@@ -1,6 +1,40 @@
 import { supabase } from './supabase';
 import { storage } from './storage';
 
+interface UserContext {
+  userId: string;
+  profile?: {
+    companyName?: string;
+    companyDomain?: string;
+    inferredIndustry?: string;
+    primaryObjective?: string;
+    secondaryObjectives?: string[];
+    targetMarkets?: string[];
+    productsOrServices?: string[];
+    confidence?: number;
+  };
+  facts: Array<{
+    fact: string;
+    score: number;
+    category: string;
+    createdAt: string;
+  }>;
+  recentMessages: Array<{
+    role: string;
+    content: string;
+    createdAt: string;
+  }>;
+  monitors: Array<{
+    label: string;
+    description: string;
+    monitorType: string;
+  }>;
+  researchRuns: Array<{
+    label: string;
+    prompt: string;
+  }>;
+}
+
 class SupervisorService {
   private pollInterval: number = 30000; // 30 seconds
   private isRunning: boolean = false;
@@ -148,6 +182,9 @@ class SupervisorService {
     const city = location?.city || 'Local';
     const country = location?.country || 'UK';
 
+    // Build comprehensive user context
+    const userContext = await this.buildUserContext(signal.user_id);
+
     console.log(`🔍 Searching for ${industry} businesses in ${city}, ${country}...`);
 
     try {
@@ -176,11 +213,17 @@ class SupervisorService {
         }
       }
 
+      // Generate intelligent rationale using full user context
+      const rationale = this.generateRationale(signal, userContext, business, industry, city);
+
+      // Calculate smarter score based on context matching
+      const score = this.calculateLeadScore(userContext, business, industry);
+
       const lead = {
         userId: signal.user_id,
-        rationale: `Generated from ${signal.type} signal - ${industry} business in ${city}${prefs?.packaging ? ` interested in ${prefs.packaging}` : ''}`,
+        rationale,
         source: 'supervisor_auto',
-        score: 0.80 + Math.random() * 0.15,
+        score,
         lead: {
           name: business.displayName?.text || 'Unknown Business',
           address: business.formattedAddress || `${city}, ${country}`,
@@ -193,11 +236,181 @@ class SupervisorService {
       };
 
       await storage.createSuggestedLead(lead);
-      console.log(`✅ Generated lead: ${lead.lead.name}`);
+      console.log(`✅ Generated lead: ${lead.lead.name} (score: ${(score * 100).toFixed(0)}%)`);
     } catch (error) {
       console.error(`Failed to generate lead from Google Places:`, error);
       throw error;
     }
+  }
+
+  private generateRationale(signal: any, context: UserContext, business: any, industry: string, city: string): string {
+    const parts: string[] = [];
+    
+    // Base rationale from signal
+    parts.push(`${business.displayName?.text || 'Business'} in ${city}`);
+
+    // Add context from user profile
+    if (context.profile?.primaryObjective) {
+      parts.push(`Matches objective: "${context.profile.primaryObjective}"`);
+    }
+
+    // Add relevant facts
+    const relevantFacts = context.facts
+      .filter(f => f.category === 'industry' || f.category === 'place' || f.score >= 85)
+      .slice(0, 2);
+    
+    if (relevantFacts.length > 0) {
+      parts.push(`User interests: ${relevantFacts.map(f => f.fact).join(', ')}`);
+    }
+
+    return parts.join(' • ');
+  }
+
+  private calculateLeadScore(context: UserContext, business: any, industry: string): number {
+    let score = 0.75; // Base score
+
+    // Boost if matches user's inferred industry
+    if (context.profile?.inferredIndustry && context.profile.inferredIndustry.toLowerCase().includes(industry.toLowerCase())) {
+      score += 0.10;
+    }
+
+    // Boost if matches target markets
+    if (context.profile?.targetMarkets && context.profile.targetMarkets.length > 0) {
+      score += 0.05;
+    }
+
+    // Boost if user has high-value facts in same category
+    const relevantFacts = context.facts.filter(f => f.category === 'industry' && f.score >= 80);
+    if (relevantFacts.length > 0) {
+      score += 0.05;
+    }
+
+    // Boost if user has active monitors (shows engagement)
+    if (context.monitors.length > 0) {
+      score += 0.03;
+    }
+
+    // Cap at 0.98
+    return Math.min(score, 0.98);
+  }
+
+  private async buildUserContext(userId: string): Promise<UserContext> {
+    console.log(`🔍 Building comprehensive context for user: ${userId}`);
+    
+    const context: UserContext = {
+      userId,
+      facts: [],
+      recentMessages: [],
+      monitors: [],
+      researchRuns: []
+    };
+
+    try {
+      // Get user profile
+      const { data: userProfile } = await supabase
+        .from('users')
+        .select('company_name, company_domain, inferred_industry, primary_objective, secondary_objectives, target_markets, products_or_services, confidence')
+        .eq('id', userId)
+        .single();
+
+      if (userProfile) {
+        context.profile = {
+          companyName: userProfile.company_name,
+          companyDomain: userProfile.company_domain,
+          inferredIndustry: userProfile.inferred_industry,
+          primaryObjective: userProfile.primary_objective,
+          secondaryObjectives: userProfile.secondary_objectives,
+          targetMarkets: userProfile.target_markets,
+          productsOrServices: userProfile.products_or_services,
+          confidence: userProfile.confidence
+        };
+        console.log(`  📋 Profile: ${userProfile.company_name || 'Unknown'} (${userProfile.inferred_industry || 'Unknown industry'})`);
+      }
+
+      // Get top ranked facts (score >= 70)
+      const { data: facts } = await supabase
+        .from('facts')
+        .select('fact, score, category, created_at')
+        .eq('user_id', userId)
+        .gte('score', 70)
+        .order('score', { ascending: false })
+        .limit(10);
+
+      if (facts) {
+        context.facts = facts.map(f => ({
+          fact: f.fact,
+          score: f.score,
+          category: f.category,
+          createdAt: new Date(f.created_at).toISOString()
+        }));
+        console.log(`  ✨ Found ${facts.length} high-value facts (score >= 70)`);
+      }
+
+      // Get recent conversations and messages (last 50 messages)
+      const { data: conversations } = await supabase
+        .from('conversations')
+        .select('id')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      if (conversations && conversations.length > 0) {
+        const conversationIds = conversations.map(c => c.id);
+        const { data: messages } = await supabase
+          .from('messages')
+          .select('role, content, created_at')
+          .in('conversation_id', conversationIds)
+          .order('created_at', { ascending: false })
+          .limit(50);
+
+        if (messages) {
+          context.recentMessages = messages.map(m => ({
+            role: m.role,
+            content: m.content,
+            createdAt: new Date(m.created_at).toISOString()
+          }));
+          console.log(`  💬 Found ${messages.length} recent messages`);
+        }
+      }
+
+      // Get active monitors
+      const { data: monitors } = await supabase
+        .from('scheduled_monitors')
+        .select('label, description, monitor_type')
+        .eq('user_id', userId)
+        .eq('is_active', 1)
+        .limit(10);
+
+      if (monitors) {
+        context.monitors = monitors.map(m => ({
+          label: m.label,
+          description: m.description,
+          monitorType: m.monitor_type
+        }));
+        console.log(`  📊 Found ${monitors.length} active monitors`);
+      }
+
+      // Get recent research runs
+      const { data: researchRuns } = await supabase
+        .from('deep_research_runs')
+        .select('label, prompt')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      if (researchRuns) {
+        context.researchRuns = researchRuns.map(r => ({
+          label: r.label,
+          prompt: r.prompt
+        }));
+        console.log(`  🔬 Found ${researchRuns.length} research runs`);
+      }
+
+    } catch (error) {
+      console.error('Error building user context:', error);
+    }
+
+    return context;
   }
 
   private async searchGooglePlaces(industry: string, city: string, country: string): Promise<any[]> {
