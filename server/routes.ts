@@ -1,6 +1,8 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { insertUserSignalSchema, insertSuggestedLeadSchema } from "@shared/schema";
+import { fromError } from "zod-validation-error";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Get suggested leads for demo user
@@ -31,11 +33,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Create a new signal (for testing)
   app.post("/api/signals", async (req, res) => {
     try {
-      const signal = await storage.createSignal({
-        userId: "demo-user",
-        type: req.body.type || "manual",
-        payload: req.body.payload || {}
-      });
+      const validationResult = insertUserSignalSchema.safeParse(req.body);
+      
+      if (!validationResult.success) {
+        const validationError = fromError(validationResult.error);
+        return res.status(400).json({ 
+          error: "Validation failed", 
+          details: validationError.toString() 
+        });
+      }
+      
+      const signal = await storage.createSignal(validationResult.data);
       res.json(signal);
     } catch (error) {
       console.error("Error creating signal:", error);

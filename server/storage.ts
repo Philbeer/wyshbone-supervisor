@@ -7,7 +7,8 @@ import {
   type InsertUser, 
   type SuggestedLead, 
   type UserSignal,
-  type InsertSuggestedLead 
+  type InsertSuggestedLead,
+  type InsertUserSignal 
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc } from "drizzle-orm";
@@ -19,7 +20,7 @@ export interface IStorage {
   getSuggestedLeads(userId: string): Promise<SuggestedLead[]>;
   getRecentSignals(userId: string): Promise<UserSignal[]>;
   createSuggestedLead(lead: InsertSuggestedLead): Promise<SuggestedLead>;
-  createSignal(signal: { userId: string; type: string; payload: any }): Promise<UserSignal>;
+  createSignal(signal: InsertUserSignal): Promise<UserSignal>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -68,7 +69,7 @@ export class DatabaseStorage implements IStorage {
     return newLead;
   }
 
-  async createSignal(signal: { userId: string; type: string; payload: any }): Promise<UserSignal> {
+  async createSignal(signal: InsertUserSignal): Promise<UserSignal> {
     const [newSignal] = await db
       .insert(userSignals)
       .values(signal)

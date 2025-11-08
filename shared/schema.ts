@@ -35,11 +35,17 @@ export const suggestedLeads = pgTable("suggested_leads", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const insertUserSignalSchema = createInsertSchema(userSignals).omit({
+  id: true,
+  createdAt: true,
+});
+
 export const insertSuggestedLeadSchema = createInsertSchema(suggestedLeads).omit({
   id: true,
   createdAt: true,
 });
 
+export type InsertUserSignal = z.infer<typeof insertUserSignalSchema>;
 export type InsertSuggestedLead = z.infer<typeof insertSuggestedLeadSchema>;
 export type SuggestedLead = typeof suggestedLeads.$inferSelect;
 export type UserSignal = typeof userSignals.$inferSelect;
