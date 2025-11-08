@@ -1,6 +1,6 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Building2, Target, Star, Activity } from "lucide-react";
+import { Building2, Target, Star, Activity, MessageSquare } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface UserContext {
@@ -57,7 +57,7 @@ export function UserContextPanel({ context, isLoading }: UserContextPanelProps) 
     );
   }
 
-  if (!context || (!context.profile && context.facts.length === 0)) {
+  if (!context || (!context.profile && context.facts.length === 0 && context.recentMessages.length === 0 && context.monitors.length === 0)) {
     return (
       <Card data-testid="card-user-context">
         <CardHeader>
@@ -193,6 +193,46 @@ export function UserContextPanel({ context, isLoading }: UserContextPanelProps) 
                 </div>
               ))}
             </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {context.recentMessages.length > 0 && (
+        <Card data-testid="card-messages">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <MessageSquare className="h-5 w-5" />
+              Recent Conversation
+            </CardTitle>
+            <CardDescription>{context.recentMessages.length} messages</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ScrollArea className="h-[300px]">
+              <div className="space-y-3 pr-4">
+                {context.recentMessages.map((message, idx) => (
+                  <div
+                    key={idx}
+                    role="article"
+                    className={`p-3 rounded-md text-sm ${
+                      message.role === 'user' 
+                        ? 'bg-primary/10 border border-primary/20' 
+                        : 'bg-muted'
+                    }`}
+                    data-testid={`message-${idx}`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <Badge variant={message.role === 'user' ? 'default' : 'secondary'} className="text-xs">
+                        {message.role}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {new Date(message.createdAt).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="text-sm">{message.content}</div>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
           </CardContent>
         </Card>
       )}

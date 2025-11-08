@@ -7,10 +7,58 @@ import { supabase } from "./supabase";
 import { supervisor } from "./supervisor";
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Debug endpoint - check what's in Supabase
+  app.get("/api/debug/supabase", async (req, res) => {
+    try {
+      // Check users table
+      const { data: users, error: usersError } = await supabase.from('users').select('*').limit(5);
+      
+      // Check user_signals table
+      const { data: signals, error: signalsError } = await supabase
+        .from('user_signals')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(5);
+      
+      // Check facts table
+      const { data: facts, error: factsError } = await supabase
+        .from('facts')
+        .select('*')
+        .order('score', { ascending: false })
+        .limit(5);
+      
+      // Check messages table
+      const { data: messages, error: messagesError } = await supabase
+        .from('messages')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(5);
+      
+      // Check conversations table
+      const { data: conversations, error: conversationsError } = await supabase
+        .from('conversations')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(5);
+      
+      res.json({
+        users: { data: users, error: usersError },
+        signals: { data: signals, error: signalsError },
+        facts: { data: facts, error: factsError },
+        messages: { data: messages, error: messagesError },
+        conversations: { data: conversations, error: conversationsError }
+      });
+    } catch (error) {
+      console.error("Error fetching Supabase debug data:", error);
+      res.status(500).json({ error: "Failed to fetch debug data" });
+    }
+  });
+
   // Get user context (profile, facts, messages, etc.)
   app.get("/api/user/context", async (req, res) => {
     try {
-      const userId = "demo-user";
+      // Allow specifying user_id via query param, default to bobby@test.com's ID
+      const userId = (req.query.user_id as string) || "dd71d4fc24290b03e6327aa7467176a8";
       const context = await supervisor.getUserContext(userId);
       res.json(context);
     } catch (error) {
@@ -22,8 +70,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get suggested leads for demo user
   app.get("/api/leads", async (req, res) => {
     try {
-      // For demo purposes, using a default user ID
-      const userId = "demo-user";
+      // Allow specifying user_id via query param, default to bobby@test.com's ID
+      const userId = (req.query.user_id as string) || "dd71d4fc24290b03e6327aa7467176a8";
       const leads = await storage.getSuggestedLeads(userId);
       res.json(leads);
     } catch (error) {
@@ -35,7 +83,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get recent user signals (from both PostgreSQL and Supabase)
   app.get("/api/signals", async (req, res) => {
     try {
-      const userId = "demo-user";
+      // Allow specifying user_id via query param, default to bobby@test.com's ID
+      const userId = (req.query.user_id as string) || "dd71d4fc24290b03e6327aa7467176a8";
       
       // Fetch from PostgreSQL
       const pgSignals = await storage.getRecentSignals(userId);
