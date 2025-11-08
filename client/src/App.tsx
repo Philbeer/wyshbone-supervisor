@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/AppSidebar";
 import Dashboard from "@/pages/Dashboard";
+import Leads from "@/pages/Leads";
 import Settings from "@/pages/Settings";
 import Signals from "@/pages/Signals";
 import NotFound from "@/pages/not-found";
@@ -14,6 +15,7 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={Dashboard} />
+      <Route path="/leads" component={Leads} />
       <Route path="/settings" component={Settings} />
       <Route path="/signals" component={Signals} />
       <Route component={NotFound} />
