@@ -120,9 +120,10 @@ Three main tables defined in `shared/schema.ts`:
 ### Third-Party Services
 
 **Supabase:**
+- Credentials configured (SUPABASE_URL, SUPABASE_SERVICE_ROLE, SUPABASE_ANON available as environment variables)
 - Referenced in attached documentation for signal storage
-- Not currently integrated in main codebase
 - Intended for user_signals polling by supervisor meta-agent
+- Ready for integration
 
 **Google Places API:**
 - Mentioned in schema (place_id field) for lead enrichment
