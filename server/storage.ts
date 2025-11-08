@@ -3,6 +3,7 @@ import {
   users, 
   suggestedLeads, 
   userSignals,
+  processedSignals,
   type User, 
   type InsertUser, 
   type SuggestedLead, 
@@ -21,6 +22,8 @@ export interface IStorage {
   getRecentSignals(userId: string): Promise<UserSignal[]>;
   createSuggestedLead(lead: InsertSuggestedLead): Promise<SuggestedLead>;
   createSignal(signal: InsertUserSignal): Promise<UserSignal>;
+  isSignalProcessed(signalId: string, source: string): Promise<boolean>;
+  markSignalProcessed(signalId: string, source: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -75,6 +78,24 @@ export class DatabaseStorage implements IStorage {
       .values(signal)
       .returning();
     return newSignal;
+  }
+
+  async isSignalProcessed(signalId: string, source: string): Promise<boolean> {
+    const [record] = await db
+      .select()
+      .from(processedSignals)
+      .where(eq(processedSignals.signalId, `${source}:${signalId}`))
+      .limit(1);
+    return !!record;
+  }
+
+  async markSignalProcessed(signalId: string, source: string): Promise<void> {
+    await db
+      .insert(processedSignals)
+      .values({
+        signalId: `${source}:${signalId}`,
+        signalSource: source
+      });
   }
 }
 

@@ -35,6 +35,13 @@ export const suggestedLeads = pgTable("suggested_leads", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const processedSignals = pgTable("processed_signals", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  signalId: text("signal_id").notNull().unique(),
+  signalSource: text("signal_source").notNull(), // 'supabase' or 'postgres'
+  processedAt: timestamp("processed_at").defaultNow().notNull(),
+});
+
 export const insertUserSignalSchema = createInsertSchema(userSignals).omit({
   id: true,
   createdAt: true,
