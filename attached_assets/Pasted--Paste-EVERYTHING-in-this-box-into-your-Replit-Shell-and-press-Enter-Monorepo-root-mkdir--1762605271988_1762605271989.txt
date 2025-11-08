@@ -1,0 +1,498 @@
+# ⬇️ Paste EVERYTHING in this box into your Replit Shell and press Enter
+
+# Monorepo root
+mkdir -p wyshbone-suite && cd wyshbone-suite
+
+# ----------------------- Root package.json -----------------------
+cat > package.json <<'JSON'
+{
+  "name": "wyshbone-suite",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n SUPERVISOR,UI -c green,blue \"npm:dev:supervisor\" \"npm:dev:ui\"",
+    "dev:supervisor": "npm --prefix supervisor run start",
+    "dev:ui": "npm --prefix ui run start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}
+JSON
+
+# ----------------------- Supervisor app --------------------------
+mkdir -p supervisor
+cat > supervisor/package.json <<'JSON'
+{
+  "name": "wyshbone-supervisor",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "undici": "^6.19.8"
+  }
+}
+JSON
+
+cat > supervisor/index.mjs <<'JS'
+/**
+ * Wyshbone Supervisor (headless meta-agent)
+ * - Polls Supabase user_signals and proactively suggests leads
+ * - Calls your existing main app internal endpoints
+ * - Notifies the UI fork via /internal/chat/push-card and suggested_leads table
+ *
+ * REQUIRED ENV (set in Replit Secrets panel at project root):
+ *   SUPABASE_URL=...
+ *   SUPABASE_SERVICE_ROLE=...
+ *   MAIN_APP_BASE=https://<your-main-replit-domain>
+ *   MAIN_APP_SUPERVISOR_TOKEN=<shared-secret>
+ *
+ * OPTIONAL:
+ *   PORT=8081
+ *   ENABLED=true
+ *   TICK_MINUTES=1
+ *   MAX_PLACES_PER_TICK=60
+ *   MAX_HUNTER_LOOKUPS_PER_TICK=20
+ *   AUTO_APPROVE_LOW_RISK=false
+ */
+import express from "express";
+import cron from "node-cron";
+import { createClient } from "@supabase/supabase-js";
+import { request } from "undici";
+
+/* ------------- Config ------------- */
+const PORT = Number(process.env.SUPERVISOR_PORT ?? process.env.PORT ?? 8081);
+const ENABLED = (process.env.ENABLED ?? "true") === "true";
+const TICK_MINUTES = Number(process.env.TICK_MINUTES ?? 1);
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+const MAIN_APP_BASE = process.env.MAIN_APP_BASE;
+const MAIN_APP_SUPERVISOR_TOKEN = process.env.MAIN_APP_SUPERVISOR_TOKEN;
+
+const BUDGETS = {
+  placesPerTick: Number(process.env.MAX_PLACES_PER_TICK ?? 60),
+  hunterPerTick: Number(process.env.MAX_HUNTER_LOOKUPS_PER_TICK ?? 20),
+};
+
+/* ------------- Supabase ------------- */
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
+  console.warn("⚠️  Missing Supabase env vars. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE in Secrets.");
+}
+const supa = createClient(SUPABASE_URL ?? "", SUPABASE_SERVICE_ROLE ?? "", { auth: { persistSession: false } });
+
+/* ------------- Main app adapters ------------- */
+async function callMain(path, body) {
+  if (!MAIN_APP_BASE || !MAIN_APP_SUPERVISOR_TOKEN) {
+    throw new Error("MAIN_APP_BASE or MAIN_APP_SUPERVISOR_TOKEN not set.");
+  }
+  const res = await request(`${MAIN_APP_BASE}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-internal-auth": MAIN_APP_SUPERVISOR_TOKEN },
+    body: JSON.stringify(body ?? {})
+  });
+  const text = await res.body.text();
+  if (res.statusCode >= 400) throw new Error(`Main call ${path} ${res.statusCode}: ${text}`);
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+const googlePlacesQuick = (p) => callMain("/internal/google-places-new", p);
+const deepDiveFindDomain = (name, address) => callMain("/internal/deep-dive/find-domain", { name, address });
+const hunterFindLikelyBuyer = (domain, roleHint) => callMain("/internal/hunter/likely-buyer", { domain, roleHint });
+const postChatCard = (userId, card) => callMain("/internal/chat/push-card", { userId, card });
+const sendEmailNudge = (userId, message) => callMain("/internal/notify/email", { userId, ...message });
+
+/* ------------- Data access ------------- */
+async function getRecentSignals(withinMinutes = 5) {
+  const sinceIso = new Date(Date.now() - withinMinutes * 60 * 1000).toISOString();
+  const { data, error } = await supa
+    .from("user_signals").select("*")
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(200);
+  if (error) throw error;
+  return data ?? [];
+}
+async function insertSuggestedLeads(userId, rows) {
+  if (!rows?.length) return;
+  const { error } = await supa.from("suggested_leads").insert(rows.map(r => ({ user_id: userId, ...r })));
+  if (error) throw error;
+}
+
+/* ------------- Hypotheses ------------- */
+function buildHypotheses(p) {
+  const hyps = [];
+  if (p?.industry === "brewery") {
+    if (p?.prefs?.packaging === "cans") hyps.push({ target: "bottle shops", weight: 0.6 });
+    hyps.push({ target: "pubs", weight: 0.4 });
+  }
+  if (!hyps.length) hyps.push({ target: "local prospects", weight: 1 });
+  return hyps;
+}
+
+/* ------------- Notifications ------------- */
+async function notifyChat(userId, count, context) {
+  return postChatCard(userId, {
+    title: "I found new prospects for you",
+    subtitle: context,
+    actions: [
+      { type: "add_to_mylist", label: `Add all ${count}`, payload: { count } },
+      { type: "email_intro", label: "Draft intros", payload: { template: "intro_v2" } }
+    ],
+    datasetKey: "suggested_leads_batch"
+  });
+}
+async function notifyEmail(userId, summary) {
+  return sendEmailNudge(userId, { subject: "New suggested leads", html: `<p>${summary}</p>` });
+}
+
+/* ------------- Tick loop ------------- */
+async function runTick() {
+  if (!ENABLED) return;
+  let usedPlaces = 0;
+  let usedHunter = 0;
+
+  const signals = await getRecentSignals(5);
+  if (!signals.length) return;
+
+  for (const s of signals) {
+    const p = s?.payload?.userProfile;
+    if (!p?.userId) continue;
+
+    const hyps = buildHypotheses(p);
+
+    for (const h of hyps) {
+      if (usedPlaces >= BUDGETS.placesPerTick) break;
+
+      const loc = p?.location;
+      const where = loc?.city ?? loc?.county ?? loc?.country ?? "UK";
+      const q = `${h.target} near ${where}`;
+      const limit = Math.min(20, BUDGETS.placesPerTick - usedPlaces);
+
+      let quick = [];
+      try {
+        quick = await googlePlacesQuick({ query: q, radiusKm: loc?.radiusKm ?? 25, limit });
+      } catch (e) {
+        console.error("googlePlacesQuick failed:", e?.message ?? e);
+        continue;
+      }
+      usedPlaces += Math.min(quick.length, limit);
+
+      const enriched = [];
+      for (const item of quick) {
+        let domain = item?.website ?? null;
+        if (!domain && p?.domain && item?.name?.includes(p?.company ?? "")) domain = p.domain;
+        if (!domain) {
+          try { domain = (await deepDiveFindDomain(item?.name, item?.address))?.domain ?? null; } catch {}
+        }
+
+        let emails = [];
+        if (domain && usedHunter < BUDGETS.hunterPerTick) {
+          try { emails = await hunterFindLikelyBuyer(domain, p?.targetBuyer ?? "owner"); usedHunter++; } catch {}
+        }
+
+        let score = 0.5;
+        if (emails?.length) score += 0.2;
+        if (p?.prefs?.packaging === "cans" && /bottle|shop|deli/i.test(item?.name ?? "")) score += 0.2;
+        if (/freehouse/i.test((item?.tags ?? []).join(" "))) score += 0.1;
+        if (score > 1) score = 1;
+
+        enriched.push({
+          rationale: `Based on ${p?.industry ?? "profile"} near ${where}`,
+          source: "google_places_new",
+          score,
+          lead: {
+            name: item?.name, address: item?.address, place_id: item?.place_id,
+            domain, emailCandidates: emails ?? [], tags: item?.tags ?? []
+          }
+        });
+      }
+
+      const ranked = enriched.sort((a,b)=>b.score-a.score).slice(0,12);
+      if (ranked.length) {
+        await insertSuggestedLeads(p.userId, ranked);
+        await notifyChat(p.userId, ranked.length, ranked[0].rationale);
+        if (s.type === "idle") await notifyEmail(p.userId, `Found ${ranked.length} new prospects. Open chat to review.`);
+      }
+    }
+  }
+}
+
+/* ------------- Server + cron ------------- */
+const app = express();
+app.use(express.json());
+app.get("/health", (_req, res) => res.json({ ok: true, enabled: ENABLED, tick: TICK_MINUTES }));
+app.post("/event", (req, res) => { console.log("event:", req.body?.type, req.body?.payload?.userProfile?.userId); res.status(204).end(); });
+app.post("/tick", async (_req, res) => { await runTick(); res.json({ ran: true }); });
+
+cron.schedule(`*/${TICK_MINUTES} * * * *`, runTick);
+app.listen(PORT, () => console.log(`✅ Supervisor running on :${PORT}`));
+JS
+
+# ------------------------- UI forkable shell -------------------------
+mkdir -p ui/public
+cat > ui/package.json <<'JSON'
+{
+  "name": "wyshbone-ui-fork",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2"
+  }
+}
+JSON
+
+# --- minimal UI server with internal endpoints + static site ---
+cat > ui/server.mjs <<'JS'
+/**
+ * Wyshbone UI fork (keeps your look/feel; adds Suggestions Panel + internal endpoints)
+ *
+ * ENV (set in Replit Secrets at project root):
+ *   APP_MODE=SUPERVISOR_UI
+ *   UI_PORT=8080
+ *   SUPABASE_URL=...
+ *   SUPABASE_ANON=...      (or service key w/ RLS properly configured)
+ *   MAIN_APP_BASE=https://<your-main-replit-domain>
+ *   INTERNAL_TOKEN=<shared-secret>  (matches supervisor's MAIN_APP_SUPERVISOR_TOKEN)
+ *   SUPERVISOR_BASE=http://localhost:8081   (while testing monorepo)
+ */
+import "dotenv/config";
+import express from "express";
+import fetch from "node-fetch";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+app.use(express.json());
+const PORT = Number(process.env.UI_PORT ?? 8080);
+const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN;
+const MAIN_APP_BASE = process.env.MAIN_APP_BASE;
+
+// Banner injection + env passthrough for client
+app.get("/env.js", (_req, res) => {
+  res.type("application/javascript").send(`
+    window.__ENV__ = {
+      SUPABASE_URL: ${JSON.stringify(process.env.SUPABASE_URL || "")},
+      SUPABASE_ANON: ${JSON.stringify(process.env.SUPABASE_ANON || "")},
+      APP_MODE: ${JSON.stringify(process.env.APP_MODE || "")}
+    };
+  `);
+});
+
+/* ------------------- Internal endpoints for Supervisor ------------------- */
+app.use("/internal", (req, res, next) => {
+  if (process.env.APP_MODE !== "SUPERVISOR_UI") return res.status(404).end();
+  const key = req.headers["x-internal-auth"];
+  if (!key || key !== INTERNAL_TOKEN) return res.status(401).json({ error: "unauthorized" });
+  next();
+});
+
+// Proxy to your ORIGINAL main app for real work (so shape stays identical)
+async function proxyToMain(path, body, res) {
+  const r = await fetch(MAIN_APP_BASE + path, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-internal-auth": INTERNAL_TOKEN },
+    body: JSON.stringify(body)
+  });
+  const t = await r.text();
+  res.status(r.status).send(t);
+}
+
+app.post("/internal/google-places-new", async (req, res) => proxyToMain("/internal/google-places-new", req.body, res));
+app.post("/internal/deep-dive/find-domain", async (req, res) => proxyToMain("/internal/deep-dive/find-domain", req.body, res));
+app.post("/internal/hunter/likely-buyer", async (req, res) => proxyToMain("/internal/hunter/likely-buyer", req.body, res));
+
+// Supervisor pushes suggestion cards here; we keep them in memory for demo
+globalThis.__CARDS__ = globalThis.__CARDS__ || [];
+app.post("/internal/chat/push-card", (req, res) => {
+  globalThis.__CARDS__.unshift({ at: Date.now(), ...(req.body?.card || {}) });
+  res.status(204).end();
+});
+app.get("/cards", (_req, res) => res.json(globalThis.__CARDS__));
+
+// Email passthrough to main app (or implement Resend/Smartlead directly here)
+app.post("/internal/notify/email", async (req, res) => proxyToMain("/internal/notify/email", req.body, res));
+
+/* ------------------- Static UI (keep your look/feel) ------------------- */
+app.use(express.static(path.join(__dirname, "public")));
+app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "public/index.html")));
+
+app.listen(PORT, () => console.log(`🖥️  UI fork running on :${PORT}`));
+JS
+
+# --- simple static page with Supervisor banner + Suggestions Panel ---
+cat > ui/public/index.html <<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Wyshbone (Supervisor Mode)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="/env.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:0; padding-top:48px; }
+    #supervisor-banner { position:fixed; top:0; left:0; right:0; padding:8px 12px; background:#111; color:#fff; z-index:9999; font:14px/1.3 system-ui; }
+    .container { max-width: 960px; margin: 0 auto; padding: 16px; }
+    .card { border:1px solid #e6e6e6; border-radius:12px; padding:12px; }
+    .grid { display:grid; gap:12px; }
+    .btn { padding:8px 10px; border-radius:8px; border:1px solid #ddd; background:#fafafa; cursor:pointer; }
+    .btn:hover { background:#f0f0f0; }
+  </style>
+</head>
+<body>
+  <div id="supervisor-banner"><strong>Supervisor Mode</strong> — this instance suggests & orchestrates; your main chatbot remains unchanged.</div>
+  <div class="container">
+    <h1>Wyshbone (Supervisor UI)</h1>
+    <p>This is a fork of your visual shell. It reads <code>suggested_leads</code> and renders cards pushed by the headless supervisor.</p>
+
+    <section style="margin-top:12px">
+      <h2>Suggested for you</h2>
+      <div id="suggestions" class="grid"></div>
+      <div style="margin-top:10px">
+        <button class="btn" id="refresh">Refresh</button>
+        <button class="btn" id="view-cards">View pushed cards</button>
+      </div>
+      <pre id="cards" style="margin-top:10px; background:#f7f7f7; padding:10px; border-radius:8px; display:none; max-height:240px; overflow:auto;"></pre>
+    </section>
+  </div>
+
+  <script type="module">
+    const ENV = window.__ENV__ || {};
+    // TODO: Replace with your real user id from auth; for demo we read from hash ?user=...
+    const params = new URLSearchParams(location.search);
+    const USER_ID = params.get("user") || "demo-user-id";
+
+    async function fetchSuggested() {
+      const base = ENV.SUPABASE_URL;
+      const anon = ENV.SUPABASE_ANON;
+      const url = new URL(`${base}/rest/v1/suggested_leads`);
+      url.searchParams.set("user_id", `eq.${USER_ID}`);
+      url.searchParams.set("order", "created_at.desc");
+      url.searchParams.set("limit", "50");
+      const r = await fetch(url, { headers: { apikey: anon, Authorization: `Bearer ${anon}` }});
+      if (!r.ok) return [];
+      return r.json();
+    }
+
+    function rowToHTML(row) {
+      const lead = row.lead || {};
+      const emails = (lead.emailCandidates || []).slice(0,3).map(e => e?.email || e).filter(Boolean);
+      return `
+        <div class="card">
+          <div style="font-weight:600">${lead.name || "Unknown"}</div>
+          <div style="opacity:.7">${lead.address || ""}</div>
+          <div style="margin-top:6px;font-size:12px">Score: ${(row.score ?? 0).toFixed(2)} • Source: ${row.source}</div>
+          <div style="margin-top:6px;font-size:12px">${row.rationale || ""}</div>
+          ${emails.length ? `<div style="margin-top:8px;font-size:12px">Emails: ${emails.join(", ")}</div>` : ""}
+          <div style="margin-top:10px;display:flex;gap:8px">
+            <button class="btn act-add" data-id="${row.id}">Add to MyList</button>
+            <button class="btn act-email" data-id="${row.id}">Draft email</button>
+            <button class="btn act-dismiss" data-id="${row.id}">Dismiss</button>
+          </div>
+        </div>`;
+    }
+
+    async function render() {
+      const rows = await fetchSuggested();
+      document.getElementById("suggestions").innerHTML = rows.map(rowToHTML).join("");
+    }
+
+    document.getElementById("refresh").addEventListener("click", render);
+    document.getElementById("view-cards").addEventListener("click", async () => {
+      const r = await fetch("/cards");
+      const j = await r.json();
+      const pre = document.getElementById("cards");
+      pre.style.display = "block";
+      pre.textContent = JSON.stringify(j, null, 2);
+    });
+
+    // Wire demo buttons (replace with your existing MyList/Smartlead flows)
+    document.addEventListener("click", async (e) => {
+      const el = e.target;
+      if (el.classList.contains("act-add")) { alert("Add to MyList → implement with your existing flow."); }
+      if (el.classList.contains("act-email")) { alert("Draft email → implement with Smartlead."); }
+      if (el.classList.contains("act-dismiss")) { alert("Dismiss → update suggested_leads.status='rejected'."); }
+    });
+
+    // auto-refresh
+    render(); setInterval(render, 20000);
+  </script>
+</body>
+</html>
+HTML
+
+# ----------------------- README (doc + SQL) ------------------------
+cat > README.md <<'MD'
+# Wyshbone Suite (Supervisor + UI Fork)
+
+This project contains:
+- `supervisor/` → headless meta-agent that watches `user_signals`, finds/enriches leads, writes to `suggested_leads`, and pushes suggestion cards.
+- `ui/` → a forkable UI that keeps your visual shell but adds a "Suggested for you" panel and `/internal` endpoints so the supervisor can push cards.
+
+## 1) Environment (Replit Secrets)
+Set these in the project **Secrets**:
+
+**Shared / Required**
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE`  (for supervisor writes)
+- `SUPABASE_ANON`         (for UI read; ensure RLS protects per-user)
+- `MAIN_APP_BASE`         (your existing main Replit app base URL)
+- `INTERNAL_TOKEN`        (shared secret header for internal calls)
+
+**Supervisor**
+- `SUPERVISOR_PORT` = 8081   (optional)
+- `ENABLED` = true
+- `TICK_MINUTES` = 1
+- `MAX_PLACES_PER_TICK` = 60
+- `MAX_HUNTER_LOOKUPS_PER_TICK` = 20
+- `AUTO_APPROVE_LOW_RISK` = false
+- `MAIN_APP_SUPERVISOR_TOKEN` = (same as INTERNAL_TOKEN)
+
+**UI**
+- `APP_MODE` = SUPERVISOR_UI
+- `UI_PORT` = 8080
+- (Optional) `SUPERVISOR_BASE` if you want to reference it directly
+
+## 2) Supabase tables (run once)
+```sql
+create table if not exists user_signals (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null,
+  type text not null,           -- session_start|search_performed|idle|profile_update|monitor_tick
+  payload jsonb not null,
+  created_at timestamptz default now()
+);
+create index if not exists user_signals_created_at_idx on user_signals (created_at);
+
+create table if not exists suggested_leads (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null,
+  rationale text,
+  source text,                  -- google_places_new|deep_dive|hunter
+  score numeric,
+  lead jsonb not null,          -- {name,address,place_id,domain,emailCandidates:[...],tags:[...]}
+  status text default 'new',    -- new|accepted|rejected|emailed|added_to_list
+  created_at timestamptz default now()
+);
+create index if not exists suggested_leads_user_idx on suggested_leads (user_id, status, score desc);
+
+create table if not exists suggested_actions (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null,
+  action_type text not null,    -- run_monitor|add_to_mylist|email_intro|refine_query
+  payload jsonb not null,
+  copy text,
+  created_at timestamptz default now(),
+  status text default 'new'
+);
