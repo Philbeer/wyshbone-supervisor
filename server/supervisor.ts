@@ -139,69 +139,140 @@ class SupervisorService {
     }
 
     const { industry, location, prefs } = userProfile;
+    
+    if (!industry) {
+      console.log('Signal has no industry in userProfile, skipping');
+      return;
+    }
 
-    // Generate a lead based on the signal
-    // For now, this is a simple mock implementation
-    // Later we'll integrate with Google Places API and email finders
-    
-    const leadName = this.generateLeadName(industry, location);
-    const leadAddress = this.generateLeadAddress(location);
-    
-    const lead = {
-      userId: signal.user_id,
-      rationale: `Generated from ${signal.type} signal - ${industry} business in ${location?.city || 'target area'}${prefs?.packaging ? ` interested in ${prefs.packaging}` : ''}`,
-      source: 'supervisor_auto',
-      score: 0.80 + Math.random() * 0.15, // Score between 0.80-0.95
-      lead: {
-        name: leadName,
-        address: leadAddress,
-        place_id: `generated_${Date.now()}`,
-        domain: this.generateDomain(leadName),
-        emailCandidates: [this.generateEmail(leadName)],
-        tags: [industry, signal.type]
+    const city = location?.city || 'Local';
+    const country = location?.country || 'UK';
+
+    console.log(`🔍 Searching for ${industry} businesses in ${city}, ${country}...`);
+
+    try {
+      // Search for businesses using Google Places API
+      const businesses = await this.searchGooglePlaces(industry, city, country);
+      
+      if (!businesses || businesses.length === 0) {
+        console.log(`⚠️  No businesses found for ${industry} in ${city}`);
+        return;
       }
+
+      // Generate one lead from the first result
+      const business = businesses[0];
+      console.log(`📍 Found business: ${business.displayName?.text || 'Unknown'}`);
+
+      // Try to find email using Hunter.io if we have a domain
+      let emailCandidates: string[] = [];
+      if (business.websiteUri) {
+        try {
+          const domain = new URL(business.websiteUri).hostname.replace('www.', '');
+          console.log(`📧 Searching for emails at ${domain}...`);
+          emailCandidates = await this.findEmails(domain);
+          console.log(`✉️  Found ${emailCandidates.length} email candidates`);
+        } catch (e) {
+          console.log(`⚠️  Could not extract domain from ${business.websiteUri}`);
+        }
+      }
+
+      const lead = {
+        userId: signal.user_id,
+        rationale: `Generated from ${signal.type} signal - ${industry} business in ${city}${prefs?.packaging ? ` interested in ${prefs.packaging}` : ''}`,
+        source: 'supervisor_auto',
+        score: 0.80 + Math.random() * 0.15,
+        lead: {
+          name: business.displayName?.text || 'Unknown Business',
+          address: business.formattedAddress || `${city}, ${country}`,
+          place_id: business.id || '',
+          domain: business.websiteUri || '',
+          emailCandidates,
+          tags: [industry, signal.type],
+          phone: business.nationalPhoneNumber || business.internationalPhoneNumber || ''
+        }
+      };
+
+      await storage.createSuggestedLead(lead);
+      console.log(`✅ Generated lead: ${lead.lead.name}`);
+    } catch (error) {
+      console.error(`Failed to generate lead from Google Places:`, error);
+      throw error;
+    }
+  }
+
+  private async searchGooglePlaces(industry: string, city: string, country: string): Promise<any[]> {
+    const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+    if (!apiKey) {
+      throw new Error('GOOGLE_PLACES_API_KEY not configured');
+    }
+
+    // Map industry to search query
+    const queryMap: Record<string, string> = {
+      'brewery': 'brewery',
+      'distillery': 'distillery',
+      'winery': 'winery',
+      'restaurant': 'restaurant',
+      'bar': 'bar'
+    };
+    const query = queryMap[industry.toLowerCase()] || industry;
+
+    const url = 'https://places.googleapis.com/v1/places:searchText';
+    const requestBody = {
+      textQuery: `${query} in ${city} ${country}`,
+      maxResultCount: 3
     };
 
-    // Create the lead - let errors bubble up to caller
-    await storage.createSuggestedLead(lead);
-    console.log(`✅ Generated lead: ${leadName}`);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.internationalPhoneNumber'
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Google Places API error: ${response.status} ${errorText}`);
+    }
+
+    const data = await response.json();
+    return data.places || [];
   }
 
-  private generateLeadName(industry: string, location: any): string {
-    const prefixes = ['The', 'Local', 'Premier', 'Quality'];
-    const suffixes = industry === 'brewery' 
-      ? ['Bottle Shop', 'Beer House', 'Craft Market', 'Brew Depot']
-      : ['Market', 'Shop', 'Store', 'Outlet'];
-    
-    const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-    const suffix = suffixes[Math.floor(Math.random() * suffixes.length)];
-    const city = location?.city || 'Local';
-    
-    return `${prefix} ${city} ${suffix}`;
+  private async findEmails(domain: string): Promise<string[]> {
+    const apiKey = process.env.HUNTER_IO_API_KEY;
+    if (!apiKey) {
+      console.log('⚠️  HUNTER_IO_API_KEY not configured, skipping email search');
+      return [];
+    }
+
+    try {
+      const url = `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&api_key=${apiKey}&limit=3`;
+      
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.log(`⚠️  Hunter.io API error: ${response.status}`);
+        return [];
+      }
+
+      const data = await response.json();
+      
+      if (data.data?.emails && data.data.emails.length > 0) {
+        return data.data.emails
+          .filter((e: any) => e.value)
+          .map((e: any) => e.value)
+          .slice(0, 3);
+      }
+
+      return [];
+    } catch (error) {
+      console.log(`⚠️  Hunter.io search failed:`, error);
+      return [];
+    }
   }
 
-  private generateLeadAddress(location: any): string {
-    const streetNum = Math.floor(Math.random() * 500) + 1;
-    const streets = ['High Street', 'Main Road', 'Market Street', 'Station Road'];
-    const street = streets[Math.floor(Math.random() * streets.length)];
-    const city = location?.city || 'Unknown';
-    const country = location?.country || 'UK';
-    
-    return `${streetNum} ${street}, ${city}, ${country}`;
-  }
-
-  private generateDomain(name: string): string {
-    return name
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, '')
-      .replace(/\s+/g, '')
-      .substring(0, 20) + '.co.uk';
-  }
-
-  private generateEmail(name: string): string {
-    const domain = this.generateDomain(name);
-    return `info@${domain}`;
-  }
 }
 
 export const supervisor = new SupervisorService();
