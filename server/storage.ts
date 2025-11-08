@@ -4,6 +4,7 @@ import {
   suggestedLeads, 
   userSignals,
   processedSignals,
+  supervisorState,
   type User, 
   type InsertUser, 
   type SuggestedLead, 
@@ -13,6 +14,11 @@ import {
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc } from "drizzle-orm";
+
+export interface SupervisorCheckpoint {
+  timestamp: Date | null;
+  id: string | null;
+}
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -24,7 +30,8 @@ export interface IStorage {
   createSignal(signal: InsertUserSignal): Promise<UserSignal>;
   isSignalProcessed(signalId: string, source: string): Promise<boolean>;
   markSignalProcessed(signalId: string, source: string, signalCreatedAt: Date): Promise<void>;
-  getLatestProcessedTimestamp(source: string): Promise<Date | null>;
+  getSupervisorCheckpoint(source: string): Promise<SupervisorCheckpoint>;
+  updateSupervisorCheckpoint(source: string, timestamp: Date, id: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -100,15 +107,44 @@ export class DatabaseStorage implements IStorage {
       });
   }
 
-  async getLatestProcessedTimestamp(source: string): Promise<Date | null> {
+  async getSupervisorCheckpoint(source: string): Promise<SupervisorCheckpoint> {
     const [record] = await db
       .select()
-      .from(processedSignals)
-      .where(eq(processedSignals.signalSource, source))
-      .orderBy(desc(processedSignals.signalCreatedAt))
+      .from(supervisorState)
+      .where(eq(supervisorState.source, source))
       .limit(1);
     
-    return record ? record.signalCreatedAt : null;
+    return {
+      timestamp: record?.lastProcessedTimestamp || null,
+      id: record?.lastProcessedId || null
+    };
+  }
+
+  async updateSupervisorCheckpoint(source: string, timestamp: Date, id: string): Promise<void> {
+    const existing = await db
+      .select()
+      .from(supervisorState)
+      .where(eq(supervisorState.source, source))
+      .limit(1);
+    
+    if (existing.length > 0) {
+      await db
+        .update(supervisorState)
+        .set({
+          lastProcessedTimestamp: timestamp,
+          lastProcessedId: id,
+          updatedAt: new Date()
+        })
+        .where(eq(supervisorState.source, source));
+    } else {
+      await db
+        .insert(supervisorState)
+        .values({
+          source,
+          lastProcessedTimestamp: timestamp,
+          lastProcessedId: id
+        });
+    }
   }
 }
 

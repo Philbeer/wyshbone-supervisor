@@ -39,46 +39,90 @@ class SupervisorService {
   }
 
   private async processNewSignals() {
-    // Get the timestamp of the latest processed signal
-    const latestProcessedTimestamp = await storage.getLatestProcessedTimestamp('supabase');
+    // Get composite checkpoint {timestamp, id}
+    const checkpoint = await storage.getSupervisorCheckpoint('supabase');
     
-    // Fetch signals newer than the latest processed one
+    // Fetch signals using timestamp-only server filter, then client-side composite cursor
+    // This works around PostgREST .or() limitations while remaining efficient
     let query = supabase
       .from('user_signals')
       .select('*')
       .order('created_at', { ascending: true })
-      .limit(this.batchSize);
+      .order('id', { ascending: true })
+      .limit(this.batchSize + 50); // Fetch extra to handle same-timestamp filtering
     
-    // Only fetch signals created after the latest processed timestamp
-    if (latestProcessedTimestamp) {
-      query = query.gt('created_at', latestProcessedTimestamp.toISOString());
+    if (checkpoint.timestamp) {
+      // Fetch signals at or after checkpoint timestamp (server-side)
+      query = query.gte('created_at', checkpoint.timestamp.toISOString());
     }
+    // else: no checkpoint, fetch from beginning
 
-    const { data: signals, error } = await query;
+    const { data: rawSignals, error } = await query;
 
     if (error) {
       console.error('Error fetching signals from Supabase:', error);
       return;
     }
 
-    if (!signals || signals.length === 0) {
+    if (!rawSignals || rawSignals.length === 0) {
       return;
     }
 
-    // Process each signal in order - stop on first failure to preserve timestamp order
+    // Client-side composite cursor filter: exclude signals at/before checkpoint
+    const filteredSignals = rawSignals.filter(signal => {
+      if (!checkpoint.timestamp || !checkpoint.id) {
+        return true; // No checkpoint, process all
+      }
+      
+      const signalTime = new Date(signal.created_at).getTime();
+      const checkpointTime = checkpoint.timestamp.getTime();
+      
+      // Only include if AFTER checkpoint: (ts > checkpoint.ts) OR (ts == checkpoint.ts AND id > checkpoint.id)
+      if (signalTime > checkpointTime) {
+        return true;
+      } else if (signalTime === checkpointTime) {
+        // Numeric comparison for bigint IDs
+        const signalId = BigInt(signal.id);
+        const checkpointId = BigInt(checkpoint.id);
+        return signalId > checkpointId;
+      }
+      return false;
+    });
+
+    // Take only batch size after filtering
+    const signals = filteredSignals.slice(0, this.batchSize);
+
+    if (signals.length === 0) {
+      return;
+    }
+
+    // Process each signal in order - stop on first failure
     for (const signal of signals) {
       const signalId = signal.id.toString();
       const signalCreatedAt = new Date(signal.created_at);
+      
+      // Check if already processed (idempotency guard - redundant but safe)
+      const alreadyProcessed = await storage.isSignalProcessed(signalId, 'supabase');
+      if (alreadyProcessed) {
+        console.log(`⏭️  Signal ${signalId} already processed, skipping...`);
+        continue;
+      }
       
       console.log(`📊 Processing new signal ${signalId} (${signal.type})...`);
       
       try {
         await this.generateLeadsFromSignal(signal);
-        // Only mark as processed AFTER successful lead generation
+        
+        // Mark as processed in processed_signals table (idempotency)
         await storage.markSignalProcessed(signalId, 'supabase', signalCreatedAt);
+        
+        // Update checkpoint to this signal's position
+        await storage.updateSupervisorCheckpoint('supabase', signalCreatedAt, signalId);
+        
+        console.log(`✅ Checkpoint updated: ${signalCreatedAt.toISOString()} / ${signalId}`);
       } catch (error) {
         console.error(`Failed to process signal ${signalId}:`, error);
-        // Break the loop - don't advance timestamp past this failed signal
+        // Break the loop - don't advance checkpoint past this failed signal
         // Will retry this signal and remaining signals on next poll
         break;
       }

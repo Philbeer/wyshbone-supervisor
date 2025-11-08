@@ -43,6 +43,14 @@ export const processedSignals = pgTable("processed_signals", {
   processedAt: timestamp("processed_at").defaultNow().notNull(),
 });
 
+export const supervisorState = pgTable("supervisor_state", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  source: text("source").notNull().unique(), // 'supabase' or 'postgres'
+  lastProcessedTimestamp: timestamp("last_processed_timestamp"),
+  lastProcessedId: text("last_processed_id"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const insertUserSignalSchema = createInsertSchema(userSignals).omit({
   id: true,
   createdAt: true,
