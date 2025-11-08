@@ -25,8 +25,9 @@ Preferred communication style: Simple, everyday language.
 - Built on shadcn/ui components (Radix UI primitives)
 - "New York" style variant with custom theming
 - Design system inspired by Linear for professional B2B aesthetics
-- Component library includes: Dashboard, LeadCard, SuggestionsPanel, SignalEvent, StatsCard, EmptyState
+- Component library includes: Dashboard, LeadCard, SuggestionsPanel, UserContextPanel, SignalEvent, StatsCard, EmptyState
 - Sidebar navigation pattern with collapsible states
+- UserContextPanel displays company profile, objectives, top facts, and active monitors
 
 **State Management:**
 - React Query for API data fetching and caching
@@ -48,6 +49,7 @@ Preferred communication style: Simple, everyday language.
 - RESTful endpoints under `/api` prefix
 - Endpoints:
   - `GET /api/leads` - Fetch suggested leads for demo user
+  - `GET /api/user/context` - Fetch comprehensive user context (profile, facts, messages, monitors)
   - `GET /api/signals` - Fetch recent user signals
   - `POST /api/signals` - Create new signal (testing)
   - `POST /api/seed` - Seed initial data
@@ -120,9 +122,18 @@ Three main tables defined in `shared/schema.ts`:
 ### Third-Party Services
 
 **Supabase:**
-- Credentials configured (SUPABASE_URL, SUPABASE_SERVICE_ROLE, SUPABASE_ANON available as environment variables)
-- Referenced in attached documentation for signal storage
-- Intended for user_signals polling by supervisor meta-agent
+- Shared database with Wyshbone UI app
+- Stores rich user context data:
+  - `users` - Company profiles, industry, objectives, target markets
+  - `conversations` - Chat sessions
+  - `messages` - Full conversation history (user ↔ AI)
+  - `facts` - Ranked user preferences/needs with importance scores
+  - `scheduled_monitors` - Active monitoring tasks showing engagement
+  - `deep_research_runs` - Research queries revealing interests
+  - `integrations` - Connected CRM/accounting platforms
+  - `user_signals` - Behavioral signals triggering lead generation
+- Credentials configured (SUPABASE_URL, SUPABASE_SERVICE_ROLE, SUPABASE_ANON)
+- Supervisor polls every 30s for new signals and builds comprehensive user context
 - Ready for integration
 
 **Google Places API:**
