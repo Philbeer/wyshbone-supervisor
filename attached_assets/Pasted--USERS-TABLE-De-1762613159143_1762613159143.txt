@@ -1,0 +1,226 @@
+-- ============================================================================
+-- USERS TABLE - Demographics, industry, company info, and personalization
+-- ============================================================================
+CREATE TABLE public.users (
+  id TEXT PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  name TEXT,
+  
+  -- Demo account management
+  is_demo INTEGER NOT NULL DEFAULT 0,
+  demo_created_at BIGINT,
+  
+  -- Stripe subscription data
+  stripe_customer_id TEXT,
+  stripe_subscription_id TEXT,
+  subscription_tier TEXT DEFAULT 'free',
+  subscription_status TEXT DEFAULT 'inactive',
+  monitor_count INTEGER NOT NULL DEFAULT 0,
+  deep_research_count INTEGER NOT NULL DEFAULT 0,
+  last_reset_at BIGINT,
+  
+  -- Personalization & company context (key for lead generation)
+  company_name TEXT,
+  company_domain TEXT,
+  role_hint TEXT,
+  primary_objective TEXT,
+  secondary_objectives TEXT[],
+  target_markets TEXT[],
+  products_or_services TEXT[],
+  preferences JSONB,
+  inferred_industry TEXT,
+  last_context_refresh BIGINT,
+  confidence INTEGER CHECK (confidence >= 0 AND confidence <= 100),
+  
+  -- Timestamps
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+
+COMMENT ON TABLE public.users IS 'User profiles with company context, industry, and personalization data for lead generation';
+COMMENT ON COLUMN public.users.company_name IS 'Company name extracted from conversations';
+COMMENT ON COLUMN public.users.inferred_industry IS 'Industry inferred from user interactions (e.g., Brewery, Charity)';
+COMMENT ON COLUMN public.users.primary_objective IS 'Main business objective (e.g., Find pubs buying cask)';
+COMMENT ON COLUMN public.users.confidence IS 'AI confidence score (0-100) for inferred data accuracy';
+
+-- Indexes for performance
+CREATE INDEX idx_users_email ON public.users USING BTREE (email);
+CREATE INDEX idx_users_subscription_tier ON public.users USING BTREE (subscription_tier);
+CREATE INDEX idx_users_is_demo ON public.users USING BTREE (is_demo, demo_created_at);
+CREATE INDEX idx_users_inferred_industry ON public.users USING BTREE (inferred_industry);
+
+
+-- ============================================================================
+-- CONVERSATIONS TABLE - Chat/conversation sessions
+-- ============================================================================
+CREATE TABLE public.conversations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT 'Conversation',
+  type TEXT NOT NULL DEFAULT 'chat',
+  monitor_id TEXT,
+  run_sequence INTEGER,
+  created_at BIGINT NOT NULL
+);
+
+COMMENT ON TABLE public.conversations IS 'User conversation sessions - includes chat and monitor runs';
+COMMENT ON COLUMN public.conversations.type IS 'Type: chat or monitor_run';
+COMMENT ON COLUMN public.conversations.monitor_id IS 'Links to scheduled_monitors if type=monitor_run';
+
+-- Indexes for performance
+CREATE INDEX idx_conversations_user_id ON public.conversations USING BTREE (user_id);
+CREATE INDEX idx_conversations_created_at ON public.conversations USING BTREE (created_at);
+CREATE INDEX idx_conversations_monitor_id ON public.conversations USING BTREE (monitor_id, run_sequence);
+
+
+-- ============================================================================
+-- MESSAGES TABLE - Individual messages in conversations
+-- ============================================================================
+CREATE TABLE public.messages (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at BIGINT NOT NULL
+);
+
+COMMENT ON TABLE public.messages IS 'Chat messages between users and AI - full conversation history';
+COMMENT ON COLUMN public.messages.role IS 'Message sender: user, assistant, or system';
+
+-- Indexes for performance (critical for conversation retrieval)
+CREATE INDEX idx_messages_conversation_id ON public.messages USING BTREE (conversation_id, created_at);
+
+
+-- ============================================================================
+-- FACTS TABLE - Ranked facts/preferences extracted from conversations
+-- ============================================================================
+CREATE TABLE public.facts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  source_conversation_id TEXT,
+  source_message_id TEXT,
+  fact TEXT NOT NULL,
+  score INTEGER NOT NULL DEFAULT 50,
+  category TEXT NOT NULL DEFAULT 'general',
+  created_at BIGINT NOT NULL
+);
+
+COMMENT ON TABLE public.facts IS 'Important user preferences and needs extracted from conversations - ranked by importance';
+COMMENT ON COLUMN public.facts.score IS 'Importance/relevance score (0-100) - higher = more important';
+COMMENT ON COLUMN public.facts.category IS 'Fact category: industry, place, subject, preference, or general';
+
+-- Indexes for performance (critical for fact retrieval by user and importance)
+CREATE INDEX idx_facts_user_id_score ON public.facts USING BTREE (user_id, score, created_at);
+CREATE INDEX idx_facts_category ON public.facts USING BTREE (category, created_at);
+
+
+-- ============================================================================
+-- USER_SESSIONS TABLE - Active user sessions
+-- ============================================================================
+CREATE TABLE public.user_sessions (
+  session_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  user_email TEXT NOT NULL,
+  default_country TEXT,
+  expires_at BIGINT NOT NULL,
+  created_at BIGINT NOT NULL
+);
+
+COMMENT ON TABLE public.user_sessions IS 'Active user sessions for authentication';
+
+-- Indexes for session lookup
+CREATE INDEX idx_user_sessions_user_id ON public.user_sessions USING BTREE (user_id);
+CREATE INDEX idx_user_sessions_expires_at ON public.user_sessions USING BTREE (expires_at);
+
+
+-- ============================================================================
+-- SCHEDULED_MONITORS TABLE - Recurring monitoring tasks
+-- ============================================================================
+CREATE TABLE public.scheduled_monitors (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  conversation_id TEXT,
+  label TEXT NOT NULL,
+  description TEXT NOT NULL,
+  schedule TEXT NOT NULL,
+  schedule_day TEXT,
+  schedule_time TEXT,
+  monitor_type TEXT NOT NULL,
+  config JSONB,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'active',
+  suggested_by TEXT,
+  suggested_reason TEXT,
+  suggestion_metadata JSONB,
+  email_notifications INTEGER NOT NULL DEFAULT 0,
+  email_address TEXT,
+  last_run_at BIGINT,
+  next_run_at BIGINT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+
+COMMENT ON TABLE public.scheduled_monitors IS 'Recurring monitoring tasks showing user engagement patterns';
+COMMENT ON COLUMN public.scheduled_monitors.schedule IS 'Frequency: once, hourly, daily, weekly, biweekly, monthly';
+COMMENT ON COLUMN public.scheduled_monitors.monitor_type IS 'Type: business_search, deep_research, wyshbone_database';
+
+-- Indexes for performance
+CREATE INDEX idx_scheduled_monitors_user_id ON public.scheduled_monitors USING BTREE (user_id);
+CREATE INDEX idx_scheduled_monitors_is_active ON public.scheduled_monitors USING BTREE (is_active, next_run_at);
+CREATE INDEX idx_scheduled_monitors_status ON public.scheduled_monitors USING BTREE (status);
+
+
+-- ============================================================================
+-- DEEP_RESEARCH_RUNS TABLE - Research tasks showing user interests
+-- ============================================================================
+CREATE TABLE public.deep_research_runs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  session_id TEXT,
+  label TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'report',
+  counties TEXT[],
+  window_months INTEGER,
+  schema_name TEXT,
+  schema JSONB,
+  intensity TEXT NOT NULL DEFAULT 'standard',
+  response_id TEXT,
+  status TEXT NOT NULL DEFAULT 'queued',
+  output_text TEXT,
+  error TEXT,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+
+COMMENT ON TABLE public.deep_research_runs IS 'Deep research runs revealing user research patterns and interests';
+COMMENT ON COLUMN public.deep_research_runs.prompt IS 'User research query - reveals business interests';
+
+-- Indexes for performance
+CREATE INDEX idx_deep_research_runs_user_id ON public.deep_research_runs USING BTREE (user_id);
+CREATE INDEX idx_deep_research_status ON public.deep_research_runs USING BTREE (status);
+CREATE INDEX idx_deep_research_updated_at ON public.deep_research_runs USING BTREE (updated_at);
+
+
+-- ============================================================================
+-- INTEGRATIONS TABLE - CRM/accounting OAuth connections
+-- ============================================================================
+CREATE TABLE public.integrations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  access_token TEXT NOT NULL,
+  refresh_token TEXT,
+  expires_at BIGINT,
+  metadata JSONB,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+
+COMMENT ON TABLE public.integrations IS 'Third-party integrations (CRM, accounting) showing tech stack';
+COMMENT ON COLUMN public.integrations.provider IS 'Provider: xero, salesforce, microsoft-business-central, google-sheets';
+
+-- Indexes for performance
+CREATE INDEX idx_integrations_user_id ON public.integrations USING BTREE (user_id);
+CREATE INDEX idx_integrations_provider ON public.integrations USING BTREE (provider);
