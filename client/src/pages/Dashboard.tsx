@@ -4,65 +4,38 @@ import { EmptyState } from "@/components/EmptyState";
 import { TrendingUp, Activity, Mail, CheckCircle, Inbox } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useQuery } from "@tanstack/react-query";
+import type { SuggestedLead } from "@shared/schema";
 
 export default function Dashboard() {
+  const { data: leads = [], isLoading: leadsLoading, refetch } = useQuery<SuggestedLead[]>({
+    queryKey: ["/api/leads"],
+  });
+
+  const highPriorityLeads = leads.filter(lead => lead.score >= 0.7);
+  const leadsWithEmails = leads.filter(lead => {
+    const leadData = lead.lead as any;
+    return leadData.emailCandidates && leadData.emailCandidates.length > 0;
+  });
+
   const mockStats = {
-    leadsGenerated: 47,
+    leadsGenerated: leads.length,
     activeSignals: 3,
-    emailMatches: 31,
+    emailMatches: leadsWithEmails.length,
     status: "Online"
   };
 
-  const mockLeads = [
-    {
-      id: "1",
-      userId: "user-1",
-      rationale: "Based on brewery profile - bottle shops near Manchester",
-      source: "google_places_new",
-      score: 0.85,
-      lead: {
-        name: "The Craft Beer Shop",
-        address: "123 Main St, Manchester, UK",
-        place_id: "place1",
-        domain: "craftbeershop.co.uk",
-        emailCandidates: ["info@craftbeershop.co.uk"],
-        tags: ["bottle_shop"]
-      },
-      createdAt: new Date()
-    },
-    {
-      id: "2",
-      userId: "user-1",
-      rationale: "Freehouse pub matching profile preferences",
-      source: "google_places_new",
-      score: 0.72,
-      lead: {
-        name: "The Old Oak Inn",
-        address: "45 High Street, Leeds, UK",
-        place_id: "place2",
-        domain: "oldoakinn.co.uk",
-        emailCandidates: [],
-        tags: ["freehouse", "pub"]
-      },
-      createdAt: new Date()
-    },
-    {
-      id: "3",
-      userId: "user-1",
-      rationale: "Premium bottle shop with craft beer focus",
-      source: "google_places_new",
-      score: 0.91,
-      lead: {
-        name: "Hop & Grain Bottle Shop",
-        address: "78 Market Street, Sheffield, UK",
-        place_id: "place3",
-        domain: "hopandgrain.co.uk",
-        emailCandidates: ["hello@hopandgrain.co.uk", "sales@hopandgrain.co.uk"],
-        tags: ["bottle_shop", "craft_beer"]
-      },
-      createdAt: new Date()
-    }
-  ];
+  const handleAddToList = (leadId: string) => {
+    console.log('Add to list:', leadId);
+  };
+
+  const handleDraftEmail = (leadId: string) => {
+    console.log('Draft email:', leadId);
+  };
+
+  const handleRefresh = () => {
+    refetch();
+  };
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -146,10 +119,11 @@ export default function Dashboard() {
 
       <div className="w-96 flex-shrink-0">
         <SuggestionsPanel
-          leads={mockLeads}
-          onAddToList={(id) => console.log('Add to list:', id)}
-          onDraftEmail={(id) => console.log('Draft email:', id)}
-          onRefresh={() => console.log('Refresh suggestions')}
+          leads={leads}
+          onAddToList={handleAddToList}
+          onDraftEmail={handleDraftEmail}
+          onRefresh={handleRefresh}
+          loading={leadsLoading}
         />
       </div>
     </div>

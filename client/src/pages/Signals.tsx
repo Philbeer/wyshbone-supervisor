@@ -3,46 +3,13 @@ import { EmptyState } from "@/components/EmptyState";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Activity, RefreshCw } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import type { UserSignal } from "@shared/schema";
 
 export default function Signals() {
-  const mockSignals = [
-    {
-      id: "signal-1",
-      userId: "user-123",
-      type: "profile_update",
-      payload: {
-        userProfile: {
-          userId: "user-123",
-          industry: "brewery",
-          location: {
-            city: "Manchester",
-            country: "UK",
-            radiusKm: 25
-          },
-          prefs: {
-            packaging: "cans"
-          }
-        }
-      },
-      createdAt: new Date(Date.now() - 120000)
-    },
-    {
-      id: "signal-2",
-      userId: "user-456",
-      type: "idle",
-      payload: {
-        userProfile: {
-          userId: "user-456",
-          industry: "restaurant",
-          location: {
-            city: "London",
-            country: "UK"
-          }
-        }
-      },
-      createdAt: new Date(Date.now() - 300000)
-    }
-  ];
+  const { data: signals = [], isLoading, refetch } = useQuery<UserSignal[]>({
+    queryKey: ["/api/signals"],
+  });
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -58,9 +25,11 @@ export default function Signals() {
             <Button 
               variant="outline" 
               size="sm"
+              onClick={() => refetch()}
+              disabled={isLoading}
               data-testid="button-refresh-signals"
             >
-              <RefreshCw className="h-4 w-4 mr-2" />
+              <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
               Refresh
             </Button>
           </div>
@@ -68,10 +37,10 @@ export default function Signals() {
 
         <div className="flex-1 overflow-auto">
           <div className="p-6">
-            {mockSignals.length > 0 ? (
+            {signals.length > 0 ? (
               <ScrollArea className="h-[calc(100vh-200px)]">
                 <div className="space-y-3 pr-4">
-                  {mockSignals.map((signal) => (
+                  {signals.map((signal) => (
                     <SignalEvent key={signal.id} signal={signal} />
                   ))}
                 </div>
