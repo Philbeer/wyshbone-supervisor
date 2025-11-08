@@ -39,12 +39,22 @@ class SupervisorService {
   }
 
   private async processNewSignals() {
-    // Fetch signals from Supabase (ordered oldest first to process backlog)
-    const { data: signals, error } = await supabase
+    // Get the timestamp of the latest processed signal
+    const latestProcessedTimestamp = await storage.getLatestProcessedTimestamp('supabase');
+    
+    // Fetch signals newer than the latest processed one
+    let query = supabase
       .from('user_signals')
       .select('*')
       .order('created_at', { ascending: true })
       .limit(this.batchSize);
+    
+    // Only fetch signals created after the latest processed timestamp
+    if (latestProcessedTimestamp) {
+      query = query.gt('created_at', latestProcessedTimestamp.toISOString());
+    }
+
+    const { data: signals, error } = await query;
 
     if (error) {
       console.error('Error fetching signals from Supabase:', error);
@@ -55,25 +65,22 @@ class SupervisorService {
       return;
     }
 
-    // Process each signal (skip if already processed)
+    // Process each signal in order - stop on first failure to preserve timestamp order
     for (const signal of signals) {
       const signalId = signal.id.toString();
+      const signalCreatedAt = new Date(signal.created_at);
       
-      // Check if already processed using database
-      const isProcessed = await storage.isSignalProcessed(signalId, 'supabase');
-      if (isProcessed) {
-        continue;
-      }
-
       console.log(`📊 Processing new signal ${signalId} (${signal.type})...`);
       
       try {
         await this.generateLeadsFromSignal(signal);
         // Only mark as processed AFTER successful lead generation
-        await storage.markSignalProcessed(signalId, 'supabase');
+        await storage.markSignalProcessed(signalId, 'supabase', signalCreatedAt);
       } catch (error) {
         console.error(`Failed to process signal ${signalId}:`, error);
-        // Don't mark as processed - will retry next poll
+        // Break the loop - don't advance timestamp past this failed signal
+        // Will retry this signal and remaining signals on next poll
+        break;
       }
     }
   }

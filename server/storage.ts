@@ -23,7 +23,8 @@ export interface IStorage {
   createSuggestedLead(lead: InsertSuggestedLead): Promise<SuggestedLead>;
   createSignal(signal: InsertUserSignal): Promise<UserSignal>;
   isSignalProcessed(signalId: string, source: string): Promise<boolean>;
-  markSignalProcessed(signalId: string, source: string): Promise<void>;
+  markSignalProcessed(signalId: string, source: string, signalCreatedAt: Date): Promise<void>;
+  getLatestProcessedTimestamp(source: string): Promise<Date | null>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -89,13 +90,25 @@ export class DatabaseStorage implements IStorage {
     return !!record;
   }
 
-  async markSignalProcessed(signalId: string, source: string): Promise<void> {
+  async markSignalProcessed(signalId: string, source: string, signalCreatedAt: Date): Promise<void> {
     await db
       .insert(processedSignals)
       .values({
         signalId: `${source}:${signalId}`,
-        signalSource: source
+        signalSource: source,
+        signalCreatedAt: signalCreatedAt
       });
+  }
+
+  async getLatestProcessedTimestamp(source: string): Promise<Date | null> {
+    const [record] = await db
+      .select()
+      .from(processedSignals)
+      .where(eq(processedSignals.signalSource, source))
+      .orderBy(desc(processedSignals.signalCreatedAt))
+      .limit(1);
+    
+    return record ? record.signalCreatedAt : null;
   }
 }
 

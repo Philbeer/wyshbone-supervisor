@@ -39,6 +39,7 @@ export const processedSignals = pgTable("processed_signals", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   signalId: text("signal_id").notNull().unique(),
   signalSource: text("signal_source").notNull(), // 'supabase' or 'postgres'
+  signalCreatedAt: timestamp("signal_created_at").notNull(), // When the signal was originally created
   processedAt: timestamp("processed_at").defaultNow().notNull(),
 });
 
