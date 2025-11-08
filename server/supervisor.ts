@@ -294,6 +294,10 @@ class SupervisorService {
     return Math.min(score, 0.98);
   }
 
+  async getUserContext(userId: string): Promise<UserContext> {
+    return this.buildUserContext(userId);
+  }
+
   private async buildUserContext(userId: string): Promise<UserContext> {
     console.log(`🔍 Building comprehensive context for user: ${userId}`);
     

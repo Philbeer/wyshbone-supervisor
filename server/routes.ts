@@ -4,8 +4,21 @@ import { storage } from "./storage";
 import { insertUserSignalSchema, insertSuggestedLeadSchema } from "@shared/schema";
 import { fromError } from "zod-validation-error";
 import { supabase } from "./supabase";
+import { supervisor } from "./supervisor";
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Get user context (profile, facts, messages, etc.)
+  app.get("/api/user/context", async (req, res) => {
+    try {
+      const userId = "demo-user";
+      const context = await supervisor.getUserContext(userId);
+      res.json(context);
+    } catch (error) {
+      console.error("Error fetching user context:", error);
+      res.status(500).json({ error: "Failed to fetch user context" });
+    }
+  });
+
   // Get suggested leads for demo user
   app.get("/api/leads", async (req, res) => {
     try {

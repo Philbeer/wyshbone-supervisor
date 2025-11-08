@@ -1,5 +1,6 @@
 import { StatsCard } from "@/components/StatsCard";
 import { SuggestionsPanel } from "@/components/SuggestionsPanel";
+import { UserContextPanel } from "@/components/UserContextPanel";
 import { EmptyState } from "@/components/EmptyState";
 import { TrendingUp, Activity, Mail, CheckCircle, Inbox } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -7,9 +8,47 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useQuery } from "@tanstack/react-query";
 import type { SuggestedLead } from "@shared/schema";
 
+interface UserContext {
+  userId: string;
+  profile?: {
+    companyName?: string;
+    companyDomain?: string;
+    inferredIndustry?: string;
+    primaryObjective?: string;
+    secondaryObjectives?: string[];
+    targetMarkets?: string[];
+    productsOrServices?: string[];
+    confidence?: number;
+  };
+  facts: Array<{
+    fact: string;
+    score: number;
+    category: string;
+    createdAt: string;
+  }>;
+  recentMessages: Array<{
+    role: string;
+    content: string;
+    createdAt: string;
+  }>;
+  monitors: Array<{
+    label: string;
+    description: string;
+    monitorType: string;
+  }>;
+  researchRuns: Array<{
+    label: string;
+    prompt: string;
+  }>;
+}
+
 export default function Dashboard() {
   const { data: leads = [], isLoading: leadsLoading, refetch } = useQuery<SuggestedLead[]>({
     queryKey: ["/api/leads"],
+  });
+
+  const { data: userContext, isLoading: contextLoading } = useQuery<UserContext>({
+    queryKey: ["/api/user/context"],
   });
 
   const highPriorityLeads = leads.filter(lead => lead.score >= 0.7);
@@ -117,14 +156,21 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="w-96 flex-shrink-0">
-        <SuggestionsPanel
-          leads={leads}
-          onAddToList={handleAddToList}
-          onDraftEmail={handleDraftEmail}
-          onRefresh={handleRefresh}
-          loading={leadsLoading}
-        />
+      <div className="w-96 flex-shrink-0 border-l flex flex-col">
+        <ScrollArea className="flex-1">
+          <div className="p-6 space-y-6">
+            <UserContextPanel context={userContext} isLoading={contextLoading} />
+            <div className="border-t pt-6">
+              <SuggestionsPanel
+                leads={leads}
+                onAddToList={handleAddToList}
+                onDraftEmail={handleDraftEmail}
+                onRefresh={handleRefresh}
+                loading={leadsLoading}
+              />
+            </div>
+          </div>
+        </ScrollArea>
       </div>
     </div>
   );
