@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertUserSignalSchema, insertSuggestedLeadSchema } from "@shared/schema";
 import { fromError } from "zod-validation-error";
+import { supabase } from "./supabase";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Get suggested leads for demo user
@@ -18,12 +19,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Get recent user signals
+  // Get recent user signals (from both PostgreSQL and Supabase)
   app.get("/api/signals", async (req, res) => {
     try {
       const userId = "demo-user";
-      const signals = await storage.getRecentSignals(userId);
-      res.json(signals);
+      
+      // Fetch from PostgreSQL
+      const pgSignals = await storage.getRecentSignals(userId);
+      
+      // Fetch from Supabase - filter by current user only
+      const { data: supabaseSignals, error } = await supabase
+        .from('user_signals')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(20);
+      
+      if (error) {
+        console.error("Error fetching Supabase signals:", error);
+      }
+      
+      // Combine and transform Supabase signals to match our schema
+      const transformedSupabaseSignals = (supabaseSignals || []).map(signal => ({
+        id: signal.id.toString(),
+        userId: signal.user_id,
+        type: signal.type,
+        payload: signal.payload,
+        createdAt: new Date(signal.created_at)
+      }));
+      
+      // Merge both sources and sort by createdAt
+      const allSignals = [...pgSignals, ...transformedSupabaseSignals]
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        .slice(0, 20);
+      
+      res.json(allSignals);
     } catch (error) {
       console.error("Error fetching signals:", error);
       res.status(500).json({ error: "Failed to fetch signals" });
