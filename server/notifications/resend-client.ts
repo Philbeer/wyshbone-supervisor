@@ -45,8 +45,13 @@ async function getCredentials() {
   }
   
   console.log(`✅ Resend connection found. From email: ${connectionSettings.settings.from_email}`);
+  
+  // TEMPORARY: Use updated API key until connection is updated
+  const apiKey = 're_NFc1V1Po_J6qtoSkLbtsuVryHSJfwjmUp';
+  console.log(`🔑 Using updated API key (temporary override)`);
+  
   return { 
-    apiKey: connectionSettings.settings.api_key, 
+    apiKey: apiKey, 
     fromEmail: connectionSettings.settings.from_email 
   };
 }
