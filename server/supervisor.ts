@@ -249,13 +249,11 @@ class SupervisorService {
 
   private async notifyLeadCreated(lead: any): Promise<void> {
     try {
-      // Get user email from Supabase
-      const userInfo = await storage.getUserEmail(lead.userId);
+      // TESTING: Use hardcoded email for now, will switch to user's email later
+      const testEmail = 'phil@listersbrewery.com';
       
-      if (!userInfo || !userInfo.email) {
-        console.log(`⚠️  No email found for user ${lead.userId}, skipping notification`);
-        return;
-      }
+      // Get user info from Supabase for name (optional)
+      const userInfo = await storage.getUserEmail(lead.userId);
 
       // Generate dashboard URL from environment variable
       const dashboardUrl = process.env.DASHBOARD_URL || 
@@ -266,8 +264,8 @@ class SupervisorService {
       // Send email notification
       await emailService.sendLeadCreatedEmail({
         lead,
-        userEmail: userInfo.email,
-        userName: userInfo.name,
+        userEmail: testEmail,
+        userName: userInfo?.name || 'there',
         dashboardUrl
       });
     } catch (error) {
