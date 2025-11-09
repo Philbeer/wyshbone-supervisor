@@ -127,7 +127,7 @@ export function generateLeadEmailTemplate(data: LeadEmailData): { html: string; 
                       <span style="color: #6b7280; font-size: 13px; font-weight: 500;">✉️ Email${emailCandidates.length > 1 ? 's' : ''}:</span>
                       <div style="margin-top: 6px;">
                         ${emailCandidates.map(email => `
-                          <a href="mailto:${escapeHtml(email)}" style="display: inline-block; background-color: #667eea; color: #ffffff; padding: 6px 12px; border-radius: 4px; font-size: 13px; text-decoration: none; margin: 4px 4px 0 0;">${escapeHtml(email)}</a>
+                          <a href="mailto:${encodeURIComponent(email)}" style="display: inline-block; background-color: #667eea; color: #ffffff; padding: 6px 12px; border-radius: 4px; font-size: 13px; text-decoration: none; margin: 4px 4px 0 0;">${escapeHtml(email)}</a>
                         `).join('')}
                       </div>
                     </div>

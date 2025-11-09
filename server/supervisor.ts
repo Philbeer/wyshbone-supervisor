@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { storage } from './storage';
+import { emailService } from './notifications/email-service';
 
 interface UserContext {
   userId: string;
@@ -235,11 +236,43 @@ class SupervisorService {
         }
       };
 
-      await storage.createSuggestedLead(lead);
+      const createdLead = await storage.createSuggestedLead(lead);
       console.log(`✅ Generated lead: ${lead.lead.name} (score: ${(score * 100).toFixed(0)}%)`);
+
+      // Send email notification to user
+      await this.notifyLeadCreated(createdLead);
     } catch (error) {
       console.error(`Failed to generate lead from Google Places:`, error);
       throw error;
+    }
+  }
+
+  private async notifyLeadCreated(lead: any): Promise<void> {
+    try {
+      // Get user email from Supabase
+      const userInfo = await storage.getUserEmail(lead.userId);
+      
+      if (!userInfo || !userInfo.email) {
+        console.log(`⚠️  No email found for user ${lead.userId}, skipping notification`);
+        return;
+      }
+
+      // Generate dashboard URL from environment variable
+      const dashboardUrl = process.env.DASHBOARD_URL || 
+        (process.env.REPL_SLUG 
+          ? `https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co`
+          : 'http://localhost:5000');
+
+      // Send email notification
+      await emailService.sendLeadCreatedEmail({
+        lead,
+        userEmail: userInfo.email,
+        userName: userInfo.name,
+        dashboardUrl
+      });
+    } catch (error) {
+      // Log error but don't block the supervisor loop
+      console.error(`❌ Failed to send email notification for lead ${lead.id}:`, error);
     }
   }
 

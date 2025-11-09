@@ -14,6 +14,7 @@ import {
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc } from "drizzle-orm";
+import { supabase } from "./supabase";
 
 export interface SupervisorCheckpoint {
   timestamp: Date | null;
@@ -32,6 +33,7 @@ export interface IStorage {
   markSignalProcessed(signalId: string, source: string, signalCreatedAt: Date): Promise<void>;
   getSupervisorCheckpoint(source: string): Promise<SupervisorCheckpoint>;
   updateSupervisorCheckpoint(source: string, timestamp: Date, id: string): Promise<void>;
+  getUserEmail(userId: string): Promise<{ email: string; name?: string } | null>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -144,6 +146,29 @@ export class DatabaseStorage implements IStorage {
           lastProcessedTimestamp: timestamp,
           lastProcessedId: id
         });
+    }
+  }
+
+  async getUserEmail(userId: string): Promise<{ email: string; name?: string } | null> {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('email, name')
+        .eq('id', userId)
+        .single();
+      
+      if (error || !data) {
+        console.log(`⚠️  No email found for user ${userId}`);
+        return null;
+      }
+      
+      return {
+        email: data.email,
+        name: data.name || undefined
+      };
+    } catch (error) {
+      console.error(`Error fetching user email for ${userId}:`, error);
+      return null;
     }
   }
 }
