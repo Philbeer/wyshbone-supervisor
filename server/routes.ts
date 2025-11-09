@@ -96,8 +96,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get user context (profile, facts, messages, etc.)
   app.get("/api/user/context", async (req, res) => {
     try {
-      // Allow specifying user_id via query param, default to bobby@test.com's ID
-      const userId = (req.query.user_id as string) || "dd71d4fc24290b03e6327aa7467176a8";
+      // Allow specifying user_id via query param, default to em@em.com's ID (Dental Sky)
+      const userId = (req.query.user_id as string) || "8f9079b3ddf739fb0217373c92292e91";
       const context = await supervisor.getUserContext(userId);
       res.json(context);
     } catch (error) {
@@ -109,8 +109,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get suggested leads for demo user
   app.get("/api/leads", async (req, res) => {
     try {
-      // Allow specifying user_id via query param, default to bobby@test.com's ID
-      const userId = (req.query.user_id as string) || "dd71d4fc24290b03e6327aa7467176a8";
+      // Allow specifying user_id via query param, default to em@em.com's ID (Dental Sky)
+      const userId = (req.query.user_id as string) || "8f9079b3ddf739fb0217373c92292e91";
       const leads = await storage.getSuggestedLeads(userId);
       res.json(leads);
     } catch (error) {
