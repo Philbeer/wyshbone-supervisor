@@ -2,9 +2,9 @@
 
 ## Overview
 
-Wyshbone Supervisor is a proactive lead generation system that automatically finds and scores prospects based on user signals. The application monitors user behavior and preferences, then uses AI to identify and suggest relevant leads with contact information. Built as a B2B productivity tool, it features a Linear-inspired design system optimized for data density and workflow efficiency.
+Wyshbone Supervisor is a proactive lead generation system that automatically finds and scores prospects based on user signals. The application monitors user behavior and preferences, then uses AI to identify and suggest relevant leads with contact information. When new leads are found, the system **automatically sends email notifications** to users with complete lead details.
 
-The system consists of a React frontend with a Node.js/Express backend, using PostgreSQL (via Neon) for data persistence and Drizzle ORM for database operations.
+Built as a B2B productivity tool, it features a Linear-inspired design system optimized for data density and workflow efficiency. The system consists of a React frontend with a Node.js/Express backend, using PostgreSQL (via Neon) for data persistence and Drizzle ORM for database operations.
 
 ## User Preferences
 
@@ -105,6 +105,8 @@ Three main tables defined in `shared/schema.ts`:
 - Signals represent user actions/preferences that trigger lead discovery
 - Supervisor processes signals to generate scored lead suggestions
 - Leads include enriched data (emails via Hunter.io, places via Google Places API)
+- When lead is created, supervisor sends email notification to user via Resend
+- Email notifications include full lead details and link to dashboard
 
 ### Authentication & Authorization
 
@@ -124,7 +126,7 @@ Three main tables defined in `shared/schema.ts`:
 **Supabase:**
 - Shared database with Wyshbone UI app
 - Stores rich user context data:
-  - `users` - Company profiles, industry, objectives, target markets
+  - `users` - Company profiles, industry, objectives, target markets, **email addresses**
   - `conversations` - Chat sessions
   - `messages` - Full conversation history (user ↔ AI)
   - `facts` - Ranked user preferences/needs with importance scores
@@ -135,6 +137,15 @@ Three main tables defined in `shared/schema.ts`:
 - Credentials configured (SUPABASE_URL, SUPABASE_SERVICE_ROLE, SUPABASE_ANON)
 - Supervisor polls every 30s for new signals and builds comprehensive user context
 - Ready for integration
+
+**Resend (Email Service):**
+- Transactional email service for lead notifications
+- Automatically sends emails when new leads are generated
+- Email includes: lead name, contact info, score, rationale, dashboard link
+- HTML and plain-text templates with proper escaping
+- Integration configured via Replit Connectors (connection:conn_resend_01K8TGCAX8WZAJ52G7YFJW46SB)
+- Graceful error handling - email failures don't block supervisor
+- Emails sent to user's address from Supabase `users` table
 
 **Google Places API:**
 - Mentioned in schema (place_id field) for lead enrichment
