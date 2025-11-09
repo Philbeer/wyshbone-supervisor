@@ -46,13 +46,18 @@ async function getCredentials() {
   
   console.log(`✅ Resend connection found. From email: ${connectionSettings.settings.from_email}`);
   
-  // TEMPORARY: Use updated API key until connection is updated
-  const apiKey = 're_NFc1V1Po_J6qtoSkLbtsuVryHSJfwjmUp';
-  console.log(`🔑 Using updated API key (temporary override)`);
+  // Use RESEND_API_KEY from environment (more secure than hardcoding)
+  const apiKey = process.env.RESEND_API_KEY || connectionSettings.settings.api_key;
+  
+  // Use Resend's default email for testing (no domain verification needed)
+  const fromEmail = 'onboarding@resend.dev';
+  
+  console.log(`🔑 Using API key from ${process.env.RESEND_API_KEY ? 'environment variable' : 'connection'}`);
+  console.log(`📧 Using from email: ${fromEmail} (Resend default for testing)`);
   
   return { 
     apiKey: apiKey, 
-    fromEmail: connectionSettings.settings.from_email 
+    fromEmail: fromEmail 
   };
 }
 
