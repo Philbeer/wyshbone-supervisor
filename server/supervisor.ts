@@ -2,6 +2,7 @@ import { supabase } from './supabase';
 import { storage } from './storage';
 import { emailService } from './notifications/email-service';
 import type { SupervisorTask, SupervisorMessage, TaskResult } from './types/supervisor-chat';
+import { randomUUID } from 'crypto';
 
 interface UserContext {
   userId: string;
@@ -276,10 +277,11 @@ class SupervisorService {
     }
 
     // Write response to messages table as Supervisor message
-    // Note: Omit created_at to use database DEFAULT (timestamptz)
+    const messageId = randomUUID();
     const { data: newMessage, error: messageError } = await supabase
       .from('messages')
       .insert({
+        id: messageId,
         conversation_id: task.conversation_id,
         role: 'assistant',
         content: response,
@@ -288,8 +290,8 @@ class SupervisorService {
           supervisor_task_id: task.id,
           capabilities,
           lead_ids: leadIds
-        }
-        // created_at omitted - uses database DEFAULT
+        },
+        created_at: Date.now()
       })
       .select()
       .single();
