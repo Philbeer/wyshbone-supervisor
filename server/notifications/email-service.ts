@@ -14,7 +14,10 @@ export class EmailNotificationService {
     const { lead, userEmail, userName, dashboardUrl } = payload;
 
     try {
+      console.log(`📧 Attempting to send email to ${userEmail}...`);
+      
       const { client, fromEmail } = await getUncachableResendClient();
+      console.log(`📧 Resend client initialized, from: ${fromEmail}`);
       
       const leadData = lead.lead as any;
       const { html, text } = generateLeadEmailTemplate({
@@ -29,7 +32,7 @@ export class EmailNotificationService {
         userName: userName || 'there'
       });
 
-      await client.emails.send({
+      const result = await client.emails.send({
         from: fromEmail,
         to: userEmail,
         subject: `🎯 New Lead Found: ${leadData.name}`,
@@ -37,9 +40,15 @@ export class EmailNotificationService {
         text
       });
 
+      console.log(`✅ Email sent successfully! Resend response:`, JSON.stringify(result));
       console.log(`✉️  Email notification sent to ${userEmail} for lead: ${leadData.name}`);
     } catch (error) {
-      console.error(`❌ Failed to send email notification to ${userEmail}:`, error);
+      console.error(`❌ DETAILED ERROR sending email to ${userEmail}:`, error);
+      console.error(`Error type: ${error?.constructor?.name}`);
+      console.error(`Error message:`, error instanceof Error ? error.message : String(error));
+      if (error && typeof error === 'object' && 'response' in error) {
+        console.error(`API Response:`, JSON.stringify((error as any).response));
+      }
       throw error;
     }
   }
