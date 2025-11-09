@@ -11,10 +11,13 @@ async function getCredentials() {
     : null;
 
   if (!xReplitToken) {
+    console.error('❌ X_REPLIT_TOKEN not found. REPL_IDENTITY:', process.env.REPL_IDENTITY, 'WEB_REPL_RENEWAL:', process.env.WEB_REPL_RENEWAL);
     throw new Error('X_REPLIT_TOKEN not found for repl/depl');
   }
 
-  connectionSettings = await fetch(
+  console.log(`🔑 Fetching Resend credentials from: https://${hostname}/api/v2/connection?include_secrets=true&connector_names=resend`);
+
+  const response = await fetch(
     'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=resend',
     {
       headers: {
@@ -22,12 +25,30 @@ async function getCredentials() {
         'X_REPLIT_TOKEN': xReplitToken
       }
     }
-  ).then(res => res.json()).then(data => data.items?.[0]);
+  );
 
-  if (!connectionSettings || (!connectionSettings.settings.api_key)) {
-    throw new Error('Resend not connected');
+  if (!response.ok) {
+    console.error(`❌ Failed to fetch connection: ${response.status} ${response.statusText}`);
+    const text = await response.text();
+    console.error('Response body:', text);
+    throw new Error(`Failed to fetch Resend connection: ${response.status}`);
   }
-  return { apiKey: connectionSettings.settings.api_key, fromEmail: connectionSettings.settings.from_email };
+
+  const data = await response.json();
+  console.log('📦 Connection API response:', JSON.stringify(data, null, 2));
+  
+  connectionSettings = data.items?.[0];
+
+  if (!connectionSettings || !connectionSettings.settings?.api_key) {
+    console.error('❌ No valid Resend connection found. Response:', JSON.stringify(data));
+    throw new Error('Resend not connected or API key missing');
+  }
+  
+  console.log(`✅ Resend connection found. From email: ${connectionSettings.settings.from_email}`);
+  return { 
+    apiKey: connectionSettings.settings.api_key, 
+    fromEmail: connectionSettings.settings.from_email 
+  };
 }
 
 export async function getUncachableResendClient() {
