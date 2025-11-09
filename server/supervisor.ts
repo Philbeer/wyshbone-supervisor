@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import { storage } from './storage';
 import { emailService } from './notifications/email-service';
+import type { SupervisorTask, SupervisorMessage, TaskResult } from './types/supervisor-chat';
 
 interface UserContext {
   userId: string;
@@ -65,7 +66,11 @@ class SupervisorService {
     if (!this.isRunning) return;
 
     try {
-      await this.processNewSignals();
+      // Process both signals and chat tasks in parallel
+      await Promise.all([
+        this.processNewSignals(),
+        this.processSupervisorTasks()
+      ]);
     } catch (error) {
       console.error('Error in supervisor poll:', error);
     }
@@ -162,6 +167,328 @@ class SupervisorService {
         break;
       }
     }
+  }
+
+  private async processSupervisorTasks() {
+    // Fetch pending supervisor tasks from Supabase
+    const { data: tasks, error } = await supabase
+      .from('supervisor_tasks')
+      .select('*')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: true })
+      .limit(10);
+
+    if (error) {
+      console.error('Error fetching supervisor tasks:', error);
+      return;
+    }
+
+    if (!tasks || tasks.length === 0) {
+      return;
+    }
+
+    console.log(`💬 Found ${tasks.length} pending chat task(s)`);
+
+    // Process each task
+    for (const task of tasks) {
+      try {
+        await this.processChatTask(task as SupervisorTask);
+      } catch (error) {
+        console.error(`Failed to process task ${task.id}:`, error);
+        // Mark task as failed
+        await supabase
+          .from('supervisor_tasks')
+          .update({
+            status: 'failed',
+            error: error instanceof Error ? error.message : String(error)
+            // processed_at omitted - uses database DEFAULT
+          })
+          .eq('id', task.id);
+      }
+    }
+  }
+
+  private async processChatTask(task: SupervisorTask) {
+    console.log(`💬 Processing chat task ${task.id} (${task.task_type})...`);
+
+    // Mark as processing - with concurrency guard
+    const { data: updateResult, error: updateError } = await supabase
+      .from('supervisor_tasks')
+      .update({ status: 'processing' })
+      .eq('id', task.id)
+      .eq('status', 'pending') // Only update if still pending
+      .select();
+
+    if (updateError || !updateResult || updateResult.length === 0) {
+      // Task already being processed or failed to update
+      console.log(`⏭️  Task ${task.id} already processing or unavailable`);
+      return;
+    }
+
+    // Build user context for intelligent response
+    const userContext = await this.buildUserContext(task.user_id);
+
+    // Fetch conversation context with error handling
+    const { data: messages, error: messagesError } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('conversation_id', task.conversation_id)
+      .order('created_at', { ascending: true })
+      .limit(50);
+
+    if (messagesError) {
+      throw new Error(`Failed to fetch conversation messages: ${messagesError.message}`);
+    }
+
+    const conversationContext = messages?.map(m => ({
+      role: m.role,
+      content: m.content,
+      created_at: m.created_at
+    })) || [];
+
+    // Generate response based on task type
+    let response: string;
+    let leadIds: string[] = [];
+    let capabilities: string[] = [];
+
+    switch (task.task_type) {
+      case 'generate_leads':
+      case 'find_prospects':
+        const result = await this.generateLeadsForChat(task, userContext, conversationContext);
+        response = result.response;
+        leadIds = result.leadIds;
+        capabilities = ['lead_generation', 'email_enrichment'];
+        break;
+
+      case 'analyze_conversation':
+        response = await this.analyzeConversation(task, userContext, conversationContext);
+        capabilities = ['conversation_analysis'];
+        break;
+
+      case 'provide_insights':
+        response = await this.provideInsights(task, userContext);
+        capabilities = ['business_insights'];
+        break;
+
+      default:
+        response = "I'm not sure how to help with that request yet. Let me know if you'd like me to find leads or analyze your conversation!";
+        capabilities = [];
+    }
+
+    // Write response to messages table as Supervisor message
+    // Note: Omit created_at to use database DEFAULT (timestamptz)
+    const { data: newMessage, error: messageError } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id: task.conversation_id,
+        role: 'assistant',
+        content: response,
+        source: 'supervisor',
+        metadata: {
+          supervisor_task_id: task.id,
+          capabilities,
+          lead_ids: leadIds
+        }
+        // created_at omitted - uses database DEFAULT
+      })
+      .select()
+      .single();
+
+    if (messageError) {
+      throw new Error(`Failed to write message: ${messageError.message}`);
+    }
+
+    console.log(`✅ Supervisor response posted to conversation ${task.conversation_id}`);
+
+    // Mark task as completed
+    await supabase
+      .from('supervisor_tasks')
+      .update({
+        status: 'completed',
+        result: {
+          message_id: newMessage.id,
+          lead_ids: leadIds,
+          capabilities_used: capabilities
+        }
+        // processed_at omitted - uses database DEFAULT
+      })
+      .eq('id', task.id);
+  }
+
+  private async generateLeadsForChat(
+    task: SupervisorTask,
+    userContext: UserContext,
+    conversationContext: Array<{ role: string; content: string }>
+  ): Promise<{ response: string; leadIds: string[] }> {
+    const requestData = task.request_data;
+    const searchQuery = requestData.search_query;
+
+    if (!searchQuery?.business_type) {
+      return {
+        response: "I'd be happy to find leads for you! Could you tell me what type of businesses you're looking for?",
+        leadIds: []
+      };
+    }
+
+    const businessType = searchQuery.business_type;
+    const location = searchQuery.location || 'Local';
+    const city = location.split(',')[0].trim();
+    const country = location.split(',')[1]?.trim() || 'UK';
+
+    console.log(`🔍 Chat request: ${businessType} in ${city}, ${country}`);
+
+    try {
+      // Search for businesses
+      const businesses = await this.searchGooglePlaces(businessType, city, country);
+
+      if (!businesses || businesses.length === 0) {
+        return {
+          response: `I searched for ${businessType} businesses in ${city}, but didn't find any results. Would you like to try a different location or business type?`,
+          leadIds: []
+        };
+      }
+
+      // Generate leads for top 3 businesses
+      const leadsToCreate = businesses.slice(0, 3);
+      const createdLeads = [];
+
+      for (const business of leadsToCreate) {
+        // Find emails
+        let emailCandidates: string[] = [];
+        if (business.websiteUri) {
+          try {
+            const domain = new URL(business.websiteUri).hostname.replace('www.', '');
+            emailCandidates = await this.findEmails(domain);
+          } catch (e) {
+            // Skip email finding if domain extraction fails
+          }
+        }
+
+        const rationale = this.generateRationale(
+          { user_id: task.user_id, type: 'chat_request', payload: { searchQuery } },
+          userContext,
+          business,
+          businessType,
+          city
+        );
+
+        const score = this.calculateLeadScore(userContext, business, businessType);
+
+        const lead = {
+          userId: task.user_id,
+          rationale,
+          source: 'supervisor_chat',
+          score,
+          lead: {
+            name: business.displayName?.text || 'Unknown Business',
+            address: business.formattedAddress || `${city}, ${country}`,
+            place_id: business.id || '',
+            domain: business.websiteUri || '',
+            emailCandidates,
+            tags: [businessType, 'chat_request'],
+            phone: business.nationalPhoneNumber || business.internationalPhoneNumber || ''
+          }
+        };
+
+        const createdLead = await storage.createSuggestedLead(lead);
+        createdLeads.push(createdLead);
+      }
+
+      // Format response
+      const leadSummaries = createdLeads.map((lead, idx) => {
+        const scorePercent = (lead.score * 100).toFixed(0);
+        const leadData = lead.lead as any;
+        const emails = leadData.emailCandidates?.length > 0
+          ? `\n   📧 ${leadData.emailCandidates.join(', ')}`
+          : '\n   📧 No email found';
+        
+        return `${idx + 1}. **${leadData.name}** (${scorePercent}% match)
+   📍 ${leadData.address}
+   🌐 ${leadData.domain || 'No website'}${emails}
+   📞 ${leadData.phone || 'No phone'}`;
+      }).join('\n\n');
+
+      const response = `🎯 I found ${createdLeads.length} ${businessType} prospects in ${city}:
+
+${leadSummaries}
+
+💡 **Why these matches:**
+${createdLeads[0].rationale}
+
+You can view detailed profiles and contact info in your [dashboard](/leads).`;
+
+      return {
+        response,
+        leadIds: createdLeads.map(l => l.id)
+      };
+    } catch (error) {
+      console.error('Error generating leads for chat:', error);
+      return {
+        response: `I encountered an issue while searching for ${businessType} in ${city}. Let me try again in a moment!`,
+        leadIds: []
+      };
+    }
+  }
+
+  private async analyzeConversation(
+    task: SupervisorTask,
+    userContext: UserContext,
+    conversationContext: Array<{ role: string; content: string }>
+  ): Promise<string> {
+    // Extract key insights from conversation
+    const userMessages = conversationContext.filter(m => m.role === 'user');
+    const recentTopics = userMessages.slice(-5).map(m => m.content).join('\n');
+
+    const insights = [];
+
+    if (userContext.profile?.companyName) {
+      insights.push(`📊 **Your Company:** ${userContext.profile.companyName}`);
+    }
+
+    if (userContext.profile?.primaryObjective) {
+      insights.push(`🎯 **Primary Goal:** ${userContext.profile.primaryObjective}`);
+    }
+
+    if (userContext.facts.length > 0) {
+      const topFacts = userContext.facts.slice(0, 3);
+      insights.push(`💡 **Key Insights:**\n${topFacts.map(f => `   • ${f.fact}`).join('\n')}`);
+    }
+
+    if (userContext.monitors.length > 0) {
+      insights.push(`🔍 **Active Monitors:** ${userContext.monitors.length} running`);
+    }
+
+    return `📈 **Conversation Analysis:**
+
+${insights.join('\n\n')}
+
+**Recent Topics:**
+${recentTopics}
+
+Would you like me to find leads based on any of these insights?`;
+  }
+
+  private async provideInsights(
+    task: SupervisorTask,
+    userContext: UserContext
+  ): Promise<string> {
+    const insights = [];
+
+    if (userContext.facts.length > 0) {
+      insights.push(`💡 Based on our conversations, I've learned ${userContext.facts.length} key things about your business needs.`);
+    }
+
+    if (userContext.monitors.length > 0) {
+      insights.push(`🔍 You have ${userContext.monitors.length} active monitors tracking opportunities.`);
+    }
+
+    if (userContext.profile?.targetMarkets && userContext.profile.targetMarkets.length > 0) {
+      insights.push(`🎯 Your target markets: ${userContext.profile.targetMarkets.join(', ')}`);
+    }
+
+    return insights.length > 0
+      ? insights.join('\n\n') + '\n\nWant me to find leads in any specific area?'
+      : "I'm still learning about your business! Tell me more about what you're looking for.";
   }
 
   private async generateLeadsFromSignal(signal: any) {
