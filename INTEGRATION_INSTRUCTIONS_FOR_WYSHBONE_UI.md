@@ -294,12 +294,33 @@ async function handleUserMessage(
     
     // Supervisor will process within 30 seconds and post response
     // Your realtime subscription will receive it automatically
-  } else {
-    // Handle with regular UI AI
-    // ... your existing logic
   }
+  
+  // 5. ALWAYS get regular AI response (regardless of Supervisor)
+  // Get full conversation history INCLUDING Supervisor messages
+  const { data: conversationHistory } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('conversation_id', conversationId)
+    .order('created_at', 'asc');
+  
+  // 6. Send to your regular AI with FULL context
+  // This includes user messages, AI responses, AND Supervisor responses
+  const aiResponse = await getAIResponse(conversationHistory);
+  
+  // 7. Save AI response to Supabase
+  await supabase.from('messages').insert({
+    id: crypto.randomUUID(),
+    conversation_id: conversationId,
+    role: 'assistant',
+    content: aiResponse,
+    source: 'ui',
+    created_at: Date.now()
+  });
 }
 ```
+
+**IMPORTANT:** Your regular AI must see ALL messages (including Supervisor responses) so it can answer follow-up questions like "Tell me more about the first clinic".
 
 ---
 
@@ -346,6 +367,65 @@ function ChatInput({ onSendMessage }) {
     </div>
   );
 }
+```
+
+---
+
+## Step 6: Context and Conversation Flow
+
+**CRITICAL:** All messages (user, AI, Supervisor) must be visible to your regular AI!
+
+**Why?**
+```
+User: "Find dental clinics in York"
+UI AI: "I'll help you search..."
+Supervisor: "🤖 I found 3 clinics: Yorkshire Dental Suite..."
+User: "Tell me more about the first one" ← AI needs Supervisor's context!
+```
+
+**How to implement:**
+```typescript
+// When building context for your AI
+async function getConversationContext(conversationId: string) {
+  const { data: messages } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('conversation_id', conversationId)
+    .order('created_at', 'asc');
+  
+  // Format for your AI (include ALL sources)
+  return messages.map(msg => ({
+    role: msg.role,
+    content: msg.content,
+    // Optional: Tag Supervisor messages
+    ...(msg.source === 'supervisor' && {
+      name: 'Supervisor',
+      metadata: msg.metadata
+    })
+  }));
+}
+```
+
+**Preventing Infinite Loops:**
+
+Supervisor only acts when explicitly requested. This prevents loops:
+
+```typescript
+function needsSupervisor(message: string): boolean {
+  // Only trigger on specific keywords
+  const triggers = [
+    'find leads', 'find prospects', 'search for',
+    'generate leads', 'analyze conversation'
+  ];
+  
+  const lower = message.toLowerCase();
+  return triggers.some(t => lower.includes(t));
+}
+
+// Regular conversation does NOT trigger Supervisor:
+// ❌ "Tell me more about that" → No task created
+// ❌ "Thanks!" → No task created
+// ✅ "Find more clinics in Manchester" → Task created
 ```
 
 ---
