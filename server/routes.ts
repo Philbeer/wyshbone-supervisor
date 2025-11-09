@@ -7,6 +7,48 @@ import { supabase } from "./supabase";
 import { supervisor } from "./supervisor";
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Test endpoint - create supervisor chat task
+  app.post("/api/test/supervisor-task", async (req, res) => {
+    const { userId, conversationId, taskType, searchQuery } = req.body;
+
+    if (!userId || !conversationId || !taskType) {
+      return res.status(400).json({ 
+        error: 'userId, conversationId, and taskType are required' 
+      });
+    }
+
+    try {
+      // Create supervisor task in Supabase
+      const { data: task, error } = await supabase
+        .from('supervisor_tasks')
+        .insert({
+          conversation_id: conversationId,
+          user_id: userId,
+          task_type: taskType,
+          request_data: {
+            user_message: searchQuery?.message || 'Find leads',
+            search_query: searchQuery || {}
+          },
+          status: 'pending',
+          created_at: Date.now()
+        })
+        .select()
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      res.json({ 
+        success: true, 
+        task,
+        message: 'Task created! Supervisor will process it within 30 seconds.' 
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Test endpoint - create signal in Supabase
   app.post("/api/test/signal-supabase", async (req, res) => {
     try {
