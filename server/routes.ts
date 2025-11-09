@@ -7,6 +7,45 @@ import { supabase } from "./supabase";
 import { supervisor } from "./supervisor";
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Test endpoint - create signal in Supabase
+  app.post("/api/test/signal-supabase", async (req, res) => {
+    try {
+      const userId = req.body.userId || "8f9079b3ddf739fb0217373c92292e91";
+      const industry = req.body.industry || "dental clinic";
+      const city = req.body.city || "Bristol";
+      
+      const { data, error } = await supabase
+        .from('user_signals')
+        .insert({
+          user_id: userId,
+          type: 'search_performed',
+          payload: {
+            userProfile: {
+              userId,
+              industry,
+              location: {
+                city,
+                country: 'UK',
+                radiusKm: 25
+              },
+              prefs: {
+                targetAudience: 'dentists'
+              }
+            }
+          }
+        })
+        .select();
+      
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+      
+      res.json({ success: true, signal: data });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Debug endpoint - check what's in Supabase
   app.get("/api/debug/supabase", async (req, res) => {
     try {
