@@ -2,9 +2,17 @@
 
 ## Overview
 
-Wyshbone Supervisor is a proactive lead generation system that automatically finds and scores prospects based on user signals. The application monitors user behavior and preferences, then uses AI to identify and suggest relevant leads with contact information. When new leads are found, the system **automatically sends email notifications** to users with complete lead details.
+Wyshbone Supervisor is a proactive lead generation system that automatically finds and scores prospects based on user signals. The application monitors user behavior and preferences, then uses AI to identify and suggest relevant leads with contact information. 
+
+**Key Capabilities:**
+- **Email Notifications**: Automatically sends email notifications when new leads are found
+- **Chat Integration**: Supervisor's AI participates directly in Wyshbone UI chat conversations
+- **Real-time Responses**: Users can ask Supervisor to find leads and get intelligent responses within 30 seconds
+- **Multi-channel Communication**: Supervisor delivers insights via both email and chat
 
 Built as a B2B productivity tool, it features a Linear-inspired design system optimized for data density and workflow efficiency. The system consists of a React frontend with a Node.js/Express backend, using PostgreSQL (via Neon) for data persistence and Drizzle ORM for database operations.
+
+**Architecture**: The Supervisor backend runs independently and integrates with the separate Wyshbone UI application through a shared Supabase database.
 
 ## User Preferences
 
@@ -146,6 +154,64 @@ Three main tables defined in `shared/schema.ts`:
 - Integration configured via Replit Connectors (connection:conn_resend_01K8TGCAX8WZAJ52G7YFJW46SB)
 - Graceful error handling - email failures don't block supervisor
 - Emails sent to user's address from Supabase `users` table
+
+## Supervisor Chat Integration (NEW)
+
+The Supervisor's AI intelligence now participates directly in Wyshbone UI chat conversations through a queue-based architecture:
+
+### Architecture Overview
+
+**Shared Database (Supabase):**
+- `messages` table extended with `source` ('ui' | 'supervisor' | 'system') and `metadata` (JSONB)
+- `supervisor_tasks` queue table for UI to request Supervisor processing
+- Both Wyshbone Supervisor and Wyshbone UI apps connect to same Supabase instance
+
+**Data Flow:**
+1. User types message in Wyshbone UI chat
+2. UI detects if Supervisor help is needed (keywords: "find leads", "analyze", etc.)
+3. UI creates `supervisor_task` entry in Supabase with conversation context
+4. Supervisor polls every 30s, finds pending tasks
+5. Supervisor analyzes conversation, generates leads, formats response
+6. Supervisor posts message to `messages` table with `source='supervisor'`
+7. UI streams new messages via Supabase realtime subscription
+8. User sees Supervisor's response with special badge and styling
+
+### Task Types
+
+- **generate_leads**: Find prospects using Google Places + Hunter.io
+- **find_prospects**: Same as generate_leads
+- **analyze_conversation**: Analyze chat history and provide insights
+- **provide_insights**: Share business intelligence from user profile
+
+### Supervisor Response Format
+
+Supervisor messages include rich metadata:
+```json
+{
+  "source": "supervisor",
+  "metadata": {
+    "supervisor_task_id": "task-uuid",
+    "capabilities": ["lead_generation", "email_enrichment"],
+    "lead_ids": ["lead-1", "lead-2", "lead-3"]
+  }
+}
+```
+
+### Integration with Wyshbone UI
+
+See `INTEGRATION_INSTRUCTIONS_FOR_WYSHBONE_UI.md` for complete integration guide.
+
+**UI Requirements:**
+- Detect Supervisor intent from user messages
+- Create supervisor_tasks in Supabase
+- Subscribe to Supabase realtime for message updates
+- Render Supervisor messages with distinctive styling (badge, border, metadata chips)
+- Handle loading states while waiting for Supervisor response (~30s)
+
+**Testing:**
+- Test endpoint: `POST /api/test/supervisor-task` creates demo tasks
+- Supervisor processes within 30 seconds
+- Check Supabase `supervisor_tasks` and `messages` tables to verify
 
 **Google Places API:**
 - Mentioned in schema (place_id field) for lead enrichment
