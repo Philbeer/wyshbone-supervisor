@@ -67,6 +67,13 @@ class SupervisorService {
     if (!this.isRunning) return;
 
     try {
+      // Skip if Supabase not configured
+      if (!supabase) {
+        // Schedule next poll
+        this.timeoutId = setTimeout(() => this.poll(), this.pollInterval);
+        return;
+      }
+
       // Process both signals and chat tasks in parallel
       await Promise.all([
         this.processNewSignals(),
@@ -80,6 +87,8 @@ class SupervisorService {
   }
 
   private async processNewSignals() {
+    if (!supabase) return;
+    
     // Get composite checkpoint {timestamp, id}
     const checkpoint = await storage.getSupervisorCheckpoint('supabase');
     
@@ -171,6 +180,8 @@ class SupervisorService {
   }
 
   private async processSupervisorTasks() {
+    if (!supabase) return;
+    
     // Fetch pending supervisor tasks from Supabase
     const { data: tasks, error } = await supabase
       .from('supervisor_tasks')
@@ -210,6 +221,8 @@ class SupervisorService {
   }
 
   private async processChatTask(task: SupervisorTask) {
+    if (!supabase) return;
+    
     console.log(`💬 Processing chat task ${task.id} (${task.task_type})...`);
 
     // Mark as processing - with concurrency guard
@@ -668,6 +681,11 @@ Would you like me to find leads based on any of these insights?`;
       monitors: [],
       researchRuns: []
     };
+
+    if (!supabase) {
+      console.warn('Supabase not configured, returning empty context');
+      return context;
+    }
 
     try {
       // Get user profile
