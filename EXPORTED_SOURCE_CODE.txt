@@ -1,0 +1,950 @@
+  type UserSignal,
+  type InsertSuggestedLead,
+  type InsertUserSignal 
+} from "@shared/schema";
+import { db } from "./db";
+import { eq, desc } from "drizzle-orm";
+import { supabase } from "./supabase";
+
+export interface SupervisorCheckpoint {
+  timestamp: Date | null;
+  id: string | null;
+}
+
+export interface IStorage {
+  getUser(id: string): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
+  createUser(user: InsertUser): Promise<User>;
+  getSuggestedLeads(userId: string): Promise<SuggestedLead[]>;
+  getRecentSignals(userId: string): Promise<UserSignal[]>;
+  createSuggestedLead(lead: InsertSuggestedLead): Promise<SuggestedLead>;
+  createSignal(signal: InsertUserSignal): Promise<UserSignal>;
+  isSignalProcessed(signalId: string, source: string): Promise<boolean>;
+  markSignalProcessed(signalId: string, source: string, signalCreatedAt: Date): Promise<void>;
+  getSupervisorCheckpoint(source: string): Promise<SupervisorCheckpoint>;
+  updateSupervisorCheckpoint(source: string, timestamp: Date, id: string): Promise<void>;
+  getUserEmail(userId: string): Promise<{ email: string; name?: string } | null>;
+}
+
+export class DatabaseStorage implements IStorage {
+  async getUser(id: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user || undefined;
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.username, username));
+    return user || undefined;
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const [user] = await db
+      .insert(users)
+      .values(insertUser)
+      .returning();
+    return user;
+  }
+
+  async getSuggestedLeads(userId: string): Promise<SuggestedLead[]> {
+    const leads = await db
+      .select()
+      .from(suggestedLeads)
+      .where(eq(suggestedLeads.userId, userId))
+      .orderBy(desc(suggestedLeads.score));
+    return leads;
+  }
+
+  async getRecentSignals(userId: string): Promise<UserSignal[]> {
+    const signals = await db
+      .select()
+      .from(userSignals)
+      .where(eq(userSignals.userId, userId))
+      .orderBy(desc(userSignals.createdAt))
+      .limit(20);
+    return signals;
+  }
+
+  async createSuggestedLead(lead: InsertSuggestedLead): Promise<SuggestedLead> {
+    const [newLead] = await db
+      .insert(suggestedLeads)
+      .values(lead)
+      .returning();
+    return newLead;
+  }
+
+  async createSignal(signal: InsertUserSignal): Promise<UserSignal> {
+    const [newSignal] = await db
+      .insert(userSignals)
+      .values(signal)
+      .returning();
+    return newSignal;
+  }
+
+  async isSignalProcessed(signalId: string, source: string): Promise<boolean> {
+    const [record] = await db
+      .select()
+      .from(processedSignals)
+      .where(eq(processedSignals.signalId, `${source}:${signalId}`))
+      .limit(1);
+    return !!record;
+  }
+
+  async markSignalProcessed(signalId: string, source: string, signalCreatedAt: Date): Promise<void> {
+    await db
+      .insert(processedSignals)
+      .values({
+        signalId: `${source}:${signalId}`,
+        signalSource: source,
+        signalCreatedAt: signalCreatedAt
+      });
+  }
+
+  async getSupervisorCheckpoint(source: string): Promise<SupervisorCheckpoint> {
+    const [record] = await db
+      .select()
+      .from(supervisorState)
+      .where(eq(supervisorState.source, source))
+      .limit(1);
+    
+    return {
+      timestamp: record?.lastProcessedTimestamp || null,
+      id: record?.lastProcessedId || null
+    };
+  }
+
+  async updateSupervisorCheckpoint(source: string, timestamp: Date, id: string): Promise<void> {
+    const existing = await db
+      .select()
+      .from(supervisorState)
+      .where(eq(supervisorState.source, source))
+      .limit(1);
+    
+    if (existing.length > 0) {
+      await db
+        .update(supervisorState)
+        .set({
+          lastProcessedTimestamp: timestamp,
+          lastProcessedId: id,
+          updatedAt: new Date()
+        })
+        .where(eq(supervisorState.source, source));
+    } else {
+      await db
+        .insert(supervisorState)
+        .values({
+          source,
+          lastProcessedTimestamp: timestamp,
+          lastProcessedId: id
+        });
+    }
+  }
+
+  async getUserEmail(userId: string): Promise<{ email: string; name?: string } | null> {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('email, name')
+        .eq('id', userId)
+        .single();
+      
+      if (error || !data) {
+        console.log(`⚠️  No email found for user ${userId}`);
+        return null;
+      }
+      
+      return {
+        email: data.email,
+        name: data.name || undefined
+      };
+    } catch (error) {
+      console.error(`Error fetching user email for ${userId}:`, error);
+      return null;
+    }
+  }
+}
+
+export const storage = new DatabaseStorage();
+
+```
+
+===FILE_START===
+PATH: server/routes.ts
+SIZE: 10932
+HASH: ee5bc2ff23e6d6738f6ad5e00fbba58a2209ad930e28746306b38b301e73071f
+LANG: typescript
+```typescript
+import type { Express } from "express";
+import { createServer, type Server } from "http";
+import { storage } from "./storage";
+import { insertUserSignalSchema, insertSuggestedLeadSchema } from "@shared/schema";
+import { fromError } from "zod-validation-error";
+import { supabase } from "./supabase";
+import { supervisor } from "./supervisor";
+
+export async function registerRoutes(app: Express): Promise<Server> {
+  // Test endpoint - create supervisor chat task
+  app.post("/api/test/supervisor-task", async (req, res) => {
+    const { userId, conversationId, taskType, searchQuery } = req.body;
+
+    if (!userId || !conversationId || !taskType) {
+      return res.status(400).json({ 
+        error: 'userId, conversationId, and taskType are required' 
+      });
+    }
+
+    try {
+      // Create supervisor task in Supabase
+      const { data: task, error } = await supabase
+        .from('supervisor_tasks')
+        .insert({
+          conversation_id: conversationId,
+          user_id: userId,
+          task_type: taskType,
+          request_data: {
+            user_message: searchQuery?.message || 'Find leads',
+            search_query: searchQuery || {}
+          },
+          status: 'pending',
+          created_at: Date.now()
+        })
+        .select()
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      res.json({ 
+        success: true, 
+        task,
+        message: 'Task created! Supervisor will process it within 30 seconds.' 
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Test endpoint - create signal in Supabase
+  app.post("/api/test/signal-supabase", async (req, res) => {
+    try {
+      const userId = req.body.userId || "8f9079b3ddf739fb0217373c92292e91";
+      const industry = req.body.industry || "dental clinic";
+      const city = req.body.city || "Bristol";
+      
+      const { data, error } = await supabase
+        .from('user_signals')
+        .insert({
+          user_id: userId,
+          type: 'search_performed',
+          payload: {
+            userProfile: {
+              userId,
+              industry,
+              location: {
+                city,
+                country: 'UK',
+                radiusKm: 25
+              },
+              prefs: {
+                targetAudience: 'dentists'
+              }
+            }
+          }
+        })
+        .select();
+      
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+      
+      res.json({ success: true, signal: data });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Debug endpoint - check what's in Supabase
+  app.get("/api/debug/supabase", async (req, res) => {
+    try {
+      // Check users table
+      const { data: users, error: usersError } = await supabase.from('users').select('*').limit(5);
+      
+      // Check user_signals table
+      const { data: signals, error: signalsError } = await supabase
+        .from('user_signals')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(5);
+      
+      // Check facts table
+      const { data: facts, error: factsError } = await supabase
+        .from('facts')
+        .select('*')
+        .order('score', { ascending: false })
+        .limit(5);
+      
+      // Check messages table
+      const { data: messages, error: messagesError } = await supabase
+        .from('messages')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(5);
+      
+      // Check conversations table
+      const { data: conversations, error: conversationsError } = await supabase
+        .from('conversations')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(5);
+      
+      res.json({
+        users: { data: users, error: usersError },
+        signals: { data: signals, error: signalsError },
+        facts: { data: facts, error: factsError },
+        messages: { data: messages, error: messagesError },
+        conversations: { data: conversations, error: conversationsError }
+      });
+    } catch (error) {
+      console.error("Error fetching Supabase debug data:", error);
+      res.status(500).json({ error: "Failed to fetch debug data" });
+    }
+  });
+
+  // Get user context (profile, facts, messages, etc.)
+  app.get("/api/user/context", async (req, res) => {
+    try {
+      // Allow specifying user_id via query param, default to em@em.com's ID (Dental Sky)
+      const userId = (req.query.user_id as string) || "8f9079b3ddf739fb0217373c92292e91";
+      const context = await supervisor.getUserContext(userId);
+      res.json(context);
+    } catch (error) {
+      console.error("Error fetching user context:", error);
+      res.status(500).json({ error: "Failed to fetch user context" });
+    }
+  });
+
+  // Get suggested leads for demo user
+  app.get("/api/leads", async (req, res) => {
+    try {
+      // Allow specifying user_id via query param, default to em@em.com's ID (Dental Sky)
+      const userId = (req.query.user_id as string) || "8f9079b3ddf739fb0217373c92292e91";
+      const leads = await storage.getSuggestedLeads(userId);
+      res.json(leads);
+    } catch (error) {
+      console.error("Error fetching leads:", error);
+      res.status(500).json({ error: "Failed to fetch leads" });
+    }
+  });
+
+  // Get recent user signals (from both PostgreSQL and Supabase)
+  app.get("/api/signals", async (req, res) => {
+    try {
+      // Allow specifying user_id via query param, default to bobby@test.com's ID
+      const userId = (req.query.user_id as string) || "dd71d4fc24290b03e6327aa7467176a8";
+      
+      // Fetch from PostgreSQL
+      const pgSignals = await storage.getRecentSignals(userId);
+      
+      // Fetch from Supabase - filter by current user only
+      const { data: supabaseSignals, error } = await supabase
+        .from('user_signals')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(20);
+      
+      if (error) {
+        console.error("Error fetching Supabase signals:", error);
+      }
+      
+      // Combine and transform Supabase signals to match our schema
+      const transformedSupabaseSignals = (supabaseSignals || []).map(signal => ({
+        id: signal.id.toString(),
+        userId: signal.user_id,
+        type: signal.type,
+        payload: signal.payload,
+        createdAt: new Date(signal.created_at)
+      }));
+      
+      // Merge both sources and sort by createdAt
+      const allSignals = [...pgSignals, ...transformedSupabaseSignals]
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        .slice(0, 20);
+      
+      res.json(allSignals);
+    } catch (error) {
+      console.error("Error fetching signals:", error);
+      res.status(500).json({ error: "Failed to fetch signals" });
+    }
+  });
+
+  // Create a new signal (for testing)
+  app.post("/api/signals", async (req, res) => {
+    try {
+      const validationResult = insertUserSignalSchema.safeParse(req.body);
+      
+      if (!validationResult.success) {
+        const validationError = fromError(validationResult.error);
+        return res.status(400).json({ 
+          error: "Validation failed", 
+          details: validationError.toString() 
+        });
+      }
+      
+      const signal = await storage.createSignal(validationResult.data);
+      res.json(signal);
+    } catch (error) {
+      console.error("Error creating signal:", error);
+      res.status(500).json({ error: "Failed to create signal" });
+    }
+  });
+
+  // Seed initial data
+  app.post("/api/seed", async (req, res) => {
+    try {
+      // Create some sample signals
+      const signal1 = await storage.createSignal({
+        userId: "demo-user",
+        type: "profile_update",
+        payload: {
+          userProfile: {
+            userId: "demo-user",
+            industry: "brewery",
+            location: {
+              city: "Manchester",
+              country: "UK",
+              radiusKm: 25
+            },
+            prefs: {
+              packaging: "cans"
+            }
+          }
+        }
+      });
+
+      const signal2 = await storage.createSignal({
+        userId: "demo-user",
+        type: "idle",
+        payload: {
+          userProfile: {
+            userId: "demo-user",
+            industry: "brewery",
+            location: {
+              city: "Leeds",
+              country: "UK"
+            }
+          }
+        }
+      });
+
+      // Create some sample suggested leads
+      const lead1 = await storage.createSuggestedLead({
+        userId: "demo-user",
+        rationale: "Based on brewery profile - bottle shops near Manchester with craft beer focus",
+        source: "google_places_new",
+        score: 0.85,
+        lead: {
+          name: "The Craft Beer Shop",
+          address: "123 Main St, Manchester, UK",
+          place_id: "place1",
+          domain: "craftbeershop.co.uk",
+          emailCandidates: ["info@craftbeershop.co.uk"],
+          tags: ["bottle_shop", "craft_beer"]
+        }
+      });
+
+      const lead2 = await storage.createSuggestedLead({
+        userId: "demo-user",
+        rationale: "Freehouse pub matching profile preferences",
+        source: "google_places_new",
+        score: 0.72,
+        lead: {
+          name: "The Old Oak Inn",
+          address: "45 High Street, Leeds, UK",
+          place_id: "place2",
+          domain: "oldoakinn.co.uk",
+          emailCandidates: [],
+          tags: ["freehouse", "pub"]
+        }
+      });
+
+      const lead3 = await storage.createSuggestedLead({
+        userId: "demo-user",
+        rationale: "Premium bottle shop with craft beer focus - high email match confidence",
+        source: "google_places_new",
+        score: 0.91,
+        lead: {
+          name: "Hop & Grain Bottle Shop",
+          address: "78 Market Street, Sheffield, UK",
+          place_id: "place3",
+          domain: "hopandgrain.co.uk",
+          emailCandidates: ["hello@hopandgrain.co.uk", "sales@hopandgrain.co.uk"],
+          tags: ["bottle_shop", "craft_beer"]
+        }
+      });
+
+      const lead4 = await storage.createSuggestedLead({
+        userId: "demo-user",
+        rationale: "Independent pub with can-friendly vibe",
+        source: "google_places_new",
+        score: 0.68,
+        lead: {
+          name: "The Hoppy Tap",
+          address: "15 Station Road, York, UK",
+          place_id: "place4",
+          domain: "hoppytap.co.uk",
+          emailCandidates: ["contact@hoppytap.co.uk"],
+          tags: ["pub", "independent"]
+        }
+      });
+
+      res.json({ 
+        success: true, 
+        created: {
+          signals: 2,
+          leads: 4
+        }
+      });
+    } catch (error) {
+      console.error("Error seeding data:", error);
+      res.status(500).json({ error: "Failed to seed data" });
+    }
+  });
+
+  const httpServer = createServer(app);
+  return httpServer;
+}
+
+```
+
+===FILE_START===
+PATH: server/db.ts
+SIZE: 532
+HASH: c06f870e4dc366f99537e80ede7625c9919be6aa74bf46d1a15cc3e0192a5559
+LANG: typescript
+```typescript
+// Referenced from blueprint:javascript_database
+import { Pool, neonConfig } from '@neondatabase/serverless';
+import { drizzle } from 'drizzle-orm/neon-serverless';
+import ws from "ws";
+import * as schema from "@shared/schema";
+
+neonConfig.webSocketConstructor = ws;
+
+if (!process.env.DATABASE_URL) {
+  throw new Error(
+    "DATABASE_URL must be set. Did you forget to provision a database?",
+  );
+}
+
+export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+export const db = drizzle({ client: pool, schema });
+
+```
+
+===FILE_START===
+PATH: server/notifications/email-service.ts
+SIZE: 2120
+HASH: 452348485b3245521cffd6ff20157e4ad428fd4c472137e1dabe550501c9aac2
+LANG: typescript
+```typescript
+import { getUncachableResendClient } from './resend-client';
+import { SuggestedLead } from '@shared/schema';
+import { generateLeadEmailTemplate } from './templates/lead-created-email';
+
+export interface LeadNotificationPayload {
+  lead: SuggestedLead;
+  userEmail: string;
+  userName?: string;
+  dashboardUrl: string;
+}
+
+export class EmailNotificationService {
+  async sendLeadCreatedEmail(payload: LeadNotificationPayload): Promise<void> {
+    const { lead, userEmail, userName, dashboardUrl } = payload;
+
+    try {
+      console.log(`📧 Attempting to send email to ${userEmail}...`);
+      
+      const { client, fromEmail } = await getUncachableResendClient();
+      console.log(`📧 Resend client initialized, from: ${fromEmail}`);
+      
+      const leadData = lead.lead as any;
+      const { html, text } = generateLeadEmailTemplate({
+        leadName: leadData.name || 'Unknown Business',
+        address: leadData.address || '',
+        phone: leadData.phone || '',
+        website: leadData.domain || '',
+        emailCandidates: leadData.emailCandidates || [],
+        score: Math.round(lead.score * 100),
+        rationale: lead.rationale,
+        dashboardUrl,
+        userName: userName || 'there'
+      });
+
+      const result = await client.emails.send({
+        from: fromEmail,
+        to: userEmail,
+        subject: `🎯 New Lead Found: ${leadData.name}`,
+        html,
+        text
+      });
+
+      console.log(`✅ Email sent successfully! Resend response:`, JSON.stringify(result));
+      console.log(`✉️  Email notification sent to ${userEmail} for lead: ${leadData.name}`);
+    } catch (error) {
+      console.error(`❌ DETAILED ERROR sending email to ${userEmail}:`, error);
+      console.error(`Error type: ${error?.constructor?.name}`);
+      console.error(`Error message:`, error instanceof Error ? error.message : String(error));
+      if (error && typeof error === 'object' && 'response' in error) {
+        console.error(`API Response:`, JSON.stringify((error as any).response));
+      }
+      throw error;
+    }
+  }
+}
+
+export const emailService = new EmailNotificationService();
+
+```
+
+===FILE_START===
+PATH: server/notifications/resend-client.ts
+SIZE: 2502
+HASH: ee0ed79a2be3ef381427152297f93a128559a171754a76e7f5c3505e57adbbb1
+LANG: typescript
+```typescript
+import { Resend } from 'resend';
+
+let connectionSettings: any;
+
+async function getCredentials() {
+  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
+  const xReplitToken = process.env.REPL_IDENTITY
+    ? 'repl ' + process.env.REPL_IDENTITY
+    : process.env.WEB_REPL_RENEWAL
+    ? 'depl ' + process.env.WEB_REPL_RENEWAL
+    : null;
+
+  if (!xReplitToken) {
+    console.error('❌ X_REPLIT_TOKEN not found. REPL_IDENTITY:', process.env.REPL_IDENTITY, 'WEB_REPL_RENEWAL:', process.env.WEB_REPL_RENEWAL);
+    throw new Error('X_REPLIT_TOKEN not found for repl/depl');
+  }
+
+  console.log(`🔑 Fetching Resend credentials from: https://${hostname}/api/v2/connection?include_secrets=true&connector_names=resend`);
+
+  const response = await fetch(
+    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=resend',
+    {
+      headers: {
+        'Accept': 'application/json',
+        'X_REPLIT_TOKEN': xReplitToken
+      }
+    }
+  );
+
+  if (!response.ok) {
+    console.error(`❌ Failed to fetch connection: ${response.status} ${response.statusText}`);
+    const text = await response.text();
+    console.error('Response body:', text);
+    throw new Error(`Failed to fetch Resend connection: ${response.status}`);
+  }
+
+  const data = await response.json();
+  console.log('📦 Connection API response:', JSON.stringify(data, null, 2));
+  
+  connectionSettings = data.items?.[0];
+
+  if (!connectionSettings || !connectionSettings.settings?.api_key) {
+    console.error('❌ No valid Resend connection found. Response:', JSON.stringify(data));
+    throw new Error('Resend not connected or API key missing');
+  }
+  
+  console.log(`✅ Resend connection found. From email: ${connectionSettings.settings.from_email}`);
+  
+  // Use RESEND_API_KEY from environment (more secure than hardcoding)
+  const apiKey = process.env.RESEND_API_KEY || connectionSettings.settings.api_key;
+  
+  // Use Resend's default email for testing (no domain verification needed)
+  const fromEmail = 'onboarding@resend.dev';
+  
+  console.log(`🔑 Using API key from ${process.env.RESEND_API_KEY ? 'environment variable' : 'connection'}`);
+  console.log(`📧 Using from email: ${fromEmail} (Resend default for testing)`);
+  
+  return { 
+    apiKey: apiKey, 
+    fromEmail: fromEmail 
+  };
+}
+
+export async function getUncachableResendClient() {
+  const { apiKey, fromEmail } = await getCredentials();
+  return {
+    client: new Resend(apiKey),
+    fromEmail: fromEmail || 'onboarding@resend.dev'
+  };
+}
+
+```
+
+===FILE_START===
+PATH: server/notifications/templates/lead-created-email.ts
+SIZE: 9736
+HASH: 7d0c6cbcfb355d23f25fb43330b1eddea81e7be4ec53224870fbb7470fdb5ac2
+LANG: typescript
+```typescript
+export interface LeadEmailData {
+  leadName: string;
+  address: string;
+  phone: string;
+  website: string;
+  emailCandidates: string[];
+  score: number;
+  rationale: string;
+  dashboardUrl: string;
+  userName: string;
+}
+
+function escapeHtml(text: string): string {
+  const map: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  };
+  return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+export function generateLeadEmailTemplate(data: LeadEmailData): { html: string; text: string } {
+  const {
+    leadName,
+    address,
+    phone,
+    website,
+    emailCandidates,
+    score,
+    rationale,
+    dashboardUrl,
+    userName
+  } = data;
+
+  const safeLeadName = escapeHtml(leadName);
+  const safeAddress = escapeHtml(address);
+  const safePhone = escapeHtml(phone);
+  const safeWebsite = escapeHtml(website);
+  const safeRationale = escapeHtml(rationale);
+  const safeUserName = escapeHtml(userName);
+
+  const formattedDate = new Date().toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+
+  const formattedTime = new Date().toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+
+  const subject = `🎯 New Lead Found: ${leadName} - ${formattedDate}`;
+
+  // Use logo from app
+  const baseUrl = dashboardUrl.split('?')[0];
+  const logoUrl = `${baseUrl}/assets/logo.png`;
+
+  const html = `
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>${subject}</title>
+<style>
+  body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+  table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+  img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; display: block; }
+  body { margin: 0; padding: 0; background-color: #f4f4f4; }
+  .container { width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .logo-section { text-align: center; padding: 20px 20px 10px; }
+  .brand-logo { width: 96px; height: 96px; margin: 0 auto; }
+  .monitor-header { padding: 10px 20px 0; text-align: left; font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif; }
+  .monitor-header h1 { margin: 0 0 8px; font-size: 22px; color: #153e52; font-weight: 700; line-height: 1.3; }
+  .badge { display: inline-block; background-color: #2b7a78; color: #ffffff; padding: 4px 12px; border-radius: 12px; font-size: 12px; letter-spacing: 0.5px; }
+  .content { padding: 18px 20px 28px; color: #333; line-height: 1.6; font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif; }
+  .info-box { background-color: #f8f9fa; border-left: 4px solid #2b7a78; padding: 14px; margin: 18px 0; border-radius: 4px; color: #444; font-size: 14px; }
+  .info-box h3 { margin: 0 0 8px; font-size: 13px; color: #2b7a78; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stats { display: flex; justify-content: center; gap: 28px; margin: 20px 0; padding: 18px 12px; background-color: #f8f9fa; border-radius: 8px; }
+  .stat { text-align: center; }
+  .stat-value { font-size: 28px; font-weight: 800; color: #2b7a78; line-height: 1.1; }
+  .stat-label { font-size: 12px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+  .summary { border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; margin: 18px 0; background-color: #ffffff; }
+  .summary h3 { margin: 0 0 8px; color: #153e52; font-size: 16px; }
+  .summary p { color: #555; font-size: 15px; line-height: 1.7; margin: 0; }
+  .cta-wrap { text-align: center; margin-top: 26px; }
+  .button { display: inline-block; background-color: #2b7a78; color: #ffffff !important; padding: 14px 32px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 16px; }
+  .footer { text-align: center; font-size: 12px; color: #777; background-color: #f8f9fa; padding: 16px; }
+  .contact-item { margin-bottom: 12px; }
+  .contact-label { color: #6b7280; font-size: 13px; font-weight: 500; }
+  .contact-value { color: #1a1a1a; font-size: 14px; margin-left: 8px; }
+  .email-button { display: inline-block; background-color: #667eea; color: #ffffff !important; padding: 6px 12px; border-radius: 4px; font-size: 13px; text-decoration: none; margin: 4px 4px 0 0; }
+</style>
+</head>
+<body>
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+    <tr>
+      <td align="center" style="padding: 16px;">
+        <div class="container">
+          <div class="logo-section">
+            <img class="brand-logo" src="${logoUrl}" width="96" height="96" alt="Wyshbone AI Logo" />
+          </div>
+
+          <div class="monitor-header">
+            <h1>${safeLeadName}</h1>
+            <span class="badge">AI-GENERATED LEAD</span>
+          </div>
+
+          <div class="content">
+            <p>Hi ${safeUserName}, your AI supervisor has found a new lead that matches your objectives.</p>
+
+            <div class="info-box">
+              <h3>Lead Details</h3>
+              <p><strong>Business Name:</strong> ${safeLeadName}</p>
+              <p><strong>Discovered:</strong> ${formattedDate} at ${formattedTime}</p>
+              <p><strong>Match Score:</strong> ${score}%</p>
+            </div>
+
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 8px; padding: 16px; margin: 18px 0; color: white;">
+              <h3 style="margin: 0 0 12px; color: white; font-size: 16px; display: flex; align-items: center; gap: 8px;">
+                🤖 AI Analysis
+              </h3>
+              <div style="background-color: rgba(255,255,255,0.15); border-radius: 6px; padding: 12px; margin-bottom: 10px;">
+                <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                  <div>
+                    <strong style="font-size: 11px; opacity: 0.9; text-transform: uppercase; letter-spacing: 0.5px;">Match Quality</strong>
+                    <div style="font-size: 16px; font-weight: 700; margin-top: 2px;">
+                      ${score >= 80 ? '🔴 HIGH' : score >= 60 ? '🟡 MEDIUM' : '🟢 NORMAL'}
+                    </div>
+                  </div>
+                  <div style="border-left: 1px solid rgba(255,255,255,0.3); padding-left: 12px;">
+                    <strong style="font-size: 11px; opacity: 0.9; text-transform: uppercase; letter-spacing: 0.5px;">Score</strong>
+                    <div style="font-size: 16px; font-weight: 700; margin-top: 2px;">
+                      ${score}%
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p style="font-size: 14px; margin: 8px 0; line-height: 1.5; opacity: 0.95;">
+                <strong>AI Reasoning:</strong> ${safeRationale}
+              </p>
+            </div>
+
+            <div class="summary">
+              <h3>📞 Contact Information</h3>
+              ${address ? `
+              <div class="contact-item">
+                <span class="contact-label">📍 Address:</span>
+                <span class="contact-value">${safeAddress}</span>
+              </div>
+              ` : ''}
+              
+              ${phone ? `
+              <div class="contact-item">
+                <span class="contact-label">📞 Phone:</span>
+                <a href="tel:${safePhone}" style="color: #2b7a78; text-decoration: none; margin-left: 8px;">${safePhone}</a>
+              </div>
+              ` : ''}
+              
+              ${website ? `
+              <div class="contact-item">
+                <span class="contact-label">🌐 Website:</span>
+                <a href="${safeWebsite}" target="_blank" style="color: #2b7a78; text-decoration: none; margin-left: 8px;">${safeWebsite}</a>
+              </div>
+              ` : ''}
+              
+              ${emailCandidates.length > 0 ? `
+              <div class="contact-item" style="margin-bottom: 0;">
+                <span class="contact-label">✉️ Email${emailCandidates.length > 1 ? 's' : ''}:</span>
+                <div style="margin-top: 6px;">
+                  ${emailCandidates.map(email => `
+                    <a href="mailto:${encodeURIComponent(email)}" class="email-button">${escapeHtml(email)}</a>
+                  `).join('')}
+                </div>
+              </div>
+              ` : ''}
+            </div>
+
+            <div class="cta-wrap">
+              <a href="${dashboardUrl}" class="button">📊 View Full Report</a>
+              <p style="margin-top: 10px; font-size: 12px; color: #999;">Open your Wyshbone dashboard to see all details</p>
+            </div>
+          </div>
+
+          <div class="footer">
+            <p>This lead was automatically generated by Wyshbone Supervisor based on your user activity and objectives.</p>
+          </div>
+        </div>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+  `.trim();
+
+  const text = `
+🎯 NEW LEAD FOUND
+
+Hi ${userName},
+
+Your AI supervisor has found a new lead that matches your objectives.
+
+${leadName}
+${score}% Match
+
+AI REASONING:
+${rationale}
+
+CONTACT INFORMATION:
+${address ? `📍 Address: ${address}` : ''}
+${phone ? `📞 Phone: ${phone}` : ''}
+${website ? `🌐 Website: ${website}` : ''}
+${emailCandidates.length > 0 ? `✉️ Email${emailCandidates.length > 1 ? 's' : ''}: ${emailCandidates.join(', ')}` : ''}
+
+View Full Report: ${dashboardUrl}
+
+---
+This lead was automatically generated by Wyshbone Supervisor
+based on your user activity and objectives.
+  `.trim();
+
+  return { html, text };
+}
+
+```
+
+===FILE_START===
+PATH: migrations/ADD-TO-SUPABASE.sql
+SIZE: 587
+HASH: 03032b2df583889b2b45dc71457ab98b675cea9af46018907790fc42f223c768
+LANG: sql
+```sql
+-- ⚠️ IMPORTANT: Run this SQL in your Supabase SQL Editor
+-- Dashboard → SQL Editor → New Query → Paste this → Run
+
+-- Add source and metadata columns to messages table
+ALTER TABLE messages 
+ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'ui',
+ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}';
+
+-- Add index for efficient filtering by source
+CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source);
+
+-- Verify the changes
+SELECT column_name, data_type 
+FROM information_schema.columns 
+WHERE table_name = 'messages' 
+  AND column_name IN ('source', 'metadata');
+
+```
+
