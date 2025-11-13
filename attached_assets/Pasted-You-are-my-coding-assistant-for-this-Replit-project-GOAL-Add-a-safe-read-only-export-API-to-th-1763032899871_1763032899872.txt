@@ -1,0 +1,202 @@
+You are my coding assistant for this Replit project.
+
+GOAL
+Add a safe, read-only export API to this app so another service can inspect the important source files WITHOUT exposing secrets. The export is used by an external “status/ticker” app and by other AIs (Grok, ChatGPT).
+
+HIGH-LEVEL REQUIREMENTS
+- Use the existing server framework in this repo (if it already uses Express/Next/etc, integrate with that).
+- Provide two GET endpoints:
+  1) GET /export/status.json
+     - Returns a JSON summary of selected files and a few metrics.
+  2) GET /export/file?path=<relative-path>
+     - Returns the raw text of a single whitelisted file.
+     - Reject if the path is not in the whitelist.
+
+- Protect both endpoints with an API key:
+  - Header: X-EXPORT-KEY: <key>
+  - Key comes from process.env.EXPORT_KEY.
+  - If EXPORT_KEY is not set, generate a random key on server startup, store it in memory, and log it to the console ONCE with a clear message: 
+    "EXPORT_KEY for this app: <key>"
+
+WHITELIST (INCLUDE) PATTERNS
+Use fast-glob or equivalent. Only include files that match these patterns if they exist:
+
+- Root configs:
+  - package.json
+  - package-lock.json
+  - pnpm-lock.yaml
+  - yarn.lock
+  - .replit
+  - replit.nix
+  - tsconfig*.json
+  - vite.config.*
+  - next.config.*
+  - astro.config.*
+  - webpack.config.*
+
+- Source code and logic:
+  - src/**
+  - server/**
+  - app/**
+  - api/**
+  - routes/**
+  - lib/**
+  - functions/**
+  - prisma/**
+  - db/**
+  - supabase/**
+  - scripts/**
+
+- Schema / DB:
+  - schema.*
+  - drizzle.config.*
+  - prisma/schema.prisma
+  - database.sql
+  - migrations/**
+
+- Docs:
+  - README.md
+  - docs/**/*.md
+
+- Small public text:
+  - public/robots.txt
+
+BLACKLIST (EXCLUDE) PATTERNS
+Never include:
+
+- Folders:
+  - node_modules/**
+  - .git/**
+  - .next/**
+  - .vercel/**
+  - .turbo/**
+  - dist/**
+  - build/**
+  - coverage/**
+  - .cache/**
+  - tmp/**
+- Secrets:
+  - any .env file: .env, .env.local, .env.* (skip completely)
+- Binary / large assets:
+  - **/*.png
+  - **/*.jpg
+  - **/*.jpeg
+  - **/*.gif
+  - **/*.svg
+  - **/*.webp
+  - **/*.ico
+  - **/*.woff*
+  - **/*.ttf
+  - **/*.pdf
+  - **/*.mp4
+  - **/*.zip
+
+IMPLEMENTATION DETAILS
+
+1) Dependencies
+   - Add to package.json if not present:
+     - "express" (if the app is not Next.js or already using an Express instance)
+     - "fast-glob"
+   - Use ESM or CJS consistently with the existing codebase.
+
+2) File structure (adapt names if the repo has a clear pattern):
+   - Create a helper module, e.g.:
+     - src/utils/exporter.(js|ts) OR tools/exporter.(js|ts)
+   - That module should:
+     - Build and cache the file list using fast-glob with the include/exclude patterns.
+     - For each file:
+       - Read as UTF-8 text (skip if unreadable or obviously binary).
+       - Compute:
+         - size in bytes
+         - line count
+         - sha256 hash (over raw bytes)
+     - Compute summary metrics:
+       - totalFiles
+       - totalSizeBytes
+       - totalLoc
+       - totalTodo (count of "TODO" case-insensitive across all files)
+       - totalFixme (count of "FIXME" case-insensitive)
+       - hasTypes (true if any .ts or .tsx)
+       - hasDocs (true if README.md or docs/ present)
+       - hasApi (true if any file path starts with api/, server/, routes/)
+       - testsCount (files whose path matches /\.test\.|__tests__/i)
+       - clevernessIndex:
+         - clevernessIndex = round(
+             log10(totalLoc + 10) * 10
+             + testsCount * 5
+             + (hasTypes ? 8 : 0)
+             + (hasDocs ? 4 : 0)
+             + (hasApi ? 6 : 0)
+             - min(totalTodo + totalFixme, 50)
+           )
+
+   - Export functions from exporter:
+     - getSummary(): returns an object with:
+       {
+         appName: <string>,
+         generatedAt: ISO string,
+         totals: { files, sizeBytes, loc, todo, fixme },
+         quality: {
+           clevernessIndex,
+           hasTypes,
+           hasDocs,
+           hasApi,
+           testsCount
+         },
+         files: [
+           {
+             path,
+             size,
+             loc,
+             hash
+           },
+           {
+             path,
+             skipped: true,
+             reason
+           },
+           ...
+         ]
+       }
+     - getFileContent(path): returns { path, content } or throws if not allowed.
+
+3) /export/status.json endpoint
+   - Checks X-EXPORT-KEY header.
+   - If invalid or missing, return 403 JSON error.
+   - Calls getSummary() and returns JSON.
+
+4) /export/file endpoint
+   - Checks X-EXPORT-KEY header.
+   - Query param: path (relative).
+   - Validates that the requested path is in the whitelisted file list.
+   - Returns JSON:
+     { path, content } for SUCCESS
+     or a 404/400 JSON error if not found or not allowed.
+
+5) Integration with the app
+   - If this project already has an Express / server entry point (like server.js, index.js, src/server.ts, etc.), mount the routes there.
+     For example:
+       app.get('/export/status.json', ...);
+       app.get('/export/file', ...);
+   - If the app is a Next.js app, you can:
+     - either extend the custom server, OR
+     - create /pages/api/export/status.ts and /pages/api/export/file.ts with the same logic and header check.
+   - Do NOT change any existing production routes/logic besides the minimal mounting.
+
+6) Logging the EXPORT_KEY
+   - On server startup:
+     - Determine the active export key:
+       - If process.env.EXPORT_KEY is set, use that.
+       - Else generate a random UUID-like key or 32-char hex.
+     - Store it in a module-level variable for the export handlers.
+     - Log exactly once:
+       console.log("EXPORT_KEY for this app:", activeKey);
+   - Do NOT log it again on each request.
+
+7) Final check
+   - After implementation, run the app.
+   - Then:
+     - Call GET /export/status.json with the X-EXPORT-KEY header (using the logged key) to verify it works.
+     - Call GET /export/file?path=package.json with the header to verify the file content is returned.
+
+Please implement all of the above now, following the existing coding style and module system of this repo.
