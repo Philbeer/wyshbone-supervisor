@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { supervisor } from "./supervisor";
+import crypto from "crypto";
 
 const app = express();
 
@@ -48,6 +49,28 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // Generate or use EXPORT_KEY for export API
+  const isProduction = process.env.NODE_ENV === 'production';
+  
+  if (!process.env.EXPORT_KEY) {
+    if (isProduction) {
+      console.error('⚠️  EXPORT_KEY must be set in production environment');
+      console.error('⚠️  Export API will be disabled');
+      (global as any).GENERATED_EXPORT_KEY = null;
+    } else {
+      const generatedKey = crypto.randomBytes(16).toString('hex');
+      (global as any).GENERATED_EXPORT_KEY = generatedKey;
+      console.log('\n' + '='.repeat(60));
+      console.log('🔑 EXPORT_KEY for this app:', generatedKey);
+      console.log('   (Development only - set EXPORT_KEY env var for production)');
+      console.log('='.repeat(60) + '\n');
+    }
+  } else {
+    if (!isProduction) {
+      console.log('✅ Using EXPORT_KEY from environment');
+    }
+  }
+
   const server = await registerRoutes(app);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

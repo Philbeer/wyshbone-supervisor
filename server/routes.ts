@@ -336,6 +336,75 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Export API - middleware to check EXPORT_KEY
+  const checkExportKey = (req: any, res: any, next: any) => {
+    const providedKey = req.headers['x-export-key'];
+    const validKey = process.env.EXPORT_KEY || (global as any).GENERATED_EXPORT_KEY;
+
+    if (!providedKey || providedKey !== validKey) {
+      return res.status(403).json({ 
+        error: 'Forbidden',
+        message: 'Valid X-EXPORT-KEY header required' 
+      });
+    }
+
+    next();
+  };
+
+  // Export API - GET /export/status.json
+  app.get('/export/status.json', checkExportKey, async (req, res) => {
+    try {
+      const { getSummary } = await import('./utils/exporter.js');
+      const summary = await getSummary();
+      res.json(summary);
+    } catch (error: any) {
+      console.error('[Export API] Error generating summary:', error.message || error);
+      res.status(500).json({ 
+        error: 'Internal server error',
+        message: 'Failed to generate export summary' 
+      });
+    }
+  });
+
+  // Export API - GET /export/file
+  app.get('/export/file', checkExportKey, async (req, res) => {
+    try {
+      const requestedPath = req.query.path as string;
+
+      if (!requestedPath) {
+        return res.status(400).json({ 
+          error: 'Bad request',
+          message: 'Query parameter "path" is required' 
+        });
+      }
+
+      const { getFileContent } = await import('./utils/exporter.js');
+      const result = await getFileContent(requestedPath);
+      res.json(result);
+    } catch (error: any) {
+      console.error('[Export API] Error fetching file:', error.message || error);
+      
+      if (error.message === 'FILE_NOT_WHITELISTED') {
+        return res.status(404).json({ 
+          error: 'Not found',
+          message: 'Requested file is not available for export' 
+        });
+      }
+
+      if (error.message === 'FILE_NOT_FOUND') {
+        return res.status(404).json({ 
+          error: 'Not found',
+          message: 'Requested file does not exist' 
+        });
+      }
+
+      res.status(500).json({ 
+        error: 'Internal server error',
+        message: 'Failed to retrieve file' 
+      });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }
