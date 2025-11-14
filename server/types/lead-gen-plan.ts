@@ -508,3 +508,32 @@ export interface LeadPlanEventPayload {
   user: SupervisorUserContext;
   meta?: Record<string, unknown>;
 }
+
+// ========================================
+// STRUCTURED EVENT LOGGING
+// ========================================
+
+/**
+ * Emit a structured plan execution event for logging/monitoring
+ */
+export function emitPlanEvent(
+  type: LeadPlanEventType,
+  payload: LeadPlanEventPayload
+): void {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    type,
+    planId: payload.plan.id,
+    userId: payload.user.userId,
+    stepId: payload.step?.id,
+    stepTool: payload.step?.tool,
+    status: 'result' in payload && payload.result && 'status' in payload.result 
+      ? payload.result.status 
+      : undefined,
+    meta: payload.meta
+  };
+
+  // Structured logging - can be extended to persist to DB or event bus
+  console.log(`[LEAD_GEN_PLAN] ${JSON.stringify(logEntry)}`);
+}
