@@ -845,18 +845,25 @@ async function executeStepWithRetries(
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     result.attempts = attempt;
-    result.status = "running";
     
     if (attempt === 1) {
+      result.status = "running";
       result.startedAt = new Date().toISOString();
       emitPlanEvent("STEP_STARTED", { plan, step, result, user });
     } else {
+      // This is a retry
+      result.status = "running";
       emitPlanEvent("STEP_RETRYING", {
         plan,
         step,
         result,
         user,
-        meta: { attempt, maxRetries }
+        meta: {
+          attempt,
+          maxRetries,
+          totalAttempts: maxRetries + 1,
+          previousError: result.errorMessage
+        }
       });
     }
 
@@ -924,21 +931,58 @@ export async function executeLeadGenerationPlan(
   // Execute steps in order, respecting dependencies
   for (const step of plan.steps) {
     const deps = step.dependsOn ?? [];
-    const anyDepFailed = deps.some(
+    
+    // Check for failed dependencies
+    const failedDeps = deps.filter(
       (depId) => stepResults[depId]?.status === "failed"
     );
+    
+    // Check for missing dependencies (not in plan or never executed)
+    const missingDeps = deps.filter(
+      (depId) => !stepResults[depId]
+    );
+    
+    // Check for skipped dependencies
+    const skippedDeps = deps.filter(
+      (depId) => stepResults[depId]?.status === "skipped"
+    );
+    
+    const unmetDeps = [...failedDeps, ...missingDeps, ...skippedDeps];
+    const shouldSkip = unmetDeps.length > 0;
 
-    if (anyDepFailed) {
-      // Skip this step because a dependency failed
+    if (shouldSkip) {
+      // Skip this step because dependencies are unmet
+      const reasons: string[] = [];
+      if (failedDeps.length > 0) reasons.push(`${failedDeps.length} failed: ${failedDeps.join(', ')}`);
+      if (missingDeps.length > 0) reasons.push(`${missingDeps.length} missing: ${missingDeps.join(', ')}`);
+      if (skippedDeps.length > 0) reasons.push(`${skippedDeps.length} skipped: ${skippedDeps.join(', ')}`);
+      
       const skipped: LeadGenStepResult = {
         stepId: step.id,
         status: "skipped",
         attempts: 0,
-        errorMessage: "Skipped because a dependency failed"
+        errorMessage: `Skipped because dependencies unmet (${reasons.join('; ')})`
       };
       stepResults[step.id] = skipped;
-      emitPlanEvent("STEP_SKIPPED", { plan, step, result: skipped, user });
-      overallStatus = overallStatus === "failed" ? "failed" : "partial";
+      emitPlanEvent("STEP_SKIPPED", {
+        plan,
+        step,
+        result: skipped,
+        user,
+        meta: {
+          failedDependencies: failedDeps,
+          missingDependencies: missingDeps,
+          skippedDependencies: skippedDeps,
+          dependencyResults: failedDeps.map(depId => stepResults[depId])
+        }
+      });
+      
+      // Only set to failed if there were actual failures (not just missing/skipped deps)
+      if (failedDeps.length > 0) {
+        overallStatus = "failed";
+      } else if (overallStatus === "succeeded") {
+        overallStatus = "partial";
+      }
       continue;
     }
 
