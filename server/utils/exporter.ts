@@ -19,6 +19,10 @@ interface SkippedFileEntry {
 interface ExportSummary {
   appName: string;
   generatedAt: string;
+  sup001_plannerEnabled: boolean;
+  sup002_executorEnabled: boolean;
+  sup003_monitorEnabled: boolean;
+  sup060_safeExperimentsEnabled: boolean;
   totals: {
     files: number;
     sizeBytes: number;
@@ -210,6 +214,10 @@ async function scanFiles(): Promise<ExportSummary> {
   return {
     appName,
     generatedAt: new Date().toISOString(),
+    sup001_plannerEnabled: false,
+    sup002_executorEnabled: true,
+    sup003_monitorEnabled: true,
+    sup060_safeExperimentsEnabled: false,
     totals: {
       files: fileEntries.filter(f => !('skipped' in f)).length,
       sizeBytes: totalSizeBytes,

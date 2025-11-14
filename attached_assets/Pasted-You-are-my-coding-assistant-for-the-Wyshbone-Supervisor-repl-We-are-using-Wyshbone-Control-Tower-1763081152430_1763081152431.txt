@@ -1,0 +1,55 @@
+You are my coding assistant for the Wyshbone Supervisor repl.
+
+We are using Wyshbone Control Tower to track progress on agentic tasks like SUP-001, SUP-002, etc. Control Tower already reads a status/export JSON from this repl and from the UI repl.
+
+On the UI side, we added a boolean flag ui001_goalCaptureEnabled to the UI status JSON, and Control Tower uses that to automatically mark UI-001 as done when it is true.
+
+I now want to do the same thing for Supervisor tasks, by exposing simple boolean flags in this repl’s status/export so Control Tower can mark Supervisor tasks as implemented.
+
+Please make the following small, focused changes:
+
+1. Find the server-side code in this Supervisor repl that serves the status/export JSON for Control Tower.
+   - This will be the endpoint that Poller / Control Tower calls to get information about the Supervisor (e.g. app name, version, fix-me count, tools/routes, etc.).
+   - It might be something like /export/status.json or similar.
+
+2. In the JSON object returned by this endpoint, add boolean fields for the Supervisor-side tasks we care about. Use these exact keys:
+
+   - For SUP-001 (lead generation plan object):
+     "sup001_plannerEnabled": <boolean>
+
+   - For SUP-002 (plan executor):
+     "sup002_executorEnabled": <boolean>
+
+   - For SUP-003 (background goal monitor):
+     "sup003_monitorEnabled": <boolean>
+
+   - For SUP-060 (safe-mode experiments / exploration):
+     "sup060_safeExperimentsEnabled": <boolean>
+
+3. For now, you can set the values as follows:
+   - If the corresponding feature is already implemented and wired in this repl, set the flag to true.
+   - If the feature is not implemented yet, set the flag to false.
+   - It’s fine if initially some of these are false; Control Tower will keep those tasks as planned until we implement them.
+
+   The important part is that the keys exist and are part of the status JSON.
+
+4. Keep the rest of the status/export JSON unchanged:
+   - Do not remove existing fields.
+   - Do not rename existing properties.
+   - Only add these four boolean properties.
+
+5. Make sure the response shape is stable so Control Tower can reliably read it. For example, a typical status JSON object should now include something like:
+
+   {
+     "app": "wyshbone-supervisor",
+     "version": "...",
+     "sup001_plannerEnabled": true or false,
+     "sup002_executorEnabled": true or false,
+     "sup003_monitorEnabled": true or false,
+     "sup060_safeExperimentsEnabled": true or false,
+     ...other existing fields...
+   }
+
+6. After implementing, run the server and verify that hitting the Supervisor status/export endpoint returns these fields with the expected boolean values.
+
+Please keep the changes minimal and focused on adding these four flags to the status/export JSON, and do not refactor unrelated parts of the Supervisor.
