@@ -814,3 +814,172 @@ async function executeMonitorSetup(
     }
   };
 }
+
+// ========================================
+// PLAN EXECUTION
+// ========================================
+
+/**
+ * Sleep helper for retry backoff
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Execute a single step with retry logic and exponential backoff
+ */
+async function executeStepWithRetries(
+  step: LeadGenPlanStep,
+  plan: LeadGenPlan,
+  user: SupervisorUserContext,
+  stepResults: Record<string, LeadGenStepResult>,
+  maxRetries: number,
+  baseDelayMs: number
+): Promise<LeadGenStepResult> {
+  const result: LeadGenStepResult = {
+    stepId: step.id,
+    status: "pending",
+    attempts: 0
+  };
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    result.attempts = attempt;
+    result.status = "running";
+    
+    if (attempt === 1) {
+      result.startedAt = new Date().toISOString();
+      emitPlanEvent("STEP_STARTED", { plan, step, result, user });
+    } else {
+      emitPlanEvent("STEP_RETRYING", {
+        plan,
+        step,
+        result,
+        user,
+        meta: { attempt, maxRetries }
+      });
+    }
+
+    try {
+      const toolResult = await runLeadTool(
+        step.tool,
+        step.params,
+        { user, plan, priorResults: stepResults }
+      );
+
+      if (toolResult.success) {
+        result.status = "succeeded";
+        result.finishedAt = new Date().toISOString();
+        result.data = toolResult.data;
+        emitPlanEvent("STEP_SUCCEEDED", { plan, step, result, user });
+        return result;
+      } else {
+        result.errorMessage = toolResult.errorMessage;
+        
+        if (attempt <= maxRetries) {
+          const delayMs = baseDelayMs * attempt;
+          await sleep(delayMs);
+          continue;
+        } else {
+          result.status = "failed";
+          result.finishedAt = new Date().toISOString();
+          emitPlanEvent("STEP_FAILED", { plan, step, result, user });
+          return result;
+        }
+      }
+    } catch (error) {
+      result.errorMessage = error instanceof Error ? error.message : String(error);
+      
+      if (attempt <= maxRetries) {
+        const delayMs = baseDelayMs * attempt;
+        await sleep(delayMs);
+        continue;
+      } else {
+        result.status = "failed";
+        result.finishedAt = new Date().toISOString();
+        emitPlanEvent("STEP_FAILED", { plan, step, result, user });
+        return result;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Execute a complete lead generation plan
+ * 
+ * Executes steps in dependency order, handles retries, and returns comprehensive results.
+ */
+export async function executeLeadGenerationPlan(
+  plan: LeadGenPlan,
+  user: SupervisorUserContext
+): Promise<LeadGenExecutionResult> {
+  const startedAt = new Date().toISOString();
+  const stepResults: Record<string, LeadGenStepResult> = {};
+  let overallStatus: LeadGenExecutionResult["overallStatus"] = "succeeded";
+
+  emitPlanEvent("PLAN_STARTED", { plan, user });
+
+  // Execute steps in order, respecting dependencies
+  for (const step of plan.steps) {
+    const deps = step.dependsOn ?? [];
+    const anyDepFailed = deps.some(
+      (depId) => stepResults[depId]?.status === "failed"
+    );
+
+    if (anyDepFailed) {
+      // Skip this step because a dependency failed
+      const skipped: LeadGenStepResult = {
+        stepId: step.id,
+        status: "skipped",
+        attempts: 0,
+        errorMessage: "Skipped because a dependency failed"
+      };
+      stepResults[step.id] = skipped;
+      emitPlanEvent("STEP_SKIPPED", { plan, step, result: skipped, user });
+      overallStatus = overallStatus === "failed" ? "failed" : "partial";
+      continue;
+    }
+
+    // Execute the step with retries
+    const result = await executeStepWithRetries(
+      step,
+      plan,
+      user,
+      stepResults,
+      2,  // maxRetries
+      1000  // baseDelayMs
+    );
+
+    stepResults[step.id] = result;
+
+    if (result.status === "failed") {
+      overallStatus = "failed";
+    }
+  }
+
+  // Check if any steps were skipped while overall is still "succeeded"
+  const hasSkipped = Object.values(stepResults).some(r => r.status === "skipped");
+  if (hasSkipped && overallStatus === "succeeded") {
+    overallStatus = "partial";
+  }
+
+  const finishedAt = new Date().toISOString();
+
+  const finalResult: LeadGenExecutionResult = {
+    planId: plan.id,
+    overallStatus,
+    startedAt,
+    finishedAt,
+    stepResults: Object.values(stepResults)
+  };
+
+  emitPlanEvent("PLAN_COMPLETED", {
+    plan,
+    user,
+    result: finalResult
+  });
+
+  return finalResult;
+}
