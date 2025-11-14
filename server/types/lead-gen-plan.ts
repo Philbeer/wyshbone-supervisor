@@ -537,3 +537,280 @@ export function emitPlanEvent(
   // Structured logging - can be extended to persist to DB or event bus
   console.log(`[LEAD_GEN_PLAN] ${JSON.stringify(logEntry)}`);
 }
+
+// ========================================
+// TOOL EXECUTION LAYER
+// ========================================
+
+/**
+ * Route and execute a single lead generation tool
+ * 
+ * This is the single point of integration with actual tool implementations.
+ * Adding a new tool only requires adding a case here.
+ */
+export async function runLeadTool(
+  tool: LeadToolIdentifier,
+  params: LeadToolParams,
+  env: LeadToolExecutionEnv
+): Promise<LeadToolExecutionResult> {
+  try {
+    switch (tool) {
+      case "GOOGLE_PLACES_SEARCH":
+        return await executeGooglePlacesSearch(params, env);
+      
+      case "HUNTER_DOMAIN_LOOKUP":
+        return await executeHunterDomainLookup(params, env);
+      
+      case "HUNTER_ENRICH":
+        return await executeHunterEnrich(params, env);
+      
+      case "LEAD_LIST_SAVE":
+        return await executeLeadListSave(params, env);
+      
+      case "EMAIL_SEQUENCE_SETUP":
+        return await executeEmailSequenceSetup(params, env);
+      
+      case "MONITOR_SETUP":
+        return await executeMonitorSetup(params, env);
+      
+      default:
+        return {
+          success: false,
+          errorMessage: `Unknown tool: ${tool}`
+        };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      errorMessage: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+// ========================================
+// TOOL IMPLEMENTATIONS
+// ========================================
+
+/**
+ * Execute Google Places search
+ */
+async function executeGooglePlacesSearch(
+  params: LeadToolParams,
+  env: LeadToolExecutionEnv
+): Promise<LeadToolExecutionResult> {
+  const { query, region, country, maxResults = 20 } = params as unknown as GooglePlacesSearchParams;
+  
+  console.log(`🔍 GOOGLE_PLACES_SEARCH: "${query}" in ${region}, ${country} (max: ${maxResults})`);
+  
+  // TODO: Integrate with existing searchGooglePlaces method from Supervisor
+  // For now, return stub data showing the structure
+  const businesses = [
+    {
+      place_id: `place_${Date.now()}_1`,
+      name: `${query} Business 1`,
+      address: `${region}, ${country}`,
+      website: `https://example1.com`,
+      phone: '+44 1234 567890'
+    },
+    {
+      place_id: `place_${Date.now()}_2`,
+      name: `${query} Business 2`,
+      address: `${region}, ${country}`,
+      website: `https://example2.com`,
+      phone: '+44 1234 567891'
+    }
+  ];
+  
+  return {
+    success: true,
+    data: { businesses, count: businesses.length }
+  };
+}
+
+/**
+ * Execute Hunter domain lookup
+ */
+async function executeHunterDomainLookup(
+  params: LeadToolParams,
+  env: LeadToolExecutionEnv
+): Promise<LeadToolExecutionResult> {
+  const { sourceStepId, country } = params as unknown as HunterDomainLookupParams;
+  
+  console.log(`🌐 HUNTER_DOMAIN_LOOKUP: Looking up domains from step ${sourceStepId}`);
+  
+  // Get data from previous step
+  const sourceResult = sourceStepId ? env.priorResults[sourceStepId] : undefined;
+  if (!sourceResult || sourceResult.status !== "succeeded") {
+    return {
+      success: false,
+      errorMessage: `Source step ${sourceStepId} not found or failed`
+    };
+  }
+  
+  const sourceData = sourceResult.data as { businesses?: Array<{ website?: string; name?: string }> };
+  const businesses = sourceData?.businesses || [];
+  
+  // Extract domains
+  const domains = businesses
+    .filter(b => b.website)
+    .map(b => {
+      try {
+        const url = new URL(b.website!);
+        return {
+          business: b.name,
+          domain: url.hostname.replace('www.', '')
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  
+  return {
+    success: true,
+    data: { domains, count: domains.length }
+  };
+}
+
+/**
+ * Execute Hunter email enrichment
+ */
+async function executeHunterEnrich(
+  params: LeadToolParams,
+  env: LeadToolExecutionEnv
+): Promise<LeadToolExecutionResult> {
+  const { sourceStepId, roleHint, maxContactsPerDomain = 2 } = params as unknown as HunterEnrichParams;
+  
+  console.log(`📧 HUNTER_ENRICH: Finding contacts (role: ${roleHint}) from step ${sourceStepId}`);
+  
+  // Get data from previous step
+  const sourceResult = sourceStepId ? env.priorResults[sourceStepId] : undefined;
+  if (!sourceResult || sourceResult.status !== "succeeded") {
+    return {
+      success: false,
+      errorMessage: `Source step ${sourceStepId} not found or failed`
+    };
+  }
+  
+  const sourceData = sourceResult.data as { domains?: Array<{ domain?: string; business?: string }> };
+  const domains = sourceData?.domains || [];
+  
+  // TODO: Integrate with existing findEmails method from Supervisor
+  // For now, generate stub email candidates
+  const enrichedLeads = domains.map(d => ({
+    business: d.business,
+    domain: d.domain,
+    emailCandidates: [
+      `contact@${d.domain}`,
+      `info@${d.domain}`
+    ].slice(0, maxContactsPerDomain)
+  }));
+  
+  return {
+    success: true,
+    data: { enrichedLeads, count: enrichedLeads.length }
+  };
+}
+
+/**
+ * Save leads to a list
+ */
+async function executeLeadListSave(
+  params: LeadToolParams,
+  env: LeadToolExecutionEnv
+): Promise<LeadToolExecutionResult> {
+  const { sourceStepId, listName, region, persona, estimatedVolume } = params as unknown as LeadListSaveParams;
+  
+  console.log(`💾 LEAD_LIST_SAVE: Saving leads from step ${sourceStepId} to list "${listName}"`);
+  
+  // Get data from previous step
+  const sourceResult = sourceStepId ? env.priorResults[sourceStepId] : undefined;
+  if (!sourceResult || sourceResult.status !== "succeeded") {
+    return {
+      success: false,
+      errorMessage: `Source step ${sourceStepId} not found or failed`
+    };
+  }
+  
+  const sourceData = sourceResult.data as { enrichedLeads?: Array<any> };
+  const leads = sourceData?.enrichedLeads || [];
+  
+  // TODO: Integrate with existing storage.createSuggestedLead
+  // For now, simulate saving
+  const savedCount = leads.length;
+  
+  return {
+    success: true,
+    data: {
+      listName,
+      savedCount,
+      listId: `list_${Date.now()}`
+    }
+  };
+}
+
+/**
+ * Set up email outreach sequence
+ */
+async function executeEmailSequenceSetup(
+  params: LeadToolParams,
+  env: LeadToolExecutionEnv
+): Promise<LeadToolExecutionResult> {
+  const { sourceListStepId, campaignName, fromIdentityId, estimatedVolume, startTiming } = params as unknown as EmailSequenceSetupParams;
+  
+  console.log(`📬 EMAIL_SEQUENCE_SETUP: Creating campaign "${campaignName}"`);
+  
+  // Get data from previous step
+  const sourceResult = sourceListStepId ? env.priorResults[sourceListStepId] : undefined;
+  if (!sourceResult || sourceResult.status !== "succeeded") {
+    return {
+      success: false,
+      errorMessage: `Source step ${sourceListStepId} not found or failed`
+    };
+  }
+  
+  // TODO: Integrate with email sequence/outreach system
+  // For now, simulate sequence setup
+  return {
+    success: true,
+    data: {
+      campaignId: `campaign_${Date.now()}`,
+      campaignName,
+      status: "scheduled",
+      startTiming
+    }
+  };
+}
+
+/**
+ * Set up ongoing monitoring for a lead list
+ */
+async function executeMonitorSetup(
+  params: LeadToolParams,
+  env: LeadToolExecutionEnv
+): Promise<LeadToolExecutionResult> {
+  const { sourceListStepId, cadence, signalTypes } = params as unknown as MonitorSetupParams;
+  
+  console.log(`🔔 MONITOR_SETUP: Setting up ${cadence} monitoring for list from step ${sourceListStepId}`);
+  
+  // Get data from previous step
+  const sourceResult = sourceListStepId ? env.priorResults[sourceListStepId] : undefined;
+  if (!sourceResult || sourceResult.status !== "succeeded") {
+    return {
+      success: false,
+      errorMessage: `Source step ${sourceListStepId} not found or failed`
+    };
+  }
+  
+  // TODO: Integrate with monitoring/cron system
+  // For now, simulate monitor setup
+  return {
+    success: true,
+    data: {
+      monitorId: `monitor_${Date.now()}`,
+      cadence,
+      signalTypes: signalTypes || [],
+      status: "active"
+    }
+  };
+}
