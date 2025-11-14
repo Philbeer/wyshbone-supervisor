@@ -214,7 +214,7 @@ async function scanFiles(): Promise<ExportSummary> {
   return {
     appName,
     generatedAt: new Date().toISOString(),
-    sup001_plannerEnabled: false,
+    sup001_plannerEnabled: true,
     sup002_executorEnabled: true,
     sup003_monitorEnabled: true,
     sup060_safeExperimentsEnabled: false,

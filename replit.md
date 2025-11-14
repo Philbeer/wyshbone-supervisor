@@ -15,9 +15,9 @@ Built as a B2B productivity tool, it features a Linear-inspired design system op
 **Architecture**: The Supervisor backend runs independently and integrates with the separate Wyshbone UI application through a shared Supabase database.
 
 **Control Tower Integration**: The export API status endpoint includes boolean flags for tracking Supervisor task implementation status:
-- `sup001_plannerEnabled`: Lead generation plan object system
-- `sup002_executorEnabled`: Plan executor for task processing
-- `sup003_monitorEnabled`: Background goal monitoring service
+- `sup001_plannerEnabled`: ✅ Lead generation plan object system (`server/types/lead-gen-plan.ts`)
+- `sup002_executorEnabled`: ✅ Plan executor for task processing (`server/supervisor.ts`)
+- `sup003_monitorEnabled`: ✅ Background goal monitoring service (30s polling)
 - `sup060_safeExperimentsEnabled`: Safe-mode experiments/exploration features
 
 ## User Preferences
