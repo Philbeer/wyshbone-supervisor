@@ -1,0 +1,409 @@
+You are editing the Wyshbone Supervisor repl.
+
+========================================
+GOAL (SUP-002 — LeadGen plan executor)
+========================================
+We already have a LeadGenPlan representation (SUP-001), including:
+- LeadGenPlan
+- LeadGenPlanStep
+- LeadToolIdentifier
+- LeadGenGoal / LeadGenContext
+
+Now implement a **LeadGenPlan executor**:
+
+  async function executeLeadGenerationPlan(
+    plan: LeadGenPlan,
+    user: SupervisorUserContext
+  ): Promise<LeadGenExecutionResult>
+
+This function should:
+
+- Execute the plan’s **steps in dependency order**
+- Route each step through a **single tool-execution layer**
+- Pass the right parameters into existing tools (global lead search, enrichment, outreach, etc.)
+- Handle failures with **limited retries** where sensible
+- Emit **structured progress events** for each step and for the plan as a whole
+- Make it easy to plug in **new tools later** by adding to the tool-execution layer only
+
+Do NOT design new tools here — reuse/assume existing ones.
+
+Keep changes small and consistent with current code patterns.
+
+========================================
+1. TYPES — EXECUTION CONTEXT & RESULTS
+========================================
+
+In the same module as LeadGenPlan (or a sibling module if that’s cleaner), add types for execution:
+
+1) User/context for Supervisor execution
+----------------------------------------
+
+Use / align with any existing “user/account” context type. If nothing exists, define:
+
+```ts
+export interface SupervisorUserContext {
+  userId: string;
+  accountId?: string;
+  email?: string;
+  // anything else already used in supervisor for ownership / logging
+}
+Step status and result
+
+ts
+Copy code
+export type LeadGenStepStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "skipped";
+
+export interface LeadGenStepResult {
+  stepId: string;
+  status: LeadGenStepStatus;
+  startedAt?: string;
+  finishedAt?: string;
+  attempts: number;
+  errorMessage?: string;
+  // whatever structured data a tool returns; keep it generic for now
+  data?: unknown;
+}
+Plan execution result
+
+ts
+Copy code
+export interface LeadGenExecutionResult {
+  planId: string;
+  overallStatus: "succeeded" | "partial" | "failed";
+  startedAt: string;
+  finishedAt: string;
+  stepResults: LeadGenStepResult[];
+}
+========================================
+2. TOOL EXECUTION LAYER
+Create a single routing function that knows how to call individual tools. This is the only place that knows about concrete tool functions.
+
+ts
+Copy code
+export interface LeadToolExecutionEnv {
+  user: SupervisorUserContext;
+  plan: LeadGenPlan;
+  priorResults: Record<string, LeadGenStepResult>;
+}
+
+export interface LeadToolExecutionResult {
+  success: boolean;
+  data?: unknown;
+  errorMessage?: string;
+}
+
+export async function runLeadTool(
+  tool: LeadToolIdentifier,
+  params: LeadToolParams,
+  env: LeadToolExecutionEnv
+): Promise<LeadToolExecutionResult> {
+  // switch or map on tool
+}
+Inside runLeadTool:
+
+Use a switch(tool) or lookup map.
+
+For each case, delegate to existing functions/utilities, e.g.:
+
+"GOOGLE_PLACES_SEARCH" → existing global lead search / Places wrapper
+
+"HUNTER_DOMAIN_LOOKUP" → existing Hunter domain lookup
+
+"HUNTER_ENRICH" → existing enrichment
+
+"EMAIL_SEQUENCE_SETUP" → existing outreach/email-sequence setup
+
+"LEAD_LIST_SAVE" → existing “save leads to list / DB”
+
+"MONITOR_SETUP" → existing monitor/cron setup
+
+Use env.priorResults if a step’s params reference sourceStepId or similar:
+
+ts
+Copy code
+const { priorResults } = env;
+const sourceResult =
+  typeof params.sourceStepId === "string"
+    ? priorResults[params.sourceStepId]
+    : undefined;
+Return { success: true, data } or { success: false, errorMessage } as appropriate.
+
+Do NOT add network calls here beyond what’s already used by those existing tool wrappers.
+
+========================================
+3. EXECUTOR FUNCTION: executeLeadGenerationPlan
+Implement:
+
+ts
+Copy code
+export async function executeLeadGenerationPlan(
+  plan: LeadGenPlan,
+  user: SupervisorUserContext
+): Promise<LeadGenExecutionResult> {
+  // Implementation described below
+}
+High-level algorithm:
+
+Initialise bookkeeping:
+
+ts
+Copy code
+const startedAt = new Date().toISOString();
+const stepResults: Record<string, LeadGenStepResult> = {};
+let overallStatus: LeadGenExecutionResult["overallStatus"] = "succeeded";
+Process steps in dependency order:
+
+The LeadGenPlan.steps are already ordered, but you must still respect dependsOn.
+
+Implementation pattern:
+
+Loop until all steps have a non-“pending” status.
+
+In each loop, find steps whose dependencies are satisfied and not yet run.
+
+Execute them (one-by-one for now; parallelism can come later).
+
+Simpler approach (acceptable here):
+
+Iterate for (const step of plan.steps) in order.
+
+For each step:
+
+Check dependsOn:
+
+If any dependency has status === "failed" → mark this step "skipped" and continue.
+
+Otherwise, run it.
+
+Per-step execution with retries:
+
+Implement a helper:
+
+ts
+Copy code
+async function executeStepWithRetries(
+  step: LeadGenPlanStep,
+  plan: LeadGenPlan,
+  user: SupervisorUserContext,
+  stepResults: Record<string, LeadGenStepResult>,
+  maxRetries: number,
+  baseDelayMs: number
+): Promise<LeadGenStepResult> {
+  // Implementation described below
+}
+Inside:
+
+Create a LeadGenStepResult with status: "pending", attempts: 0.
+
+For each attempt:
+
+attempts++
+
+status = "running", startedAt if first attempt.
+
+Emit a “STEP_STARTED” log event (see logging section).
+
+Call runLeadTool(tool, params, env).
+
+If success:
+
+Set status = "succeeded", finishedAt, data = result.data.
+
+Emit “STEP_SUCCEEDED”.
+
+Return the result.
+
+If failure:
+
+If attempts <= maxRetries:
+
+Emit “STEP_RETRYING”.
+
+Wait (simple exponential backoff: baseDelayMs * attempts) using setTimeout/sleep helper.
+
+Else:
+
+Set status = "failed", errorMessage.
+
+Emit “STEP_FAILED”.
+
+Return result.
+
+Use modest defaults: maxRetries = 2, baseDelayMs = 1000.
+
+Main loop using helper:
+
+Back in executeLeadGenerationPlan:
+
+ts
+Copy code
+for (const step of plan.steps) {
+  const deps = step.dependsOn ?? [];
+  const anyDepFailed = deps.some(
+    (depId) => stepResults[depId]?.status === "failed"
+  );
+
+  if (anyDepFailed) {
+    // Skip this step
+    const skipped: LeadGenStepResult = {
+      stepId: step.id,
+      status: "skipped",
+      attempts: 0,
+      errorMessage: "Skipped because a dependency failed"
+    };
+    stepResults[step.id] = skipped;
+    emitPlanEvent("STEP_SKIPPED", { plan, step, result: skipped, user });
+    overallStatus = overallStatus === "failed" ? "failed" : "partial";
+    continue;
+  }
+
+  const result = await executeStepWithRetries(
+    step,
+    plan,
+    user,
+    stepResults,
+    2,
+    1000
+  );
+
+  stepResults[step.id] = result;
+
+  if (result.status === "failed") {
+    overallStatus = "failed";
+  } else if (result.status === "succeeded" && overallStatus === "succeeded") {
+    // keep as succeeded unless changed later
+  }
+}
+After the loop, if overallStatus is still "succeeded" but any step was "skipped", set overallStatus = "partial".
+
+Assemble final result:
+
+ts
+Copy code
+const finishedAt = new Date().toISOString();
+
+const finalResult: LeadGenExecutionResult = {
+  planId: plan.id,
+  overallStatus,
+  startedAt,
+  finishedAt,
+  stepResults: Object.values(stepResults)
+};
+
+emitPlanEvent("PLAN_COMPLETED", { plan, result: finalResult, user });
+
+return finalResult;
+========================================
+4. LOGGING STRUCTURED PROGRESS EVENTS
+Add a small logging helper that centralises plan/step logging:
+
+ts
+Copy code
+export type LeadPlanEventType =
+  | "PLAN_STARTED"
+  | "PLAN_COMPLETED"
+  | "STEP_STARTED"
+  | "STEP_SUCCEEDED"
+  | "STEP_FAILED"
+  | "STEP_SKIPPED"
+  | "STEP_RETRYING";
+
+export interface LeadPlanEventPayload {
+  plan: LeadGenPlan;
+  step?: LeadGenPlanStep;
+  result?: LeadGenStepResult;
+  user: SupervisorUserContext;
+  meta?: Record<string, unknown>;
+}
+
+export function emitPlanEvent(
+  type: LeadPlanEventType,
+  payload: LeadPlanEventPayload
+): void {
+  // Implementation:
+  // - For now, at minimum console.log a structured JSON object.
+  // - If there is an existing logging / event bus utility, use that instead.
+}
+Usage:
+
+At the start of executeLeadGenerationPlan:
+
+ts
+Copy code
+emitPlanEvent("PLAN_STARTED", { plan, user });
+Inside executeStepWithRetries and main loop:
+
+Emit appropriate events for each status transition.
+
+This gives us a clear audit trail and makes it easy later to:
+
+Persist events to DB
+
+Stream events to UI dashboards
+
+Trigger alerts.
+
+========================================
+5. PLUGGABILITY FOR FUTURE TOOLS
+Ensure that adding a new tool is just:
+
+Add new "SOME_NEW_TOOL" to LeadToolIdentifier
+
+Add one case "SOME_NEW_TOOL": to runLeadTool
+
+No other parts of the executor should need changes.
+
+========================================
+6. ACCEPTANCE CRITERIA
+This task is complete when:
+
+executeLeadGenerationPlan(plan, user) exists, is exported, and:
+
+Respects dependsOn relationships between steps.
+
+Executes steps using runLeadTool.
+
+Applies retries for failed steps (up to 2 retries with backoff).
+
+Produces a LeadGenExecutionResult with per-step statuses.
+
+runLeadTool routes correctly to existing tool functions for at least:
+
+GOOGLE_PLACES_SEARCH
+
+HUNTER_DOMAIN_LOOKUP
+
+HUNTER_ENRICH
+
+LEAD_LIST_SAVE
+
+EMAIL_SEQUENCE_SETUP
+
+MONITOR_SETUP
+(Can be stubbed minimally if necessary, but the structure must be correct.)
+
+Structured logging is in place via emitPlanEvent for:
+
+PLAN_STARTED / PLAN_COMPLETED
+
+STEP_STARTED / STEP_SUCCEEDED / STEP_FAILED / STEP_SKIPPED / STEP_RETRYING
+
+A simple manual test with a LeadGenPlan built by planLeadGeneration should produce:
+
+A sequence of events showing each step running in order
+
+A final LeadGenExecutionResult with a reasonable overallStatus
+
+Correct handling of a simulated failure (e.g. one tool throws) with retries and subsequent dependent step skipped.
+
+Please keep to existing coding style and file structure used in SUP-001, and do not introduce new external dependencies.
+
+arduino
+Copy code
+
+If you’d like, once Replit has done this, we can write the **integration prompt** that makes UI send the clarified goal to Supervisor, run this executor, and feed results back into the chat.

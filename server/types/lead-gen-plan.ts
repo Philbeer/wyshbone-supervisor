@@ -1,8 +1,8 @@
 /**
- * Lead Generation Planning Module (SUP-001)
+ * Lead Generation Planning & Execution Module (SUP-001 + SUP-002)
  * 
- * Pure planning function that generates execution plans for lead generation
- * without actually executing tools or making external calls.
+ * SUP-001: Pure planning function that generates execution plans
+ * SUP-002: Executor that runs plans and manages tool execution
  */
 
 // ========================================
@@ -419,4 +419,92 @@ export function exampleLeadGenPlan(): LeadGenPlan {
       defaultFromIdentityId: "from-identity-1"
     }
   );
+}
+
+// ========================================
+// SUP-002: EXECUTION TYPES & LOGIC
+// ========================================
+
+/**
+ * User context for Supervisor execution
+ */
+export interface SupervisorUserContext {
+  userId: string;
+  accountId?: string;
+  email?: string;
+}
+
+/**
+ * Step execution status
+ */
+export type LeadGenStepStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "skipped";
+
+/**
+ * Result of executing a single plan step
+ */
+export interface LeadGenStepResult {
+  stepId: string;
+  status: LeadGenStepStatus;
+  startedAt?: string;
+  finishedAt?: string;
+  attempts: number;
+  errorMessage?: string;
+  data?: unknown;
+}
+
+/**
+ * Overall result of executing a complete plan
+ */
+export interface LeadGenExecutionResult {
+  planId: string;
+  overallStatus: "succeeded" | "partial" | "failed";
+  startedAt: string;
+  finishedAt: string;
+  stepResults: LeadGenStepResult[];
+}
+
+/**
+ * Environment passed to tool execution functions
+ */
+export interface LeadToolExecutionEnv {
+  user: SupervisorUserContext;
+  plan: LeadGenPlan;
+  priorResults: Record<string, LeadGenStepResult>;
+}
+
+/**
+ * Result from executing a single tool
+ */
+export interface LeadToolExecutionResult {
+  success: boolean;
+  data?: unknown;
+  errorMessage?: string;
+}
+
+/**
+ * Structured event types for plan execution logging
+ */
+export type LeadPlanEventType =
+  | "PLAN_STARTED"
+  | "PLAN_COMPLETED"
+  | "STEP_STARTED"
+  | "STEP_SUCCEEDED"
+  | "STEP_FAILED"
+  | "STEP_SKIPPED"
+  | "STEP_RETRYING";
+
+/**
+ * Payload for plan execution events
+ */
+export interface LeadPlanEventPayload {
+  plan: LeadGenPlan;
+  step?: LeadGenPlanStep;
+  result?: LeadGenStepResult | LeadGenExecutionResult;
+  user: SupervisorUserContext;
+  meta?: Record<string, unknown>;
 }
