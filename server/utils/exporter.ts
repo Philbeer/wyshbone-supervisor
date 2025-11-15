@@ -19,10 +19,10 @@ interface SkippedFileEntry {
 interface ExportSummary {
   appName: string;
   generatedAt: string;
-  sup001_plannerEnabled: boolean;
-  sup002_executorEnabled: boolean;
-  sup003_monitorEnabled: boolean;
-  sup060_safeExperimentsEnabled: boolean;
+  sup001_done: boolean;
+  sup002_done: boolean;
+  sup003_done: boolean;
+  sup060_done: boolean;
   totals: {
     files: number;
     sizeBytes: number;
@@ -214,10 +214,10 @@ async function scanFiles(): Promise<ExportSummary> {
   return {
     appName,
     generatedAt: new Date().toISOString(),
-    sup001_plannerEnabled: true,
-    sup002_executorEnabled: true,
-    sup003_monitorEnabled: true,
-    sup060_safeExperimentsEnabled: false,
+    sup001_done: true,   // Planner implemented
+    sup002_done: true,   // Executor implemented
+    sup003_done: false,  // Monitor not yet implemented
+    sup060_done: false,  // Safe experiments not implemented
     totals: {
       files: fileEntries.filter(f => !('skipped' in f)).length,
       sizeBytes: totalSizeBytes,
