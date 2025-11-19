@@ -28,6 +28,7 @@ The frontend uses a React with TypeScript stack, built with Vite and Wouter for 
 - **Lead Generation Logic**:
     - **Branching Plans (SUP-010)**: Supports conditional step execution in lead generation plans based on runtime results (e.g., `too_many_results`, `too_few_results`, `data_source_failed`).
     - **Fallback Data Sources (SUP-011)**: Implements automatic fallback between ordered data sources if a primary source fails to meet minimum thresholds, tracking the source used and the fallback chain.
+    - **Historical Performance (SUP-012)**: Uses past plan executions and lead outcomes to guide future planning decisions. Analyzes strategy performance across niche, region, data source, and outreach channel dimensions. Includes user AND account isolation to prevent cross-user and cross-account data leakage.
 - **Chat Integration**: Supervisor's AI integrates into Wyshbone UI chat via a queue-based architecture using shared Supabase tables (`messages`, `supervisor_tasks`). The UI detects Supervisor intent, creates tasks, and streams Supervisor responses.
 
 ### Feature Specifications

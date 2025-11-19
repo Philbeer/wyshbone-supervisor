@@ -119,27 +119,49 @@ function extractLocationFromLead(leadData: any): { city?: string; region?: strin
  * Analyze plan executions and leads to build strategy scores.
  * 
  * @param goal - The goal we're planning for (used to filter relevant historical data)
+ * @param userId - The user whose historical data to analyze
+ * @param accountId - Optional account ID for further scoping
  * @returns Historical context with top and low performers
  */
-export async function getHistoricalContextForGoal(goal: {
-  description?: string;
-  targetMarket?: string;
-  country?: string;
-  region?: string;
-  city?: string;
-}): Promise<HistoricalContext> {
+export async function getHistoricalContextForGoal(
+  goal: {
+    description?: string;
+    targetMarket?: string;
+    country?: string;
+    region?: string;
+    city?: string;
+  },
+  userId: string,
+  accountId?: string
+): Promise<HistoricalContext> {
   
-  // Fetch recent plan executions (last 100)
-  const executions = await db
+  // CRITICAL: Scope to user AND account to prevent cross-user and cross-account data leakage
+  let executionsQuery = db
     .select()
     .from(planExecutions)
+    .where(sql`${planExecutions.userId} = ${userId}`);
+  
+  // Add account filter if provided (prevents cross-account leakage for multi-account users)
+  if (accountId) {
+    executionsQuery = executionsQuery.where(sql`${planExecutions.accountId} = ${accountId}`);
+  }
+  
+  const executions = await executionsQuery
     .orderBy(desc(planExecutions.createdAt))
     .limit(100);
   
-  // Fetch recent suggested leads (last 500 for more lead-level data)
-  const leads = await db
+  // Fetch recent suggested leads (last 500 for this user/account)
+  let leadsQuery = db
     .select()
     .from(suggestedLeads)
+    .where(sql`${suggestedLeads.userId} = ${userId}`);
+  
+  // Add account filter if provided
+  if (accountId) {
+    leadsQuery = leadsQuery.where(sql`${suggestedLeads.accountId} = ${accountId}`);
+  }
+  
+  const leads = await leadsQuery
     .orderBy(desc(suggestedLeads.createdAt))
     .limit(500);
   
@@ -157,52 +179,86 @@ export async function getHistoricalContextForGoal(goal: {
     const stepResults = exec.stepResults as LeadGenStepResult[];
     const wasSuccessful = exec.overallStatus === 'succeeded';
     const execDate = exec.createdAt?.toISOString();
+    const metadata = exec.metadata as any;
     
-    for (const stepResult of stepResults) {
-      // Extract data source from SUP-011 metadata
-      const sourceMeta = (stepResult.data as any)?.sourceMeta;
-      const dataSource = sourceMeta?.source as LeadDataSourceId | undefined;
-      const leadsFound = (stepResult.data as any)?.leadsFound ?? 0;
-      
-      // Extract location from goal text (simple heuristic)
-      const goalLower = (exec.goalText || '').toLowerCase();
-      const region = extractRegionFromText(goalLower);
-      const niche = extractNicheFromText(goalLower);
-      
-      // Build strategy key
+    // Extract niche/region from metadata (SUP-003) or goal text
+    let niche = metadata?.niche || extractNicheFromText(exec.goalText || '');
+    let region = metadata?.region || extractRegionFromText(exec.goalText || '');
+    const totalLeadsFromMeta = metadata?.totalLeadsFound || 0;
+    
+    // Process each step result for data source strategies
+    if (stepResults && stepResults.length > 0) {
+      for (const stepResult of stepResults) {
+        // Extract data source from SUP-011 metadata
+        const sourceMeta = (stepResult.data as any)?.sourceMeta;
+        const dataSource = sourceMeta?.source as LeadDataSourceId | undefined;
+        const leadsFound = (stepResult.data as any)?.leadsFound ?? 0;
+        
+        // Build strategy key using execution's own data (not current goal)
+        const strategyKey: StrategyKey = {
+          niche: niche || undefined,
+          region: region || undefined,
+          country: metadata?.country || undefined, // Use execution's country
+          dataSource: dataSource || undefined
+        };
+        
+        // Skip empty strategies
+        if (!strategyKey.niche && !strategyKey.region && !strategyKey.dataSource) {
+          continue;
+        }
+        
+        const keyStr = JSON.stringify(strategyKey);
+        const existing = strategyMap.get(keyStr) || {
+          key: strategyKey,
+          successCount: 0,
+          totalCount: 0,
+          totalLeadsFound: 0,
+          lastUsedAt: execDate
+        };
+        
+        existing.totalCount++;
+        existing.totalLeadsFound += leadsFound;
+        if (wasSuccessful && stepResult.status === 'succeeded') {
+          existing.successCount++;
+        }
+        
+        // Update last used date
+        if (execDate && (!existing.lastUsedAt || execDate > existing.lastUsedAt)) {
+          existing.lastUsedAt = execDate;
+        }
+        
+        strategyMap.set(keyStr, existing);
+      }
+    } else {
+      // No stepResults - create a single strategy from metadata
       const strategyKey: StrategyKey = {
         niche: niche || undefined,
         region: region || undefined,
-        country: goal.country || undefined,
-        dataSource: dataSource || undefined
+        country: metadata?.country || undefined // Use execution's country
       };
       
-      // Skip empty strategies
-      if (!strategyKey.niche && !strategyKey.region && !strategyKey.dataSource) {
-        continue;
+      if (strategyKey.niche || strategyKey.region) {
+        const keyStr = JSON.stringify(strategyKey);
+        const existing = strategyMap.get(keyStr) || {
+          key: strategyKey,
+          successCount: 0,
+          totalCount: 0,
+          totalLeadsFound: 0,
+          lastUsedAt: execDate
+        };
+        
+        existing.totalCount++;
+        existing.totalLeadsFound += totalLeadsFromMeta;
+        if (wasSuccessful) {
+          existing.successCount++;
+        }
+        
+        if (execDate && (!existing.lastUsedAt || execDate > existing.lastUsedAt)) {
+          existing.lastUsedAt = execDate;
+        }
+        
+        strategyMap.set(keyStr, existing);
       }
-      
-      const keyStr = JSON.stringify(strategyKey);
-      const existing = strategyMap.get(keyStr) || {
-        key: strategyKey,
-        successCount: 0,
-        totalCount: 0,
-        totalLeadsFound: 0,
-        lastUsedAt: execDate
-      };
-      
-      existing.totalCount++;
-      existing.totalLeadsFound += leadsFound;
-      if (wasSuccessful && stepResult.status === 'succeeded') {
-        existing.successCount++;
-      }
-      
-      // Update last used date
-      if (execDate && (!existing.lastUsedAt || execDate > existing.lastUsedAt)) {
-        existing.lastUsedAt = execDate;
-      }
-      
-      strategyMap.set(keyStr, existing);
     }
   }
   

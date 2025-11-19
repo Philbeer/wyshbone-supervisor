@@ -446,13 +446,18 @@ export async function planLeadGenerationWithHistory(
   context: LeadGenContext
 ): Promise<LeadGenPlan> {
   
-  // Fetch historical context
-  const historical = await getHistoricalContextForGoal({
-    description: goal.rawGoal,
-    targetMarket: goal.targetPersona,
-    country: context.defaultCountry,
-    region: goal.targetRegion || context.defaultRegion
-  });
+  // Fetch historical context (SCOPED TO THIS USER/ACCOUNT)
+  // IMPORTANT: Only pass explicit goal parameters to avoid over-filtering
+  const historical = await getHistoricalContextForGoal(
+    {
+      description: goal.rawGoal,
+      targetMarket: goal.targetPersona,
+      country: undefined, // Don't filter by default country
+      region: goal.targetRegion // Only filter by explicit goal region
+    },
+    context.userId,
+    context.accountId
+  );
   
   // Apply historical insights to modify goal and context
   const { adjustedGoal, adjustedContext, decisions } = applyHistoricalInsights(
@@ -1465,6 +1470,7 @@ export async function executeLeadGenerationPlan(
     await storage.createPlanExecution({
       planId: plan.id,
       userId: user.userId,
+      accountId: user.accountId || undefined, // SUP-012: Account isolation
       goalId: undefined, // No goalId at plan level - could be added in future
       goalText: plan.rawGoal || plan.title,
       overallStatus,

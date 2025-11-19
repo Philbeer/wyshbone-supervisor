@@ -28,6 +28,7 @@ export const userSignals = pgTable("user_signals", {
 export const suggestedLeads = pgTable("suggested_leads", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id").notNull(),
+  accountId: varchar("account_id"), // For multi-account isolation (SUP-012)
   rationale: text("rationale").notNull(),
   source: text("source").notNull(),
   score: real("score").notNull(),
@@ -55,6 +56,7 @@ export const planExecutions = pgTable("plan_executions", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   planId: text("plan_id").notNull(),
   userId: varchar("user_id").notNull(),
+  accountId: varchar("account_id"), // For multi-account isolation (SUP-012)
   goalId: text("goal_id"), // Reference to scheduled_monitor id in Supabase or similar
   goalText: text("goal_text"), // Snapshot of the goal for this execution
   overallStatus: text("overall_status").notNull(), // 'succeeded', 'failed', 'partial'

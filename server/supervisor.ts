@@ -7,6 +7,7 @@ import { monitorGoalsOnce, publishGoalMonitorEvents } from './goal-monitoring';
 
 interface UserContext {
   userId: string;
+  accountId?: string; // SUP-012: Account ID for multi-account isolation
   profile?: {
     companyName?: string;
     companyDomain?: string;
@@ -580,6 +581,7 @@ Would you like me to find leads based on any of these insights?`;
 
       const lead = {
         userId: signal.user_id,
+        accountId: userContext.accountId, // SUP-012: Account isolation via enriched user context
         rationale,
         source: 'supervisor_auto',
         score,
@@ -704,10 +706,10 @@ Would you like me to find leads based on any of these insights?`;
     }
 
     try {
-      // Get user profile
+      // Get user profile including accountId for SUP-012 isolation
       const { data: userProfile } = await supabase
         .from('users')
-        .select('company_name, company_domain, inferred_industry, primary_objective, secondary_objectives, target_markets, products_or_services, confidence')
+        .select('company_name, company_domain, inferred_industry, primary_objective, secondary_objectives, target_markets, products_or_services, confidence, account_id')
         .eq('id', userId)
         .single();
 
@@ -722,6 +724,7 @@ Would you like me to find leads based on any of these insights?`;
           productsOrServices: userProfile.products_or_services,
           confidence: userProfile.confidence
         };
+        context.accountId = userProfile.account_id || undefined; // SUP-012: Account isolation
         console.log(`  📋 Profile: ${userProfile.company_name || 'Unknown'} (${userProfile.inferred_industry || 'Unknown industry'})`);
       }
 
