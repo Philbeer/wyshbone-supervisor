@@ -4,7 +4,7 @@
  * Tests automatic fallback between data sources when primary fails
  */
 
-import { createLeadGenerationPlan, executeLeadGenerationPlan, type SupervisorUserContext } from "./types/lead-gen-plan";
+import { exampleLeadGenPlan, executeLeadGenerationPlan, type SupervisorUserContext, type LeadGenPlan } from "./types/lead-gen-plan";
 
 async function runFallbackTests() {
   console.log("╔════════════════════════════════════════╗");
@@ -18,16 +18,11 @@ async function runFallbackTests() {
 
   // Test 1: Primary source succeeds (Google Places API configured)
   console.log("1️⃣  Testing successful primary source...");
-  const plan1 = createLeadGenerationPlan({
-    planId: "plan_primary_success",
-    goal: "Find restaurants in London",
-    targetRegion: "London",
-    targetCountry: "UK",
-    niche: "restaurant"
-  });
+  const plan1 = exampleLeadGenPlan();
+  plan1.id = "plan_primary_success";
 
   const result1 = await executeLeadGenerationPlan(plan1, user);
-  const step1Result = result1.stepResults.find(s => s.stepId === "search_places");
+  const step1Result = result1.stepResults.find(s => s.stepId === "google_places_1");
   const sourceMeta1 = (step1Result?.data as any)?.sourceMeta;
   
   console.log(`   Execution completed with status: ${result1.overallStatus}`);
@@ -49,16 +44,18 @@ async function runFallbackTests() {
 
   // Test 2: Check that source metadata is accessible for branching
   console.log("2️⃣  Testing source metadata accessibility for SUP-010 branching...");
-  const plan2 = createLeadGenerationPlan({
-    planId: "plan_metadata_check",
-    goal: "Test metadata persistence",
-    targetRegion: "Manchester",
-    targetCountry: "UK",
-    niche: "unicorn startup"  // Will return very few results
-  });
+  const plan2 = exampleLeadGenPlan();
+  plan2.id = "plan_metadata_check";
+  // Modify first step to search for something that returns few results
+  if (plan2.steps.length > 0) {
+    plan2.steps[0].params = {
+      ...plan2.steps[0].params,
+      query: "unicorn startup"
+    };
+  }
 
   const result2 = await executeLeadGenerationPlan(plan2, user);
-  const step2Result = result2.stepResults.find(s => s.stepId === "search_places");
+  const step2Result = result2.stepResults.find(s => s.stepId === "google_places_1");
   const sourceMeta2 = (step2Result?.data as any)?.sourceMeta;
 
   if (sourceMeta2) {
