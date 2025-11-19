@@ -51,6 +51,20 @@ export const supervisorState = pgTable("supervisor_state", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
+export const planExecutions = pgTable("plan_executions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  planId: text("plan_id").notNull(),
+  userId: varchar("user_id").notNull(),
+  goalId: text("goal_id"), // Reference to scheduled_monitor id in Supabase or similar
+  goalText: text("goal_text"), // Snapshot of the goal for this execution
+  overallStatus: text("overall_status").notNull(), // 'succeeded', 'failed', 'partial'
+  startedAt: timestamp("started_at").notNull(),
+  finishedAt: timestamp("finished_at").notNull(),
+  stepResults: jsonb("step_results").notNull(), // Array of step results
+  metadata: jsonb("metadata"), // Additional context (source, trigger, etc.)
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const insertUserSignalSchema = createInsertSchema(userSignals).omit({
   id: true,
   createdAt: true,
@@ -61,7 +75,14 @@ export const insertSuggestedLeadSchema = createInsertSchema(suggestedLeads).omit
   createdAt: true,
 });
 
+export const insertPlanExecutionSchema = createInsertSchema(planExecutions).omit({
+  id: true,
+  createdAt: true,
+});
+
 export type InsertUserSignal = z.infer<typeof insertUserSignalSchema>;
 export type InsertSuggestedLead = z.infer<typeof insertSuggestedLeadSchema>;
+export type InsertPlanExecution = z.infer<typeof insertPlanExecutionSchema>;
 export type SuggestedLead = typeof suggestedLeads.$inferSelect;
 export type UserSignal = typeof userSignals.$inferSelect;
+export type PlanExecution = typeof planExecutions.$inferSelect;

@@ -122,6 +122,13 @@ async function checkMonitorStatus(monitor: any): Promise<GoalMonitorEvent | null
       new Date(lead.createdAt) > oldThresholdDate
     );
 
+    // Check persisted plan executions (SUP-002 executor results)
+    const planExecutions = await storage.getPlanExecutions(userId, 50);
+    const recent24hExecutions = planExecutions.filter(exec =>
+      new Date(exec.createdAt) > oldThresholdDate
+    );
+    const failedExecutions = recent24hExecutions.filter(exec => exec.overallStatus === 'failed');
+
     // Check for recent user activity (signals, messages) to detect execution attempts
     const { data: recentSignals } = await supabase
       .from('user_signals')
@@ -140,17 +147,21 @@ async function checkMonitorStatus(monitor: any): Promise<GoalMonitorEvent | null
       .limit(20);
 
     const hasRecentActivity = (recentSignals && recentSignals.length > 0) || 
-                              (supervisorTasks && supervisorTasks.length > 0);
+                              (supervisorTasks && supervisorTasks.length > 0) ||
+                              recent24hExecutions.length > 0;
     const failedTasks = supervisorTasks?.filter(t => t.status === 'failed') || [];
+    
+    // Combined failure count from both supervisor_tasks and plan_executions
+    const totalFailures = failedTasks.length + failedExecutions.length;
     
     // Determine status based on activity patterns
     let status: GoalMonitorStatus = 'ok';
     let reason = '';
 
     // REPEATED FAILURES: Active execution attempts but no successful leads
-    if (hoursSinceCreation >= 24 && hasRecentActivity && last24hLeads.length === 0 && failedTasks.length >= 3) {
+    if (hoursSinceCreation >= 24 && hasRecentActivity && last24hLeads.length === 0 && totalFailures >= 3) {
       status = 'repeated_failures';
-      reason = `Monitor "${monitor.label}" has ${failedTasks.length} failed execution attempts in the past 24h with no successful leads generated. This suggests systematic failures in lead generation.`;
+      reason = `Monitor "${monitor.label}" has ${totalFailures} failed execution attempts in the past 24h (${failedExecutions.length} plan executions, ${failedTasks.length} chat tasks) with no successful leads generated. This suggests systematic failures in lead generation.`;
       
       return {
         userId,
@@ -158,8 +169,10 @@ async function checkMonitorStatus(monitor: any): Promise<GoalMonitorEvent | null
         goalText,
         status,
         reason,
-        failureCount: failedTasks.length,
-        lastActivityAt: failedTasks[0]?.created_at,
+        failureCount: totalFailures,
+        lastActivityAt: failedExecutions[0]?.createdAt 
+          ? new Date(failedExecutions[0].createdAt).toISOString()
+          : failedTasks[0]?.created_at,
         createdAt: new Date().toISOString(),
         monitorType: monitor.monitor_type,
         monitorLabel: monitor.label

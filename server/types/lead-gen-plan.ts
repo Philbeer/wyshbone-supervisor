@@ -5,6 +5,8 @@
  * SUP-002: Executor that runs plans and manages tool execution
  */
 
+import { storage } from "../storage";
+
 // ========================================
 // TOOL IDENTIFIERS
 // ========================================
@@ -16,6 +18,28 @@ export type LeadToolIdentifier =
   | "EMAIL_SEQUENCE_SETUP"
   | "LEAD_LIST_SAVE"
   | "MONITOR_SETUP";
+
+// ========================================
+// CONDITIONAL BRANCHING (SUP-010)
+// ========================================
+
+/**
+ * Conditions that trigger different execution paths
+ */
+export type BranchCondition =
+  | { type: "too_many_results"; threshold: number }
+  | { type: "too_few_results"; threshold: number }
+  | { type: "data_source_failed"; source: string }
+  | { type: "budget_exceeded"; maxBudget: number }
+  | { type: "fallback"; reason?: string };
+
+/**
+ * A single branch in a plan step
+ */
+export interface PlanBranch {
+  when: BranchCondition;
+  nextStepId: string;
+}
 
 // ========================================
 // TOOL PARAMETERS
@@ -101,6 +125,12 @@ export interface LeadGenPlanStep {
    * Optional notes / rationale for the planner / debugger.
    */
   note?: string;
+
+  /**
+   * Optional conditional branches for dynamic execution paths (SUP-010).
+   * If undefined or empty, execution proceeds sequentially to next step by index.
+   */
+  branches?: PlanBranch[];
 }
 
 // ========================================
@@ -922,7 +952,8 @@ export async function executeLeadGenerationPlan(
   plan: LeadGenPlan,
   user: SupervisorUserContext
 ): Promise<LeadGenExecutionResult> {
-  const startedAt = new Date().toISOString();
+  const startedAtDate = new Date();
+  const startedAt = startedAtDate.toISOString();
   const stepResults: Record<string, LeadGenStepResult> = {};
   let overallStatus: LeadGenExecutionResult["overallStatus"] = "succeeded";
 
@@ -1009,7 +1040,8 @@ export async function executeLeadGenerationPlan(
     overallStatus = "partial";
   }
 
-  const finishedAt = new Date().toISOString();
+  const finishedAtDate = new Date();
+  const finishedAt = finishedAtDate.toISOString();
 
   const finalResult: LeadGenExecutionResult = {
     planId: plan.id,
@@ -1024,6 +1056,30 @@ export async function executeLeadGenerationPlan(
     user,
     result: finalResult
   });
+
+  // Persist execution results to database for monitoring (SUP-003)
+  try {
+    await storage.createPlanExecution({
+      planId: plan.id,
+      userId: user.userId,
+      goalId: plan.goalId,
+      goalText: plan.goalText,
+      overallStatus,
+      startedAt: startedAtDate,
+      finishedAt: finishedAtDate,
+      stepResults: Object.values(stepResults),
+      metadata: {
+        totalSteps: plan.steps.length,
+        succeededSteps: Object.values(stepResults).filter(r => r.status === "succeeded").length,
+        failedSteps: Object.values(stepResults).filter(r => r.status === "failed").length,
+        skippedSteps: Object.values(stepResults).filter(r => r.status === "skipped").length,
+        source: 'executor'
+      }
+    });
+  } catch (error) {
+    console.error('[EXECUTOR] Failed to persist execution results:', error);
+    // Don't fail the execution if persistence fails
+  }
 
   return finalResult;
 }

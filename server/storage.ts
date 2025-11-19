@@ -5,12 +5,15 @@ import {
   userSignals,
   processedSignals,
   supervisorState,
+  planExecutions,
   type User, 
   type InsertUser, 
   type SuggestedLead, 
   type UserSignal,
+  type PlanExecution,
   type InsertSuggestedLead,
-  type InsertUserSignal 
+  type InsertUserSignal,
+  type InsertPlanExecution
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc } from "drizzle-orm";
@@ -34,6 +37,9 @@ export interface IStorage {
   getSupervisorCheckpoint(source: string): Promise<SupervisorCheckpoint>;
   updateSupervisorCheckpoint(source: string, timestamp: Date, id: string): Promise<void>;
   getUserEmail(userId: string): Promise<{ email: string; name?: string } | null>;
+  createPlanExecution(execution: InsertPlanExecution): Promise<PlanExecution>;
+  getPlanExecutions(userId: string, limit?: number): Promise<PlanExecution[]>;
+  getPlanExecutionsByGoal(goalId: string, limit?: number): Promise<PlanExecution[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -170,6 +176,34 @@ export class DatabaseStorage implements IStorage {
       console.error(`Error fetching user email for ${userId}:`, error);
       return null;
     }
+  }
+
+  async createPlanExecution(execution: InsertPlanExecution): Promise<PlanExecution> {
+    const [newExecution] = await db
+      .insert(planExecutions)
+      .values(execution)
+      .returning();
+    return newExecution;
+  }
+
+  async getPlanExecutions(userId: string, limit: number = 50): Promise<PlanExecution[]> {
+    const executions = await db
+      .select()
+      .from(planExecutions)
+      .where(eq(planExecutions.userId, userId))
+      .orderBy(desc(planExecutions.createdAt))
+      .limit(limit);
+    return executions;
+  }
+
+  async getPlanExecutionsByGoal(goalId: string, limit: number = 50): Promise<PlanExecution[]> {
+    const executions = await db
+      .select()
+      .from(planExecutions)
+      .where(eq(planExecutions.goalId, goalId))
+      .orderBy(desc(planExecutions.createdAt))
+      .limit(limit);
+    return executions;
   }
 }
 

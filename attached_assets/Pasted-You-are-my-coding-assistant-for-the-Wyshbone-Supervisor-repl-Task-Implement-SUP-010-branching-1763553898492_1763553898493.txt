@@ -1,0 +1,190 @@
+You are my coding assistant for the Wyshbone Supervisor repl.
+
+Task:
+Implement SUP-010: branching plans.
+
+The Supervisor must be able to adapt a LeadGenPlan at runtime based on conditions like:
+- search results being too many / too few
+- budget / volume constraints
+- data source failures
+- prior performance
+
+In practice this means:
+- the LeadGenPlan structure must support branches / conditional next steps
+- the plan executor (SUP-002) must be able to:
+  • choose the next step based on the current context + step result
+  • skip / adjust steps when certain conditions are met
+  • record which path was taken
+
+Do NOT overcomplicate this; implement a minimal but real branching system that can be extended later.
+
+-------------------------
+1) Discover the current LeadGenPlan structure
+-------------------------
+
+- Find the types and functions for:
+  • LeadGenPlan (or equivalent)
+  • LeadGenStep / PlanStep
+  • the executor implemented for SUP-002 (executeLeadGenerationPlan, executePlanStep, etc.)
+- Identify:
+  • how steps are sequenced (simple array? index? status?)
+  • how results/summaries are represented (success/failure, counts, etc.)
+  • what context the executor currently has (e.g. lastStepResult, accumulatedResults, etc.)
+
+We will extend these types rather than inventing a parallel system.
+
+-------------------------
+2) Extend the plan model to support branching
+-------------------------
+
+In the relevant shared types file (e.g. `server/types.ts`, `server/plan-types.ts`, or similar), introduce minimal branching support.
+
+Example shape (adjust to fit existing types):
+
+- Extend the step type (or introduce a new field) to include:
+
+  type BranchCondition =
+    | { type: "too_many_results"; threshold: number }
+    | { type: "too_few_results"; threshold: number }
+    | { type: "data_source_failed"; source: string }
+    | { type: "budget_exceeded"; maxBudget: number }
+    | { type: "fallback"; reason?: string };
+
+  interface PlanBranch {
+    when: BranchCondition;
+    nextStepId: string;  // or index, depending on current plan design
+  }
+
+  interface LeadGenStep {
+    id: string;
+    kind: string;
+    // ...existing fields...
+    branches?: PlanBranch[];  // optional branching
+  }
+
+- Make sure this compiles cleanly with existing plan types.
+- Do NOT break existing simple linear plans: if `branches` is undefined or empty, the behaviour should be exactly as before.
+
+-------------------------
+3) Add branching logic to the executor (SUP-002)
+-------------------------
+
+In the core executor (e.g. `server/execute-plan.ts`, `server/plan-executor.ts`, or similar):
+
+- After executing a step and getting a result, call a new helper:
+
+  const nextStepId = chooseNextStep(currentStep, stepResult, planContext);
+
+- Implement `chooseNextStep` in a sensible location (same file or a small helper module).
+
+Behaviour:
+
+- If `currentStep.branches` is undefined or empty:
+  • fall back to existing “next step” logic (e.g., next by index).
+
+- Otherwise:
+  • Evaluate each branch in order against the `stepResult` and any relevant context.
+  • Branch conditions should be based on real, already-available fields, e.g.:
+
+    - "too_many_results":
+        if stepResult.leadsFound > threshold
+    - "too_few_results":
+        if stepResult.leadsFound < threshold
+    - "data_source_failed":
+        if stepResult.errorSource === source or stepResult.status === "failed"
+    - "budget_exceeded":
+        if planContext.spentBudget > maxBudget
+
+  • The first matching branch wins:
+        return branch.nextStepId;
+
+  • If no branches match:
+        fall back to the default next-step behaviour (e.g. sequential).
+
+- Ensure that the executor can resolve `nextStepId` to an actual step (by id or index).
+- If the referenced step is missing, log a structured error and terminate the plan safely with a clear failure state.
+
+-------------------------
+4) Make plan generation (SUP-001) capable of emitting basic branches
+-------------------------
+
+In the plan-generation logic (SUP-001 code), minimally:
+
+- Allow the generator to **optionally** create branches for obvious cases, such as:
+  • After a “search for leads” step:
+      - if too_many_results → add a “narrow filters” step
+      - if too_few_results → add an “expand radius / adjust query” step
+  • After a data-source-dependent step:
+      - if data_source_failed → add a fallback step using another source
+
+Implementation detail:
+
+- You don’t need deep AI logic here; even static templates are fine for now.
+- Example for a search step:
+
+  {
+    id: "step_search_leads",
+    kind: "search_leads",
+    // ...
+    branches: [
+      {
+        when: { type: "too_many_results", threshold: 500 },
+        nextStepId: "step_narrow_filters"
+      },
+      {
+        when: { type: "too_few_results", threshold: 20 },
+        nextStepId: "step_expand_scope"
+      }
+    ]
+  }
+
+- Keep this simple and deterministic. The important part is that the plan model + executor supports branching.
+
+-------------------------
+5) Logging + observability
+-------------------------
+
+- Wherever you log executor progress (to Tower or Supervisor logs), extend the payload to include:
+  • currentStepId
+  • chosenNextStepId
+  • matchedBranchCondition (if any)
+
+Example shape:
+
+  {
+    type: "plan_step_completed",
+    stepId,
+    status,
+    leadsFound,
+    chosenNextStepId,
+    matchedBranchCondition: branch?.when ?? null,
+    timestamp
+  }
+
+- This will let Tower later visualise the path taken through a plan.
+
+-------------------------
+6) Backwards compatibility
+-------------------------
+
+- Confirm via a quick test (or existing tests) that:
+  • An older, linear LeadGenPlan with no `branches` still executes exactly as before.
+  • SUP-003 (goal monitoring) still sees execution events as expected.
+
+-------------------------
+7) Mark SUP-010 as complete in export/status
+-------------------------
+
+- Update whatever export/status mechanism is used (e.g. `export/status.json` or `buildExportStatus()` in `server/supervisor.ts`) to set:
+  • "sup010_done": true
+
+-------------------------
+8) Output requirements
+-------------------------
+
+- For any **new file**: output the full file contents.
+- For any **modified file**: output the full file contents with your changes.
+- Include all needed imports/exports.
+- Do not just describe changes — produce concrete, copy-pasteable code.
+
+Now implement SUP-010 according to these requirements, keeping changes minimal and consistent with the existing Supervisor architecture.
