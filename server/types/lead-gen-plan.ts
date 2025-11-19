@@ -1040,11 +1040,31 @@ export async function executeLeadGenerationPlan(
   const startedAt = startedAtDate.toISOString();
   const stepResults: Record<string, LeadGenStepResult> = {};
   let overallStatus: LeadGenExecutionResult["overallStatus"] = "succeeded";
+  const planContext: Record<string, unknown> = { spentBudget: 0 };
+  const executionPath: string[] = []; // Track which steps were executed
 
   emitPlanEvent("PLAN_STARTED", { plan, user });
 
-  // Execute steps in order, respecting dependencies
-  for (const step of plan.steps) {
+  // Build step lookup map for branch-based navigation
+  const stepMap = new Map<string, { step: LeadGenPlanStep; index: number }>();
+  plan.steps.forEach((step, index) => {
+    stepMap.set(step.id, { step, index });
+  });
+
+  // Start with first step
+  let currentStepId: string | null = plan.steps[0]?.id ?? null;
+
+  while (currentStepId !== null) {
+    const stepInfo = stepMap.get(currentStepId);
+    if (!stepInfo) {
+      console.error(`[EXECUTOR] Referenced step "${currentStepId}" not found in plan`);
+      overallStatus = "failed";
+      break;
+    }
+
+    const { step, index: currentIndex } = stepInfo;
+    executionPath.push(step.id);
+
     const deps = step.dependsOn ?? [];
     
     // Check for failed dependencies
@@ -1098,6 +1118,10 @@ export async function executeLeadGenerationPlan(
       } else if (overallStatus === "succeeded") {
         overallStatus = "partial";
       }
+      
+      // Move to next step (sequential fallback for skipped steps)
+      const nextIndex = currentIndex + 1;
+      currentStepId = nextIndex < plan.steps.length ? plan.steps[nextIndex].id : null;
       continue;
     }
 
@@ -1116,6 +1140,22 @@ export async function executeLeadGenerationPlan(
     if (result.status === "failed") {
       overallStatus = "failed";
     }
+
+    // Determine next step using branching logic (SUP-010)
+    const { nextStepId, matchedBranch } = chooseNextStep(
+      step,
+      result,
+      plan,
+      currentIndex,
+      planContext
+    );
+
+    // Log which branch was taken (if any)
+    if (matchedBranch) {
+      console.log(`[EXECUTOR] Branch taken: ${step.id} → ${nextStepId} (condition: ${matchedBranch.when.type})`);
+    }
+
+    currentStepId = nextStepId;
   }
 
   // Check if any steps were skipped while overall is still "succeeded"
