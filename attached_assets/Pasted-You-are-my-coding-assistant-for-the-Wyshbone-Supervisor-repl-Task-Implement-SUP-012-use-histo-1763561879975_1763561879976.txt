@@ -1,0 +1,202 @@
+You are my coding assistant for the Wyshbone Supervisor repl.
+
+Task:
+Implement SUP-012: use historical performance when generating and executing lead-gen plans.
+
+The goal is:
+- When creating a new plan (SUP-001) and choosing strategies (niches, sources, filters, locations, outreach mix),
+- The Supervisor should look at past results and prefer things that have worked, and avoid things that have failed.
+
+Keep it minimal but real:
+- Start with simple scoring / weighting based on existing data (supervisor_tasks, suggested_leads, outreach outcomes, etc.).
+- Do NOT build a full ML system; just add structured heuristics.
+
+--------------------------------
+1) Discover existing historical data
+--------------------------------
+
+Identify where “performance” currently lives:
+
+- Tables like:
+  • supervisor_tasks
+  • suggested_leads
+  • outreach sequences / smartlead tasks (if stored)
+  • any table capturing:
+      - lead quality / success
+      - reply/open rates
+      - booked calls / deals
+- Look at existing types:
+  • Lead, SuggestedLead, SupervisorTask, etc.
+  • Any “success”, “status”, “outcome”, “result”, “converted” fields.
+  • Any per-niche, per-location, or per-source metrics we can infer.
+
+We will use these to derive simple “scores”.
+
+--------------------------------
+2) Create a HistoricalPerformance module
+--------------------------------
+
+Add a new module, for example:
+
+- `server/historical-performance.ts`
+
+Implement:
+
+  interface StrategyKey {
+    niche?: string;          // e.g. "breweries", "coffee roasters"
+    country?: string;
+    region?: string;
+    city?: string;
+    dataSource?: string;     // e.g. "google_places", "internal_pubs", "dataledger"
+    outreachChannel?: string; // e.g. "email", "phone", "linkedin"
+  }
+
+  interface StrategyScore {
+    key: StrategyKey;
+    score: number;           // higher = better
+    samples: number;
+    successRate?: number;
+    lastUsedAt?: string;     // ISO
+  }
+
+  interface HistoricalContext {
+    topStrategies: StrategyScore[];
+    lowPerformers: StrategyScore[];
+  }
+
+  async function getHistoricalContextForGoal(goal: {
+    description: string;
+    targetMarket?: string;
+    country?: string;
+    region?: string;
+    city?: string;
+  }): Promise<HistoricalContext>;
+
+Behaviour:
+
+- Query existing tables (e.g. supervisor_tasks + suggested_leads + any outreach results) to:
+  • group outcomes by StrategyKey (niche, region/country, dataSource, outreachChannel)
+  • compute simple metrics:
+      - successRate (e.g. fraction of leads marked as “good”/“contacted”/“responded”)
+      - sample count
+  • compute a simple score, e.g.:
+      score = successRate * log(1 + samples)
+
+- Produce:
+  • topStrategies: best N strategies (e.g. 10) relevant to the goal
+  • lowPerformers: worst N strategies relevant to the goal
+
+“Relevant to the goal” can be loose:
+- Match on targetMarket/niche if present.
+- Match on country/region/city if present.
+- If nothing matches, fall back to global top/worst strategies.
+
+Keep SQL/queries simple and well-commented.
+
+--------------------------------
+3) Integrate into SUP-001 (plan generation)
+--------------------------------
+
+Find the plan-generation logic (SUP-001) that currently builds a LeadGenPlan, e.g.:
+
+- `server/lead-gen-plan.ts`
+- `createLeadGenPlan`, `buildLeadGenPlanForGoal`, etc.
+
+Modify it so that:
+
+- Before constructing the plan, call:
+    const hist = await getHistoricalContextForGoal(goal);
+
+- When choosing:
+  • which niches to target first,
+  • which dataSource to use first,
+  • which outreachChannel to prioritise,
+  use `hist.topStrategies` and `hist.lowPerformers` to guide decisions.
+
+Examples (minimal logic):
+
+- If a niche + country combination has high score:
+    • Prefer that niche / region combination in the plan.
+- If `dataSource: "google_places"` has low success and `dataSource: "internal_pubs"` has higher:
+    • Swap the primary/secondary order of data sources.
+- If email-only has been poor and email+phone is better:
+    • Include a phone-follow-up step by default.
+
+Important:
+- This should be implemented as small, deterministic rules.
+- No randomness required.
+- Make sure the plan description / step metadata clearly reflects chosen strategies (include dataSource, niche, region in step labels where appropriate).
+
+--------------------------------
+4) Integrate into SUP-002 execution (optional but valuable)
+--------------------------------
+
+Where SUP-002 records execution results:
+
+- Ensure we persist enough metadata for future scoring:
+  • niche / sector
+  • location (country/region/city)
+  • dataSource used (from SUP-011 source metadata)
+  • outreachChannel (if known at this step)
+  • success/failure flags
+
+If this is not being recorded yet, extend the step result / supervisor_task update to include these fields so future runs get better historical context.
+
+--------------------------------
+5) Expose summary for Tower (optional hook)
+--------------------------------
+
+Add a small helper:
+
+  async function getStrategySummaryForGoal(goalIdOrSessionId: string): Promise<HistoricalContext>;
+
+Use the same logic as `getHistoricalContextForGoal`, but allow Tower to query and display:
+- what strategies are being favoured
+- what is being downranked
+
+You don’t need to build the Tower UI here; just expose the function or route.
+
+--------------------------------
+6) Logging
+--------------------------------
+
+When generating a plan, add structured logs like:
+
+- "SUP-012: using historical performance to bias plan"
+- Include:
+    {
+      goalDescription,
+      chosenDataSource,
+      avoidedDataSource,
+      chosenOutreachChannels,
+      highScoreStrategiesCount: hist.topStrategies.length
+    }
+
+This makes later debugging easier.
+
+--------------------------------
+7) Backwards compatibility
+--------------------------------
+
+- If `getHistoricalContextForGoal` finds no data (cold start), the plan generation must still work:
+  • default to current behaviour with no changes.
+- Ensure that plan generation does not fail when there are zero historical rows.
+
+--------------------------------
+8) Mark SUP-012 as done
+--------------------------------
+
+Update the export/status mechanism (e.g. `server/utils/exporter.ts` or equivalent) to set:
+
+- "sup012_done": true
+
+--------------------------------
+9) Output requirements
+--------------------------------
+
+- For any new file: output full contents.
+- For any modified file: output full contents with your changes applied.
+- Include all necessary imports and exports.
+- Do not just describe changes — produce concrete, copy-pasteable code.
+
+Implement SUP-012 now according to the above, keeping the implementation minimal, coherent, and tightly integrated with existing Supervisor types and DB schema.
