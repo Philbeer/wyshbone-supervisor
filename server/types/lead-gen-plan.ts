@@ -1,11 +1,13 @@
 /**
- * Lead Generation Planning & Execution Module (SUP-001 + SUP-002)
+ * Lead Generation Planning & Execution Module (SUP-001 + SUP-002 + SUP-012)
  * 
  * SUP-001: Pure planning function that generates execution plans
  * SUP-002: Executor that runs plans and manages tool execution
+ * SUP-012: Historical performance integration for smarter planning
  */
 
 import { storage } from "../storage";
+import { getHistoricalContextForGoal, type HistoricalContext } from "../historical-performance";
 
 // ========================================
 // TOOL IDENTIFIERS
@@ -420,6 +422,191 @@ export function planLeadGeneration(
   };
 
   return plan;
+}
+
+// ========================================
+// SUP-012: HISTORICAL PERFORMANCE INTEGRATION
+// ========================================
+
+/**
+ * Plan lead generation with historical performance guidance (SUP-012).
+ * 
+ * This async wrapper:
+ * 1. Fetches historical context for the goal
+ * 2. Adjusts strategy based on top/low performers
+ * 3. Generates plan with optimized choices
+ * 4. Logs decisions for observability
+ * 
+ * @param goal - The lead generation goal
+ * @param context - User and environment context
+ * @returns Promise of LeadGenPlan with historically-informed strategies
+ */
+export async function planLeadGenerationWithHistory(
+  goal: LeadGenGoal,
+  context: LeadGenContext
+): Promise<LeadGenPlan> {
+  
+  // Fetch historical context
+  const historical = await getHistoricalContextForGoal({
+    description: goal.rawGoal,
+    targetMarket: goal.targetPersona,
+    country: context.defaultCountry,
+    region: goal.targetRegion || context.defaultRegion
+  });
+  
+  // Apply historical insights to modify goal and context
+  const { adjustedGoal, adjustedContext, decisions } = applyHistoricalInsights(
+    goal,
+    context,
+    historical
+  );
+  
+  // Generate plan with adjusted parameters
+  const plan = planLeadGeneration(adjustedGoal, adjustedContext);
+  
+  // Log SUP-012 decisions for observability
+  logHistoricalDecisions(goal, decisions, historical);
+  
+  return plan;
+}
+
+/**
+ * Apply historical insights to adjust planning parameters.
+ * Returns modified goal/context and a record of decisions made.
+ */
+function applyHistoricalInsights(
+  goal: LeadGenGoal,
+  context: LeadGenContext,
+  historical: HistoricalContext
+): {
+  adjustedGoal: LeadGenGoal;
+  adjustedContext: LeadGenContext;
+  decisions: {
+    preferredDataSource?: string;
+    avoidedDataSource?: string;
+    preferredNiche?: string;
+    preferredRegion?: string;
+    addedChannel?: string;
+    removedChannel?: string;
+  };
+} {
+  const decisions: any = {};
+  let adjustedGoal = { ...goal };
+  let adjustedContext = { ...context };
+  
+  // No historical data? Use defaults
+  if (historical.topStrategies.length === 0) {
+    return { adjustedGoal, adjustedContext, decisions };
+  }
+  
+  // 1. Prefer successful niches
+  const topNiches = historical.topStrategies
+    .filter(s => s.key.niche)
+    .slice(0, 3);
+  
+  if (topNiches.length > 0 && !goal.targetPersona) {
+    adjustedGoal.targetPersona = topNiches[0].key.niche;
+    decisions.preferredNiche = topNiches[0].key.niche;
+  }
+  
+  // 2. Prefer successful regions
+  const topRegions = historical.topStrategies
+    .filter(s => s.key.region)
+    .slice(0, 3);
+  
+  if (topRegions.length > 0 && !goal.targetRegion && !context.defaultRegion) {
+    adjustedContext.defaultRegion = topRegions[0].key.region;
+    decisions.preferredRegion = topRegions[0].key.region;
+  }
+  
+  // 3. Prefer/avoid data sources based on performance
+  const dataSourceStrategies = historical.topStrategies.filter(s => s.key.dataSource);
+  const lowDataSources = historical.lowPerformers.filter(s => s.key.dataSource);
+  
+  if (dataSourceStrategies.length > 0) {
+    decisions.preferredDataSource = dataSourceStrategies[0].key.dataSource;
+  }
+  
+  if (lowDataSources.length > 0) {
+    decisions.avoidedDataSource = lowDataSources[0].key.dataSource;
+  }
+  
+  // Note: Data source selection happens in planLeadGeneration via fallback logic (SUP-011)
+  // The decisions here inform logging but don't directly change the plan steps
+  
+  // 4. Adjust outreach channels based on performance
+  const channelStrategies = historical.topStrategies.filter(s => s.key.outreachChannel);
+  const lowChannels = historical.lowPerformers.filter(s => s.key.outreachChannel);
+  
+  // Type guard for valid channels
+  type ValidChannel = "email" | "phone" | "linkedin";
+  const isValidChannel = (ch: string): ch is ValidChannel => {
+    return ch === "email" || ch === "phone" || ch === "linkedin";
+  };
+  
+  if (channelStrategies.length > 0) {
+    const topChannel = channelStrategies[0].key.outreachChannel!;
+    if (isValidChannel(topChannel)) {
+      if (!goal.preferredChannels) {
+        adjustedGoal.preferredChannels = [topChannel];
+        decisions.addedChannel = topChannel;
+      } else if (!goal.preferredChannels.includes(topChannel)) {
+        adjustedGoal.preferredChannels = [topChannel, ...goal.preferredChannels];
+        decisions.addedChannel = topChannel;
+      }
+    }
+  }
+  
+  if (lowChannels.length > 0) {
+    const worstChannel = lowChannels[0].key.outreachChannel!;
+    if (isValidChannel(worstChannel) && adjustedGoal.preferredChannels?.includes(worstChannel)) {
+      adjustedGoal.preferredChannels = adjustedGoal.preferredChannels.filter(c => c !== worstChannel);
+      decisions.removedChannel = worstChannel;
+    }
+  }
+  
+  return { adjustedGoal, adjustedContext, decisions };
+}
+
+/**
+ * Log SUP-012 decisions for debugging and observability
+ */
+function logHistoricalDecisions(
+  originalGoal: LeadGenGoal,
+  decisions: any,
+  historical: HistoricalContext
+): void {
+  const hasDecisions = Object.keys(decisions).length > 0;
+  
+  if (!hasDecisions && historical.topStrategies.length === 0) {
+    console.log('[SUP-012] No historical data available - using default planning');
+    return;
+  }
+  
+  console.log('[SUP-012] Using historical performance to bias plan');
+  console.log(JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: 'SUP012_PLANNING',
+    goalDescription: originalGoal.rawGoal,
+    topStrategiesCount: historical.topStrategies.length,
+    lowPerformersCount: historical.lowPerformers.length,
+    decisions: {
+      preferredDataSource: decisions.preferredDataSource || null,
+      avoidedDataSource: decisions.avoidedDataSource || null,
+      preferredNiche: decisions.preferredNiche || null,
+      preferredRegion: decisions.preferredRegion || null,
+      addedChannel: decisions.addedChannel || null,
+      removedChannel: decisions.removedChannel || null
+    },
+    topStrategies: historical.topStrategies.slice(0, 3).map(s => ({
+      niche: s.key.niche,
+      region: s.key.region,
+      dataSource: s.key.dataSource,
+      score: s.score.toFixed(2),
+      samples: s.samples,
+      successRate: s.successRate?.toFixed(2)
+    }))
+  }));
 }
 
 // ========================================
@@ -1278,8 +1465,8 @@ export async function executeLeadGenerationPlan(
     await storage.createPlanExecution({
       planId: plan.id,
       userId: user.userId,
-      goalId: plan.goalId,
-      goalText: plan.goalText,
+      goalId: undefined, // No goalId at plan level - could be added in future
+      goalText: plan.rawGoal || plan.title,
       overallStatus,
       startedAt: startedAtDate,
       finishedAt: finishedAtDate,
