@@ -75,15 +75,23 @@ try {
   const result1 = await executeLeadGenerationPlan(planWithTooManyBranch, testUser);
   console.log("   ✓ Execution completed with status:", result1.overallStatus);
   
-  // Check if branch was taken (should skip normal_next_step, execute too_many_handler)
-  const executedStepIds = result1.stepResults.map(r => r.stepId);
+  // Check which steps actually executed (not skipped)
+  const executedStepIds = result1.stepResults
+    .filter(r => r.status === "succeeded" || r.status === "failed")
+    .map(r => r.stepId);
+  const skippedStepIds = result1.stepResults
+    .filter(r => r.status === "skipped")
+    .map(r => r.stepId);
+  
   console.log("   Executed steps:", executedStepIds);
+  console.log("   Skipped steps:", skippedStepIds);
   
   if (executedStepIds.includes("too_many_handler") && !executedStepIds.includes("normal_next_step")) {
     console.log("   ✓ Branch correctly taken: search_step → too_many_handler");
+  } else if (executedStepIds.includes("normal_next_step") && skippedStepIds.includes("too_many_handler")) {
+    console.log("   ✓ Sequential path taken (condition not met), branch target skipped");
   } else {
-    console.log("   ⚠️  Expected branch to too_many_handler, but got sequential execution");
-    console.log("   (This may be expected if leadsFound <= 5)");
+    console.log("   ❌ Unexpected execution pattern");
   }
 } catch (error) {
   console.error("   ❌ Test failed:", error);
@@ -141,13 +149,21 @@ try {
   const result2 = await executeLeadGenerationPlan(planWithTooFewBranch, testUser);
   console.log("   ✓ Execution completed with status:", result2.overallStatus);
   
-  const executedStepIds = result2.stepResults.map(r => r.stepId);
-  console.log("   Executed steps:", executedStepIds);
+  const executedStepIds = result2.stepResults
+    .filter(r => r.status === "succeeded" || r.status === "failed")
+    .map(r => r.stepId);
+  const skippedStepIds = result2.stepResults
+    .filter(r => r.status === "skipped")
+    .map(r => r.stepId);
   
-  if (executedStepIds.includes("expand_search") && !executedStepIds.includes("normal_next_step")) {
+  console.log("   Executed steps:", executedStepIds);
+  console.log("   Skipped steps:", skippedStepIds);
+  
+  if (executedStepIds.includes("expand_search") && skippedStepIds.includes("normal_next_step")) {
     console.log("   ✓ Branch correctly taken: search_step → expand_search");
+    console.log("   ✓ Untaken path skipped");
   } else {
-    console.log("   ⚠️  Expected branch to expand_search");
+    console.log("   ❌ Expected branch to expand_search with normal_next_step skipped");
   }
 } catch (error) {
   console.error("   ❌ Test failed:", error);
@@ -221,18 +237,26 @@ try {
   const result3 = await executeLeadGenerationPlan(planWithMultipleBranches, testUser);
   console.log("   ✓ Execution completed with status:", result3.overallStatus);
   
-  const executedStepIds = result3.stepResults.map(r => r.stepId);
-  console.log("   ✓ Executed steps:", executedStepIds);
+  const executedStepIds = result3.stepResults
+    .filter(r => r.status === "succeeded" || r.status === "failed")
+    .map(r => r.stepId);
+  const skippedStepIds = result3.stepResults
+    .filter(r => r.status === "skipped")
+    .map(r => r.stepId);
   
-  // At least one branch should have been taken
-  const branchTaken = executedStepIds.includes("narrow_search") || 
-                      executedStepIds.includes("expand_search") || 
-                      executedStepIds.includes("process_results");
+  console.log("   Executed steps:", executedStepIds);
+  console.log("   Skipped steps:", skippedStepIds);
   
-  if (branchTaken) {
-    console.log("   ✓ Branch evaluation working correctly");
+  // Exactly one branch should have been taken
+  const branchTargets = ["narrow_search", "expand_search", "process_results"];
+  const executedBranches = branchTargets.filter(id => executedStepIds.includes(id));
+  const skippedBranches = branchTargets.filter(id => skippedStepIds.includes(id));
+  
+  if (executedBranches.length === 1 && skippedBranches.length === 2) {
+    console.log(`   ✓ Branch evaluation working correctly (took: ${executedBranches[0]})`);
+    console.log(`   ✓ Untaken branches skipped: ${skippedBranches.join(", ")}`);
   } else {
-    console.log("   ❌ No branch was taken");
+    console.log(`   ❌ Expected 1 executed branch, got ${executedBranches.length}`);
   }
 } catch (error) {
   console.error("   ❌ Test failed:", error);
@@ -285,16 +309,26 @@ try {
   const result4 = await executeLeadGenerationPlan(linearPlan, testUser);
   console.log("   ✓ Execution completed with status:", result4.overallStatus);
   
-  const executedStepIds = result4.stepResults.map(r => r.stepId);
+  const executedStepIds = result4.stepResults
+    .filter(r => r.status === "succeeded" || r.status === "failed")
+    .map(r => r.stepId);
+  const skippedStepIds = result4.stepResults
+    .filter(r => r.status === "skipped")
+    .map(r => r.stepId);
+  
   console.log("   Executed steps:", executedStepIds);
+  if (skippedStepIds.length > 0) {
+    console.log("   Skipped steps:", skippedStepIds);
+  }
   
   const allStepsExecuted = ["step_1", "step_2", "step_3"].every(id => executedStepIds.includes(id));
+  const noStepsSkipped = skippedStepIds.length === 0;
   
-  if (allStepsExecuted) {
+  if (allStepsExecuted && noStepsSkipped) {
     console.log("   ✓ All steps executed sequentially");
     console.log("   ✓ Backwards compatibility maintained");
   } else {
-    console.log("   ❌ Not all steps were executed");
+    console.log("   ❌ Expected all steps executed with none skipped");
   }
 } catch (error) {
   console.error("   ❌ Test failed:", error);

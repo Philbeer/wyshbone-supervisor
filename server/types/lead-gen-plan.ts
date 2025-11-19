@@ -608,12 +608,27 @@ export function chooseNextStep(
   }
 
   // No branches or no matching branches - fall back to sequential execution
-  const nextIndex = currentStepIndex + 1;
-  if (nextIndex < plan.steps.length) {
-    return {
-      nextStepId: plan.steps[nextIndex].id,
-      matchedBranch: null
-    };
+  // Skip over any branch-only steps in sequential progression
+  const branchOnlySteps = new Set<string>();
+  for (const planStep of plan.steps) {
+    if (planStep.branches) {
+      for (const branch of planStep.branches) {
+        branchOnlySteps.add(branch.nextStepId);
+      }
+    }
+  }
+
+  let nextIndex = currentStepIndex + 1;
+  while (nextIndex < plan.steps.length) {
+    const candidateStepId = plan.steps[nextIndex].id;
+    // Skip branch-only steps during sequential progression
+    if (!branchOnlySteps.has(candidateStepId)) {
+      return {
+        nextStepId: candidateStepId,
+        matchedBranch: null
+      };
+    }
+    nextIndex++;
   }
 
   // Plan is complete
@@ -718,26 +733,27 @@ async function executeGooglePlacesSearch(
   
   // TODO: Integrate with existing searchGooglePlaces method from Supervisor
   // For now, return stub data showing the structure
-  const businesses = [
-    {
-      place_id: `place_${Date.now()}_1`,
-      name: `${query} Business 1`,
-      address: `${region}, ${country}`,
-      website: `https://example1.com`,
-      phone: '+44 1234 567890'
-    },
-    {
-      place_id: `place_${Date.now()}_2`,
-      name: `${query} Business 2`,
-      address: `${region}, ${country}`,
-      website: `https://example2.com`,
-      phone: '+44 1234 567891'
-    }
-  ];
+  // SUP-010: Vary results based on query to test branch conditions
+  let mockCount = 2;  // Default
+  if (query?.includes("restaurant")) mockCount = 10;  // For too_many_results test
+  if (query?.includes("unicorn")) mockCount = 2;      // For too_few_results test
+  if (query?.includes("coffee")) mockCount = 8;       // For fallback test
+  
+  const businesses = Array.from({ length: mockCount }, (_, i) => ({
+    place_id: `place_${Date.now()}_${i}`,
+    name: `${query} Business ${i + 1}`,
+    address: `${region}, ${country}`,
+    website: `https://example${i}.com`,
+    phone: `+44 1234 56789${i}`
+  }));
   
   return {
     success: true,
-    data: { businesses, count: businesses.length }
+    data: {
+      businesses,
+      count: businesses.length,
+      leadsFound: businesses.length  // SUP-010: For branch condition evaluation
+    }
   };
 }
 
@@ -1051,6 +1067,21 @@ export async function executeLeadGenerationPlan(
     stepMap.set(step.id, { step, index });
   });
 
+  // Identify steps that are branch-only targets (SUP-010)
+  // These steps can ONLY be reached via branches, not sequential progression
+  const branchOnlySteps = new Set<string>();
+  for (const step of plan.steps) {
+    if (step.branches) {
+      for (const branch of step.branches) {
+        branchOnlySteps.add(branch.nextStepId);
+      }
+    }
+  }
+
+  // Track which steps are reachable (SUP-010: for conditional execution)
+  const reachableSteps = new Set<string>();
+  reachableSteps.add(plan.steps[0]?.id); // First step is always reachable
+
   // Start with first step
   let currentStepId: string | null = plan.steps[0]?.id ?? null;
 
@@ -1155,7 +1186,34 @@ export async function executeLeadGenerationPlan(
       console.log(`[EXECUTOR] Branch taken: ${step.id} → ${nextStepId} (condition: ${matchedBranch.when.type})`);
     }
 
+    // Mark the chosen next step as reachable
+    if (nextStepId) {
+      reachableSteps.add(nextStepId);
+    }
+
     currentStepId = nextStepId;
+  }
+
+  // Skip any steps that were never made reachable (untaken branch targets)
+  for (const step of plan.steps) {
+    if (!reachableSteps.has(step.id) && !stepResults[step.id]) {
+      const skipped: LeadGenStepResult = {
+        stepId: step.id,
+        status: "skipped",
+        attempts: 0,
+        errorMessage: "Skipped because not reachable via execution path (untaken branch target)"
+      };
+      stepResults[step.id] = skipped;
+      emitPlanEvent("STEP_SKIPPED", {
+        plan,
+        step,
+        result: skipped,
+        user,
+        meta: {
+          reason: "unreachable_branch_target"
+        }
+      });
+    }
   }
 
   // Check if any steps were skipped while overall is still "succeeded"
