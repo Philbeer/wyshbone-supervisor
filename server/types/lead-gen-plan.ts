@@ -540,6 +540,90 @@ export interface LeadPlanEventPayload {
 }
 
 // ========================================
+// BRANCH EVALUATION (SUP-010)
+// ========================================
+
+/**
+ * Evaluate a branch condition against a step result and execution context
+ */
+function evaluateBranchCondition(
+  condition: BranchCondition,
+  stepResult: LeadGenStepResult,
+  planContext: Record<string, unknown>
+): boolean {
+  switch (condition.type) {
+    case "too_many_results": {
+      const leadsFound = (stepResult.data as any)?.leadsFound ?? 0;
+      return leadsFound > condition.threshold;
+    }
+    case "too_few_results": {
+      const leadsFound = (stepResult.data as any)?.leadsFound ?? 0;
+      return leadsFound < condition.threshold;
+    }
+    case "data_source_failed": {
+      const errorSource = (stepResult.data as any)?.errorSource;
+      return stepResult.status === "failed" && errorSource === condition.source;
+    }
+    case "budget_exceeded": {
+      const spentBudget = (planContext.spentBudget as number) ?? 0;
+      return spentBudget > condition.maxBudget;
+    }
+    case "fallback": {
+      // Fallback always matches as a catch-all
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Choose the next step to execute based on branches or sequential order (SUP-010)
+ * 
+ * @param currentStep The step that just completed
+ * @param stepResult The result of the current step
+ * @param plan The full plan being executed
+ * @param currentStepIndex Index of the current step in plan.steps
+ * @param planContext Additional context (e.g., budget tracking)
+ * @returns The ID of the next step to execute, or null if plan is complete
+ */
+export function chooseNextStep(
+  currentStep: LeadGenPlanStep,
+  stepResult: LeadGenStepResult,
+  plan: LeadGenPlan,
+  currentStepIndex: number,
+  planContext: Record<string, unknown> = {}
+): { nextStepId: string | null; matchedBranch: PlanBranch | null } {
+  // If step has branches, evaluate them in order
+  if (currentStep.branches && currentStep.branches.length > 0) {
+    for (const branch of currentStep.branches) {
+      if (evaluateBranchCondition(branch.when, stepResult, planContext)) {
+        // First matching branch wins
+        return {
+          nextStepId: branch.nextStepId,
+          matchedBranch: branch
+        };
+      }
+    }
+  }
+
+  // No branches or no matching branches - fall back to sequential execution
+  const nextIndex = currentStepIndex + 1;
+  if (nextIndex < plan.steps.length) {
+    return {
+      nextStepId: plan.steps[nextIndex].id,
+      matchedBranch: null
+    };
+  }
+
+  // Plan is complete
+  return {
+    nextStepId: null,
+    matchedBranch: null
+  };
+}
+
+// ========================================
 // STRUCTURED EVENT LOGGING
 // ========================================
 
