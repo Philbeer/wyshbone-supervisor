@@ -1197,6 +1197,7 @@ export async function executeLeadGenerationPlan(
         succeededSteps: Object.values(stepResults).filter(r => r.status === "succeeded").length,
         failedSteps: Object.values(stepResults).filter(r => r.status === "failed").length,
         skippedSteps: Object.values(stepResults).filter(r => r.status === "skipped").length,
+        executionPath, // SUP-010: Track which path through the plan was taken
         source: 'executor'
       }
     });

@@ -22,6 +22,7 @@ interface ExportSummary {
   sup001_done: boolean;
   sup002_done: boolean;
   sup003_done: boolean;
+  sup010_done: boolean;
   sup060_done: boolean;
   totals: {
     files: number;
@@ -217,6 +218,7 @@ async function scanFiles(): Promise<ExportSummary> {
     sup001_done: true,   // Planner implemented
     sup002_done: true,   // Executor implemented
     sup003_done: true,   // Goal monitoring implemented
+    sup010_done: true,   // Branching plans with conditional execution
     sup060_done: false,  // Safe experiments not implemented
     totals: {
       files: fileEntries.filter(f => !('skipped' in f)).length,
