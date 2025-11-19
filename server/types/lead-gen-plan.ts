@@ -586,6 +586,13 @@ function evaluateBranchCondition(
       return leadsFound < condition.threshold;
     }
     case "data_source_failed": {
+      // SUP-011: Check if primary source failed (even if fallback succeeded)
+      const sourceMeta = (stepResult.data as any)?.sourceMeta;
+      if (sourceMeta?.fallbackChain) {
+        const primaryAttempt = sourceMeta.fallbackChain[0];
+        return primaryAttempt && !primaryAttempt.success && primaryAttempt.source === condition.source;
+      }
+      // Backwards compatibility: check legacy errorSource field
       const errorSource = (stepResult.data as any)?.errorSource;
       return stepResult.status === "failed" && errorSource === condition.source;
     }
@@ -732,7 +739,7 @@ export async function runLeadTool(
 // ========================================
 
 /**
- * Execute Google Places search
+ * Execute Google Places search with SUP-011 fallback support
  */
 async function executeGooglePlacesSearch(
   params: LeadToolParams,
@@ -742,29 +749,41 @@ async function executeGooglePlacesSearch(
   
   console.log(`🔍 GOOGLE_PLACES_SEARCH: "${query}" in ${region}, ${country} (max: ${maxResults})`);
   
-  // TODO: Integrate with existing searchGooglePlaces method from Supervisor
-  // For now, return stub data showing the structure
-  // SUP-010: Vary results based on query to test branch conditions
-  let mockCount = 2;  // Default
-  if (query?.includes("restaurant")) mockCount = 10;  // For too_many_results test
-  if (query?.includes("unicorn")) mockCount = 2;      // For too_few_results test
-  if (query?.includes("coffee")) mockCount = 8;       // For fallback test
+  // SUP-011: Use fallback search with automatic source switching
+  const { searchLeadsWithFallback } = await import("../lead-search-with-fallback");
   
-  const businesses = Array.from({ length: mockCount }, (_, i) => ({
-    place_id: `place_${Date.now()}_${i}`,
-    name: `${query} Business ${i + 1}`,
-    address: `${region}, ${country}`,
-    website: `https://example${i}.com`,
-    phone: `+44 1234 56789${i}`
+  const result = await searchLeadsWithFallback(
+    {
+      primary: "google_places",
+      fallbacks: ["fallback_mock"]  // Use mock fallback for testing
+    },
+    {
+      query,
+      region,
+      country,
+      maxResults
+    }
+  );
+  
+  // Map to our business format
+  const businesses = result.leads.map(lead => ({
+    place_id: lead.place_id,
+    name: lead.name,
+    address: lead.address,
+    website: lead.website,
+    phone: lead.phone
   }));
   
   return {
-    success: true,
+    success: result.meta.success,
     data: {
       businesses,
       count: businesses.length,
       leadsFound: businesses.length  // SUP-010: For branch condition evaluation
-    }
+    },
+    errorMessage: result.meta.errorMessage,
+    // SUP-011: Include source metadata
+    sourceMeta: result.meta
   };
 }
 
