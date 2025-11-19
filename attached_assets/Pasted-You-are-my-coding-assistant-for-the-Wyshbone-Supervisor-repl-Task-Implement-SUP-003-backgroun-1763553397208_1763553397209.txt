@@ -1,0 +1,122 @@
+You are my coding assistant for the Wyshbone Supervisor repl.
+
+Task:
+Implement SUP-003: background monitoring of user goals.
+
+The Supervisor must continuously (or periodically) monitor each user’s sales/lead goals and detect when they are stalled, empty, or need attention. It should emit structured “monitor events” and make them visible to the rest of the system (Tower + UI).
+
+High-level behaviour:
+- Read the current goal for a user (as set by UI-001 / UI-010).
+- Look at recent plans and executions linked to that goal.
+- Detect simple problem states like:
+  • no active plan for a goal
+  • no recent execution activity for a goal
+  • repeated failures for a goal
+- Emit a structured monitoring event (e.g. “goal_stalled”, “no_plan”, “repeated_failures”) that Tower and UI can consume.
+
+Do NOT over-engineer this; implement a minimal but real background monitor that can be improved later.
+
+Implementation steps:
+
+1) Discover how goals and plans are represented
+- Find the types and storage for:
+  • user goals (e.g. Goal, UserGoal, LeadGoal)
+  • plans (LeadGenPlan or similar)
+  • plan runs / executions (planRun, runLog, executionRecord, etc.)
+- Identify:
+  • where plans are created (SUP-001) and executed (SUP-002)
+  • how they are stored (database tables, Supabase, etc.)
+  • how they are linked to a goal (goalId, goalText, or metadata)
+
+Use the existing types; do not invent new parallel ones.
+
+2) Add a GoalMonitoring module
+Create a module such as:
+- `src/core/goalMonitoring.ts` (or equivalent location)
+
+In this module, implement:
+
+- A `GoalMonitorStatus` type, e.g.:
+
+  type GoalMonitorStatus =
+    | "ok"
+    | "no_plan"
+    | "stalled"
+    | "repeated_failures";
+
+- A `GoalMonitorEvent` type, e.g.:
+
+  interface GoalMonitorEvent {
+    userId: string;
+    sessionId?: string;
+    goalId?: string;
+    goalText?: string;
+    status: GoalMonitorStatus;
+    reason: string;
+    lastPlanId?: string;
+    lastActivityAt?: string; // ISO timestamp
+    failureCount?: number;
+    createdAt: string; // ISO timestamp
+  }
+
+- A function like:
+
+  async function monitorGoalsOnce(): Promise<GoalMonitorEvent[]>;
+
+This function should:
+  • Fetch all active goals (or all goals for now).
+  • For each goal, look up the most recent plan + executions.
+  • Apply simple rules, e.g.:
+      - If no plan exists for this goal → status = "no_plan".
+      - If last execution/plan run is older than a threshold (e.g. 24–72h) → status = "stalled".
+      - If there are several recent failures (e.g. > 3 in last N runs) → status = "repeated_failures".
+      - Otherwise → status = "ok" (do not emit or emit only if needed).
+
+Return a list of GoalMonitorEvent for non-OK statuses.
+
+3) Integrate with Tower / logging
+- Reuse existing Tower client or logging utility if one exists (e.g. `towerClient`, `runLogger`, `logEventToTower`).
+- Add a helper:
+
+  async function publishGoalMonitorEvents(events: GoalMonitorEvent[]): Promise<void>;
+
+- For each event, send a structured payload to Tower, with all relevant fields.
+- Also log locally (Supervisor logs) if there is an existing structured logger.
+
+4) Schedule background monitoring
+- Find the existing background job / scheduler mechanism in Supervisor, e.g.:
+  • a cron-like job
+  • a periodic timer
+  • an endpoint that Tower or Poller calls regularly
+- Add a scheduled job or handler to run:
+
+  await monitorGoalsOnce();
+  await publishGoalMonitorEvents(events);
+
+on a sensible interval (e.g. every 15–60 minutes), using whatever scheduling pattern is already used in this repl. Do NOT invent a new scheduling system if there is already one.
+
+If there is no existing scheduling mechanism:
+  • Create a minimal one that fits the current architecture (e.g., an HTTP endpoint `/internal/monitor-goals` that Poller can hit periodically).
+  • Document it in code comments.
+
+5) Make the monitor goal-aware and user-aware
+- Ensure `monitorGoalsOnce` properly:
+  • associates each event with the correct userId and, if available, sessionId.
+  • includes either goalId or goalText for clarity.
+- Use the same identifiers that UI and Tower already use for user/session/run.
+
+6) Keep thresholds configurable
+- Define reasonable defaults in code, e.g.:
+
+  const STALE_HOURS = 48;
+  const FAILURE_THRESHOLD = 3;
+
+- Make them easy to change later (constants at top of file).
+
+7) Output requirements
+- For any new file: output its full contents.
+- For any modified file: output full contents with changes applied.
+- Include all imports/exports.
+- Do not describe changes—produce concrete, copy-pasteable code.
+
+Implement SUP-003 now according to these requirements, keeping changes minimal, coherent, and aligned with the existing Supervisor architecture.

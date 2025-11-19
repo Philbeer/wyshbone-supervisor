@@ -216,7 +216,7 @@ async function scanFiles(): Promise<ExportSummary> {
     generatedAt: new Date().toISOString(),
     sup001_done: true,   // Planner implemented
     sup002_done: true,   // Executor implemented
-    sup003_done: false,  // Monitor not yet implemented
+    sup003_done: true,   // Goal monitoring implemented
     sup060_done: false,  // Safe experiments not implemented
     totals: {
       files: fileEntries.filter(f => !('skipped' in f)).length,

@@ -3,6 +3,7 @@ import { storage } from './storage';
 import { emailService } from './notifications/email-service';
 import type { SupervisorTask, SupervisorMessage, TaskResult } from './types/supervisor-chat';
 import { randomUUID } from 'crypto';
+import { monitorGoalsOnce, publishGoalMonitorEvents } from './goal-monitoring';
 
 interface UserContext {
   userId: string;
@@ -74,10 +75,11 @@ class SupervisorService {
         return;
       }
 
-      // Process both signals and chat tasks in parallel
+      // Process signals, chat tasks, and goal monitoring in parallel
       await Promise.all([
         this.processNewSignals(),
-        this.processSupervisorTasks()
+        this.processSupervisorTasks(),
+        this.monitorGoals()
       ]);
     } catch (error) {
       console.error('Error in supervisor poll:', error);
@@ -217,6 +219,20 @@ class SupervisorService {
           })
           .eq('id', task.id);
       }
+    }
+  }
+
+  private async monitorGoals() {
+    try {
+      // Run goal monitoring check
+      const events = await monitorGoalsOnce();
+      
+      // Publish any issues found
+      if (events.length > 0) {
+        await publishGoalMonitorEvents(events);
+      }
+    } catch (error) {
+      console.error('Error in goal monitoring:', error);
     }
   }
 

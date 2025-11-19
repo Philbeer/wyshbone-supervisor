@@ -17,7 +17,7 @@ Built as a B2B productivity tool, it features a Linear-inspired design system op
 **Control Tower Integration**: The export API status endpoint includes boolean flags for tracking Supervisor task completion status:
 - `sup001_done`: ✅ Pure planning function generates execution-ready DAG plans (`server/types/lead-gen-plan.ts`)
 - `sup002_done`: ✅ Complete executor with dependency handling, retry logic (3 attempts, exponential backoff), structured event logging, and 6 tool types (`server/types/lead-gen-plan.ts`)
-- `sup003_done`: ❌ Background goal monitoring service (not yet implemented)
+- `sup003_done`: ✅ Background goal monitoring service - polls every 30s, detects stalled/no-plan/repeated-failure states, emits structured monitor events (`server/goal-monitoring.ts`)
 - `sup060_done`: ❌ Safe-mode experiments/exploration features (not yet implemented)
 
 ## User Preferences
