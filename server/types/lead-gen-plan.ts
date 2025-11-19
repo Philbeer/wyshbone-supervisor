@@ -1037,7 +1037,11 @@ async function executeStepWithRetries(
       if (toolResult.success) {
         result.status = "succeeded";
         result.finishedAt = new Date().toISOString();
-        result.data = toolResult.data;
+        // SUP-011: Include source metadata in step result data for observability and branching
+        result.data = {
+          ...toolResult.data as object,
+          sourceMeta: toolResult.sourceMeta
+        };
         emitPlanEvent("STEP_SUCCEEDED", { plan, step, result, user });
         return result;
       } else {
