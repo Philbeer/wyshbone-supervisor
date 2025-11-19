@@ -1,0 +1,179 @@
+You are my coding assistant for the Wyshbone Supervisor repl.
+
+Task:
+Implement SUP-011: fallback data sources.
+
+The Supervisor must:
+- Detect when a primary data source fails or returns unusable results.
+- Automatically try one or more fallback data sources.
+- Record which source was used and whether we fell back.
+- Expose this info to Tower/UI so we can see which path was taken.
+
+Keep it minimal but real: start with just a couple of clearly-defined fallbacks.
+
+--------------------------------
+1) Discover current data source usage
+--------------------------------
+
+Find where the Supervisor currently calls external data sources for lead gen, e.g.:
+
+- Google Places / new Places API
+- Static pub database / Supabase tables
+- DataLedger
+- Any “global search” tools
+
+Look for:
+- Functions like `searchLeads`, `searchBusinesses`, `runLeadSearchTool`, `fetchCandidates`, etc.
+- Tool wrappers used in SUP-002’s plan execution.
+- Any “source” identifiers already present (e.g. `"places"`, `"internal_db"`, `"dataledger"`).
+
+We will build fallback logic around these existing tools.
+
+--------------------------------
+2) Define a simple DataSource + Fallback model
+--------------------------------
+
+In a shared types file (e.g. `server/types.ts`, `server/tools.ts`, or similar), introduce:
+
+- A `LeadDataSourceId` union type, e.g.:
+
+  type LeadDataSourceId = "google_places" | "internal_pubs" | "dataledger";
+
+- A `LeadSearchResultMeta` interface that includes at least:
+
+  interface LeadSearchResultMeta {
+    source: LeadDataSourceId;
+    leadsFound: number;
+    success: boolean;
+    errorCode?: string;
+    errorMessage?: string;
+  }
+
+- If you already have a result envelope type for lead search, extend it to include this meta rather than adding a completely new return type.
+
+--------------------------------
+3) Implement a fallback-aware search helper
+--------------------------------
+
+Create a small module, e.g.:
+
+- `server/lead-search-with-fallback.ts`
+
+Implement a function:
+
+  interface LeadSearchOptions {
+    primary: LeadDataSourceId;
+    fallbacks: LeadDataSourceId[];
+    // any search parameters you already use: location, query, niche, etc.
+  }
+
+  interface LeadSearchWithFallbackResult {
+    sourceUsed: LeadDataSourceId;
+    leads: any[]; // or your existing Lead type
+    meta: LeadSearchResultMeta;
+    fallbackChain: { source: LeadDataSourceId; success: boolean; errorMessage?: string }[];
+  }
+
+  async function searchLeadsWithFallback(
+    options: LeadSearchOptions,
+    params: ExistingSearchParamsType
+  ): Promise<LeadSearchWithFallbackResult>;
+
+Behaviour:
+
+- Try the primary data source first using your existing search function(s).
+- If it:
+  • throws an error,
+  • returns an error status,
+  • or returns “too few leads” (e.g. < MIN_LEADS threshold),
+  then:
+    - Log a structured warning.
+    - Try the first fallback, and so on.
+- Stop at the first successful source that returns a usable number of leads.
+- If all sources fail, return an error result and no leads.
+
+Keep thresholds simple and configurable via constants in this file.
+
+--------------------------------
+4) Integrate into the plan executor (SUP-002)
+--------------------------------
+
+Find where SUP-002 currently performs “search for leads” steps in the plan execution.
+
+- Replace direct calls to a single search data source with `searchLeadsWithFallback`, passing:
+  • primary: whichever source is currently used (e.g. "google_places")
+  • fallbacks: one or two others (e.g. ["internal_pubs", "dataledger"]) depending on your current capabilities.
+
+- Attach the result metadata to whatever execution result / run log you already produce for that step, e.g.:
+
+  {
+    stepId,
+    status: "completed" | "failed",
+    leadsFound,
+    sourceUsed,
+    fallbackChain,
+    errorCode,
+    errorMessage,
+    ...
+  }
+
+- Ensure this metadata is sent to Tower (if plan step logs are already sent) or at least to Supervisor logs.
+
+--------------------------------
+5) Connect with SUP-010 branching (if present)
+--------------------------------
+
+If SUP-010 branching logic is already implemented:
+
+- Allow branch conditions to inspect:
+  • `sourceUsed`
+  • `leadsFound`
+  • failure reasons
+
+For example:
+- If even after fallbacks `leadsFound` < threshold => branch to “expand scope” step.
+- If primary source failed repeatedly => branch to a “switch niche” or “different region” step.
+
+Keep this simple and additive.
+
+--------------------------------
+6) Logging and observability
+--------------------------------
+
+Wherever you log plan execution events:
+
+- Include:
+  • `sourceUsed`
+  • whether a fallback was used
+  • `fallbackChain`
+  • `leadsFound`
+
+This will make it easy for Tower and UI to later show why a particular search succeeded or needed fallback.
+
+--------------------------------
+7) Backwards compatibility
+--------------------------------
+
+- Ensure that if `searchLeadsWithFallback` is not used (e.g. for other step types), existing behaviour is unchanged.
+- For steps that don’t use external data sources, no changes should be needed.
+
+--------------------------------
+8) Mark SUP-011 as done
+--------------------------------
+
+Update the Supervisor export/status to reflect:
+
+- "sup011_done": true
+
+(wherever you currently track SUP task completion, e.g. in `server/supervisor.ts` export status.json logic).
+
+--------------------------------
+9) Output requirements
+--------------------------------
+
+- For any new file: output full file contents.
+- For any modified file: output full file contents with your changes applied.
+- Include all necessary imports and exports.
+- Do not just describe changes — produce concrete, copy-pasteable code.
+
+Implement SUP-011 now according to the above, keeping changes minimal and consistent with how SUP-002 currently executes lead-gen steps.

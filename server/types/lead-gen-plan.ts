@@ -508,12 +508,37 @@ export interface LeadToolExecutionEnv {
 }
 
 /**
+ * SUP-011: Lead data source identifiers
+ */
+export type LeadDataSourceId = "google_places" | "internal_pubs" | "dataledger" | "fallback_mock";
+
+/**
+ * SUP-011: Metadata about lead search results including source and fallback info
+ */
+export interface LeadSearchResultMeta {
+  source: LeadDataSourceId;
+  leadsFound: number;
+  success: boolean;
+  errorCode?: string;
+  errorMessage?: string;
+  fallbackUsed: boolean;
+  fallbackChain?: Array<{
+    source: LeadDataSourceId;
+    success: boolean;
+    errorMessage?: string;
+    leadsFound?: number;
+  }>;
+}
+
+/**
  * Result from executing a single tool
  */
 export interface LeadToolExecutionResult {
   success: boolean;
   data?: unknown;
   errorMessage?: string;
+  // SUP-011: Optional source metadata for search tools
+  sourceMeta?: LeadSearchResultMeta;
 }
 
 /**
