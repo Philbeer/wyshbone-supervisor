@@ -18,11 +18,44 @@ Built as a B2B productivity tool, it features a Linear-inspired design system op
 - `sup001_done`: ✅ Pure planning function generates execution-ready DAG plans (`server/types/lead-gen-plan.ts`)
 - `sup002_done`: ✅ Complete executor with dependency handling, retry logic (3 attempts, exponential backoff), structured event logging, and 6 tool types (`server/types/lead-gen-plan.ts`)
 - `sup003_done`: ✅ Background goal monitoring service - polls every 30s, detects stalled/no-plan/repeated-failure states, emits structured monitor events (`server/goal-monitoring.ts`)
+- `sup010_done`: ✅ Branching plans with conditional step execution - supports too_many_results, too_few_results, data_source_failed, budget_exceeded, fallback conditions with exclusive execution (`server/types/lead-gen-plan.ts`)
 - `sup060_done`: ❌ Safe-mode experiments/exploration features (not yet implemented)
 
 ## User Preferences
 
 Preferred communication style: Simple, everyday language.
+
+## SUP-010: Branching Plans
+
+**Feature**: Conditional step execution based on runtime results
+
+**Capabilities**:
+- **Branch Conditions**: too_many_results, too_few_results, data_source_failed, budget_exceeded, fallback
+- **Exclusive Execution**: Only chosen branch paths execute; untaken branches are skipped
+- **Threshold Evaluation**: Compares leadsFound against condition thresholds
+- **Reachability Tracking**: Branch-only steps aren't reachable via sequential progression
+- **Backwards Compatibility**: Linear plans without branches work unchanged
+
+**Implementation**:
+- Extended `LeadGenPlanStep` with optional `branches: PlanBranch[]` field
+- `chooseNextStep()` evaluates conditions and selects next step dynamically
+- Executor uses while-loop with branch-aware navigation instead of sequential for-loop
+- Post-execution marks unreachable steps as "skipped" in plan persistence
+
+**Example**:
+```typescript
+{
+  id: "search_restaurants",
+  tool: "GOOGLE_PLACES_SEARCH",
+  branches: [
+    { when: { type: "too_many_results", threshold: 5 }, nextStepId: "narrow_search" },
+    { when: { type: "too_few_results", threshold: 50 }, nextStepId: "expand_search" },
+    { when: { type: "fallback" }, nextStepId: "process_results" }
+  ]
+}
+```
+
+**Testing**: Comprehensive test suite in `server/test-branching.ts` verifies all condition types and exclusive execution
 
 ## System Architecture
 

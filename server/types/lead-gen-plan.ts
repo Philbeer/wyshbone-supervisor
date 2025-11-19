@@ -608,27 +608,13 @@ export function chooseNextStep(
   }
 
   // No branches or no matching branches - fall back to sequential execution
-  // Skip over any branch-only steps in sequential progression
-  const branchOnlySteps = new Set<string>();
-  for (const planStep of plan.steps) {
-    if (planStep.branches) {
-      for (const branch of planStep.branches) {
-        branchOnlySteps.add(branch.nextStepId);
-      }
-    }
-  }
-
-  let nextIndex = currentStepIndex + 1;
-  while (nextIndex < plan.steps.length) {
-    const candidateStepId = plan.steps[nextIndex].id;
-    // Skip branch-only steps during sequential progression
-    if (!branchOnlySteps.has(candidateStepId)) {
-      return {
-        nextStepId: candidateStepId,
-        matchedBranch: null
-      };
-    }
-    nextIndex++;
+  // Note: We don't skip steps here. Reachability tracking will handle which steps execute.
+  const nextIndex = currentStepIndex + 1;
+  if (nextIndex < plan.steps.length) {
+    return {
+      nextStepId: plan.steps[nextIndex].id,
+      matchedBranch: null
+    };
   }
 
   // Plan is complete
