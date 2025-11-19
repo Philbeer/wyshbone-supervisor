@@ -2,293 +2,57 @@
 
 ## Overview
 
-Wyshbone Supervisor is a proactive lead generation system that automatically finds and scores prospects based on user signals. The application monitors user behavior and preferences, then uses AI to identify and suggest relevant leads with contact information. 
+Wyshbone Supervisor is a proactive lead generation system designed as a B2B productivity tool. It automatically finds and scores prospects based on user signals, monitoring user behavior and preferences to identify and suggest relevant leads with contact information.
 
 **Key Capabilities:**
-- **Email Notifications**: Automatically sends email notifications when new leads are found
-- **Chat Integration**: Supervisor's AI participates directly in Wyshbone UI chat conversations
-- **Real-time Responses**: Users can ask Supervisor to find leads and get intelligent responses within 30 seconds
-- **Multi-channel Communication**: Supervisor delivers insights via both email and chat
+- **Email Notifications**: Automatically sends email notifications when new leads are found.
+- **Chat Integration**: Supervisor's AI participates directly in Wyshbone UI chat conversations.
+- **Real-time Responses**: Provides intelligent lead-finding responses within 30 seconds.
+- **Multi-channel Communication**: Delivers insights via both email and chat.
 
-Built as a B2B productivity tool, it features a Linear-inspired design system optimized for data density and workflow efficiency. The system consists of a React frontend with a Node.js/Express backend, using PostgreSQL (via Neon) for data persistence and Drizzle ORM for database operations.
-
-**Architecture**: The Supervisor backend runs independently and integrates with the separate Wyshbone UI application through a shared Supabase database.
-
-**Control Tower Integration**: The export API status endpoint includes boolean flags for tracking Supervisor task completion status:
-- `sup001_done`: ✅ Pure planning function generates execution-ready DAG plans (`server/types/lead-gen-plan.ts`)
-- `sup002_done`: ✅ Complete executor with dependency handling, retry logic (3 attempts, exponential backoff), structured event logging, and 6 tool types (`server/types/lead-gen-plan.ts`)
-- `sup003_done`: ✅ Background goal monitoring service - polls every 30s, detects stalled/no-plan/repeated-failure states, emits structured monitor events (`server/goal-monitoring.ts`)
-- `sup010_done`: ✅ Branching plans with conditional step execution - supports too_many_results, too_few_results, data_source_failed, budget_exceeded, fallback conditions with exclusive execution (`server/types/lead-gen-plan.ts`)
-- `sup060_done`: ❌ Safe-mode experiments/exploration features (not yet implemented)
+The system features a Linear-inspired design system optimized for data density and workflow efficiency. It consists of a React frontend, a Node.js/Express backend, PostgreSQL (via Neon) for data persistence, and Drizzle ORM for database operations. The Supervisor backend integrates with the separate Wyshbone UI application through a shared Supabase database.
 
 ## User Preferences
 
 Preferred communication style: Simple, everyday language.
 
-## SUP-010: Branching Plans
-
-**Feature**: Conditional step execution based on runtime results
-
-**Capabilities**:
-- **Branch Conditions**: too_many_results, too_few_results, data_source_failed, budget_exceeded, fallback
-- **Exclusive Execution**: Only chosen branch paths execute; untaken branches are skipped
-- **Threshold Evaluation**: Compares leadsFound against condition thresholds
-- **Reachability Tracking**: Branch-only steps aren't reachable via sequential progression
-- **Backwards Compatibility**: Linear plans without branches work unchanged
-
-**Implementation**:
-- Extended `LeadGenPlanStep` with optional `branches: PlanBranch[]` field
-- `chooseNextStep()` evaluates conditions and selects next step dynamically
-- Executor uses while-loop with branch-aware navigation instead of sequential for-loop
-- Post-execution marks unreachable steps as "skipped" in plan persistence
-
-**Example**:
-```typescript
-{
-  id: "search_restaurants",
-  tool: "GOOGLE_PLACES_SEARCH",
-  branches: [
-    { when: { type: "too_many_results", threshold: 5 }, nextStepId: "narrow_search" },
-    { when: { type: "too_few_results", threshold: 50 }, nextStepId: "expand_search" },
-    { when: { type: "fallback" }, nextStepId: "process_results" }
-  ]
-}
-```
-
-**Testing**: Comprehensive test suite in `server/test-branching.ts` verifies all condition types and exclusive execution
-
 ## System Architecture
 
-### Frontend Architecture
+### UI/UX Decisions
+The frontend uses a React with TypeScript stack, built with Vite and Wouter for routing. Styling is managed with Tailwind CSS, utilizing custom design tokens. The UI component system is built on `shadcn/ui` (Radix UI primitives) with a "New York" style variant, inspired by Linear's B2B aesthetic. Key components include Dashboard, LeadCard, and a sidebar navigation.
 
-**Technology Stack:**
-- React with TypeScript
-- Vite for build tooling and development server
-- Wouter for client-side routing
-- TanStack Query (React Query) for server state management
-- Tailwind CSS for styling with custom design tokens
+### Technical Implementations
+- **Frontend**: React with TypeScript, Vite, Wouter, TanStack Query for server state management.
+- **Backend**: Node.js with Express and TypeScript, using ESM module system.
+- **Data Storage**: PostgreSQL via Neon serverless, managed with Drizzle ORM for type-safe queries and migrations.
+- **Lead Generation Logic**:
+    - **Branching Plans (SUP-010)**: Supports conditional step execution in lead generation plans based on runtime results (e.g., `too_many_results`, `too_few_results`, `data_source_failed`).
+    - **Fallback Data Sources (SUP-011)**: Implements automatic fallback between ordered data sources if a primary source fails to meet minimum thresholds, tracking the source used and the fallback chain.
+- **Chat Integration**: Supervisor's AI integrates into Wyshbone UI chat via a queue-based architecture using shared Supabase tables (`messages`, `supervisor_tasks`). The UI detects Supervisor intent, creates tasks, and streams Supervisor responses.
 
-**UI Component System:**
-- Built on shadcn/ui components (Radix UI primitives)
-- "New York" style variant with custom theming
-- Design system inspired by Linear for professional B2B aesthetics
-- Component library includes: Dashboard, LeadCard, SuggestionsPanel, UserContextPanel, SignalEvent, StatsCard, EmptyState
-- Sidebar navigation pattern with collapsible states
-- UserContextPanel displays company profile, objectives, top facts, and active monitors
+### Feature Specifications
+- RESTful API endpoints for leads, user context, and signals.
+- Database schema includes `users`, `user_signals`, and `suggested_leads` tables.
+- Signals represent user actions that trigger lead discovery.
+- Leads include enriched data (e.g., emails, places) and trigger email notifications.
 
-**State Management:**
-- React Query for API data fetching and caching
-- Local component state for UI interactions
-- Query invalidation on user actions (refresh, create)
-
-**Routing:**
-- Three main routes: Dashboard (/), Settings (/settings), Signals (/signals)
-- Wouter for lightweight client-side routing
-
-### Backend Architecture
-
-**Technology Stack:**
-- Node.js with Express
-- TypeScript for type safety
-- ESM module system
-
-**API Structure:**
-- RESTful endpoints under `/api` prefix
-- Endpoints:
-  - `GET /api/leads` - Fetch suggested leads for demo user
-  - `GET /api/user/context` - Fetch comprehensive user context (profile, facts, messages, monitors)
-  - `GET /api/signals` - Fetch recent user signals
-  - `POST /api/signals` - Create new signal (testing)
-  - `POST /api/seed` - Seed initial data
-
-**Storage Layer:**
-- Database abstraction through `IStorage` interface
-- `DatabaseStorage` implementation using Drizzle ORM
-- Methods for user management, lead retrieval, signal tracking
-
-**Development Features:**
-- Vite middleware integration for HMR
-- Request logging with timing
-- Error overlay for runtime errors
-- Custom logger with timestamps
-
-### Data Storage
-
-**Database:**
-- PostgreSQL via Neon serverless
-- Connection pooling with `@neondatabase/serverless`
-- WebSocket support for serverless environment
-
-**Schema Design:**
-Three main tables defined in `shared/schema.ts`:
-
-1. **users** - User accounts
-   - id (UUID primary key)
-   - username (unique)
-   - password
-
-2. **user_signals** - User behavior tracking
-   - id (UUID primary key)
-   - userId (foreign reference)
-   - type (signal classification)
-   - payload (JSONB for flexible data)
-   - createdAt (timestamp)
-
-3. **suggested_leads** - AI-generated lead suggestions
-   - id (UUID primary key)
-   - userId (foreign reference)
-   - rationale (explanation text)
-   - source (origin of suggestion)
-   - score (real number for ranking)
-   - lead (JSONB for lead details including name, address, email candidates)
-   - createdAt (timestamp)
-
-**ORM:**
-- Drizzle ORM for type-safe database queries
-- Drizzle-Zod integration for runtime validation
-- Migration support via `drizzle-kit`
-
-**Data Flow:**
-- Signals represent user actions/preferences that trigger lead discovery
-- Supervisor processes signals to generate scored lead suggestions
-- Leads include enriched data (emails via Hunter.io, places via Google Places API)
-- When lead is created, supervisor sends email notification to user via Resend
-- Email notifications include full lead details and link to dashboard
-
-### Authentication & Authorization
-
-**Current Implementation:**
-- Demo user mode with hardcoded "demo-user" ID
-- User schema supports username/password authentication (not yet implemented)
-- No session management or authentication middleware currently active
-
-**Future Considerations:**
-- Session-based authentication using `connect-pg-simple` (already in dependencies)
-- User-specific data isolation once auth is enabled
+### System Design Choices
+- `IStorage` interface for database abstraction, with `DatabaseStorage` using Drizzle ORM.
+- Hardcoded "demo-user" for current authentication, with future support for username/password and session management planned.
+- Comprehensive logging and error handling for robustness.
 
 ## External Dependencies
 
-### Third-Party Services
-
-**Supabase:**
-- Shared database with Wyshbone UI app
-- Stores rich user context data:
-  - `users` - Company profiles, industry, objectives, target markets, **email addresses**
-  - `conversations` - Chat sessions
-  - `messages` - Full conversation history (user ↔ AI)
-  - `facts` - Ranked user preferences/needs with importance scores
-  - `scheduled_monitors` - Active monitoring tasks showing engagement
-  - `deep_research_runs` - Research queries revealing interests
-  - `integrations` - Connected CRM/accounting platforms
-  - `user_signals` - Behavioral signals triggering lead generation
-- Credentials configured (SUPABASE_URL, SUPABASE_SERVICE_ROLE, SUPABASE_ANON)
-- Supervisor polls every 30s for new signals and builds comprehensive user context
-- Ready for integration
-
-**Resend (Email Service):**
-- Transactional email service for lead notifications
-- Automatically sends emails when new leads are generated
-- Email includes: lead name, contact info, score, rationale, dashboard link
-- HTML and plain-text templates with proper escaping
-- Integration configured via Replit Connectors (connection:conn_resend_01K8TGCAX8WZAJ52G7YFJW46SB)
-- Graceful error handling - email failures don't block supervisor
-- Emails sent to user's address from Supabase `users` table
-
-## Supervisor Chat Integration (NEW)
-
-The Supervisor's AI intelligence now participates directly in Wyshbone UI chat conversations through a queue-based architecture:
-
-### Architecture Overview
-
-**Shared Database (Supabase):**
-- `messages` table extended with `source` ('ui' | 'supervisor' | 'system') and `metadata` (JSONB)
-- `supervisor_tasks` queue table for UI to request Supervisor processing
-- Both Wyshbone Supervisor and Wyshbone UI apps connect to same Supabase instance
-
-**Data Flow:**
-1. User types message in Wyshbone UI chat
-2. UI detects if Supervisor help is needed (keywords: "find leads", "analyze", etc.)
-3. UI creates `supervisor_task` entry in Supabase with conversation context
-4. Supervisor polls every 30s, finds pending tasks
-5. Supervisor analyzes conversation, generates leads, formats response
-6. Supervisor posts message to `messages` table with `source='supervisor'`
-7. UI streams new messages via Supabase realtime subscription
-8. User sees Supervisor's response with special badge and styling
-
-### Task Types
-
-- **generate_leads**: Find prospects using Google Places + Hunter.io
-- **find_prospects**: Same as generate_leads
-- **analyze_conversation**: Analyze chat history and provide insights
-- **provide_insights**: Share business intelligence from user profile
-
-### Supervisor Response Format
-
-Supervisor messages include rich metadata:
-```json
-{
-  "source": "supervisor",
-  "metadata": {
-    "supervisor_task_id": "task-uuid",
-    "capabilities": ["lead_generation", "email_enrichment"],
-    "lead_ids": ["lead-1", "lead-2", "lead-3"]
-  }
-}
-```
-
-### Integration with Wyshbone UI
-
-See `INTEGRATION_INSTRUCTIONS_FOR_WYSHBONE_UI.md` for complete integration guide.
-
-**UI Requirements:**
-- Detect Supervisor intent from user messages
-- Create supervisor_tasks in Supabase
-- Subscribe to Supabase realtime for message updates
-- Render Supervisor messages with distinctive styling (badge, border, metadata chips)
-- Handle loading states while waiting for Supervisor response (~30s)
-
-**Testing:**
-- Test endpoint: `POST /api/test/supervisor-task` creates demo tasks
-- Supervisor processes within 30 seconds
-- Check Supabase `supervisor_tasks` and `messages` tables to verify
-
-**Google Places API:**
-- Mentioned in schema (place_id field) for lead enrichment
-- Used to find physical business locations based on user signals
-
-**Hunter.io:**
-- Email discovery service for lead contact information
-- Referenced in settings page with maxHunter configuration
-- Used to populate emailCandidates field in leads
-
-### UI Component Libraries
-
-**Radix UI:**
-- Comprehensive primitive component set (@radix-ui/react-*)
-- Accordion, Dialog, Dropdown, Popover, Tabs, Toast, Tooltip, etc.
-- Provides accessible, unstyled components for custom theming
-
-**shadcn/ui:**
-- Component configuration via `components.json`
-- Custom styling applied through Tailwind utilities
-- Path aliases for clean imports (@/components, @/lib, @/hooks)
-
-### Development Tools
-
-**Build & Development:**
-- Vite with React plugin
-- Replit-specific plugins: runtime error modal, cartographer, dev banner
-- PostCSS with Tailwind and Autoprefixer
-- esbuild for server bundling
-
-**Type Safety:**
-- TypeScript with strict mode
-- Zod for runtime schema validation
-- Drizzle-Zod for database schema validation
-
-### Fonts & Assets
-
-**Typography:**
-- Inter font family via Google Fonts CDN
-- Variable font weights (100-900)
-- Preconnect optimization for performance
+- **Supabase**: Used as the shared database for both Wyshbone UI and Supervisor. It stores user profiles, conversations, facts, scheduled monitors, deep research runs, integrations, and user signals. Supervisor polls Supabase for new signals and task management for chat integration.
+- **Resend**: Transactional email service used for sending lead notification emails to users.
+- **Google Places API**: Utilized for finding physical business locations and enriching lead data.
+- **Hunter.io**: An email discovery service used to populate `emailCandidates` for leads.
+- **Radix UI**: Provides accessible, unstyled primitive components for UI development.
+- **shadcn/ui**: Component library built on Radix UI, providing custom-themed components.
+- **PostgreSQL (Neon)**: Serverless relational database for data persistence.
+- **Drizzle ORM**: Type-safe ORM for database interactions.
+- **Vite**: Build tool and development server for the frontend.
+- **Wouter**: Lightweight client-side router.
+- **TanStack Query**: For server state management and caching.
+- **Tailwind CSS**: Utility-first CSS framework for styling.
+- **Zod**: Runtime schema validation library.
