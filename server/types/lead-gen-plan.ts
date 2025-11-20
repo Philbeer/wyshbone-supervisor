@@ -1366,6 +1366,10 @@ export async function executeLeadGenerationPlan(
   console.log(`  startedAt: ${startedAt}`);
   console.log(`${'='.repeat(70)}\n`);
 
+  // Log to Tower (Control Tower)
+  const { logPlanStart } = await import('../tower-logger');
+  logPlanStart(plan.id, user.userId, user.accountId, plan.title);
+
   emitPlanEvent("PLAN_STARTED", { plan, user });
 
   // Build step lookup map for branch-based navigation
@@ -1549,7 +1553,8 @@ export async function executeLeadGenerationPlan(
   const succeeded = Object.values(stepResults).filter(r => r.status === "succeeded").length;
   const failed = Object.values(stepResults).filter(r => r.status === "failed").length;
   const skipped = Object.values(stepResults).filter(r => r.status === "skipped").length;
-  const duration = ((finishedAtDate.getTime() - startedAtDate.getTime()) / 1000).toFixed(1);
+  const durationSeconds = (finishedAtDate.getTime() - startedAtDate.getTime()) / 1000;
+  const duration = durationSeconds.toFixed(1);
 
   const statusEmoji = overallStatus === "succeeded" ? "✓✓✓" : overallStatus === "failed" ? "✗✗✗" : "○○○";
   console.log(`\n${'='.repeat(70)}`);
@@ -1559,6 +1564,24 @@ export async function executeLeadGenerationPlan(
   console.log(`  steps: ${succeeded} succeeded, ${failed} failed, ${skipped} skipped`);
   console.log(`  executionPath: [${executionPath.slice(0, 3).join(', ')}${executionPath.length > 3 ? `, ... (${executionPath.length} total)` : ''}]`);
   console.log(`${'='.repeat(70)}\n`);
+
+  // Log to Tower (Control Tower)
+  const { logPlanComplete } = await import('../tower-logger');
+  logPlanComplete(
+    plan.id,
+    user.userId,
+    user.accountId,
+    plan.title,
+    overallStatus === "succeeded" ? "success" : overallStatus === "failed" ? "failed" : "partial",
+    {
+      total: plan.steps.length,
+      succeeded,
+      failed,
+      skipped
+    },
+    durationSeconds,
+    failed > 0 ? `${failed} step(s) failed` : undefined
+  );
 
   emitPlanEvent("PLAN_COMPLETED", {
     plan,
