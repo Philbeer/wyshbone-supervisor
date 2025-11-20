@@ -45,17 +45,17 @@ async function executePlanWithProgress(
     const eventHandler = (eventType: string, payload: any) => {
       if (eventType === "STEP_STARTED") {
         const { stepId } = payload;
-        updateStepStatus(sessionId, stepId, "running");
+        updateStepStatus(planId, stepId, "running");
       } else if (eventType === "STEP_SUCCEEDED") {
         const { stepId, attempts } = payload;
-        updateStepStatus(sessionId, stepId, "completed", undefined, attempts);
+        updateStepStatus(planId, stepId, "completed", undefined, attempts);
       } else if (eventType === "STEP_FAILED") {
         const { stepId, error, attempts } = payload;
-        updateStepStatus(sessionId, stepId, "failed", error, attempts);
+        updateStepStatus(planId, stepId, "failed", error, attempts);
       } else if (eventType === "PLAN_COMPLETED") {
-        completePlan(sessionId);
+        completePlan(planId);
       } else if (eventType === "PLAN_FAILED") {
-        failPlan(sessionId, payload.error);
+        failPlan(planId, payload.error);
       }
     };
 
@@ -68,10 +68,10 @@ async function executePlanWithProgress(
 
       // Update final status based on result
       if (result.overallStatus === "succeeded") {
-        completePlan(sessionId);
+        completePlan(planId);
         console.log(`[EXEC+PROGRESS] Plan ${planId} completed successfully`);
       } else if (result.overallStatus === "failed") {
-        failPlan(sessionId, "Plan execution failed");
+        failPlan(planId, "Plan execution failed");
         console.log(`[EXEC+PROGRESS] Plan ${planId} failed`);
       }
     } finally {
@@ -81,7 +81,7 @@ async function executePlanWithProgress(
 
   } catch (error: any) {
     console.error(`[EXEC+PROGRESS] Execution error:`, error);
-    failPlan(sessionId, error.message);
+    failPlan(planId, error.message);
     // Ensure cleanup happens even on error
     unregisterPlanEventHandler(planId);
     throw error;
@@ -219,7 +219,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Execute plan asynchronously (fire-and-forget)
       executePlanWithProgress(plan, userContext, sessionId).catch(err => {
         console.error(`[PLAN API] Execution error for plan ${planId}:`, err);
-        failPlan(sessionId, err.message);
+        failPlan(planId, err.message);
       });
 
       res.json({ 
@@ -237,9 +237,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/plan/progress", async (req, res) => {
     try {
       const userId = getUserId(req);
-      const sessionId = userId; // Using userId as session ID
+      const { planId } = req.query;
 
-      const progress = getProgress(sessionId);
+      let progress;
+      if (planId) {
+        // Get progress for specific plan
+        progress = getProgress(planId as string);
+      } else {
+        // Get user's most recent plan progress
+        const { getUserProgress } = await import("./plan-progress");
+        progress = getUserProgress(userId);
+      }
 
       if (!progress) {
         return res.json({ 

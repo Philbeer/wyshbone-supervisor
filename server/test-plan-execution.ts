@@ -53,7 +53,7 @@ async function testPlanExecutionPipeline() {
   startPlanProgress(plan.id, sessionId, plan.steps);
   console.log('✓ Progress tracking initialized');
 
-  let progress = getProgress(sessionId);
+  let progress = getProgress(plan.id);
   console.log(`  Status: ${progress?.overallStatus}`);
   console.log(`  Steps pending: ${progress?.steps.filter(s => s.status === 'pending').length}`);
 
@@ -66,13 +66,13 @@ async function testPlanExecutionPipeline() {
     eventLog.push({ type: eventType, stepId: payload.stepId, status: payload.status });
     
     if (eventType === "STEP_STARTED") {
-      updateStepStatus(sessionId, payload.stepId, "running");
+      updateStepStatus(plan.id, payload.stepId, "running");
       console.log(`  📍 Step started: ${payload.stepId}`);
     } else if (eventType === "STEP_SUCCEEDED") {
-      updateStepStatus(sessionId, payload.stepId, "completed", undefined, payload.attempts);
+      updateStepStatus(plan.id, payload.stepId, "completed", undefined, payload.attempts);
       console.log(`  ✅ Step completed: ${payload.stepId} (${payload.attempts} attempts)`);
     } else if (eventType === "STEP_FAILED") {
-      updateStepStatus(sessionId, payload.stepId, "failed", payload.error, payload.attempts);
+      updateStepStatus(plan.id, payload.stepId, "failed", payload.error, payload.attempts);
       console.log(`  ❌ Step failed: ${payload.stepId} - ${payload.error}`);
     } else if (eventType === "STEP_SKIPPED") {
       console.log(`  ⏭️  Step skipped: ${payload.stepId}`);
@@ -97,16 +97,16 @@ async function testPlanExecutionPipeline() {
   // Step 5: Update final status
   console.log('\n5️⃣  Finalizing...');
   if (result.overallStatus === "succeeded") {
-    completePlan(sessionId);
+    completePlan(plan.id);
     console.log('✓ Plan completed successfully');
   } else {
-    failPlan(sessionId, "Plan execution failed");
+    failPlan(plan.id, "Plan execution failed");
     console.log('✗ Plan failed');
   }
 
   // Step 6: Verify progress
   console.log('\n6️⃣  Verifying progress tracking...');
-  progress = getProgress(sessionId);
+  progress = getProgress(plan.id);
   
   if (!progress) {
     console.log('✗ ERROR: No progress found!');

@@ -1,19 +1,19 @@
 /**
- * Test concurrent plan executions to verify event handler isolation
+ * Test same user launching multiple plans sequentially
  * 
- * Validates that multiple plans can execute simultaneously without
- * interfering with each other's progress tracking.
+ * Validates that progress tracking correctly handles multiple plans
+ * for the same user without overwriting each other.
  */
 
 import { planLeadGenerationWithHistory, executeLeadGenerationPlan, registerPlanEventHandler, unregisterPlanEventHandler, type LeadGenGoal, type LeadGenContext, type SupervisorUserContext } from "./types/lead-gen-plan";
-import { startPlanProgress, updateStepStatus, completePlan, failPlan, getProgress } from "./plan-progress";
+import { startPlanProgress, updateStepStatus, completePlan, failPlan, getProgress, getUserProgress } from "./plan-progress";
 
 async function executePlanWithTracking(
   goal: LeadGenGoal,
   userId: string,
-  accountId: string
+  accountId: string,
+  planLabel: string
 ): Promise<{ planId: string; events: string[]; finalStatus: string }> {
-  const sessionId = userId;
   const events: string[] = [];
 
   // Create plan
@@ -26,10 +26,10 @@ async function executePlanWithTracking(
   };
 
   const plan = await planLeadGenerationWithHistory(goal, context);
-  console.log(`[${userId}] Created plan ${plan.id}`);
+  console.log(`[${planLabel}] Created plan ${plan.id}`);
 
   // Initialize progress
-  startPlanProgress(plan.id, sessionId, plan.steps);
+  startPlanProgress(plan.id, userId, plan.steps);
 
   // Register event handler for this plan
   registerPlanEventHandler(plan.id, (eventType, payload) => {
@@ -65,66 +65,75 @@ async function executePlanWithTracking(
   }
 }
 
-async function testConcurrentExecutions() {
+async function testSameUserMultiplePlans() {
   console.log('\n========================================');
-  console.log('TEST: Concurrent Plan Executions');
+  console.log('TEST: Same User Multiple Plans');
   console.log('========================================\n');
 
-  // Define two different goals for two different users
+  const userId = "test-user-same";
+  const accountId = "test-account";
+
+  // Define two different goals for the same user
   const goal1: LeadGenGoal = {
-    rawGoal: "Find 5 coffee shops in Manchester",
-    targetRegion: "Manchester",
-    targetPersona: "coffee shop owners",
-    volume: 5,
+    rawGoal: "Find 3 gyms in Bristol",
+    targetRegion: "Bristol",
+    targetPersona: "gym owners",
+    volume: 3,
     timing: "asap",
     preferredChannels: [],
     includeMonitoring: false
   };
 
   const goal2: LeadGenGoal = {
-    rawGoal: "Find 8 restaurants in London",
-    targetRegion: "London",
-    targetPersona: "restaurant owners",
-    volume: 8,
+    rawGoal: "Find 5 cafes in Leeds",
+    targetRegion: "Leeds",
+    targetPersona: "cafe owners",
+    volume: 5,
     timing: "asap",
     preferredChannels: [],
     includeMonitoring: false
   };
 
-  console.log('1️⃣  Starting two plans concurrently...\n');
+  console.log('1️⃣  Executing first plan...\n');
+  const result1 = await executePlanWithTracking(goal1, userId, accountId, "Plan 1");
 
-  // Execute both plans concurrently
-  const [result1, result2] = await Promise.all([
-    executePlanWithTracking(goal1, "user1", "account1"),
-    executePlanWithTracking(goal2, "user2", "account2")
-  ]);
+  console.log('\n2️⃣  Executing second plan (same user)...\n');
+  const result2 = await executePlanWithTracking(goal2, userId, accountId, "Plan 2");
 
-  console.log('\n2️⃣  Verifying results...\n');
+  console.log('\n3️⃣  Verifying both plans tracked separately...\n');
 
-  // Verify plan 1
+  // Verify each plan can be accessed by planId
+  const progress1 = getProgress(result1.planId);
+  const progress2 = getProgress(result2.planId);
+
   console.log(`Plan 1 (${result1.planId}):`);
   console.log(`  Final status: ${result1.finalStatus}`);
+  console.log(`  Progress status: ${progress1?.overallStatus}`);
   console.log(`  Events captured: ${result1.events.length}`);
-  console.log(`  Event types: ${[...new Set(result1.events.map(e => e.split(':')[0]))].join(', ')}`);
 
-  // Verify plan 2
   console.log(`\nPlan 2 (${result2.planId}):`);
   console.log(`  Final status: ${result2.finalStatus}`);
+  console.log(`  Progress status: ${progress2?.overallStatus}`);
   console.log(`  Events captured: ${result2.events.length}`);
-  console.log(`  Event types: ${[...new Set(result2.events.map(e => e.split(':')[0]))].join(', ')}`);
+
+  // Verify getUserProgress returns the most recent plan
+  const userRecentProgress = getUserProgress(userId);
+  console.log(`\nUser's most recent plan: ${userRecentProgress?.planId}`);
+  console.log(`  Expected: ${result2.planId}`);
+  console.log(`  Match: ${userRecentProgress?.planId === result2.planId ? '✅' : '❌'}`);
 
   // Verification checks
-  console.log('\n3️⃣  Verification checks...\n');
+  console.log('\n4️⃣  Verification checks...\n');
 
   const checks = {
+    plan1Exists: progress1 !== null,
+    plan2Exists: progress2 !== null,
+    plan1Completed: progress1?.overallStatus === "completed",
+    plan2Completed: progress2?.overallStatus === "completed",
+    differentPlanIds: result1.planId !== result2.planId,
     plan1HasEvents: result1.events.length > 0,
     plan2HasEvents: result2.events.length > 0,
-    plan1Succeeded: result1.finalStatus === "succeeded",
-    plan2Succeeded: result2.finalStatus === "succeeded",
-    eventsNotMixed: !result1.events.some(e => e.includes(result2.planId)) && 
-                    !result2.events.some(e => e.includes(result1.planId)),
-    bothHaveStepEvents: result1.events.some(e => e.startsWith('STEP_')) && 
-                        result2.events.some(e => e.startsWith('STEP_'))
+    userRecentIsCorrect: userRecentProgress?.planId === result2.planId
   };
 
   Object.entries(checks).forEach(([check, passed]) => {
@@ -135,15 +144,15 @@ async function testConcurrentExecutions() {
   // Final result
   const allChecksPassed = Object.values(checks).every(v => v);
   
-  console.log('\n4️⃣  Final result...\n');
+  console.log('\n5️⃣  Final result...\n');
   
   if (allChecksPassed) {
-    console.log('✅ TEST PASSED: Concurrent executions work correctly!');
+    console.log('✅ TEST PASSED: Same user can execute multiple plans!');
     console.log('   - Both plans executed successfully');
-    console.log('   - Events properly isolated per plan');
-    console.log('   - No cross-contamination detected');
+    console.log('   - Progress tracked independently per plan');
+    console.log('   - getUserProgress returns most recent plan');
   } else {
-    console.log('❌ TEST FAILED: Concurrent execution issues detected');
+    console.log('❌ TEST FAILED: Issues with same-user multiple plans');
     console.log(`   Failed checks: ${Object.entries(checks).filter(([_, v]) => !v).map(([k]) => k).join(', ')}`);
   }
 
@@ -151,7 +160,7 @@ async function testConcurrentExecutions() {
 }
 
 // Run the test
-testConcurrentExecutions()
+testSameUserMultiplePlans()
   .then((passed) => {
     console.log('\n========================================');
     console.log('Test completed');
