@@ -2,7 +2,7 @@
  * Plan Progress Tracking Module
  * 
  * Tracks real-time progress of lead generation plan execution.
- * Progress is stored in-memory, keyed by sessionId.
+ * Progress is stored in-memory, keyed by planId.
  */
 
 export interface PlanStepProgress {

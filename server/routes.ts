@@ -114,12 +114,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         includeMonitoring: goal.includeMonitoring || false
       };
 
-      // Get user's account ID from Supabase for multi-account isolation
-      const { data: userData } = await supabase
-        .from('users')
-        .select('account_id, email')
-        .eq('id', userId)
-        .single();
+      // Get user's account ID from Supabase for multi-account isolation (if configured)
+      let userData: { account_id?: string; email?: string } | null = null;
+      if (supabase) {
+        const result = await supabase
+          .from('users')
+          .select('account_id, email')
+          .eq('id', userId)
+          .single();
+        userData = result.data;
+      }
 
       const context: LeadGenContext = {
         userId,
@@ -213,11 +217,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Get user context for execution
       console.log(`[PLAN_APPROVE] Fetching user context for ${userId}...`);
-      const { data: userData } = await supabase
-        .from('users')
-        .select('email, account_id')
-        .eq('id', userId)
-        .single();
+      let userData: { account_id?: string; email?: string } | null = null;
+      if (supabase) {
+        const result = await supabase
+          .from('users')
+          .select('email, account_id')
+          .eq('id', userId)
+          .single();
+        userData = result.data;
+      }
 
       const userContext: SupervisorUserContext = {
         userId,
@@ -231,17 +239,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log(`[PLAN_APPROVE] Updating plan status to 'executing'...`);
       await storage.updatePlanStatus(planId, "executing");
 
-      // Start progress tracking (use userId as session ID)
-      const sessionId = userId;
-      console.log(`[PLAN_APPROVE] Starting progress tracking for plan ${planId} (session: ${sessionId})...`);
-      startPlanProgress(plan.id, sessionId, plan.steps);
+      // Start progress tracking (use planId)
+      console.log(`[PLAN_APPROVE] Starting progress tracking for plan ${planId}...`);
+      startPlanProgress(plan.id, plan.id, plan.steps);
 
       // Execute plan asynchronously (fire-and-forget)
       console.log(`[PLAN_APPROVE] Kicking off execution for plan ${planId}...`);
-      executePlanWithProgress(plan, userContext, sessionId).catch(err => {
-        console.error(`[PLAN_APPROVE] EXECUTION ERROR for plan ${planId}:`, err);
-        failPlan(planId, err.message);
-      });
+      const { startPlanExecution } = await import('./plan-executor');
+      startPlanExecution(planId);
 
       const elapsed = Date.now() - startTime;
       console.log(`\n${'='.repeat(60)}`);
@@ -319,22 +324,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
     console.log(`[PLAN_STATUS] Request received - query params:`, req.query);
     
     try {
-      const userId = getUserId(req);
-      const { planId, conversationId } = req.query;
+      const { planId } = req.query;
 
-      console.log(`[PLAN_STATUS] userId: ${userId}, planId: ${planId}, conversationId: ${conversationId}`);
+      console.log(`[PLAN_STATUS] planId: ${planId}`);
 
-      let progress;
-      if (planId) {
-        // Get progress for specific plan
-        console.log(`[PLAN_STATUS] Looking up progress for planId: ${planId}`);
-        progress = getProgress(planId as string);
-      } else {
-        // Get user's most recent plan progress
-        console.log(`[PLAN_STATUS] Looking up most recent plan for userId: ${userId}`);
-        const { getUserProgress } = await import("./plan-progress");
-        progress = getUserProgress(userId);
+      if (!planId) {
+        console.log(`[PLAN_STATUS] No planId provided - returning idle status`);
+        return res.json({ 
+          hasActivePlan: false,
+          status: "idle",
+          message: "No planId provided"
+        });
       }
+
+      // Get progress for specific plan using planId
+      console.log(`[PLAN_STATUS] Looking up progress for planId: ${planId}`);
+      const progress = getProgress(planId as string);
 
       if (!progress) {
         console.log(`[PLAN_STATUS] No progress found - returning idle status`);
