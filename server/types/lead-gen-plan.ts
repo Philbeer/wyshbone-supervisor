@@ -1356,6 +1356,16 @@ export async function executeLeadGenerationPlan(
   const planContext: Record<string, unknown> = { spentBudget: 0 };
   const executionPath: string[] = []; // Track which steps were executed
 
+  console.log(`\n${'='.repeat(70)}`);
+  console.log(`[PLAN_EXEC] STARTING EXECUTION`);
+  console.log(`  planId: ${plan.id}`);
+  console.log(`  userId: ${user.userId}`);
+  console.log(`  accountId: ${user.accountId || 'N/A'}`);
+  console.log(`  goal: ${plan.title}`);
+  console.log(`  totalSteps: ${plan.steps.length}`);
+  console.log(`  startedAt: ${startedAt}`);
+  console.log(`${'='.repeat(70)}\n`);
+
   emitPlanEvent("PLAN_STARTED", { plan, user });
 
   // Build step lookup map for branch-based navigation
@@ -1454,6 +1464,9 @@ export async function executeLeadGenerationPlan(
     }
 
     // Execute the step with retries
+    const stepNumber = currentIndex + 1;
+    console.log(`[PLAN_EXEC] Step ${stepNumber}/${plan.steps.length}: ${step.label || step.tool} (${step.id}) → status=running`);
+    
     const result = await executeStepWithRetries(
       step,
       plan,
@@ -1464,6 +1477,9 @@ export async function executeLeadGenerationPlan(
     );
 
     stepResults[step.id] = result;
+
+    const statusEmoji = result.status === "succeeded" ? "✓" : result.status === "failed" ? "✗" : "○";
+    console.log(`[PLAN_EXEC] Step ${stepNumber}/${plan.steps.length}: ${step.label || step.tool} → ${statusEmoji} status=${result.status}${result.errorMessage ? ` (${result.errorMessage})` : ''}`);
 
     if (result.status === "failed") {
       overallStatus = "failed";
@@ -1529,6 +1545,20 @@ export async function executeLeadGenerationPlan(
     finishedAt,
     stepResults: Object.values(stepResults)
   };
+
+  const succeeded = Object.values(stepResults).filter(r => r.status === "succeeded").length;
+  const failed = Object.values(stepResults).filter(r => r.status === "failed").length;
+  const skipped = Object.values(stepResults).filter(r => r.status === "skipped").length;
+  const duration = ((finishedAtDate.getTime() - startedAtDate.getTime()) / 1000).toFixed(1);
+
+  const statusEmoji = overallStatus === "succeeded" ? "✓✓✓" : overallStatus === "failed" ? "✗✗✗" : "○○○";
+  console.log(`\n${'='.repeat(70)}`);
+  console.log(`[PLAN_EXEC] ${statusEmoji} ${overallStatus.toUpperCase()}`);
+  console.log(`  planId: ${plan.id}`);
+  console.log(`  duration: ${duration}s`);
+  console.log(`  steps: ${succeeded} succeeded, ${failed} failed, ${skipped} skipped`);
+  console.log(`  executionPath: [${executionPath.slice(0, 3).join(', ')}${executionPath.length > 3 ? `, ... (${executionPath.length} total)` : ''}]`);
+  console.log(`${'='.repeat(70)}\n`);
 
   emitPlanEvent("PLAN_COMPLETED", {
     plan,

@@ -1,0 +1,146 @@
+You are my coding assistant for the Wyshbone Supervisor repl.
+
+Goal:
+Debug and fix the live “plan approval → execution → progress” pipeline that the UI is using.
+
+Symptoms Phil sees in the real app:
+- He enters a goal in the right panel, clicks “Start working on this goal”, sees a real plan with steps.
+- He clicks “Approve Plan” and gets the toast: “Plan Approved – Wyshbone will now execute your plan.”
+- The Progress widget stays red with “Unable to load progress”.
+- In Tower, we only see normal chat runs (source: live_user) – no plan-execution runs.
+
+You recently added:
+- /api/plan/start
+- /api/plan/approve
+- /api/plan-status
+- plan execution + progress tracking (tests all pass)
+
+But in the **real UI flow** something is not firing correctly.
+
+----------------------------
+1) Instrument /api/plan/approve
+----------------------------
+
+Open server/routes.ts and find the handler for POST /api/plan/approve.
+
+Add **very explicit logging** to the console at the start and end of this handler, including:
+- the planId being approved
+- the userId / accountId / session
+- whether we actually call the executor function
+
+Example (adapt/rename to match the codebase):
+
+- “PLAN_APPROVE: received request for planId=..., userId=...”
+- “PLAN_APPROVE: starting execution for planId=...”
+- “PLAN_APPROVE: execution kicked off OK”
+- “PLAN_APPROVE: ERROR …” if anything throws
+
+Then restart the app.
+
+The aim is: when Phil clicks Approve Plan in the UI, we should clearly see in logs that:
+- /api/plan/approve was called
+- startPlanExecution (or equivalent) was invoked
+
+If the handler currently only updates status to “approved” in the DB but **never actually calls** the execution helper, fix that: call the same execution function you use in your test scripts (e.g. executePlanWithProgress(planId) or similar).
+
+----------------------------
+2) Verify the executor actually runs
+----------------------------
+
+Find the plan execution code in server/types/lead-gen-plan.ts (or wherever the executor lives).
+
+Add logging at key points:
+
+- When an execution starts:
+  - “PLAN_EXEC: starting execution for planId=..., userId=...”
+- When each step starts / ends:
+  - “PLAN_EXEC: step X/Y 'title' status=running/completed/failed”
+- On final success / failure:
+  - “PLAN_EXEC: planId=... COMPLETED”
+  - “PLAN_EXEC: planId=... FAILED error=...”
+
+Then re-run the app and, after Phil approves a plan in the UI, check the logs:
+- If you see nothing → /api/plan/approve is not triggering the executor.
+- If you see “PLAN_EXEC” logs → the executor is running but /api/plan-status is not returning the right data.
+
+Fix whichever is broken.
+
+----------------------------
+3) Check /api/plan-status behaviour
+----------------------------
+
+Open the handler for GET /api/plan-status in routes.ts.
+
+Confirm:
+- What query parameters it expects (planId? conversationId? userId?).
+- What it returns on success vs failure.
+
+Now inspect the hook in the UI:
+- client/src/hooks/use-plan-progress.ts
+
+Verify that:
+- It is calling the **same path** (/api/plan-status, not /api/plan/progress).
+- It is passing the correct identifier (planId or conversationId) that the server expects.
+
+If there is a mismatch (e.g. UI passes planId but server expects conversationId, or vice versa), fix the route handler to accept planId from the query string and look up the correct progress entry.
+
+Important: If /api/plan-status is currently throwing or returning a 4xx/5xx when there is no progress yet, the UI will show “Unable to load progress”. Instead:
+
+- For “no progress yet but execution started” return a valid JSON shape with status “pending” and step statuses all “pending”.
+- For “no active plan found” return a clear JSON with e.g. `{ hasActivePlan: false }` and HTTP 200, so the UI doesn’t treat it as a hard error.
+
+Add explicit logging in /api/plan-status:
+- Log the incoming query params and the resolved planId.
+- Log what status/progress you are returning.
+
+----------------------------
+4) Connect execution → progress tracker
+----------------------------
+
+In your execution code you previously wired progress to an in-memory store keyed by planId (e.g. startPlanProgress, updateStepStatus, completePlan, failPlan).
+
+Double-check that:
+
+- When /api/plan/approve triggers execution, it is passing the SAME planId that the progress tracker is keyed by.
+- /api/plan-status uses that SAME planId to read from the progress store.
+
+If they are keying on different things (sessionId vs planId vs conversationId), unify them:
+- Use **planId** as the primary key throughout.
+- Optionally support “most recent plan for this user” if no planId is passed, but primary path is planId.
+
+----------------------------
+5) Tower logging for plan execution
+----------------------------
+
+Once plan execution is confirmed to be running, add a simple Tower log from the executor so Phil can see plan runs in Tower.
+
+Somewhere near the start of the executor (once you know planId, goal, and userId), call your existing Tower ingestion helper (or, if none, directly POST to /tower/runs/log) with something like:
+
+- source: "plan_executor"
+- userId: same as UI runs
+- runId: the planId or a derived id
+- request: { goal, planId }
+- status: "running" / then "success" or "failed" at the end
+
+Keep it minimal – a single run per plan is enough for now.
+
+----------------------------
+6) Sanity test flow (what you should test yourself)
+----------------------------
+
+After implementing all of this, do a full manual test from inside Replit:
+
+1. Start the app.
+2. In the UI:
+   - Enter a goal, click “Start working on this goal”.
+   - Approve the generated plan.
+3. Watch the server logs:
+   - See /api/plan/approve logs.
+   - See “PLAN_EXEC” logs for starting + step transitions.
+   - See /api/plan-status logs every 5 seconds with sensible JSON.
+4. Watch the UI:
+   - The Progress widget should now move from error/red to a real status with at least some indication of step states.
+5. Check Tower:
+   - Confirm that a new run with source "plan_executor" (or equivalent) appears for this plan.
+
+When you are done, summarise **exactly** what you changed (file names + functions) and confirm the end-to-end flow works for a real UI goal, not just test scripts.

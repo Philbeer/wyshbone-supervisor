@@ -168,35 +168,51 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // POST /api/plan/approve - Approve and execute a plan
   app.post("/api/plan/approve", async (req, res) => {
-    try {
-      const userId = getUserId(req);
-      const { planId } = req.body;
+    const startTime = Date.now();
+    const userId = getUserId(req);
+    const { planId } = req.body;
 
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`[PLAN_APPROVE] RECEIVED REQUEST`);
+    console.log(`  planId: ${planId}`);
+    console.log(`  userId: ${userId}`);
+    console.log(`  timestamp: ${new Date().toISOString()}`);
+    console.log(`${'='.repeat(60)}\n`);
+
+    try {
       if (!planId) {
+        console.log(`[PLAN_APPROVE] ERROR: Missing planId`);
         return res.status(400).json({ error: "planId is required" });
       }
 
       // Retrieve plan from database
+      console.log(`[PLAN_APPROVE] Retrieving plan ${planId} from database...`);
       const dbPlan = await storage.getPlan(planId);
+      
       if (!dbPlan) {
+        console.log(`[PLAN_APPROVE] ERROR: Plan ${planId} not found`);
         return res.status(404).json({ error: "Plan not found" });
       }
 
+      console.log(`[PLAN_APPROVE] Found plan - status: ${dbPlan.status}, owner: ${dbPlan.userId}`);
+
       // Validate ownership
       if (dbPlan.userId !== userId) {
+        console.log(`[PLAN_APPROVE] ERROR: User ${userId} not authorized for plan ${planId} (owner: ${dbPlan.userId})`);
         return res.status(403).json({ error: "Not authorized to approve this plan" });
       }
 
       // Check if already executed
       if (dbPlan.status !== "pending_approval") {
+        console.log(`[PLAN_APPROVE] ERROR: Plan ${planId} already has status ${dbPlan.status}`);
         return res.status(400).json({ error: `Plan is already ${dbPlan.status}` });
       }
 
       const plan = dbPlan.planData as LeadGenPlan;
-
-      console.log(`[PLAN API] Approved plan ${planId}, starting execution...`);
+      console.log(`[PLAN_APPROVE] Plan ${planId} has ${plan.steps.length} steps`);
 
       // Get user context for execution
+      console.log(`[PLAN_APPROVE] Fetching user context for ${userId}...`);
       const { data: userData } = await supabase
         .from('users')
         .select('email, account_id')
@@ -209,18 +225,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
         email: userData?.email || undefined
       };
 
+      console.log(`[PLAN_APPROVE] User context: accountId=${userContext.accountId}, email=${userContext.email}`);
+
       // Update plan status to executing
+      console.log(`[PLAN_APPROVE] Updating plan status to 'executing'...`);
       await storage.updatePlanStatus(planId, "executing");
 
       // Start progress tracking (use userId as session ID)
       const sessionId = userId;
+      console.log(`[PLAN_APPROVE] Starting progress tracking for plan ${planId} (session: ${sessionId})...`);
       startPlanProgress(plan.id, sessionId, plan.steps);
 
       // Execute plan asynchronously (fire-and-forget)
+      console.log(`[PLAN_APPROVE] Kicking off execution for plan ${planId}...`);
       executePlanWithProgress(plan, userContext, sessionId).catch(err => {
-        console.error(`[PLAN API] Execution error for plan ${planId}:`, err);
+        console.error(`[PLAN_APPROVE] EXECUTION ERROR for plan ${planId}:`, err);
         failPlan(planId, err.message);
       });
+
+      const elapsed = Date.now() - startTime;
+      console.log(`\n${'='.repeat(60)}`);
+      console.log(`[PLAN_APPROVE] SUCCESS - Execution kicked off`);
+      console.log(`  planId: ${plan.id}`);
+      console.log(`  status: executing`);
+      console.log(`  elapsed: ${elapsed}ms`);
+      console.log(`${'='.repeat(60)}\n`);
 
       res.json({ 
         planId: plan.id,
@@ -228,7 +257,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         message: "Plan approved and execution started"
       });
     } catch (error: any) {
-      console.error("[PLAN API] Error approving plan:", error);
+      const elapsed = Date.now() - startTime;
+      console.error(`\n${'='.repeat(60)}`);
+      console.error(`[PLAN_APPROVE] EXCEPTION CAUGHT`);
+      console.error(`  planId: ${planId}`);
+      console.error(`  userId: ${userId}`);
+      console.error(`  error: ${error.message || error}`);
+      console.error(`  stack: ${error.stack || 'N/A'}`);
+      console.error(`  elapsed: ${elapsed}ms`);
+      console.error(`${'='.repeat(60)}\n`);
+      
       res.status(500).json({ error: error.message || "Failed to approve plan" });
     }
   });
@@ -273,6 +311,63 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: any) {
       console.error("[PLAN API] Error fetching progress:", error);
       res.status(500).json({ error: error.message || "Failed to fetch progress" });
+    }
+  });
+
+  // GET /api/plan-status - Alias for UI compatibility (same as /api/plan/progress)
+  app.get("/api/plan-status", async (req, res) => {
+    console.log(`[PLAN_STATUS] Request received - query params:`, req.query);
+    
+    try {
+      const userId = getUserId(req);
+      const { planId, conversationId } = req.query;
+
+      console.log(`[PLAN_STATUS] userId: ${userId}, planId: ${planId}, conversationId: ${conversationId}`);
+
+      let progress;
+      if (planId) {
+        // Get progress for specific plan
+        console.log(`[PLAN_STATUS] Looking up progress for planId: ${planId}`);
+        progress = getProgress(planId as string);
+      } else {
+        // Get user's most recent plan progress
+        console.log(`[PLAN_STATUS] Looking up most recent plan for userId: ${userId}`);
+        const { getUserProgress } = await import("./plan-progress");
+        progress = getUserProgress(userId);
+      }
+
+      if (!progress) {
+        console.log(`[PLAN_STATUS] No progress found - returning idle status`);
+        return res.json({ 
+          hasActivePlan: false,
+          status: "idle",
+          message: "No active plan execution"
+        });
+      }
+
+      console.log(`[PLAN_STATUS] Found progress for plan ${progress.planId} - status: ${progress.overallStatus}, steps: ${progress.steps.length}`);
+
+      // Format response for UI
+      const response = {
+        hasActivePlan: true,
+        status: progress.overallStatus,
+        planId: progress.planId,
+        currentStepIndex: progress.currentStepIndex,
+        totalSteps: progress.steps.length,
+        steps: progress.steps.map(step => ({
+          title: step.title,
+          status: step.status,
+          errorMessage: step.errorMessage,
+          attempts: step.attempts
+        })),
+        updatedAt: progress.updatedAt
+      };
+
+      console.log(`[PLAN_STATUS] Returning:`, JSON.stringify(response, null, 2));
+      res.json(response);
+    } catch (error: any) {
+      console.error("[PLAN_STATUS] ERROR:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch plan status" });
     }
   });
 
