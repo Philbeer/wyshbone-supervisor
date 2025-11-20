@@ -36,8 +36,9 @@ The frontend uses a React with TypeScript stack, built with Vite and Wouter for 
 - RESTful API endpoints for leads, user context, signals, and plan execution.
 - **Plan Execution API**:
   - POST `/api/plan/start` - Creates a plan using SUP-001 + SUP-012, stores in database with "pending_approval" status
-  - POST `/api/plan/approve` - Validates ownership, starts execution asynchronously with progress tracking
+  - POST `/api/plan/approve` - Validates ownership, starts execution asynchronously with comprehensive logging
   - GET `/api/plan/progress?planId=xxx` - Returns real-time progress for specific plan or user's most recent plan
+  - GET `/api/plan-status` - Alias for `/api/plan/progress` with enhanced logging for UI integration
 - Database schema includes `users`, `user_signals`, `suggested_leads`, `plan_executions`, and `plans` tables.
 - Signals represent user actions that trigger lead discovery.
 - Leads include enriched data (e.g., emails, places) and trigger email notifications.
@@ -46,7 +47,10 @@ The frontend uses a React with TypeScript stack, built with Vite and Wouter for 
 ### System Design Choices
 - `IStorage` interface for database abstraction, with `DatabaseStorage` using Drizzle ORM.
 - Hardcoded "demo-user" for current authentication, with future support for username/password and session management planned.
-- Comprehensive logging and error handling for robustness.
+- **Logging Infrastructure**: Three-tier logging system for production debugging and monitoring:
+  - **API Layer** (`server/routes.ts`): Structured logs for all plan-related endpoints with timing metrics, user context, and error details
+  - **Executor Layer** (`server/types/lead-gen-plan.ts`): Step-by-step execution logs with visual status indicators and performance metrics
+  - **Tower Integration** (`server/tower-logger.ts`): JSON-formatted logs for Control Tower monitoring with source identifier "plan_executor"
 - **Progress Tracking**: In-memory store keyed by planId (not sessionId) to support concurrent plan executions by same user. Includes cleanup functions to prevent memory leaks.
 - **Event System**: Map-based registry keyed by planId for isolated event streams. Each plan execution has its own event handler, preventing cross-contamination between concurrent plans.
 - **Error Handling**: Both success and failure paths use planId for progress updates, ensuring failed plans are correctly marked and can be cleaned up.
