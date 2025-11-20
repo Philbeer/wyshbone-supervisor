@@ -6,14 +6,17 @@ import {
   processedSignals,
   supervisorState,
   planExecutions,
+  plans,
   type User, 
   type InsertUser, 
   type SuggestedLead, 
   type UserSignal,
   type PlanExecution,
+  type Plan,
   type InsertSuggestedLead,
   type InsertUserSignal,
-  type InsertPlanExecution
+  type InsertPlanExecution,
+  type InsertPlan
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc } from "drizzle-orm";
@@ -40,6 +43,10 @@ export interface IStorage {
   createPlanExecution(execution: InsertPlanExecution): Promise<PlanExecution>;
   getPlanExecutions(userId: string, limit?: number): Promise<PlanExecution[]>;
   getPlanExecutionsByGoal(goalId: string, limit?: number): Promise<PlanExecution[]>;
+  createPlan(plan: InsertPlan): Promise<Plan>;
+  getPlan(planId: string): Promise<Plan | undefined>;
+  updatePlanStatus(planId: string, status: string): Promise<void>;
+  getUserActivePlan(userId: string): Promise<Plan | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -204,6 +211,43 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(planExecutions.createdAt))
       .limit(limit);
     return executions;
+  }
+
+  async createPlan(plan: InsertPlan): Promise<Plan> {
+    const [newPlan] = await db
+      .insert(plans)
+      .values(plan)
+      .returning();
+    return newPlan;
+  }
+
+  async getPlan(planId: string): Promise<Plan | undefined> {
+    const [plan] = await db
+      .select()
+      .from(plans)
+      .where(eq(plans.id, planId))
+      .limit(1);
+    return plan || undefined;
+  }
+
+  async updatePlanStatus(planId: string, status: string): Promise<void> {
+    await db
+      .update(plans)
+      .set({ 
+        status, 
+        updatedAt: new Date() 
+      })
+      .where(eq(plans.id, planId));
+  }
+
+  async getUserActivePlan(userId: string): Promise<Plan | undefined> {
+    const [plan] = await db
+      .select()
+      .from(plans)
+      .where(eq(plans.userId, userId))
+      .orderBy(desc(plans.createdAt))
+      .limit(1);
+    return plan || undefined;
   }
 }
 

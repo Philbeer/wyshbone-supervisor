@@ -5,8 +5,273 @@ import { insertUserSignalSchema, insertSuggestedLeadSchema } from "@shared/schem
 import { fromError } from "zod-validation-error";
 import { supabase } from "./supabase";
 import { supervisor } from "./supervisor";
+import { 
+  planLeadGenerationWithHistory,
+  executeLeadGenerationPlan,
+  type LeadGenGoal,
+  type LeadGenContext,
+  type LeadGenPlan,
+  type SupervisorUserContext
+} from "./types/lead-gen-plan";
+import { 
+  startPlanProgress,
+  updateStepStatus,
+  completePlan,
+  failPlan,
+  getProgress 
+} from "./plan-progress";
+
+// Helper to get userId from request (simple version for MVP)
+function getUserId(req: any): string {
+  // Priority: body.userId > query.user_id > default demo user
+  return req.body?.userId || req.query?.user_id || "8f9079b3ddf739fb0217373c92292e91";
+}
+
+// Execute plan with progress tracking integration
+async function executePlanWithProgress(
+  plan: LeadGenPlan,
+  userContext: SupervisorUserContext,
+  sessionId: string
+): Promise<void> {
+  const planId = plan.id;
+  
+  // Import event registration functions
+  const { registerPlanEventHandler, unregisterPlanEventHandler } = await import("./types/lead-gen-plan");
+  
+  try {
+    console.log(`[EXEC+PROGRESS] Starting execution for plan ${planId}`);
+
+    // Create event handler for this specific plan
+    const eventHandler = (eventType: string, payload: any) => {
+      if (eventType === "STEP_STARTED") {
+        const { stepId } = payload;
+        updateStepStatus(sessionId, stepId, "running");
+      } else if (eventType === "STEP_SUCCEEDED") {
+        const { stepId, attempts } = payload;
+        updateStepStatus(sessionId, stepId, "completed", undefined, attempts);
+      } else if (eventType === "STEP_FAILED") {
+        const { stepId, error, attempts } = payload;
+        updateStepStatus(sessionId, stepId, "failed", error, attempts);
+      } else if (eventType === "PLAN_COMPLETED") {
+        completePlan(sessionId);
+      } else if (eventType === "PLAN_FAILED") {
+        failPlan(sessionId, payload.error);
+      }
+    };
+
+    // Register event handler for this plan
+    registerPlanEventHandler(planId, eventHandler);
+
+    try {
+      // Execute the plan
+      const result = await executeLeadGenerationPlan(plan, userContext);
+
+      // Update final status based on result
+      if (result.overallStatus === "succeeded") {
+        completePlan(sessionId);
+        console.log(`[EXEC+PROGRESS] Plan ${planId} completed successfully`);
+      } else if (result.overallStatus === "failed") {
+        failPlan(sessionId, "Plan execution failed");
+        console.log(`[EXEC+PROGRESS] Plan ${planId} failed`);
+      }
+    } finally {
+      // Always unregister handler, even if execution fails
+      unregisterPlanEventHandler(planId);
+    }
+
+  } catch (error: any) {
+    console.error(`[EXEC+PROGRESS] Execution error:`, error);
+    failPlan(sessionId, error.message);
+    // Ensure cleanup happens even on error
+    unregisterPlanEventHandler(planId);
+    throw error;
+  }
+}
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // ========================================
+  // PLAN EXECUTION PIPELINE
+  // ========================================
+
+  // POST /api/plan/start - Create a new lead generation plan
+  app.post("/api/plan/start", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { goal } = req.body;
+
+      if (!goal) {
+        return res.status(400).json({ error: "goal is required" });
+      }
+
+      // Parse the goal into structured format
+      const leadGenGoal: LeadGenGoal = {
+        rawGoal: goal.rawGoal || goal,
+        targetRegion: goal.targetRegion,
+        targetPersona: goal.targetPersona,
+        volume: goal.volume,
+        timing: goal.timing || "asap",
+        preferredChannels: goal.preferredChannels || [],
+        includeMonitoring: goal.includeMonitoring || false
+      };
+
+      // Get user's account ID from Supabase for multi-account isolation
+      const { data: userData } = await supabase
+        .from('users')
+        .select('account_id, email')
+        .eq('id', userId)
+        .single();
+
+      const context: LeadGenContext = {
+        userId,
+        accountId: userData?.account_id,
+        defaultRegion: goal.targetRegion || "UK",
+        defaultCountry: "GB",
+        defaultFromIdentityId: "default-identity"
+      };
+
+      console.log(`[PLAN API] Creating plan for goal: "${leadGenGoal.rawGoal}"`);
+
+      // Generate plan using SUP-001 + SUP-012 (with historical context)
+      const plan = await planLeadGenerationWithHistory(leadGenGoal, context);
+
+      // Store plan in database
+      await storage.createPlan({
+        id: plan.id,
+        userId,
+        accountId: userData?.account_id,
+        status: "pending_approval",
+        planData: plan as any,
+        goalText: leadGenGoal.rawGoal
+      });
+
+      console.log(`[PLAN API] Created plan ${plan.id} with ${plan.steps.length} steps`);
+
+      res.json({ 
+        planId: plan.id,
+        plan: {
+          id: plan.id,
+          title: plan.title,
+          steps: plan.steps.map(step => ({
+            id: step.id,
+            title: step.label || step.tool,
+            tool: step.tool,
+            dependsOn: step.dependsOn
+          }))
+        },
+        status: "pending_approval" 
+      });
+    } catch (error: any) {
+      console.error("[PLAN API] Error creating plan:", error);
+      res.status(500).json({ error: error.message || "Failed to create plan" });
+    }
+  });
+
+  // POST /api/plan/approve - Approve and execute a plan
+  app.post("/api/plan/approve", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { planId } = req.body;
+
+      if (!planId) {
+        return res.status(400).json({ error: "planId is required" });
+      }
+
+      // Retrieve plan from database
+      const dbPlan = await storage.getPlan(planId);
+      if (!dbPlan) {
+        return res.status(404).json({ error: "Plan not found" });
+      }
+
+      // Validate ownership
+      if (dbPlan.userId !== userId) {
+        return res.status(403).json({ error: "Not authorized to approve this plan" });
+      }
+
+      // Check if already executed
+      if (dbPlan.status !== "pending_approval") {
+        return res.status(400).json({ error: `Plan is already ${dbPlan.status}` });
+      }
+
+      const plan = dbPlan.planData as LeadGenPlan;
+
+      console.log(`[PLAN API] Approved plan ${planId}, starting execution...`);
+
+      // Get user context for execution
+      const { data: userData } = await supabase
+        .from('users')
+        .select('email, account_id')
+        .eq('id', userId)
+        .single();
+
+      const userContext: SupervisorUserContext = {
+        userId,
+        accountId: userData?.account_id,
+        email: userData?.email || undefined
+      };
+
+      // Update plan status to executing
+      await storage.updatePlanStatus(planId, "executing");
+
+      // Start progress tracking (use userId as session ID)
+      const sessionId = userId;
+      startPlanProgress(plan.id, sessionId, plan.steps);
+
+      // Execute plan asynchronously (fire-and-forget)
+      executePlanWithProgress(plan, userContext, sessionId).catch(err => {
+        console.error(`[PLAN API] Execution error for plan ${planId}:`, err);
+        failPlan(sessionId, err.message);
+      });
+
+      res.json({ 
+        planId: plan.id,
+        status: "executing",
+        message: "Plan approved and execution started"
+      });
+    } catch (error: any) {
+      console.error("[PLAN API] Error approving plan:", error);
+      res.status(500).json({ error: error.message || "Failed to approve plan" });
+    }
+  });
+
+  // GET /api/plan/progress - Get current execution progress
+  app.get("/api/plan/progress", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const sessionId = userId; // Using userId as session ID
+
+      const progress = getProgress(sessionId);
+
+      if (!progress) {
+        return res.json({ 
+          status: "idle",
+          message: "No active plan execution"
+        });
+      }
+
+      // Format response for UI
+      res.json({
+        status: progress.overallStatus,
+        planId: progress.planId,
+        currentStepIndex: progress.currentStepIndex,
+        totalSteps: progress.steps.length,
+        steps: progress.steps.map(step => ({
+          title: step.title,
+          status: step.status,
+          errorMessage: step.errorMessage,
+          attempts: step.attempts
+        })),
+        updatedAt: progress.updatedAt
+      });
+    } catch (error: any) {
+      console.error("[PLAN API] Error fetching progress:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch progress" });
+    }
+  });
+
+  // ========================================
+  // EXISTING ENDPOINTS
+  // ========================================
+
   // Test endpoint - create supervisor chat task
   app.post("/api/test/supervisor-task", async (req, res) => {
     const { userId, conversationId, taskType, searchQuery } = req.body;

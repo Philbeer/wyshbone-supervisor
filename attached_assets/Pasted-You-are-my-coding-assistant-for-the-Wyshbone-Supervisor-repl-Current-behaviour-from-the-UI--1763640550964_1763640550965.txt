@@ -1,0 +1,214 @@
+You are my coding assistant for the Wyshbone Supervisor repl.
+
+Current behaviour from the UI:
+- /api/plan/start is working: the UI shows a plan with steps (Search DB, Enrich, Prepare Outreach).
+- /api/plan/approve returns success: the UI shows a toast “Plan Approved – Wyshbone will now execute your plan”.
+- After approval, the UI returns to the goal view, but:
+  - No visible execution happens.
+  - The Progress widget continues to show an error / no progress.
+- I have never seen step-by-step progress for a plan in the UI.
+
+Conclusion:
+- Plan objects are being created and marked approved.
+- The Supervisor is NOT yet wiring plan approval → SUP-002 execution → progress reporting in a way the UI can see.
+
+Goal:
+Implement the full approval → execution → progress pipeline for LeadGenPlan.
+
+------------------------------------------------
+1) Find the approval and execution code paths
+------------------------------------------------
+
+Locate:
+- The plan approval handler (called by the UI):
+  - Look in server/routes.ts (or similar) for endpoints like:
+    - POST /api/plan/approve
+    - POST /api/plan/:id/approve
+- The plan execution logic (SUP-002), probably in:
+  - server/lead-gen-plan.ts
+  - server/supervisor.ts
+  - any executeLeadGenerationPlan / runLeadGenPlan / executePlanStep functions.
+
+Document in comments:
+- Which function is responsible for:
+  - validating a plan
+  - running it step-by-step
+  - emitting or storing progress.
+
+If there is *no* single “executeLeadGenerationPlan(plan, ctx)” yet, create one and use it consistently.
+
+------------------------------------------------
+2) Wire plan approval to SUP-002 execution
+------------------------------------------------
+
+In the plan approval route handler:
+
+- Read the current sessionId using the SAME helper the rest of the app uses (getSessionId or equivalent).
+- Read the planId from the request (body or URL).
+- Look up the plan for this session.
+- Validate:
+  - plan exists
+  - plan belongs to this session
+  - plan is in a "pending_approval" state.
+
+On success:
+
+- Mark the plan status as "approved" / "executing" in whatever storage you use (in-memory or DB).
+- Call the SUP-002 execution function, e.g.:
+
+    await executeLeadGenerationPlan(plan, {
+      sessionId,
+      goal,
+      // any other context you already use
+      onProgress: reportPlanProgress,
+    });
+
+- Return JSON:
+
+    { planId, status: "executing" }
+
+Add robust error handling:
+
+- Log planId, sessionId, and error.
+- Return 400/500 with a clear message if execution cannot be started.
+
+Do NOT block indefinitely on long-running work. If execution is long, you can:
+- fire-and-forget (start an async task) and immediately return status "executing",
+- as long as progress will be updated asynchronously.
+
+------------------------------------------------
+3) Implement a simple progress reporting mechanism
+------------------------------------------------
+
+Create or unify a progress tracking module, e.g. in:
+
+- server/plan-progress.ts
+
+Define a structure along the lines of:
+
+  interface PlanStepProgress {
+    stepId: string;
+    title: string;
+    index: number;
+    totalSteps: number;
+    status: "pending" | "running" | "completed" | "failed";
+    errorMessage?: string;
+  }
+
+  interface PlanProgress {
+    planId: string;
+    sessionId: string;
+    overallStatus: "pending" | "executing" | "completed" | "failed";
+    currentStepIndex: number;
+    steps: PlanStepProgress[];
+    updatedAt: string;
+  }
+
+Store progress in an in-memory map keyed by either:
+- sessionId (simpler for now), or
+- planId (and make the progress endpoint look up the active plan for a session).
+
+Provide helper functions:
+
+- startPlanProgress(plan, sessionId)
+- updateStepStatus(planId, stepIndex, status, error?)
+- completePlan(planId)
+- failPlan(planId, error?)
+
+------------------------------------------------
+4) Expose a GET endpoint for the UI progress widget
+------------------------------------------------
+
+Add an endpoint, or fix the existing one, e.g.:
+
+  GET /api/plan/progress
+
+Behaviour:
+
+- Uses getSessionId to identify the session.
+- Returns 404 or { status: "idle" } if there is no active plan for this session.
+- Returns the current PlanProgress object otherwise.
+
+Example response shape:
+
+  {
+    "status": "executing",
+    "planId": "...",
+    "currentStepIndex": 1,
+    "totalSteps": 3,
+    "steps": [
+      { "title": "Search Wyshbone Global Database", "status": "completed" },
+      { "title": "Enrich Contact Data", "status": "running" },
+      { "title": "Prepare Outreach", "status": "pending" }
+    ]
+  }
+
+Make sure this matches what the UI expects; if necessary, adapt the UI later once this is working.
+
+------------------------------------------------
+5) Integrate progress updates into SUP-002
+------------------------------------------------
+
+In the plan execution function (SUP-002):
+
+- On start:
+  - call startPlanProgress(plan, sessionId)
+- For each step:
+  - set that step’s status to "running"
+  - after the tool call succeeds: set status to "completed"
+  - if a tool call fails irrecoverably: set status to "failed" and overallStatus to "failed"
+- When all steps complete successfully:
+  - set overallStatus to "completed"
+
+Make sure this logic works even when:
+
+- Branching skips or repeats steps.
+- Fallback (SUP-011) changes which source is used, but the same logical step is considered "completed".
+
+------------------------------------------------
+6) Add a simple test script
+------------------------------------------------
+
+Create something like server/test-plan-execution.ts that:
+
+- Creates a sample LeadGenPlan with 2–3 dummy steps.
+- Calls executeLeadGenerationPlan with a fake sessionId and a test onProgress hook.
+- Logs progress to the console as steps move from pending → running → completed.
+
+Run it with:
+
+  tsx server/test-plan-execution.ts
+
+and confirm that progress updates look correct.
+
+------------------------------------------------
+7) After implementation, verify with the UI
+------------------------------------------------
+
+Once all of the above is wired:
+
+From the UI:
+
+1) Enter a goal and save it.
+2) Click “Start Working On This Goal” to create the plan.
+3) Click “Approve Plan”.
+
+Expected:
+
+- The approval call returns status 200 with { planId, status: "executing" }.
+- The UI toast says “Plan Approved – Wyshbone will now execute your plan.”
+- Within a few seconds, the progress endpoint returns "executing" instead of an error.
+- The Progress widget in the UI starts showing:
+    - Step 1 of X: running → completed
+    - Step 2 of X: running → completed
+    - etc.
+
+------------------------------------------------
+8) Output requirements
+------------------------------------------------
+
+For any new files you create (e.g. plan-progress.ts, test-plan-execution.ts), output the full file contents.
+
+For every existing file you modify (routes.ts, supervisor.ts, lead-gen-plan.ts, etc.), output the full file contents including imports/exports.
+
+Focus on making the plan approval → execution → progress pipeline fully functional and observable from the UI.

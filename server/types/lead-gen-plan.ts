@@ -852,6 +852,45 @@ export function chooseNextStep(
 // STRUCTURED EVENT LOGGING
 // ========================================
 
+// Event handler type
+type PlanEventHandler = (eventType: string, payload: any) => void;
+
+// Registry of event handlers keyed by planId
+const eventHandlers = new Map<string, PlanEventHandler>();
+
+/**
+ * Register an event handler for a specific plan execution
+ * @param planId - Unique plan identifier
+ * @param handler - Event handler function
+ */
+export function registerPlanEventHandler(planId: string, handler: PlanEventHandler): void {
+  eventHandlers.set(planId, handler);
+  console.log(`[LEAD_GEN_PLAN] Event handler registered for plan ${planId}`);
+}
+
+/**
+ * Unregister an event handler for a plan
+ * @param planId - Unique plan identifier
+ */
+export function unregisterPlanEventHandler(planId: string): void {
+  eventHandlers.delete(planId);
+  console.log(`[LEAD_GEN_PLAN] Event handler unregistered for plan ${planId}`);
+}
+
+/**
+ * @deprecated Use registerPlanEventHandler instead
+ * Legacy single-handler registration (for backward compatibility with tests)
+ */
+export function onPlanEvent(handler: PlanEventHandler | null): void {
+  console.warn('[LEAD_GEN_PLAN] onPlanEvent is deprecated, use registerPlanEventHandler');
+  if (handler) {
+    // Register with a special key for legacy support
+    eventHandlers.set('__legacy__', handler);
+  } else {
+    eventHandlers.delete('__legacy__');
+  }
+}
+
 /**
  * Emit a structured plan execution event for logging/monitoring
  */
@@ -860,10 +899,12 @@ export function emitPlanEvent(
   payload: LeadPlanEventPayload
 ): void {
   const timestamp = new Date().toISOString();
+  const planId = payload.plan.id;
+  
   const logEntry = {
     timestamp,
     type,
-    planId: payload.plan.id,
+    planId,
     userId: payload.user.userId,
     stepId: payload.step?.id,
     stepTool: payload.step?.tool,
@@ -875,6 +916,36 @@ export function emitPlanEvent(
 
   // Structured logging - can be extended to persist to DB or event bus
   console.log(`[LEAD_GEN_PLAN] ${JSON.stringify(logEntry)}`);
+
+  // Call registered event handler for this specific plan
+  const handler = eventHandlers.get(planId);
+  if (handler) {
+    const simplifiedPayload = {
+      stepId: payload.step?.id,
+      attempts: 'result' in payload && payload.result && 'attempts' in payload.result 
+        ? payload.result.attempts 
+        : undefined,
+      error: 'result' in payload && payload.result && 'errorMessage' in payload.result 
+        ? payload.result.errorMessage 
+        : undefined
+    };
+    handler(type, simplifiedPayload);
+  }
+
+  // Also call legacy handler if registered
+  const legacyHandler = eventHandlers.get('__legacy__');
+  if (legacyHandler && planId !== '__legacy__') {
+    const simplifiedPayload = {
+      stepId: payload.step?.id,
+      attempts: 'result' in payload && payload.result && 'attempts' in payload.result 
+        ? payload.result.attempts 
+        : undefined,
+      error: 'result' in payload && payload.result && 'errorMessage' in payload.result 
+        ? payload.result.errorMessage 
+        : undefined
+    };
+    legacyHandler(type, simplifiedPayload);
+  }
 }
 
 // ========================================
