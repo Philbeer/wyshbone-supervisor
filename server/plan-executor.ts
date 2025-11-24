@@ -118,6 +118,9 @@ export async function executeLeadGenerationPlan(planId: string): Promise<void> {
     const userId = dbPlan.userId;
     console.log(`PLAN_EXEC_START: Loaded plan with ${plan.steps.length} steps for user ${userId}`);
 
+    // Track results from previous steps to pass to next steps
+    const stepResults = new Map<string, any>();
+
     // Execute each step in sequence
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
@@ -128,8 +131,28 @@ export async function executeLeadGenerationPlan(planId: string): Promise<void> {
       updateStepStatus(planId, step.id, "running");
       
       try {
+        // Inject results from dependency steps
+        if (step.dependsOn && step.dependsOn.length > 0) {
+          const dependencyResults = step.dependsOn
+            .map(depId => stepResults.get(depId))
+            .filter(Boolean);
+          
+          // If this is an EMAIL_FINDER step, inject leads from previous steps
+          if (step.type === 'EMAIL_FINDER' && step.input) {
+            const allLeads = dependencyResults
+              .flatMap(result => result.data?.leads || []);
+            step.input.leads = allLeads;
+            console.log(`[PLAN_EXEC] Injected ${allLeads.length} leads from previous steps`);
+          }
+        }
+        
         // Execute the real action
         await executeStep(step, i, userId);
+        
+        // Store results for downstream steps
+        if (step.result?.data) {
+          stepResults.set(step.id, step.result);
+        }
         
         // Update progress to "completed" with result summary
         const summary = step.result?.summary || 'Step completed';

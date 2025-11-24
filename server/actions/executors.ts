@@ -83,14 +83,18 @@ export async function runGlobalDatabaseSearch(input: ActionInput): Promise<Actio
   }
 
   try {
-    const result = await searchLeadsWithFallback({
-      query,
-      region,
-      country,
-      maxResults,
-      minResults: 3,
-      dataSources: ['google_places', 'yelp', 'yellow_pages']
-    });
+    const result = await searchLeadsWithFallback(
+      {
+        primary: 'google_places',
+        fallbacks: ['internal_pubs', 'dataledger', 'fallback_mock']
+      },
+      {
+        query,
+        region,
+        country,
+        maxResults
+      }
+    );
 
     const leadCount = result.leads?.length || 0;
     const sourceUsed = result.sourceUsed || 'unknown';

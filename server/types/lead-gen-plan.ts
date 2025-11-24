@@ -310,12 +310,20 @@ export function planLeadGeneration(
     id: googlePlacesStepId,
     label: "Find candidate businesses via Google Places",
     tool: "GOOGLE_PLACES_SEARCH",
+    type: "GLOBAL_DB",
     params: {
       query: persona,
       region: effectiveRegion,
       country: effectiveCountry,
       maxResults: volume * 2 // Over-fetch so we can filter later
     },
+    input: {
+      query: persona,
+      region: effectiveRegion,
+      country: effectiveCountry,
+      maxResults: volume * 2
+    },
+    status: "pending",
     dependsOn: [],
     note: "Initial business discovery from Google Places based on persona and region."
   });
@@ -330,10 +338,16 @@ export function planLeadGeneration(
     id: hunterDomainStepId,
     label: "Look up domains for candidate businesses",
     tool: "HUNTER_DOMAIN_LOOKUP",
+    type: "EMAIL_FINDER",
     params: {
       sourceStepId: googlePlacesStepId,
       country: effectiveCountry
     },
+    input: {
+      leads: [], // Will be populated from previous step results
+      sourceStepId: googlePlacesStepId
+    },
+    status: "pending",
     dependsOn: [googlePlacesStepId],
     note: "Take business names from Google Places and find domains."
   });
@@ -348,11 +362,17 @@ export function planLeadGeneration(
     id: hunterEnrichStepId,
     label: "Find target contacts at those domains",
     tool: "HUNTER_ENRICH",
+    type: "EMAIL_FINDER",
     params: {
       sourceStepId: hunterDomainStepId,
       roleHint: persona,
       maxContactsPerDomain: 2
     },
+    input: {
+      leads: [], // Will be populated from previous step results
+      sourceStepId: hunterDomainStepId
+    },
+    status: "pending",
     dependsOn: [hunterDomainStepId],
     note: "Use Hunter to find contacts that match the target persona."
   });
@@ -367,6 +387,7 @@ export function planLeadGeneration(
     id: saveListStepId,
     label: "Save enriched leads to a list",
     tool: "LEAD_LIST_SAVE",
+    type: "GLOBAL_DB",
     params: {
       sourceStepId: hunterEnrichStepId,
       listName: goal.rawGoal || "Lead list",
@@ -374,6 +395,12 @@ export function planLeadGeneration(
       persona,
       estimatedVolume: volume
     },
+    input: {
+      query: persona,
+      region: effectiveRegion,
+      maxResults: volume
+    },
+    status: "pending",
     dependsOn: [hunterEnrichStepId],
     note: "Store all enriched leads under a named list in Wyshbone."
   });
@@ -392,6 +419,7 @@ export function planLeadGeneration(
       id: emailSeqStepId,
       label: "Set up outbound email sequence",
       tool: "EMAIL_SEQUENCE_SETUP",
+      type: "EMAIL_FINDER",
       params: {
         sourceListStepId: saveListStepId,
         campaignName: goal.rawGoal || "Outbound campaign",
@@ -399,6 +427,11 @@ export function planLeadGeneration(
         estimatedVolume: volume,
         startTiming: timing
       },
+      input: {
+        leads: [],
+        sourceStepId: saveListStepId
+      },
+      status: "pending",
       dependsOn: [saveListStepId],
       note: "Create an email sequence in the outreach system targeting the saved leads."
     });
@@ -415,11 +448,18 @@ export function planLeadGeneration(
       id: monitorStepId,
       label: "Set up ongoing monitoring for this lead list",
       tool: "MONITOR_SETUP",
+      type: "SCHEDULED_MONITOR",
       params: {
         sourceListStepId: saveListStepId,
         cadence: "weekly",
         signalTypes: ["new_reviews", "profile_changes"]
       },
+      input: {
+        label: goal.rawGoal || "Lead list monitor",
+        description: `Monitor for ${persona} in ${effectiveRegion}`,
+        monitorType: "lead_generation"
+      },
+      status: "pending",
       dependsOn: [saveListStepId],
       note: "Configure background monitoring to surface future signals for this list."
     });

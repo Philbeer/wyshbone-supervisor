@@ -45,6 +45,7 @@ export interface IStorage {
   getPlanExecutionsByGoal(goalId: string, limit?: number): Promise<PlanExecution[]>;
   createPlan(plan: InsertPlan): Promise<Plan>;
   getPlan(planId: string): Promise<Plan | undefined>;
+  updatePlan(planId: string, updates: Partial<InsertPlan>): Promise<void>;
   updatePlanStatus(planId: string, status: string): Promise<void>;
   getUserActivePlan(userId: string): Promise<Plan | undefined>;
 }
@@ -235,6 +236,16 @@ export class DatabaseStorage implements IStorage {
       .update(plans)
       .set({ 
         status, 
+        updatedAt: new Date() 
+      })
+      .where(eq(plans.id, planId));
+  }
+
+  async updatePlan(planId: string, updates: Partial<InsertPlan>): Promise<void> {
+    await db
+      .update(plans)
+      .set({ 
+        ...updates,
         updatedAt: new Date() 
       })
       .where(eq(plans.id, planId));
