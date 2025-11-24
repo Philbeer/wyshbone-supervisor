@@ -43,67 +43,6 @@ function mapToolToActionType(tool: string): string | undefined {
   return mapping[tool];
 }
 
-// Execute plan with progress tracking integration
-async function executePlanWithProgress(
-  plan: LeadGenPlan,
-  userContext: SupervisorUserContext,
-  sessionId: string
-): Promise<void> {
-  const planId = plan.id;
-  
-  // Import event registration functions
-  const { registerPlanEventHandler, unregisterPlanEventHandler } = await import("./types/lead-gen-plan");
-  
-  try {
-    console.log(`[EXEC+PROGRESS] Starting execution for plan ${planId}`);
-
-    // Create event handler for this specific plan
-    const eventHandler = (eventType: string, payload: any) => {
-      if (eventType === "STEP_STARTED") {
-        const { stepId } = payload;
-        updateStepStatus(planId, stepId, "running");
-      } else if (eventType === "STEP_SUCCEEDED") {
-        const { stepId, attempts } = payload;
-        updateStepStatus(planId, stepId, "completed", undefined, attempts);
-      } else if (eventType === "STEP_FAILED") {
-        const { stepId, error, attempts } = payload;
-        updateStepStatus(planId, stepId, "failed", error, attempts);
-      } else if (eventType === "PLAN_COMPLETED") {
-        completePlan(planId);
-      } else if (eventType === "PLAN_FAILED") {
-        failPlan(planId, payload.error);
-      }
-    };
-
-    // Register event handler for this plan
-    registerPlanEventHandler(planId, eventHandler);
-
-    try {
-      // Execute the plan
-      const result = await executeLeadGenerationPlan(plan, userContext);
-
-      // Update final status based on result
-      if (result.overallStatus === "succeeded") {
-        completePlan(planId);
-        console.log(`[EXEC+PROGRESS] Plan ${planId} completed successfully`);
-      } else if (result.overallStatus === "failed") {
-        failPlan(planId, "Plan execution failed");
-        console.log(`[EXEC+PROGRESS] Plan ${planId} failed`);
-      }
-    } finally {
-      // Always unregister handler, even if execution fails
-      unregisterPlanEventHandler(planId);
-    }
-
-  } catch (error: any) {
-    console.error(`[EXEC+PROGRESS] Execution error:`, error);
-    failPlan(planId, error.message);
-    // Ensure cleanup happens even on error
-    unregisterPlanEventHandler(planId);
-    throw error;
-  }
-}
-
 export async function registerRoutes(app: Express): Promise<Server> {
   // ========================================
   // PLAN EXECUTION PIPELINE
