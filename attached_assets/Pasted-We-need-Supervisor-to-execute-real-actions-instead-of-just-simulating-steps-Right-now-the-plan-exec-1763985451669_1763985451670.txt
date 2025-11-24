@@ -1,0 +1,97 @@
+We need Supervisor to execute real actions instead of just simulating steps. Right now the plan execution loop only flips step statuses; it doesn’t call the real functions that Wyshbone-UI can trigger.
+
+Please do the following refactor:
+
+1. Introduce a canonical action registry
+
+Create a central “action registry” on the server side that defines four capabilities:
+
+DEEP_RESEARCH
+
+GLOBAL_DB (Wyshbone Global Database search)
+
+SCHEDULED_MONITOR
+
+EMAIL_FINDER (renamed from the old SalesHandy batch flow)
+
+Each should map to a real executor function that already exists (or a thin wrapper around existing logic) in the UI/backend code:
+
+runDeepResearch(input) → calls the existing Deep Research pipeline
+
+runGlobalDatabaseSearch(input) → calls the Google Places / Wyshbone DB search
+
+createScheduledMonitor(input) → creates a monitor that runs Deep Research on a schedule
+
+runEmailFinderBatch(input) → Google Places → domain extraction → email enrichment/verification → enqueue to SalesHandy or similar
+
+If these functions don’t exist yet as clean exports, create them by extracting the current implementation used by the UI buttons into reusable server functions, then have both UI and Supervisor call those.
+
+2. Make plan steps reference these actions
+
+Update the plan/step model so that each step has:
+
+type: 'DEEP_RESEARCH' | 'GLOBAL_DB' | 'SCHEDULED_MONITOR' | 'EMAIL_FINDER'
+
+input: any (JSON payload)
+
+status: 'pending' | 'executing' | 'completed' | 'failed'
+
+result?: any (action output or summary)
+
+Ensure existing plans (e.g. “find pubs in West Sussex”) use these types where appropriate, even if inputs are placeholders for now.
+
+3. Update the execution loop
+
+In the Supervisor execution code (where it currently just flips step statuses), change it so that:
+
+When a step’s status is pending, set it to executing.
+
+Look up the executor from the action registry based on step.type.
+
+Call the executor with step.input.
+
+On success:
+
+Set status = 'completed'
+
+Save a summary + raw result into step.result
+
+On error:
+
+Set status = 'failed'
+
+Save error message into step.result
+
+This must update the stored plan so that /api/plan-status returns both progress and per-step result summaries.
+
+4. Keep the HTTP API stable
+
+Do not break the existing /api/plan-status contract used by Wyshbone-UI. Instead, enrich it:
+
+Keep completedSteps, totalSteps, currentStep, status
+
+Add steps: [{ id, type, status, label, resultSummary }] if not already present
+
+5. Make UI use the same actions (shared layer)
+
+Find where Wyshbone-UI currently triggers Deep Research / Global DB / Monitors / SalesHandy manually. Refactor those buttons/endpoints to call the same action functions used by the action registry, not duplicate code.
+
+6. Testing expectations
+
+After your changes, I should be able to:
+
+Start a goal in Wyshbone-UI (e.g. “find pubs in West Sussex”).
+
+Approve the plan.
+
+See Supervisor execute real actions (even if input is simple).
+
+Watch the Progress widget show:
+
+Step types (Deep Research, Global DB, etc.)
+
+Status changes from pending → executing → completed
+
+Optional short result summaries for each step.
+
+Please keep existing logging ([PLAN_DEBUG], [EXECUTION_CONTROLLER], etc.) and add any additional logs as needed to trace which action is being executed for each step.

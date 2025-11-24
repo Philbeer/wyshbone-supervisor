@@ -8,6 +8,7 @@
 
 import { storage } from "../storage";
 import { getHistoricalContextForGoal, type HistoricalContext } from "../historical-performance";
+import type { ActionType, ActionInput, ActionResult } from "../actions/registry";
 
 // ========================================
 // TOOL IDENTIFIERS
@@ -109,14 +110,34 @@ export interface LeadGenPlanStep {
   label?: string;
 
   /**
-   * Which tool this step intends to call.
+   * Which tool this step intends to call (legacy).
    */
   tool: LeadToolIdentifier;
 
   /**
-   * Parameters to feed into that tool when the executor runs it.
+   * Parameters to feed into that tool when the executor runs it (legacy).
    */
   params: LeadToolParams;
+
+  /**
+   * Canonical action type for execution (DEEP_RESEARCH, GLOBAL_DB, etc.)
+   */
+  type?: ActionType;
+
+  /**
+   * Structured input for the action executor
+   */
+  input?: ActionInput;
+
+  /**
+   * Execution status
+   */
+  status?: 'pending' | 'executing' | 'completed' | 'failed';
+
+  /**
+   * Result from action execution (populated after execution)
+   */
+  result?: ActionResult;
 
   /**
    * IDs of other steps that must be completed before this one can run.
