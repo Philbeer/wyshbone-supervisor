@@ -27,6 +27,22 @@ function getUserId(req: any): string {
   return req.body?.userId || req.query?.user_id || "8f9079b3ddf739fb0217373c92292e91";
 }
 
+/**
+ * Map legacy tool identifiers to canonical action types
+ */
+function mapToolToActionType(tool: string): string | undefined {
+  const mapping: Record<string, string> = {
+    'GOOGLE_PLACES_SEARCH': 'GLOBAL_DB',
+    'HUNTER_DOMAIN_LOOKUP': 'EMAIL_FINDER',
+    'HUNTER_ENRICH': 'EMAIL_FINDER',
+    'EMAIL_SEQUENCE_SETUP': 'EMAIL_FINDER',
+    'LEAD_LIST_SAVE': 'GLOBAL_DB',
+    'MONITOR_SETUP': 'SCHEDULED_MONITOR'
+  };
+  
+  return mapping[tool];
+}
+
 // Execute plan with progress tracking integration
 async function executePlanWithProgress(
   plan: LeadGenPlan,
@@ -352,6 +368,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       console.log(`[PLAN_STATUS] Found progress for plan ${progress.planId} - status: ${progress.overallStatus}, steps: ${progress.steps.length}`);
 
+      // Fetch plan from database to get step results
+      const dbPlan = await storage.getPlan(progress.planId);
+      const planSteps = dbPlan?.planData?.steps || [];
+
       // Format response for UI
       const response = {
         hasActivePlan: true,
@@ -359,12 +379,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         planId: progress.planId,
         currentStepIndex: progress.currentStepIndex,
         totalSteps: progress.steps.length,
-        steps: progress.steps.map(step => ({
-          title: step.title,
-          status: step.status,
-          errorMessage: step.errorMessage,
-          attempts: step.attempts
-        })),
+        steps: progress.steps.map((step, index) => {
+          const planStep = planSteps[index];
+          return {
+            id: step.id,
+            title: step.title,
+            status: step.status,
+            type: planStep?.type || (planStep?.tool ? mapToolToActionType(planStep.tool) : undefined),
+            errorMessage: step.errorMessage,
+            attempts: step.attempts,
+            resultSummary: planStep?.result?.summary || step.errorMessage || undefined
+          };
+        }),
         updatedAt: progress.updatedAt
       };
 

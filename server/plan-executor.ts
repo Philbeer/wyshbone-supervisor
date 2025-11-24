@@ -5,20 +5,100 @@
 import { storage } from './storage';
 import { updateStepStatus, completePlan, failPlan } from './plan-progress';
 import type { LeadGenPlan, LeadGenPlanStep } from './types/lead-gen-plan';
+import { executeAction, type ActionType, type ActionInput } from './actions/registry';
 
 /**
- * Stub function that simulates step execution
- * In production, this would call actual tools (Google Places, Hunter.io, etc.)
+ * Map legacy tool identifiers to canonical action types
  */
-async function runStepStub(step: LeadGenPlanStep, stepIndex: number): Promise<string> {
-  console.log(`PLAN_EXEC_STUB: starting step ${stepIndex + 1}:`, step.title || step.label || step.tool);
+function mapToolToActionType(tool: string): ActionType | null {
+  const mapping: Record<string, ActionType> = {
+    'GOOGLE_PLACES_SEARCH': 'GLOBAL_DB',
+    'HUNTER_DOMAIN_LOOKUP': 'EMAIL_FINDER',
+    'HUNTER_ENRICH': 'EMAIL_FINDER',
+    'EMAIL_SEQUENCE_SETUP': 'EMAIL_FINDER',
+    'LEAD_LIST_SAVE': 'GLOBAL_DB',
+    'MONITOR_SETUP': 'SCHEDULED_MONITOR'
+  };
   
-  // Simulate work with 1-2 second delay
-  const delayMs = 1000 + Math.random() * 1000;
-  await new Promise(res => setTimeout(res, delayMs));
+  return mapping[tool] || null;
+}
+
+/**
+ * Convert legacy step parameters to action input
+ */
+function convertStepToActionInput(step: LeadGenPlanStep, userId: string): ActionInput {
+  // If step has explicit input, use it
+  if (step.input) {
+    return { ...step.input, userId };
+  }
+
+  // Otherwise convert legacy params to input based on tool type
+  const params = step.params || {};
   
-  console.log(`PLAN_EXEC_STUB: completed step ${stepIndex + 1}`);
-  return "success";
+  switch (step.tool) {
+    case 'GOOGLE_PLACES_SEARCH':
+      return {
+        query: (params as any).query || 'businesses',
+        region: (params as any).region || 'UK',
+        country: (params as any).country || 'UK',
+        maxResults: (params as any).maxResults || 10,
+        userId
+      };
+    
+    case 'HUNTER_DOMAIN_LOOKUP':
+    case 'HUNTER_ENRICH':
+      return {
+        leads: [], // Will be populated from previous step results
+        userId
+      };
+    
+    case 'MONITOR_SETUP':
+      return {
+        label: step.label || 'Automated Monitor',
+        description: step.note || 'Monitor created by Supervisor',
+        monitorType: 'lead_generation',
+        userId
+      };
+    
+    default:
+      return { ...params, userId };
+  }
+}
+
+/**
+ * Execute a single plan step using the action registry
+ */
+async function executeStep(
+  step: LeadGenPlanStep,
+  stepIndex: number,
+  userId: string
+): Promise<void> {
+  console.log(`[PLAN_EXEC] Executing step ${stepIndex + 1}: ${step.label || step.tool}`);
+  
+  // Determine action type (explicit or mapped from legacy tool)
+  const actionType = step.type || mapToolToActionType(step.tool);
+  
+  if (!actionType) {
+    throw new Error(`Unknown action type for tool: ${step.tool}`);
+  }
+
+  // Prepare action input
+  const input = convertStepToActionInput(step, userId);
+  
+  console.log(`[PLAN_EXEC] Action type: ${actionType}`);
+  
+  // Execute the action using the registry
+  const result = await executeAction(actionType, input);
+  
+  // Store result in step (this will be saved to progress)
+  step.status = result.success ? 'completed' : 'failed';
+  step.result = result;
+  
+  if (!result.success) {
+    throw new Error(result.error || 'Action failed');
+  }
+  
+  console.log(`[PLAN_EXEC] Step completed: ${result.summary}`);
 }
 
 /**
@@ -35,27 +115,46 @@ export async function executeLeadGenerationPlan(planId: string): Promise<void> {
     }
 
     const plan = dbPlan.planData as LeadGenPlan;
-    console.log(`PLAN_EXEC_START: Loaded plan with ${plan.steps.length} steps`);
+    const userId = dbPlan.userId;
+    console.log(`PLAN_EXEC_START: Loaded plan with ${plan.steps.length} steps for user ${userId}`);
 
     // Execute each step in sequence
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
       
-      console.log(`PLAN_EXEC_STEP_RUNNING: Step ${i + 1}/${plan.steps.length} - ${step.title || step.label || step.tool}`);
+      console.log(`PLAN_EXEC_STEP_RUNNING: Step ${i + 1}/${plan.steps.length} - ${step.label || step.tool}`);
       
       // Update progress to "running"
       updateStepStatus(planId, step.id, "running");
       
       try {
-        // Run the step (stub implementation)
-        await runStepStub(step, i);
+        // Execute the real action
+        await executeStep(step, i, userId);
         
-        // Update progress to "completed"
-        updateStepStatus(planId, step.id, "completed");
-        console.log(`PLAN_EXEC_STEP_COMPLETED: Step ${i + 1}/${plan.steps.length} - ${step.title || step.label || step.tool}`);
+        // Update progress to "completed" with result summary
+        const summary = step.result?.summary || 'Step completed';
+        updateStepStatus(planId, step.id, "completed", summary);
+        console.log(`PLAN_EXEC_STEP_COMPLETED: Step ${i + 1}/${plan.steps.length} - ${summary}`);
+        
+        // Update the plan in database with step results
+        plan.steps[i] = step;
+        await storage.updatePlan(planId, { planData: plan as any });
+        
       } catch (stepError: any) {
-        console.error(`PLAN_EXEC_STEP_FAILED: Step ${i + 1} failed:`, stepError.message);
-        updateStepStatus(planId, step.id, "failed", stepError.message);
+        const errorMsg = stepError.message || 'Step execution failed';
+        console.error(`PLAN_EXEC_STEP_FAILED: Step ${i + 1} failed:`, errorMsg);
+        updateStepStatus(planId, step.id, "failed", errorMsg);
+        
+        // Update the plan with failure
+        step.status = 'failed';
+        step.result = {
+          success: false,
+          summary: errorMsg,
+          error: errorMsg
+        };
+        plan.steps[i] = step;
+        await storage.updatePlan(planId, { planData: plan as any });
+        
         throw stepError; // Fail the whole plan if a step fails
       }
     }
