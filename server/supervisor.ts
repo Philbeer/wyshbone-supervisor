@@ -616,10 +616,8 @@ Would you like me to find leads based on any of these insights?`;
       const userInfo = await storage.getUserEmail(lead.userId);
 
       // Generate dashboard URL from environment variable
-      const dashboardUrl = process.env.DASHBOARD_URL || 
-        (process.env.REPL_SLUG 
-          ? `https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co`
-          : 'http://localhost:5000');
+      // FRONTEND_URL should be the public URL of the frontend (e.g., https://wyshbone.vercel.app)
+      const dashboardUrl = process.env.DASHBOARD_URL || process.env.FRONTEND_URL || 'http://localhost:5173';
 
       // Send email notification
       await emailService.sendLeadCreatedEmail({
@@ -856,9 +854,10 @@ Would you like me to find leads based on any of these insights?`;
   }
 
   private async findEmails(domain: string): Promise<string[]> {
-    const apiKey = process.env.HUNTER_IO_API_KEY;
+    // Support both HUNTER_API_KEY (standard) and HUNTER_IO_API_KEY (legacy)
+    const apiKey = process.env.HUNTER_API_KEY || process.env.HUNTER_IO_API_KEY;
     if (!apiKey) {
-      console.log('⚠️  HUNTER_IO_API_KEY not configured, skipping email search');
+      console.log('⚠️  HUNTER_API_KEY not configured, skipping email search');
       return [];
     }
 

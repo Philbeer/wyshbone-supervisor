@@ -1429,7 +1429,7 @@ export async function executeLeadGenerationPlan(
 
   // Log to Tower (Control Tower)
   const { logPlanStart } = await import('../tower-logger');
-  logPlanStart(plan.id, user.userId, user.accountId, plan.title);
+  await logPlanStart(plan.id, user.userId, user.accountId, plan.title);
 
   emitPlanEvent("PLAN_STARTED", { plan, user });
 
@@ -1628,7 +1628,7 @@ export async function executeLeadGenerationPlan(
 
   // Log to Tower (Control Tower)
   const { logPlanComplete } = await import('../tower-logger');
-  logPlanComplete(
+  await logPlanComplete(
     plan.id,
     user.userId,
     user.accountId,

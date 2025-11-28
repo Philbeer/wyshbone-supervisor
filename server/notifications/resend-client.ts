@@ -1,70 +1,49 @@
 import { Resend } from 'resend';
 
-let connectionSettings: any;
+/**
+ * Resend email client for Supervisor notifications
+ * 
+ * Required environment variables:
+ * - RESEND_API_KEY: Your Resend API key
+ * - RESEND_FROM_EMAIL: The "from" email address (default: onboarding@resend.dev for testing)
+ */
 
-async function getCredentials() {
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY
-    ? 'repl ' + process.env.REPL_IDENTITY
-    : process.env.WEB_REPL_RENEWAL
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL
-    : null;
+let cachedClient: { client: Resend; fromEmail: string } | null = null;
 
-  if (!xReplitToken) {
-    console.error('❌ X_REPLIT_TOKEN not found. REPL_IDENTITY:', process.env.REPL_IDENTITY, 'WEB_REPL_RENEWAL:', process.env.WEB_REPL_RENEWAL);
-    throw new Error('X_REPLIT_TOKEN not found for repl/depl');
-  }
-
-  console.log(`🔑 Fetching Resend credentials from: https://${hostname}/api/v2/connection?include_secrets=true&connector_names=resend`);
-
-  const response = await fetch(
-    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=resend',
-    {
-      headers: {
-        'Accept': 'application/json',
-        'X_REPLIT_TOKEN': xReplitToken
-      }
-    }
-  );
-
-  if (!response.ok) {
-    console.error(`❌ Failed to fetch connection: ${response.status} ${response.statusText}`);
-    const text = await response.text();
-    console.error('Response body:', text);
-    throw new Error(`Failed to fetch Resend connection: ${response.status}`);
-  }
-
-  const data = await response.json();
-  console.log('📦 Connection API response:', JSON.stringify(data, null, 2));
+function getResendCredentials() {
+  const apiKey = process.env.RESEND_API_KEY;
   
-  connectionSettings = data.items?.[0];
-
-  if (!connectionSettings || !connectionSettings.settings?.api_key) {
-    console.error('❌ No valid Resend connection found. Response:', JSON.stringify(data));
-    throw new Error('Resend not connected or API key missing');
+  if (!apiKey) {
+    throw new Error(
+      'RESEND_API_KEY environment variable is required. ' +
+      'Get your API key from https://resend.com/api-keys'
+    );
   }
   
-  console.log(`✅ Resend connection found. From email: ${connectionSettings.settings.from_email}`);
+  // Use RESEND_FROM_EMAIL if set, otherwise use Resend's default testing email
+  // Note: For production, you'll need a verified domain in Resend
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
   
-  // Use RESEND_API_KEY from environment (more secure than hardcoding)
-  const apiKey = process.env.RESEND_API_KEY || connectionSettings.settings.api_key;
+  console.log(`📧 Resend configured with from email: ${fromEmail}`);
   
-  // Use Resend's default email for testing (no domain verification needed)
-  const fromEmail = 'onboarding@resend.dev';
-  
-  console.log(`🔑 Using API key from ${process.env.RESEND_API_KEY ? 'environment variable' : 'connection'}`);
-  console.log(`📧 Using from email: ${fromEmail} (Resend default for testing)`);
-  
-  return { 
-    apiKey: apiKey, 
-    fromEmail: fromEmail 
-  };
+  return { apiKey, fromEmail };
 }
 
 export async function getUncachableResendClient() {
-  const { apiKey, fromEmail } = await getCredentials();
+  const { apiKey, fromEmail } = getResendCredentials();
   return {
     client: new Resend(apiKey),
-    fromEmail: fromEmail || 'onboarding@resend.dev'
+    fromEmail
   };
+}
+
+export function getResendClient() {
+  if (!cachedClient) {
+    const { apiKey, fromEmail } = getResendCredentials();
+    cachedClient = {
+      client: new Resend(apiKey),
+      fromEmail
+    };
+  }
+  return cachedClient;
 }
