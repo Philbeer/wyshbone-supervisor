@@ -6,12 +6,16 @@
  * events, and messages must follow.
  * 
  * SUP-1: Create /core/ folder + base interfaces
+ * SUP-2: Implement SupervisorEventBus
  * 
  * @module core
  */
 
 // Re-export all types from the types submodule
 export * from './types';
+
+// Re-export event bus types and implementation
+export * from './event-bus';
 
 // Export version for debugging
 export const CORE_VERSION = '1.0.0';
