@@ -9,6 +9,7 @@
  * SUP-2: Implement SupervisorEventBus
  * SUP-3: Implement SupervisorScheduler
  * SUP-4: Define domain event types
+ * SUP-5: Task Execution Engine (TaskRunner)
  * 
  * @module core
  */
@@ -24,6 +25,9 @@ export * from './scheduler';
 
 // Re-export domain event types
 export * from './events';
+
+// Re-export task runner types and implementation
+export * from './task-runner';
 
 // Export version for debugging
 export const CORE_VERSION = '1.0.0';
