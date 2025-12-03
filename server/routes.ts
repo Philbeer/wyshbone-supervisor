@@ -22,6 +22,13 @@ import {
 } from "./plan-progress";
 import { runFeature } from "./services/FeatureRunner";
 import type { FeatureType } from "./features/types";
+import { 
+  saveLead as saveLeadToStore, 
+  listSavedLeads,
+  type IncomingLeadPayload,
+  type SaveLeadResponse,
+  type ListLeadsResponse
+} from "./features/saveLead";
 
 // Helper to get userId from request (simple version for MVP)
 function getUserId(req: any): string {
@@ -741,6 +748,107 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ 
         error: 'Internal server error',
         message: 'Failed to retrieve file' 
+      });
+    }
+  });
+
+  // ========================================
+  // SAVE LEAD API (SUP-7)
+  // ========================================
+
+  // POST /api/leads/save - Save a lead to in-memory store
+  app.post("/api/leads/save", async (req, res) => {
+    try {
+      const { lead, ownerUserId } = req.body;
+
+      // Validate required fields
+      if (!lead) {
+        return res.status(400).json({ 
+          status: "error",
+          error: "lead object is required" 
+        });
+      }
+
+      if (!lead.businessName) {
+        return res.status(400).json({ 
+          status: "error",
+          error: "lead.businessName is required" 
+        });
+      }
+
+      if (!lead.address) {
+        return res.status(400).json({ 
+          status: "error",
+          error: "lead.address is required" 
+        });
+      }
+
+      if (!ownerUserId) {
+        return res.status(400).json({ 
+          status: "error",
+          error: "ownerUserId is required" 
+        });
+      }
+
+      // Validate source if provided
+      const validSources = ["google", "database", "manual"];
+      if (lead.source && !validSources.includes(lead.source)) {
+        return res.status(400).json({ 
+          status: "error",
+          error: `Invalid lead.source. Valid values: ${validSources.join(", ")}` 
+        });
+      }
+
+      const payload: IncomingLeadPayload = {
+        lead: {
+          businessName: lead.businessName,
+          address: lead.address,
+          placeId: lead.placeId,
+          website: lead.website,
+          phone: lead.phone,
+          lat: lead.lat,
+          lng: lead.lng,
+          source: lead.source || "manual"
+        },
+        ownerUserId
+      };
+
+      const savedLead = saveLeadToStore(payload);
+
+      const response: SaveLeadResponse = {
+        status: "ok",
+        leadId: savedLead.id,
+        savedLead
+      };
+
+      res.json(response);
+    } catch (error: any) {
+      console.error("[LEADS API] Error saving lead:", error);
+      res.status(500).json({ 
+        status: "error",
+        error: error.message || "Failed to save lead" 
+      });
+    }
+  });
+
+  // GET /api/leads/saved - List saved leads from in-memory store
+  app.get("/api/leads/saved", async (req, res) => {
+    try {
+      const ownerUserId = req.query.ownerUserId as string | undefined;
+      
+      const leads = listSavedLeads(ownerUserId);
+
+      const response: ListLeadsResponse = {
+        status: "ok",
+        leads
+      };
+
+      res.json(response);
+    } catch (error: any) {
+      console.error("[LEADS API] Error listing saved leads:", error);
+      res.status(500).json({ 
+        status: "error",
+        error: error.message || "Failed to list saved leads" 
       });
     }
   });
