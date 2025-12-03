@@ -32,6 +32,7 @@ export interface IStorage {
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   getSuggestedLeads(userId: string): Promise<SuggestedLead[]>;
+  getSuggestedLeadsByAccount(accountId: string): Promise<SuggestedLead[]>; // SUP-12
   getRecentSignals(userId: string): Promise<UserSignal[]>;
   createSuggestedLead(lead: InsertSuggestedLead): Promise<SuggestedLead>;
   createSignal(signal: InsertUserSignal): Promise<UserSignal>;
@@ -75,6 +76,16 @@ export class DatabaseStorage implements IStorage {
       .from(suggestedLeads)
       .where(eq(suggestedLeads.userId, userId))
       .orderBy(desc(suggestedLeads.score));
+    return leads;
+  }
+
+  // SUP-12: Get leads by account for stale leads detection
+  async getSuggestedLeadsByAccount(accountId: string): Promise<SuggestedLead[]> {
+    const leads = await db
+      .select()
+      .from(suggestedLeads)
+      .where(eq(suggestedLeads.accountId, accountId))
+      .orderBy(desc(suggestedLeads.createdAt));
     return leads;
   }
 

@@ -1,0 +1,34 @@
+{
+  "rules": [
+    {
+      "description": "Always ask for confirmation before any destructive or high-impact action.",
+      "pattern": ".*",
+      "requires_confirmation": true,
+      "applies_to": [
+        "git.push",
+        "git.reset",
+        "git.checkout",
+        "git.merge",
+        "file.delete",
+        "file.overwrite",
+        "file.create_directory",
+        "run.install_packages",
+        "run.shell",
+        "docker.run",
+        "docker.build",
+        "apply_patch"
+      ]
+    },
+    {
+      "description": "Auto-run safe edit operations",
+      "pattern": ".*",
+      "requires_confirmation": false,
+      "applies_to": [
+        "edit.apply",
+        "edit.lint",
+        "edit.format",
+        "run.test"
+      ]
+    }
+  ]
+}

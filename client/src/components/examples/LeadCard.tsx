@@ -4,6 +4,7 @@ export default function LeadCardExample() {
   const mockLead = {
     id: "1",
     userId: "user-1",
+    accountId: null,
     rationale: "Based on brewery near Manchester - high match for bottle shops",
     source: "google_places_new",
     score: 0.85,
@@ -15,7 +16,11 @@ export default function LeadCardExample() {
       emailCandidates: ["info@craftbeershop.co.uk"],
       tags: ["bottle_shop", "craft_beer"]
     },
-    createdAt: new Date()
+    createdAt: new Date(),
+    lastContactedAt: null,
+    pipelineStage: null,
+    pipelineStageChangedAt: null,
+    updatedAt: null
   };
 
   return (

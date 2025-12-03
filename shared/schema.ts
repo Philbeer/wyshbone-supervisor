@@ -34,6 +34,11 @@ export const suggestedLeads = pgTable("suggested_leads", {
   score: real("score").notNull(),
   lead: jsonb("lead").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  // SUP-12: Stale leads tracking fields
+  lastContactedAt: timestamp("last_contacted_at"),
+  pipelineStage: text("pipeline_stage"),
+  pipelineStageChangedAt: timestamp("pipeline_stage_changed_at"),
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 export const processedSignals = pgTable("processed_signals", {
