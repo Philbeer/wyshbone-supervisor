@@ -20,6 +20,8 @@ import {
   failPlan,
   getProgress 
 } from "./plan-progress";
+import { runFeature } from "./services/FeatureRunner";
+import type { FeatureType } from "./features/types";
 
 // Helper to get userId from request (simple version for MVP)
 function getUserId(req: any): string {
@@ -739,6 +741,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ 
         error: 'Internal server error',
         message: 'Failed to retrieve file' 
+      });
+    }
+  });
+
+  // ========================================
+  // FEATURE RUNNER API (SUP-6)
+  // ========================================
+
+  // POST /api/features/run - Run a feature
+  app.post("/api/features/run", async (req, res) => {
+    try {
+      const { feature, params } = req.body;
+
+      if (!feature) {
+        return res.status(400).json({ error: "feature is required" });
+      }
+
+      // Validate feature type
+      const validFeatures: FeatureType[] = ["leadFinder"];
+      if (!validFeatures.includes(feature)) {
+        return res.status(400).json({ 
+          error: `Invalid feature type: ${feature}. Valid types: ${validFeatures.join(", ")}` 
+        });
+      }
+
+      console.log(`[FEATURES API] Running feature: ${feature}`);
+      
+      const result = await runFeature(feature as FeatureType, params || {});
+
+      if (result.status === "error") {
+        return res.status(500).json({ 
+          status: "error",
+          error: result.error 
+        });
+      }
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("[FEATURES API] Error running feature:", error);
+      res.status(500).json({ 
+        status: "error",
+        error: error.message || "Failed to run feature" 
       });
     }
   });
