@@ -3,12 +3,14 @@
  * 
  * Orchestrates feature execution and emits completion events.
  * SUP-6: Lead Finder Feature Pack
+ * SUP-9: Feature Toggle Support
  */
 
 import type { FeatureType, FeatureRunResult } from '../features/types';
 import { runLeadFinder, type LeadFinderParams } from '../features/leadFinder/leadFinder';
 import { createEventBus } from '../core/event-bus';
 import type { BaseSupervisorEvent } from '../core/types';
+import { isFeatureEnabled, type FeatureId, type FeatureContext } from '../config/features';
 
 /**
  * Generate a unique ID (simple implementation without uuid dependency)
@@ -45,19 +47,48 @@ export function getFeatureEventBus() {
   return eventBus;
 }
 
+// ============================================
+// FEATURE TYPE TO TOGGLE ID MAPPING (SUP-9)
+// ============================================
+
+/**
+ * Maps FeatureType (camelCase API values) to FeatureId (snake_case toggle IDs).
+ * This ensures consistency between the API and the toggle system.
+ */
+const featureTypeToToggleId: Record<FeatureType, FeatureId> = {
+  leadFinder: 'lead_finder',
+};
+
 /**
  * Run a feature by type with given parameters.
  * 
+ * Checks feature toggle before execution (SUP-9).
+ * If the feature is disabled, returns a feature_disabled status
+ * without executing the feature logic or emitting events.
+ * 
  * @param featureType - The type of feature to run
  * @param params - Parameters for the feature
+ * @param context - Optional feature context for toggle evaluation
  * @returns Promise resolving to the feature result
  */
 export async function runFeature(
   featureType: FeatureType,
-  params: Record<string, unknown>
+  params: Record<string, unknown>,
+  context?: FeatureContext
 ): Promise<FeatureRunResult> {
   const requestId = generateId();
   const timestamp = new Date().toISOString();
+  
+  // SUP-9: Check feature toggle before execution
+  const toggleId = featureTypeToToggleId[featureType];
+  if (!isFeatureEnabled(toggleId, context)) {
+    console.log(`[FeatureRunner] Feature disabled: ${featureType} (toggle: ${toggleId}), requestId: ${requestId}`);
+    return {
+      status: "feature_disabled",
+      error: `Feature '${featureType}' is currently disabled`,
+      errorCode: "FEATURE_DISABLED"
+    };
+  }
   
   console.log(`[FeatureRunner] Running feature: ${featureType}, requestId: ${requestId}`);
   
@@ -80,7 +111,7 @@ export async function runFeature(
       }
     }
     
-    // Emit FeatureCompleted event
+    // Emit FeatureCompleted event (only when feature actually runs)
     const completedEvent: FeatureCompletedEvent = {
       id: generateId(),
       type: 'feature.completed',
@@ -107,7 +138,8 @@ export async function runFeature(
     
     return {
       status: "error",
-      error: errorMessage
+      error: errorMessage,
+      errorCode: "EXECUTION_FAILED"
     };
   }
 }

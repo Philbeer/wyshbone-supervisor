@@ -854,7 +854,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ========================================
-  // FEATURE RUNNER API (SUP-6)
+  // FEATURE RUNNER API (SUP-6, SUP-9)
   // ========================================
 
   // POST /api/features/run - Run a feature
@@ -878,10 +878,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const result = await runFeature(feature as FeatureType, params || {});
 
+      // SUP-9: Handle feature disabled status
+      if (result.status === "feature_disabled") {
+        return res.status(403).json({
+          status: "feature_disabled",
+          error: result.error,
+          errorCode: result.errorCode
+        });
+      }
+
       if (result.status === "error") {
         return res.status(500).json({ 
           status: "error",
-          error: result.error 
+          error: result.error,
+          errorCode: result.errorCode
         });
       }
 
