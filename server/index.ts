@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { supervisor } from "./supervisor";
+import { startSubconScheduler } from "./subcon";
 import crypto from "crypto";
 
 const app = express();
@@ -106,5 +107,9 @@ app.use((req, res, next) => {
     supervisor.start().catch(error => {
       console.error('Failed to start supervisor:', error);
     });
+    
+    // Start the subconscious scheduler (SUP-11)
+    // Disable with SUBCON_SCHEDULER_ENABLED=false
+    startSubconScheduler();
   });
 })();
