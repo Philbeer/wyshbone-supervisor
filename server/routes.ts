@@ -854,6 +854,80 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ========================================
+  // SUBCONSCIOUS NUDGES API (SUP-13)
+  // ========================================
+
+  // GET /api/subcon/nudges/account/:accountId - Get all nudges for an account
+  app.get("/api/subcon/nudges/account/:accountId", async (req, res) => {
+    try {
+      const { accountId } = req.params;
+      const { unresolved } = req.query;
+
+      if (!accountId) {
+        return res.status(400).json({ error: "accountId is required" });
+      }
+
+      let nudges;
+      if (unresolved === 'true') {
+        nudges = await storage.getUnresolvedSubconNudges(accountId);
+      } else {
+        nudges = await storage.getSubconNudgesByAccount(accountId);
+      }
+
+      res.json({ 
+        status: "ok",
+        nudges,
+        count: nudges.length
+      });
+    } catch (error: any) {
+      console.error("[SUBCON API] Error fetching nudges:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch nudges" });
+    }
+  });
+
+  // POST /api/subcon/nudges/resolve/:id - Resolve a nudge
+  app.post("/api/subcon/nudges/resolve/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!id) {
+        return res.status(400).json({ error: "nudge id is required" });
+      }
+
+      await storage.resolveSubconNudge(id);
+
+      res.json({ 
+        status: "ok",
+        message: `Nudge ${id} resolved`
+      });
+    } catch (error: any) {
+      console.error("[SUBCON API] Error resolving nudge:", error);
+      res.status(500).json({ error: error.message || "Failed to resolve nudge" });
+    }
+  });
+
+  // POST /api/subcon/nudges/dismiss/:id - Dismiss a nudge
+  app.post("/api/subcon/nudges/dismiss/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!id) {
+        return res.status(400).json({ error: "nudge id is required" });
+      }
+
+      await storage.dismissSubconNudge(id);
+
+      res.json({ 
+        status: "ok",
+        message: `Nudge ${id} dismissed`
+      });
+    } catch (error: any) {
+      console.error("[SUBCON API] Error dismissing nudge:", error);
+      res.status(500).json({ error: error.message || "Failed to dismiss nudge" });
+    }
+  });
+
+  // ========================================
   // FEATURE RUNNER API (SUP-6, SUP-9)
   // ========================================
 

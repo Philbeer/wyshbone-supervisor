@@ -3,10 +3,14 @@
  * 
  * Type definitions for the subconscious engine.
  * SUP-10: SubconsciousPack type + registry
+ * SUP-13: DBSubconNudge type for persisted nudges
  * 
  * The subconscious engine runs background packs that analyze data
  * and produce "nudges" - suggestions or alerts for users.
  */
+
+// Re-export database nudge type for convenience
+export type { SubconsciousNudge as DBSubconNudge } from '@shared/schema';
 
 // ============================================
 // PACK IDENTIFIERS

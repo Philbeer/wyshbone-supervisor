@@ -7,6 +7,7 @@ import {
   supervisorState,
   planExecutions,
   plans,
+  subconsciousNudges,
   type User, 
   type InsertUser, 
   type SuggestedLead, 
@@ -16,10 +17,13 @@ import {
   type InsertSuggestedLead,
   type InsertUserSignal,
   type InsertPlanExecution,
-  type InsertPlan
+  type InsertPlan,
+  type SubconsciousNudge as DBSubconsciousNudge,
+  type InsertSubconsciousNudge
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, isNull, and } from "drizzle-orm";
+import type { SubconNudge } from "./subcon/types";
 import { supabase } from "./supabase";
 
 export interface SupervisorCheckpoint {
@@ -49,6 +53,12 @@ export interface IStorage {
   updatePlan(planId: string, updates: Partial<InsertPlan>): Promise<void>;
   updatePlanStatus(planId: string, status: string): Promise<void>;
   getUserActivePlan(userId: string): Promise<Plan | undefined>;
+  // SUP-13: Subconscious nudges storage
+  saveSubconNudges(accountId: string, nudges: SubconNudge[]): Promise<void>;
+  getSubconNudgesByAccount(accountId: string): Promise<DBSubconsciousNudge[]>;
+  resolveSubconNudge(id: string): Promise<void>;
+  dismissSubconNudge(id: string): Promise<void>;
+  getUnresolvedSubconNudges(accountId: string): Promise<DBSubconsciousNudge[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -270,6 +280,88 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(plans.createdAt))
       .limit(1);
     return plan || undefined;
+  }
+
+  // SUP-13: Subconscious nudges storage
+
+  /**
+   * Convert priority to importance score (0-100 scale)
+   */
+  private priorityToImportance(priority: 'low' | 'medium' | 'high'): number {
+    switch (priority) {
+      case 'high': return 90;
+      case 'medium': return 60;
+      case 'low': return 30;
+      default: return 50;
+    }
+  }
+
+  /**
+   * Generate a title from nudge type
+   */
+  private nudgeTypeToTitle(type: string): string {
+    switch (type) {
+      case 'stale_lead': return 'Stale Lead Alert';
+      case 'follow_up': return 'Follow-up Reminder';
+      default: return type.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    }
+  }
+
+  async saveSubconNudges(accountId: string, nudges: SubconNudge[]): Promise<void> {
+    if (nudges.length === 0) return;
+
+    const insertData: InsertSubconsciousNudge[] = nudges.map(nudge => ({
+      id: `nudge_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+      accountId,
+      userId: null, // Could be set from context if needed
+      nudgeType: nudge.type,
+      title: this.nudgeTypeToTitle(nudge.type),
+      message: nudge.message,
+      importance: this.priorityToImportance(nudge.priority),
+      leadId: nudge.entityId || null,
+      context: nudge.metadata ? (nudge.metadata as Record<string, unknown>) : null,
+    }));
+
+    await db.insert(subconsciousNudges).values(insertData);
+    console.log(`[Storage] Saved ${nudges.length} subconscious nudges for account ${accountId}`);
+  }
+
+  async getSubconNudgesByAccount(accountId: string): Promise<DBSubconsciousNudge[]> {
+    const nudges = await db
+      .select()
+      .from(subconsciousNudges)
+      .where(eq(subconsciousNudges.accountId, accountId))
+      .orderBy(desc(subconsciousNudges.createdAt));
+    return nudges;
+  }
+
+  async resolveSubconNudge(id: string): Promise<void> {
+    await db
+      .update(subconsciousNudges)
+      .set({ resolvedAt: new Date() })
+      .where(eq(subconsciousNudges.id, id));
+  }
+
+  async dismissSubconNudge(id: string): Promise<void> {
+    await db
+      .update(subconsciousNudges)
+      .set({ dismissedAt: new Date() })
+      .where(eq(subconsciousNudges.id, id));
+  }
+
+  async getUnresolvedSubconNudges(accountId: string): Promise<DBSubconsciousNudge[]> {
+    const nudges = await db
+      .select()
+      .from(subconsciousNudges)
+      .where(
+        and(
+          eq(subconsciousNudges.accountId, accountId),
+          isNull(subconsciousNudges.resolvedAt),
+          isNull(subconsciousNudges.dismissedAt)
+        )
+      )
+      .orderBy(desc(subconsciousNudges.importance), desc(subconsciousNudges.createdAt));
+    return nudges;
   }
 }
 

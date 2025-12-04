@@ -33,6 +33,7 @@ import type { SuggestedLead } from '@shared/schema';
  */
 export interface StaleLeadsStorage {
   getSuggestedLeadsByAccount(accountId: string): Promise<SuggestedLead[]>;
+  saveSubconNudges?(accountId: string, nudges: SubconNudge[]): Promise<void>;
 }
 
 // Lazy-load the actual storage to avoid circular dependencies and allow testing
@@ -304,6 +305,8 @@ function analysisToNudge(analysis: LeadStalenessInfo): SubconNudge {
  * 
  * Analyzes leads for staleness and generates nudges to
  * prompt users to follow up on neglected leads.
+ * 
+ * SUP-13: Now persists nudges to storage after analysis.
  */
 export const staleLeadsPack: SubconsciousPack = {
   id: 'stale_leads',
@@ -314,8 +317,8 @@ export const staleLeadsPack: SubconsciousPack = {
     const now = context.timestamp ? new Date(context.timestamp) : new Date();
     
     // Fetch all leads for this account
-    const storage = await getStorage();
-    const leads = await storage.getSuggestedLeadsByAccount(context.accountId);
+    const storageInstance = await getStorage();
+    const leads = await storageInstance.getSuggestedLeadsByAccount(context.accountId);
     
     console.log(`[StaleLeadsPack] Found ${leads.length} leads for account ${context.accountId}`);
     
@@ -338,6 +341,17 @@ export const staleLeadsPack: SubconsciousPack = {
       .sort((a, b) => b.finalScore - a.finalScore);
     
     const nudges = staleAnalyses.map(analysisToNudge);
+
+    // SUP-13: Persist nudges to storage
+    if (nudges.length > 0 && storageInstance.saveSubconNudges) {
+      try {
+        await storageInstance.saveSubconNudges(context.accountId, nudges);
+        console.log(`[StaleLeadsPack] Persisted ${nudges.length} nudges to storage`);
+      } catch (error) {
+        console.error(`[StaleLeadsPack] Failed to persist nudges:`, error);
+        // Don't fail the pack if storage fails - nudges are still returned
+      }
+    }
     
     return {
       nudges,

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, jsonb, real } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, jsonb, real, integer, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -83,6 +83,24 @@ export const planExecutions = pgTable("plan_executions", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// SUP-13: Subconscious nudges storage
+export const subconsciousNudges = pgTable("subconscious_nudges", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  userId: text("user_id"),
+  nudgeType: text("nudge_type").notNull(),
+  title: text("title").notNull(),
+  message: text("message").notNull(),
+  importance: integer("importance").notNull(),
+  leadId: text("lead_id"),
+  context: jsonb("context"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  resolvedAt: timestamp("resolved_at"),
+  dismissedAt: timestamp("dismissed_at"),
+}, (table) => ({
+  accountIdIdx: index("subconscious_nudges_account_id_idx").on(table.accountId),
+}));
+
 export const insertUserSignalSchema = createInsertSchema(userSignals).omit({
   id: true,
   createdAt: true,
@@ -103,11 +121,17 @@ export const insertPlanSchema = createInsertSchema(plans).omit({
   updatedAt: true,
 });
 
+export const insertSubconsciousNudgeSchema = createInsertSchema(subconsciousNudges).omit({
+  createdAt: true,
+});
+
 export type InsertUserSignal = z.infer<typeof insertUserSignalSchema>;
 export type InsertSuggestedLead = z.infer<typeof insertSuggestedLeadSchema>;
 export type InsertPlanExecution = z.infer<typeof insertPlanExecutionSchema>;
 export type InsertPlan = z.infer<typeof insertPlanSchema>;
+export type InsertSubconsciousNudge = z.infer<typeof insertSubconsciousNudgeSchema>;
 export type SuggestedLead = typeof suggestedLeads.$inferSelect;
 export type UserSignal = typeof userSignals.$inferSelect;
 export type PlanExecution = typeof planExecutions.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
+export type SubconsciousNudge = typeof subconsciousNudges.$inferSelect;
