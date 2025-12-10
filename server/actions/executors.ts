@@ -204,12 +204,13 @@ export async function runEmailFinderBatch(input: ActionInput): Promise<ActionRes
     };
   }
 
-  const hunterApiKey = process.env.HUNTER_IO_API_KEY;
+  // Support both HUNTER_API_KEY (standard) and HUNTER_IO_API_KEY (legacy)
+  const hunterApiKey = process.env.HUNTER_API_KEY || process.env.HUNTER_IO_API_KEY;
   if (!hunterApiKey) {
     return {
       success: false,
       summary: 'Email finder requires Hunter.io API key',
-      error: 'HUNTER_IO_API_KEY not configured'
+      error: 'HUNTER_API_KEY not configured'
     };
   }
 

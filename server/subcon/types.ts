@@ -29,12 +29,20 @@ export type SubconsciousPackId = 'stale_leads';
 /**
  * Context passed to subconscious packs when they run.
  * Contains the user/account scope and optional timing info.
+ * 
+ * SUP-17: Added verticalId for vertical-aware pack selection.
  */
 export interface SubconContext {
   /** User ID for whom the pack is running */
   userId: string;
   /** Account ID (tenant) scope */
   accountId: string;
+  /** 
+   * Vertical ID for the account (SUP-17).
+   * Determines which subcon packs are enabled.
+   * Defaults to 'brewery' if not provided.
+   */
+  verticalId?: import('../core/verticals/types').VerticalId;
   /** Optional timestamp for the run (defaults to now if not provided) */
   timestamp?: string;
 }

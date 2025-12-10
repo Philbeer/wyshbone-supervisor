@@ -79,6 +79,12 @@ export interface SubconSchedulerConfig {
   defaultUserId: string;
   /** Default account ID (null means system-wide) */
   defaultAccountId: string;
+  /** 
+   * Default vertical ID for pack selection (SUP-16).
+   * Determines which subcon packs should run by default.
+   * SUP-17 will set this per-account; for now defaults to 'brewery'.
+   */
+  defaultVerticalId?: string;
 }
 
 /**
@@ -90,6 +96,7 @@ export const DEFAULT_SCHEDULER_CONFIG: SubconSchedulerConfig = {
   tickIntervalMs: 60 * 1000, // Check every 60 seconds
   defaultUserId: 'system',
   defaultAccountId: 'system',
+  defaultVerticalId: 'brewery', // SUP-16: Default to brewery vertical
 };
 
 // ============================================

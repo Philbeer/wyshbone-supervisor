@@ -29,6 +29,12 @@ export * from './events';
 // Re-export task runner types and implementation
 export * from './task-runner';
 
+// Re-export verticals types and registry (SUP-14)
+export * from './verticals';
+
+// Re-export accounts types and helpers (SUP-17)
+export * from './accounts';
+
 // Export version for debugging
 export const CORE_VERSION = '1.0.0';
 

@@ -8,6 +8,7 @@ import { monitorGoalsOnce, publishGoalMonitorEvents } from './goal-monitoring';
 interface UserContext {
   userId: string;
   accountId?: string; // SUP-012: Account ID for multi-account isolation
+  verticalId?: import('./core/verticals/types').VerticalId; // SUP-17: Vertical ID for vertical-aware features
   profile?: {
     companyName?: string;
     companyDomain?: string;
@@ -616,10 +617,8 @@ Would you like me to find leads based on any of these insights?`;
       const userInfo = await storage.getUserEmail(lead.userId);
 
       // Generate dashboard URL from environment variable
-      const dashboardUrl = process.env.DASHBOARD_URL || 
-        (process.env.REPL_SLUG 
-          ? `https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co`
-          : 'http://localhost:5000');
+      // FRONTEND_URL should be the public URL of the frontend (e.g., https://wyshbone.vercel.app)
+      const dashboardUrl = process.env.DASHBOARD_URL || process.env.FRONTEND_URL || 'http://localhost:5173';
 
       // Send email notification
       await emailService.sendLeadCreatedEmail({
@@ -692,8 +691,10 @@ Would you like me to find leads based on any of these insights?`;
   private async buildUserContext(userId: string): Promise<UserContext> {
     console.log(`🔍 Building comprehensive context for user: ${userId}`);
     
+    // SUP-17: Initialize with default verticalId = 'brewery'
     const context: UserContext = {
       userId,
+      verticalId: 'brewery', // SUP-17: Default to brewery
       facts: [],
       recentMessages: [],
       monitors: [],
@@ -706,10 +707,10 @@ Would you like me to find leads based on any of these insights?`;
     }
 
     try {
-      // Get user profile including accountId for SUP-012 isolation
+      // Get user profile including accountId for SUP-012 isolation and verticalId for SUP-17
       const { data: userProfile } = await supabase
         .from('users')
-        .select('company_name, company_domain, inferred_industry, primary_objective, secondary_objectives, target_markets, products_or_services, confidence, account_id')
+        .select('company_name, company_domain, inferred_industry, primary_objective, secondary_objectives, target_markets, products_or_services, confidence, account_id, vertical_id')
         .eq('id', userId)
         .single();
 
@@ -725,7 +726,10 @@ Would you like me to find leads based on any of these insights?`;
           confidence: userProfile.confidence
         };
         context.accountId = userProfile.account_id || undefined; // SUP-012: Account isolation
+        // SUP-17: Set verticalId, defaulting to 'brewery'
+        context.verticalId = (userProfile.vertical_id as UserContext['verticalId']) || 'brewery';
         console.log(`  📋 Profile: ${userProfile.company_name || 'Unknown'} (${userProfile.inferred_industry || 'Unknown industry'})`);
+        console.log(`  🏭 Vertical: ${context.verticalId}`);
       }
 
       // Get top ranked facts (score >= 70)
@@ -856,9 +860,10 @@ Would you like me to find leads based on any of these insights?`;
   }
 
   private async findEmails(domain: string): Promise<string[]> {
-    const apiKey = process.env.HUNTER_IO_API_KEY;
+    // Support both HUNTER_API_KEY (standard) and HUNTER_IO_API_KEY (legacy)
+    const apiKey = process.env.HUNTER_API_KEY || process.env.HUNTER_IO_API_KEY;
     if (!apiKey) {
-      console.log('⚠️  HUNTER_IO_API_KEY not configured, skipping email search');
+      console.log('⚠️  HUNTER_API_KEY not configured, skipping email search');
       return [];
     }
 

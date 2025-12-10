@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertUserSignalSchema, insertSuggestedLeadSchema } from "@shared/schema";
+import { insertUserSignalSchema, insertSuggestedLeadSchema } from "./schema";
 import { fromError } from "zod-validation-error";
 import { supabase } from "./supabase";
 import { supervisor } from "./supervisor";

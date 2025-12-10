@@ -1,8 +1,8 @@
 /**
  * Tower (Control Tower) Logging Integration
  * 
- * Logs plan executions in a structured format that can be picked up by Control Tower.
- * Uses console.log with a specific format that Tower can ingest.
+ * Logs plan executions to Tower via HTTP POST.
+ * Configure with TOWER_URL and TOWER_API_KEY environment variables.
  */
 
 export interface TowerRunLog {
@@ -19,9 +19,66 @@ export interface TowerRunLog {
 }
 
 /**
+ * Check if Tower logging is enabled
+ */
+function isTowerLoggingEnabled(): boolean {
+  return !!(process.env.TOWER_URL && (process.env.TOWER_API_KEY || process.env.EXPORT_KEY));
+}
+
+/**
+ * Send a log entry to Tower via HTTP POST
+ */
+async function sendToTower(log: TowerRunLog): Promise<void> {
+  const towerUrl = process.env.TOWER_URL;
+  const apiKey = process.env.TOWER_API_KEY || process.env.EXPORT_KEY;
+
+  if (!towerUrl || !apiKey) {
+    // Fallback to console logging if Tower is not configured
+    console.log(`[TOWER_LOG] ${JSON.stringify(log)}`);
+    return;
+  }
+
+  const endpoint = `${towerUrl.replace(/\/$/, '')}/tower/runs/log`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-TOWER-API-KEY': apiKey,
+      },
+      body: JSON.stringify({
+        runId: log.runId,
+        source: 'supervisor',
+        userId: log.userId,
+        status: log.status === 'running' ? 'started' : log.status,
+        request: log.request,
+        response: log.response,
+        meta: {
+          ...log.metadata,
+          accountId: log.accountId,
+          originalSource: log.source,
+          error: log.error,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      console.warn(`[Tower] Failed to log run ${log.runId}: HTTP ${response.status}`);
+    } else {
+      console.log(`[Tower] Logged run ${log.runId} (${log.status})`);
+    }
+  } catch (error) {
+    console.warn(`[Tower] Failed to log run ${log.runId}:`, error instanceof Error ? error.message : error);
+    // Fallback to console logging
+    console.log(`[TOWER_LOG] ${JSON.stringify(log)}`);
+  }
+}
+
+/**
  * Log a plan execution to Tower
  */
-export function logPlanExecutionToTower(params: {
+export async function logPlanExecutionToTower(params: {
   planId: string;
   userId: string;
   accountId?: string;
@@ -35,7 +92,7 @@ export function logPlanExecutionToTower(params: {
   };
   duration?: number;
   error?: string;
-}): void {
+}): Promise<void> {
   const log: TowerRunLog = {
     source: 'plan_executor',
     userId: params.userId,
@@ -62,15 +119,15 @@ export function logPlanExecutionToTower(params: {
     log.error = params.error;
   }
 
-  // Log in a format that Tower can pick up
-  console.log(`[TOWER_LOG] ${JSON.stringify(log)}`);
+  // Send to Tower via HTTP (or fallback to console.log)
+  await sendToTower(log);
 }
 
 /**
  * Log the start of a plan execution
  */
-export function logPlanStart(planId: string, userId: string, accountId: string | undefined, goal: string): void {
-  logPlanExecutionToTower({
+export async function logPlanStart(planId: string, userId: string, accountId: string | undefined, goal: string): Promise<void> {
+  await logPlanExecutionToTower({
     planId,
     userId,
     accountId,
@@ -82,7 +139,7 @@ export function logPlanStart(planId: string, userId: string, accountId: string |
 /**
  * Log the completion of a plan execution
  */
-export function logPlanComplete(
+export async function logPlanComplete(
   planId: string,
   userId: string,
   accountId: string | undefined,
@@ -91,8 +148,8 @@ export function logPlanComplete(
   stepsSummary: { total: number; succeeded: number; failed: number; skipped: number },
   duration: number,
   error?: string
-): void {
-  logPlanExecutionToTower({
+): Promise<void> {
+  await logPlanExecutionToTower({
     planId,
     userId,
     accountId,
@@ -103,3 +160,8 @@ export function logPlanComplete(
     error
   });
 }
+
+/**
+ * Export the check function for external use
+ */
+export { isTowerLoggingEnabled };

@@ -1,4 +1,4 @@
-// Referenced from blueprint:javascript_database
+// Schema imports - use server/schema.ts for env-aware schema selection
 import { 
   users, 
   suggestedLeads, 
@@ -20,7 +20,7 @@ import {
   type InsertPlan,
   type SubconsciousNudge as DBSubconsciousNudge,
   type InsertSubconsciousNudge
-} from "@shared/schema";
+} from "./schema";
 import { db } from "./db";
 import { eq, desc, isNull, and } from "drizzle-orm";
 import type { SubconNudge } from "./subcon/types";

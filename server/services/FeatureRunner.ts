@@ -97,9 +97,12 @@ export async function runFeature(
     
     switch (featureType) {
       case "leadFinder": {
+        // SUP-15: Pass through recipeId and verticalId for pack-based searches
         const leadFinderParams: LeadFinderParams = {
           query: (params.query as string) || "",
-          location: (params.location as string) || ""
+          location: (params.location as string) || "",
+          recipeId: params.recipeId as string | undefined,
+          verticalId: params.verticalId as LeadFinderParams['verticalId'],
         };
         data = await runLeadFinder(leadFinderParams);
         break;

@@ -7,7 +7,7 @@
 
 import { storage } from "./storage";
 import { db } from "./db";
-import { planExecutions, suggestedLeads } from "@shared/schema";
+import { planExecutions, suggestedLeads } from "./schema";
 import { desc, sql } from "drizzle-orm";
 import type { LeadGenStepResult, LeadDataSourceId } from "./types/lead-gen-plan";
 

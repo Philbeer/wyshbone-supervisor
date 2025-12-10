@@ -53,6 +53,15 @@ export * from './packs';
 // Re-export schedules config
 export { SUBCON_SCHEDULES, getScheduleById, getEnabledSchedules } from './schedules';
 
+// Re-export vertical mapping (SUP-16)
+export {
+  getDefaultSubconPackIdsForVertical,
+  getVerticalSubconConfig,
+  listVerticalSubconConfigs,
+  hasDefaultSubconPacks,
+  type VerticalSubconConfig
+} from './SubconVerticalMapping';
+
 // Re-export scheduler functions
 export {
   startSubconScheduler,
@@ -60,6 +69,9 @@ export {
   getSubconSchedulerStatus,
   triggerSchedule,
   isScheduleDue,
+  // SUP-16: Vertical-aware pack selection
+  getCurrentVerticalId,
+  getCurrentVerticalPackIds,
   // Testing utilities
   _setTimeProvider,
   _resetTimeProvider,

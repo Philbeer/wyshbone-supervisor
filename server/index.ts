@@ -1,4 +1,5 @@
 import express, { type Request, Response, NextFunction } from "express";
+import cors from "cors";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { supervisor } from "./supervisor";
@@ -6,6 +7,38 @@ import { startSubconScheduler } from "./subcon";
 import crypto from "crypto";
 
 const app = express();
+
+// CORS configuration for cross-origin requests
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://localhost:5000',
+  process.env.FRONTEND_URL,
+  process.env.UI_URL,
+].filter(Boolean) as string[];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app') || origin.endsWith('.onrender.com')) {
+      return callback(null, true);
+    }
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-EXPORT-KEY']
+}));
+
+// Health check endpoint for load balancers
+app.get('/health', (_req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    service: 'wyshbone-supervisor',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
 
 declare module 'http' {
   interface IncomingMessage {
@@ -96,12 +129,9 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || '5000', 10);
-  server.listen({
-    port,
-    host: "0.0.0.0",
-    reusePort: true,
-  }, () => {
-    log(`serving on port ${port}`);
+  const host = process.env.HOST || '127.0.0.1';
+  server.listen(port, host, () => {
+    log(`serving on http://${host}:${port}`);
     
     // Start the supervisor service
     supervisor.start().catch(error => {

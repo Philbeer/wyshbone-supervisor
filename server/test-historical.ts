@@ -7,7 +7,7 @@
 import { planLeadGenerationWithHistory } from "./types/lead-gen-plan";
 import type { LeadGenGoal, LeadGenContext } from "./types/lead-gen-plan";
 import { db } from "./db";
-import { planExecutions, suggestedLeads } from "@shared/schema";
+import { planExecutions, suggestedLeads } from "./schema";
 import { sql } from "drizzle-orm";
 
 async function seedHistoricalData() {

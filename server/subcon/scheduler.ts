@@ -35,6 +35,9 @@ import {
 } from './scheduler-types';
 import { SUBCON_SCHEDULES, getEnabledSchedules } from './schedules';
 import { runSubconPack, initializeSubconEngine } from './index';
+import { getDefaultSubconPackIdsForVertical } from './SubconVerticalMapping';
+import type { VerticalId } from '../core/verticals/types';
+import { getAccountVerticalId, DEFAULT_VERTICAL_ID } from '../core/accounts';
 
 // ============================================
 // SCHEDULER STATE
@@ -134,10 +137,31 @@ export function isScheduleDue(schedule: SubconSchedule, now: number): boolean {
 }
 
 /**
- * Get schedules that are due to run now.
+ * Get schedules that are due to run now for the configured vertical.
+ * 
+ * SUP-16: Filters schedules to only include packs that are in the
+ * vertical's default pack list.
+ * SUP-17: Uses getAccountVerticalId for consistent defaulting.
+ * 
+ * @param now - Current timestamp in milliseconds
+ * @returns Array of schedules that are due and valid for the current vertical
  */
 function getDueSchedules(now: number): SubconSchedule[] {
-  return getEnabledSchedules().filter(schedule => isScheduleDue(schedule, now));
+  // Get the vertical ID from config (defaults to 'brewery' via SUP-17)
+  const verticalId = getAccountVerticalId(config.defaultVerticalId as VerticalId | undefined);
+  
+  // Get the default pack IDs for this vertical
+  const verticalPackIds = getDefaultSubconPackIdsForVertical(verticalId);
+  
+  // Filter enabled schedules to only those whose packId is in the vertical's defaults
+  return getEnabledSchedules().filter(schedule => {
+    // First check if the pack is in the vertical's default packs
+    if (!verticalPackIds.includes(schedule.packId)) {
+      return false;
+    }
+    // Then check if the schedule is due
+    return isScheduleDue(schedule, now);
+  });
 }
 
 // ============================================
@@ -147,6 +171,8 @@ function getDueSchedules(now: number): SubconSchedule[] {
 /**
  * Run a single schedule.
  * 
+ * SUP-17: Now includes verticalId in the context for vertical-aware pack execution.
+ * 
  * @param schedule - The schedule to run
  */
 async function executeSchedule(schedule: SubconSchedule): Promise<void> {
@@ -154,10 +180,14 @@ async function executeSchedule(schedule: SubconSchedule): Promise<void> {
   
   console.log(`[SubconScheduler] Running schedule: ${schedule.id} (pack: ${schedule.packId})`);
   
-  // Build context for the pack
+  // SUP-17: Get verticalId from config, defaulting to 'brewery'
+  const verticalId = getAccountVerticalId(config.defaultVerticalId as VerticalId | undefined);
+  
+  // Build context for the pack (SUP-17: now includes verticalId)
   const context: SubconContext = {
     userId: config.defaultUserId,
     accountId: config.defaultAccountId,
+    verticalId,
     timestamp: new Date(now).toISOString(),
   };
   
@@ -335,6 +365,29 @@ export async function triggerSchedule(scheduleId: SubconScheduleId): Promise<voi
   }
   
   await executeSchedule(schedule);
+}
+
+/**
+ * Get the current vertical ID being used by the scheduler.
+ * 
+ * SUP-16: Returns the verticalId from config (defaults to 'brewery').
+ * SUP-17: Uses getAccountVerticalId for consistent defaulting.
+ * 
+ * @returns The current VerticalId
+ */
+export function getCurrentVerticalId(): VerticalId {
+  return getAccountVerticalId(config.defaultVerticalId as VerticalId | undefined);
+}
+
+/**
+ * Get the default subcon pack IDs for the current vertical.
+ * 
+ * SUP-16: Convenience function that uses the scheduler's configured vertical.
+ * 
+ * @returns Array of SubconsciousPackId that are defaults for the current vertical
+ */
+export function getCurrentVerticalPackIds(): import('./types').SubconsciousPackId[] {
+  return getDefaultSubconPackIdsForVertical(getCurrentVerticalId());
 }
 
 // ============================================
