@@ -1038,6 +1038,173 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ========================================
+  // DAG MUTATION API (Phase 3 Task 5)
+  // ========================================
+
+  // POST /api/plan/:planId/dag/add-step - Add a step to the plan
+  app.post("/api/plan/:planId/dag/add-step", async (req, res) => {
+    try {
+      const { planId } = req.params;
+      const { step, insertAfter, insertBefore, reason } = req.body;
+
+      if (!step) {
+        return res.status(400).json({ error: "step is required" });
+      }
+
+      const { addStep } = await import('./dag-mutator');
+      const result = await addStep(planId, step, {
+        insertAfter,
+        insertBefore,
+        reason,
+        automatic: false
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({
+        success: true,
+        mutationId: result.mutationId,
+        warnings: result.warnings
+      });
+    } catch (error: any) {
+      console.error('[DAG API] Error adding step:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // DELETE /api/plan/:planId/dag/step/:stepId - Remove a step
+  app.delete("/api/plan/:planId/dag/step/:stepId", async (req, res) => {
+    try {
+      const { planId, stepId } = req.params;
+      const { updateDependencies, reason } = req.body;
+
+      const { removeStep } = await import('./dag-mutator');
+      const result = await removeStep(planId, stepId, {
+        updateDependencies: updateDependencies !== false, // Default true
+        reason,
+        automatic: false
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({
+        success: true,
+        mutationId: result.mutationId,
+        warnings: result.warnings
+      });
+    } catch (error: any) {
+      console.error('[DAG API] Error removing step:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PUT /api/plan/:planId/dag/step/:stepId/dependencies - Modify step dependencies
+  app.put("/api/plan/:planId/dag/step/:stepId/dependencies", async (req, res) => {
+    try {
+      const { planId, stepId } = req.params;
+      const { dependencies, reason } = req.body;
+
+      if (!Array.isArray(dependencies)) {
+        return res.status(400).json({ error: "dependencies must be an array" });
+      }
+
+      const { modifyStepDependencies } = await import('./dag-mutator');
+      const result = await modifyStepDependencies(planId, stepId, dependencies, {
+        reason,
+        automatic: false
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({
+        success: true,
+        mutationId: result.mutationId,
+        warnings: result.warnings
+      });
+    } catch (error: any) {
+      console.error('[DAG API] Error modifying dependencies:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PUT /api/plan/:planId/dag/step/:stepId/replace - Replace a step
+  app.put("/api/plan/:planId/dag/step/:stepId/replace", async (req, res) => {
+    try {
+      const { planId, stepId } = req.params;
+      const { newStep, reason } = req.body;
+
+      if (!newStep) {
+        return res.status(400).json({ error: "newStep is required" });
+      }
+
+      const { replaceStep } = await import('./dag-mutator');
+      const result = await replaceStep(planId, stepId, newStep, {
+        reason,
+        automatic: false
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({
+        success: true,
+        mutationId: result.mutationId,
+        warnings: result.warnings
+      });
+    } catch (error: any) {
+      console.error('[DAG API] Error replacing step:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /api/plan/:planId/dag/validate - Validate DAG structure
+  app.post("/api/plan/:planId/dag/validate", async (req, res) => {
+    try {
+      const { planId } = req.params;
+
+      const dbPlan = await storage.getPlan(planId);
+      if (!dbPlan) {
+        return res.status(404).json({ error: 'Plan not found' });
+      }
+
+      const plan = dbPlan.planData;
+      const { validateDAG } = await import('./dag-mutator');
+      const validation = validateDAG(plan);
+
+      res.json(validation);
+    } catch (error: any) {
+      console.error('[DAG API] Error validating DAG:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // GET /api/plan/:planId/dag/mutations - Get mutation history
+  app.get("/api/plan/:planId/dag/mutations", async (req, res) => {
+    try {
+      const { planId } = req.params;
+
+      const { getMutationHistory } = await import('./dag-mutator');
+      const history = getMutationHistory(planId);
+
+      res.json({
+        planId,
+        mutations: history,
+        count: history.length
+      });
+    } catch (error: any) {
+      console.error('[DAG API] Error getting mutations:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }

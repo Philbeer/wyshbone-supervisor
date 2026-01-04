@@ -15,7 +15,8 @@
     "db:seed": "tsx server/scripts/seed.ts",
     "test:goals": "tsx server/scripts/test-goal-generator.ts",
     "test:executor": "tsx server/scripts/test-task-executor.ts",
-    "test:cron": "tsx server/scripts/test-daily-cron.ts"
+    "test:cron": "tsx server/scripts/test-daily-cron.ts",
+    "test:dag": "tsx server/scripts/test-dag-mutator.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
