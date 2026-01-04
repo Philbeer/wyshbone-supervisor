@@ -4,11 +4,13 @@ This document defines how AI agents (Cursor, Claude, etc.) should operate in thi
 
 ## 🚫 CRITICAL: QA Gate Requirement
 
+**Before declaring any work done, agents MUST run `npm run smoke` and fix failures until it passes.**
+
 **You MUST NOT declare any task complete until you have:**
 
-1. ✅ Booted the supervisor service locally (`npm run dev`)
-2. ✅ Run the smoke test (`npx tsx scripts/smoke-test.ts`)
-3. ✅ Confirmed no unhandled errors in logs
+1. ✅ Run the smoke test: `npm run smoke`
+2. ✅ Confirmed all checks pass (✅ ALL TESTS PASSED)
+3. ✅ Fixed any failures before proceeding
 4. ✅ Verified no 404/500 on modified endpoints
 5. ✅ Added and passed 1-3 task-specific checks
 
@@ -44,8 +46,8 @@ wyshbone-supervisor/
 # Start development server (backend + frontend)
 npm run dev
 
-# Run smoke test (QA gate)
-npx tsx scripts/smoke-test.ts
+# Run smoke test (QA gate) - REQUIRED before declaring work complete
+npm run smoke
 
 # Type check
 npm run check

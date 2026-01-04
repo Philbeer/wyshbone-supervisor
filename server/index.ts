@@ -4,6 +4,7 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { supervisor } from "./supervisor";
 import { startSubconScheduler } from "./subcon";
+import { startDailyAgentCron } from "./cron/daily-agent";
 import crypto from "crypto";
 
 const app = express();
@@ -141,5 +142,9 @@ app.use((req, res, next) => {
     // Start the subconscious scheduler (SUP-11)
     // Disable with SUBCON_SCHEDULER_ENABLED=false
     startSubconScheduler();
+
+    // Start the daily agent cron job (Phase 2 Task 5)
+    // Runs at 9am daily - disable with DAILY_AGENT_ENABLED=false
+    startDailyAgentCron();
   });
 })();

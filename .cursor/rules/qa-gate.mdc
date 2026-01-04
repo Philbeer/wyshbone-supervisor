@@ -18,9 +18,9 @@ npm run dev
 
 ### 2. Run Smoke Test
 ```bash
-npx tsx scripts/smoke-test.ts
+npm run smoke
 ```
-- All endpoint checks must pass (✅)
+- All endpoint checks must pass (✅ ALL TESTS PASSED)
 - If smoke test fails, diagnose and fix before proceeding
 
 ### 3. Verify No Errors
@@ -90,8 +90,8 @@ Before declaring done, output this report:
 # Start dev server
 npm run dev
 
-# Run smoke test
-npx tsx scripts/smoke-test.ts
+# Run smoke test (REQUIRED before declaring work complete)
+npm run smoke
 
 # Type check
 npm run check

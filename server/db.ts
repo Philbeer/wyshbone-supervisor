@@ -35,9 +35,29 @@ if (!hasDbUrl && !isProduction) {
   console.log('');
   
   // Create a mock db object that won't crash
+  // This mock supports common query patterns used in the codebase
+  const createQueryChain = (): any => {
+    const chain: any = {
+      from: () => chain,
+      where: () => chain,
+      orderBy: () => chain,
+      limit: () => chain,
+      offset: () => chain,
+      leftJoin: () => chain,
+      innerJoin: () => chain,
+      groupBy: () => chain,
+      having: () => chain,
+      // Terminal methods that return promises
+      then: (resolve: any) => resolve([]),
+      catch: () => Promise.resolve([]),
+    };
+    // Make it thenable so it works with await
+    return chain;
+  };
+  
   db = {
     _isMock: true,
-    select: () => ({ from: () => ({ where: () => ({ orderBy: () => Promise.resolve([]) }) }) }),
+    select: () => createQueryChain(),
     insert: () => ({ values: () => ({ returning: () => Promise.resolve([]) }) }),
     update: () => ({ set: () => ({ where: () => Promise.resolve([]) }) }),
     delete: () => ({ where: () => Promise.resolve([]) }),
@@ -74,10 +94,27 @@ if (!hasDbUrl && !isProduction) {
         console.log('='.repeat(60));
         console.log('');
         
-        // Fall back to mock
+        // Fall back to mock - use same pattern as above
+        const createQueryChain = (): any => {
+          const chain: any = {
+            from: () => chain,
+            where: () => chain,
+            orderBy: () => chain,
+            limit: () => chain,
+            offset: () => chain,
+            leftJoin: () => chain,
+            innerJoin: () => chain,
+            groupBy: () => chain,
+            having: () => chain,
+            then: (resolve: any) => resolve([]),
+            catch: () => Promise.resolve([]),
+          };
+          return chain;
+        };
+        
         db = {
           _isMock: true,
-          select: () => ({ from: () => ({ where: () => ({ orderBy: () => Promise.resolve([]) }) }) }),
+          select: () => createQueryChain(),
           insert: () => ({ values: () => ({ returning: () => Promise.resolve([]) }) }),
           update: () => ({ set: () => ({ where: () => Promise.resolve([]) }) }),
           delete: () => ({ where: () => Promise.resolve([]) }),

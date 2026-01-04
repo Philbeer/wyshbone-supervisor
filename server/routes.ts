@@ -979,6 +979,65 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ========================================
+  // DAILY AGENT CRON API (Phase 2 Task 5)
+  // ========================================
+
+  // POST /api/agent/trigger - Manually trigger daily agent
+  app.post("/api/agent/trigger", async (req, res) => {
+    try {
+      console.log('[AGENT API] Manual trigger requested');
+
+      const { triggerDailyAgentManually } = await import('./cron/daily-agent');
+      const result = await triggerDailyAgentManually();
+
+      res.json({
+        status: 'success',
+        message: 'Daily agent executed successfully',
+        result: {
+          cronJobId: result.cronJobId,
+          totalUsers: result.totalUsers,
+          successfulUsers: result.successfulUsers,
+          failedUsers: result.failedUsers,
+          totalTasksGenerated: result.totalTasksGenerated,
+          totalTasksExecuted: result.totalTasksExecuted,
+          totalSuccessfulTasks: result.totalSuccessfulTasks,
+          totalInterestingResults: result.totalInterestingResults,
+          duration: result.duration
+        }
+      });
+    } catch (error: any) {
+      console.error('[AGENT API] Error triggering daily agent:', error);
+      res.status(500).json({
+        status: 'error',
+        error: error.message || 'Failed to trigger daily agent'
+      });
+    }
+  });
+
+  // GET /api/agent/status - Get cron job status
+  app.get("/api/agent/status", async (req, res) => {
+    try {
+      const { isDailyAgentCronRunning, getNextCronRunTime } = await import('./cron/daily-agent');
+
+      const isRunning = isDailyAgentCronRunning();
+      const nextRun = getNextCronRunTime();
+
+      res.json({
+        enabled: isRunning,
+        schedule: process.env.DAILY_AGENT_CRON_SCHEDULE || '0 9 * * *',
+        nextRun,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+      });
+    } catch (error: any) {
+      console.error('[AGENT API] Error getting agent status:', error);
+      res.status(500).json({
+        status: 'error',
+        error: error.message || 'Failed to get agent status'
+      });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }
