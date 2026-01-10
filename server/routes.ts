@@ -1318,6 +1318,53 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // POST /api/wabs/feedback - Submit WABS scoring feedback (P3-T3)
+  app.post("/api/wabs/feedback", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { taskId, resultData, wabsScore, wabsSignals, userFeedback, feedbackReason } = req.body;
+
+      if (!taskId || !wabsScore || !wabsSignals || !userFeedback) {
+        return res.status(400).json({
+          error: "Missing required fields: taskId, wabsScore, wabsSignals, userFeedback"
+        });
+      }
+
+      if (!['helpful', 'not_helpful'].includes(userFeedback)) {
+        return res.status(400).json({
+          error: "userFeedback must be 'helpful' or 'not_helpful'"
+        });
+      }
+
+      // Import WABS feedback service
+      const { storeWABSFeedback } = await import("./services/wabs-feedback");
+
+      const memoryId = await storeWABSFeedback({
+        userId,
+        taskId,
+        resultData: resultData || {},
+        wabsScore,
+        wabsSignals,
+        userFeedback,
+        feedbackReason,
+        timestamp: Date.now()
+      });
+
+      res.json({
+        success: true,
+        memoryId,
+        message: `WABS feedback recorded: ${userFeedback}`
+      });
+
+    } catch (error: any) {
+      console.error("[WABS FEEDBACK API] Error storing feedback:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message || "Failed to store WABS feedback"
+      });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }

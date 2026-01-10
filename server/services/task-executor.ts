@@ -10,6 +10,7 @@ import type { GeneratedTask } from '../autonomous-agent';
 import { createMemoriesFromSuccess, createMemoriesFromFailure } from './memory-writer';
 import { learnFromFeedback } from './preference-learner';
 import { getUserPreferences } from './preference-learner';
+import { getWeightsForUser } from './wabs-feedback';
 
 // ========================================
 // TYPES
@@ -295,6 +296,9 @@ async function evaluateResults(
     // Get user preferences for context
     const preferences = await getUserPreferences(userId);
 
+    // Get calibrated weights for this user (P3-T3: Learn from feedback)
+    const weights = await getWeightsForUser(userId);
+
     // Build user context for WABS scorer
     const userContext = {
       preferences: {
@@ -314,8 +318,8 @@ async function evaluateResults(
     const wabsScorerPath = '../../wyshbone-control-tower/lib/wabs-scorer.js';
     const { scoreInterestingness } = await import(wabsScorerPath);
 
-    // Score the result
-    const scoring = scoreInterestingness(data, userContext);
+    // Score the result with calibrated weights
+    const scoring = scoreInterestingness(data, userContext, weights);
 
     // Results scoring >70 are considered interesting (P3-T2 threshold)
     const interesting = scoring.score >= 70;
