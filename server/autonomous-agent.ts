@@ -9,6 +9,7 @@ import { supabase } from './supabase';
 import { storage } from './storage';
 import { claudeAPI } from './services/claude-api';
 import { executeTasks, type BatchExecutionResult } from './services/task-executor';
+import { getMemoryContext, summarizeMemoryContext } from './services/memory-reader';
 
 // ========================================
 // TYPES
@@ -90,23 +91,34 @@ export async function generateDailyTasks(userId: string): Promise<GoalGeneration
       };
     }
 
-    // 2. Build prompt for Claude
-    const prompt = buildTaskGenerationPrompt(context);
+    // 2. Retrieve memory context (P2-T2: Memory-influenced planning)
+    let memoryContext = '';
+    try {
+      const memories = await getMemoryContext(userId);
+      memoryContext = summarizeMemoryContext(memories);
+      console.log(`[AUTONOMOUS_AGENT] Retrieved memory context (${memories.preferences.length} preferences, ${memories.successPatterns.length} success patterns, ${memories.failurePatterns.length} failure patterns)`);
+    } catch (memoryError: any) {
+      console.error('[AUTONOMOUS_AGENT] Failed to retrieve memories:', memoryError.message);
+      // Continue without memory context
+    }
+
+    // 3. Build prompt for Claude
+    const prompt = buildTaskGenerationPrompt(context, memoryContext);
     const systemPrompt = buildSystemPrompt();
 
-    // 3. Call Claude API
+    // 4. Call Claude API
     console.log('[AUTONOMOUS_AGENT] Calling Claude API...');
     const response = await claudeAPI.chat(prompt, systemPrompt, {
       maxTokens: 2048,
       temperature: 0.7 // Slightly creative but not random
     });
 
-    // 4. Parse tasks from Claude's response
+    // 5. Parse tasks from Claude's response
     const tasks = parseGeneratedTasks(response.content);
 
     console.log(`[AUTONOMOUS_AGENT] Generated ${tasks.length} tasks`);
 
-    // 5. Store in agent_activities table
+    // 6. Store in agent_activities table
     await storeAgentActivity({
       userId,
       activityType: 'generate_tasks',
@@ -357,7 +369,7 @@ Output format (JSON):
 /**
  * Build user-specific prompt
  */
-function buildTaskGenerationPrompt(context: UserGoalsContext): string {
+function buildTaskGenerationPrompt(context: UserGoalsContext, memoryContext: string = ''): string {
   let prompt = `Generate 3-5 tasks for today based on this user's context:\n\n`;
 
   // Primary objective
@@ -397,8 +409,15 @@ function buildTaskGenerationPrompt(context: UserGoalsContext): string {
     prompt += `SUGGESTED LEADS: ${context.suggestedLeads} leads waiting for action\n\n`;
   }
 
-  prompt += `Based on this context, what are the 3-5 most important tasks this user should do TODAY?\n\n`;
-  prompt += `Remember: Be SPECIFIC and ACTIONABLE. Output JSON only.`;
+  // Memory context (P2-T2: Past learnings influence planning)
+  if (memoryContext) {
+    prompt += `AGENT MEMORY (learned from past experiences):\n`;
+    prompt += memoryContext;
+    prompt += `\n`;
+  }
+
+  prompt += `Based on this context and past learnings, what are the 3-5 most important tasks this user should do TODAY?\n\n`;
+  prompt += `Remember: Be SPECIFIC and ACTIONABLE. Learn from past successes and avoid past failures. Output JSON only.`;
 
   return prompt;
 }
