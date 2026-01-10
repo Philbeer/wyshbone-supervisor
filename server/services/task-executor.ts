@@ -9,6 +9,7 @@ import { supabase } from '../supabase';
 import type { GeneratedTask } from '../autonomous-agent';
 import { createMemoriesFromSuccess, createMemoriesFromFailure } from './memory-writer';
 import { learnFromFeedback } from './preference-learner';
+import { getUserPreferences } from './preference-learner';
 
 // ========================================
 // TYPES
@@ -94,8 +95,8 @@ export async function executeTask(
     if (toolResponse.success) {
       result.status = 'success';
 
-      // Evaluate if results are interesting
-      const evaluation = evaluateResults(task, toolResponse.data);
+      // Evaluate if results are interesting using WABS scoring (P3-T1)
+      const evaluation = await evaluateResults(task, toolResponse.data, userId);
       result.interesting = evaluation.interesting;
       result.interestingReason = evaluation.reason;
 
@@ -267,119 +268,97 @@ async function callToolEndpoint(request: ToolEndpointRequest): Promise<ToolEndpo
 }
 
 // ========================================
-// RESULT EVALUATION
+// RESULT EVALUATION (WABS SCORING - P3-T1)
 // ========================================
 
 /**
- * Evaluate if task results are "interesting" using simple heuristics
+ * Evaluate if task results are "interesting" using WABS scoring engine
  *
- * Interesting results include:
- * - Found new leads/contacts
- * - Discovered opportunities
- * - Identified issues that need attention
- * - Generated actionable insights
+ * WABS (What's Actually Been Said) scoring considers:
+ * - Relevance to user preferences
+ * - Novelty (new vs. seen before)
+ * - Actionability (can user do something with this?)
+ * - Urgency (time-sensitive?)
+ *
+ * Returns score 0-100 with explanation
  */
-function evaluateResults(
+async function evaluateResults(
   task: GeneratedTask,
-  data: any
-): { interesting: boolean; reason?: string } {
+  data: any,
+  userId: string
+): Promise<{ interesting: boolean; reason?: string }> {
   if (!data) {
     return { interesting: false };
   }
 
-  // Heuristic 1: Check for new leads or contacts
+  try {
+    // Get user preferences for context
+    const preferences = await getUserPreferences(userId);
+
+    // Build user context for WABS scorer
+    const userContext = {
+      preferences: {
+        industries: preferences.industries,
+        regions: preferences.regions,
+        contactTypes: preferences.contactTypes
+      },
+      keywords: preferences.keywords.map(k => k.value),
+      goals: {
+        primary: task.description // Use task description as goal context
+      },
+      recentResults: [], // TODO P3-T2: Track recent results to detect novelty
+      seenEntities: []   // TODO P3-T2: Track seen entities
+    };
+
+    // Import WABS scorer dynamically (from wyshbone-control-tower)
+    const wabsScorerPath = '../../wyshbone-control-tower/lib/wabs-scorer.js';
+    const { scoreInterestingness } = await import(wabsScorerPath);
+
+    // Score the result
+    const scoring = scoreInterestingness(data, userContext);
+
+    // Results scoring >70 are considered interesting (P3-T2 threshold)
+    const interesting = scoring.score >= 70;
+
+    console.log(`[WABS] Score: ${scoring.score}/100 | Signals: R=${scoring.signals.relevance} N=${scoring.signals.novelty} A=${scoring.signals.actionability} U=${scoring.signals.urgency}`);
+
+    return {
+      interesting,
+      reason: interesting ? `WABS Score: ${scoring.score}/100 - ${scoring.explanation}` : undefined
+    };
+
+  } catch (scoringError: any) {
+    // Fallback to simple heuristics if WABS fails
+    console.error(`[WABS] Scoring failed, using fallback heuristics:`, scoringError.message);
+    return evaluateResultsFallback(task, data);
+  }
+}
+
+/**
+ * Fallback evaluation using simple heuristics (if WABS fails)
+ */
+function evaluateResultsFallback(
+  task: GeneratedTask,
+  data: any
+): { interesting: boolean; reason?: string } {
+  // Check for new leads or contacts
   if (data.leads && Array.isArray(data.leads) && data.leads.length > 0) {
-    return {
-      interesting: true,
-      reason: `Found ${data.leads.length} new leads`
-    };
+    return { interesting: true, reason: `Found ${data.leads.length} new leads` };
   }
-
   if (data.contacts && Array.isArray(data.contacts) && data.contacts.length > 0) {
-    return {
-      interesting: true,
-      reason: `Found ${data.contacts.length} new contacts`
-    };
+    return { interesting: true, reason: `Found ${data.contacts.length} new contacts` };
   }
 
-  // Heuristic 2: Check for opportunities
+  // Check for opportunities
   if (data.opportunities && Array.isArray(data.opportunities) && data.opportunities.length > 0) {
-    return {
-      interesting: true,
-      reason: `Identified ${data.opportunities.length} opportunities`
-    };
+    return { interesting: true, reason: `Identified ${data.opportunities.length} opportunities` };
   }
 
-  // Heuristic 3: Check for alerts or issues
-  if (data.alerts && Array.isArray(data.alerts) && data.alerts.length > 0) {
-    return {
-      interesting: true,
-      reason: `Found ${data.alerts.length} alerts requiring attention`
-    };
-  }
-
-  if (data.issues && Array.isArray(data.issues) && data.issues.length > 0) {
-    return {
-      interesting: true,
-      reason: `Detected ${data.issues.length} issues`
-    };
-  }
-
-  // Heuristic 4: Check for significant counts
+  // Check for significant counts
   if (typeof data.count === 'number' && data.count > 0) {
-    return {
-      interesting: true,
-      reason: `Found ${data.count} items`
-    };
+    return { interesting: true, reason: `Found ${data.count} items` };
   }
 
-  // Heuristic 5: Check for changes or updates
-  if (data.changes && Array.isArray(data.changes) && data.changes.length > 0) {
-    return {
-      interesting: true,
-      reason: `Detected ${data.changes.length} changes`
-    };
-  }
-
-  if (data.updated && typeof data.updated === 'number' && data.updated > 0) {
-    return {
-      interesting: true,
-      reason: `Updated ${data.updated} items`
-    };
-  }
-
-  // Heuristic 6: Check for insights or recommendations
-  if (data.insights && Array.isArray(data.insights) && data.insights.length > 0) {
-    return {
-      interesting: true,
-      reason: `Generated ${data.insights.length} insights`
-    };
-  }
-
-  if (data.recommendations && Array.isArray(data.recommendations) && data.recommendations.length > 0) {
-    return {
-      interesting: true,
-      reason: `Provided ${data.recommendations.length} recommendations`
-    };
-  }
-
-  // Heuristic 7: Check for success indicators
-  if (data.success === true && data.message) {
-    return {
-      interesting: true,
-      reason: data.message
-    };
-  }
-
-  // Heuristic 8: High priority based on task priority
-  if (task.priority === 'high' && data.result) {
-    return {
-      interesting: true,
-      reason: 'High priority task completed with results'
-    };
-  }
-
-  // Default: not interesting
   return { interesting: false };
 }
 
