@@ -7,6 +7,8 @@
 
 import { supabase } from '../supabase';
 import type { GeneratedTask } from '../autonomous-agent';
+import { createMemoriesFromSuccess, createMemoriesFromFailure } from './memory-writer';
+import { learnFromFeedback } from './preference-learner';
 
 // ========================================
 // TYPES
@@ -116,6 +118,33 @@ export async function executeTask(
 
   // Log activity to database
   await logTaskActivity(userId, result);
+
+  // Store outcome in memory for learning (P2-T2)
+  try {
+    if (result.status === 'success' && result.interesting) {
+      const memoryIds = await createMemoriesFromSuccess(userId, result);
+      console.log(`[MEMORY] Created ${memoryIds.length} success memories from task`);
+    } else if (result.status === 'failed' && result.error) {
+      const memoryIds = await createMemoriesFromFailure(userId, result);
+      console.log(`[MEMORY] Created ${memoryIds.length} failure memories from task`);
+    }
+  } catch (memoryError: any) {
+    // Don't fail task if memory storage fails
+    console.error(`[MEMORY] Failed to store memories:`, memoryError.message);
+  }
+
+  // Learn user preferences from outcome (P2-T4)
+  try {
+    await learnFromFeedback({
+      userId,
+      taskId,
+      result: result.toolResponse?.data || result.toolResponse,
+      interesting: result.interesting
+    });
+  } catch (prefError: any) {
+    // Don't fail task if preference learning fails
+    console.error(`[PREFERENCE_LEARNER] Failed to learn preferences:`, prefError.message);
+  }
 
   return result;
 }

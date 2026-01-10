@@ -1205,6 +1205,119 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ========================================
+  // AGENT MEMORY API (Phase 2: ADAPT)
+  // ========================================
+
+  // POST /api/memory/store - Store a new memory from tool execution
+  app.post("/api/memory/store", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { toolUsed, query, outcome, userFeedback, confidenceScore, planId, taskId } = req.body;
+
+      if (!toolUsed || !query || !outcome) {
+        return res.status(400).json({ error: "toolUsed, query, and outcome are required" });
+      }
+
+      // Calculate expiration date (90 days from now)
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + 90);
+
+      const memory = await storage.storeAgentMemory({
+        userId,
+        accountId: req.body.accountId,
+        toolUsed,
+        query,
+        outcome,
+        userFeedback: userFeedback || null,
+        confidenceScore: confidenceScore || null,
+        planId: planId || null,
+        taskId: taskId || null,
+        expiresAt
+      });
+
+      console.log(`[MEMORY API] Stored memory for user ${userId}, tool: ${toolUsed}`);
+
+      res.json({
+        status: "success",
+        memory
+      });
+    } catch (error: any) {
+      console.error("[MEMORY API] Error storing memory:", error);
+      res.status(500).json({ error: error.message || "Failed to store memory" });
+    }
+  });
+
+  // GET /api/memory - Retrieve memories for a user
+  app.get("/api/memory", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { toolUsed, limit = 50, offset = 0 } = req.query;
+
+      const memories = await storage.getAgentMemories({
+        userId,
+        toolUsed: toolUsed as string,
+        limit: parseInt(limit as string),
+        offset: parseInt(offset as string)
+      });
+
+      res.json({
+        status: "success",
+        memories,
+        count: memories.length
+      });
+    } catch (error: any) {
+      console.error("[MEMORY API] Error retrieving memories:", error);
+      res.status(500).json({ error: error.message || "Failed to retrieve memories" });
+    }
+  });
+
+  // GET /api/preferences - Get user's learned preferences (P2-T4)
+  app.get("/api/preferences", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+
+      // Import preference learner (dynamic to avoid circular dependencies)
+      const { getUserPreferences } = await import("./services/preference-learner");
+
+      const preferences = await getUserPreferences(userId);
+
+      res.json({
+        success: true,
+        preferences,
+        updatedAt: Date.now()
+      });
+    } catch (error: any) {
+      console.error("[PREFERENCES API] Error retrieving preferences:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message || "Failed to retrieve preferences"
+      });
+    }
+  });
+
+  // POST /api/memory/:id/feedback - Update user feedback on a memory
+  app.post("/api/memory/:id/feedback", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { userFeedback } = req.body;
+
+      if (!userFeedback || !['helpful', 'not_helpful'].includes(userFeedback)) {
+        return res.status(400).json({ error: "userFeedback must be 'helpful' or 'not_helpful'" });
+      }
+
+      await storage.updateMemoryFeedback(id, userFeedback);
+
+      res.json({
+        status: "success",
+        message: `Memory ${id} marked as ${userFeedback}`
+      });
+    } catch (error: any) {
+      console.error("[MEMORY API] Error updating feedback:", error);
+      res.status(500).json({ error: error.message || "Failed to update feedback" });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }
