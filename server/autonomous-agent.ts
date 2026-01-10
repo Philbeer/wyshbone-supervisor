@@ -10,6 +10,7 @@ import { storage } from './storage';
 import { claudeAPI } from './services/claude-api';
 import { executeTasks, type BatchExecutionResult } from './services/task-executor';
 import { getMemoryContext, summarizeMemoryContext } from './services/memory-reader';
+import { sendAgentFindingsNotification } from './services/agent-email-notifier';
 
 // ========================================
 // TYPES
@@ -539,6 +540,30 @@ export async function generateAndExecuteTasks(userId: string): Promise<{
   // 2. Execute tasks
   console.log(`[AUTONOMOUS_AGENT] Executing ${generation.tasks.length} generated tasks...`);
   const execution = await executeTasks(generation.tasks, userId);
+
+  // 2.5. Send email notification for interesting findings (P3-T2)
+  if (execution.interesting > 0) {
+    try {
+      // Get user email from database
+      const profile = await storage.getUserProfile(userId);
+      if (profile && profile.email) {
+        await sendAgentFindingsNotification(
+          {
+            userId,
+            email: profile.email,
+            name: profile.name
+          },
+          execution,
+          'https://app.wyshbone.ai/dashboard'
+        );
+      } else {
+        console.warn(`[AUTONOMOUS_AGENT] No email found for user ${userId} - skipping notification`);
+      }
+    } catch (emailError: any) {
+      console.error(`[AUTONOMOUS_AGENT] Failed to send email notification:`, emailError.message);
+      // Don't fail execution if email fails
+    }
+  }
 
   // 3. Log combined activity
   await storeAgentActivity({
