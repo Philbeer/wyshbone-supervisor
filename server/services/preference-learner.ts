@@ -6,7 +6,6 @@
  * Updates preference weights based on feedback.
  */
 
-import { supabase } from '../supabase';
 import { createPreferenceMemory, updateMemory } from './memory-writer';
 import { getActiveMemories } from './memory-reader';
 
@@ -136,42 +135,66 @@ function extractSignals(result: any): {
 
   if (!result) return signals;
 
-  // Extract industries
-  if (result.industry) {
-    signals.industries.push(normalizeValue(result.industry));
-  }
-  if (result.industries && Array.isArray(result.industries)) {
-    signals.industries.push(...result.industries.map(normalizeValue));
-  }
+  // Helper to extract from nested objects (brewery, pub, restaurant, etc.)
+  const extractFromNested = (obj: any) => {
+    if (!obj || typeof obj !== 'object') return;
 
-  // Extract regions/locations
-  if (result.location) {
-    signals.regions.push(normalizeValue(result.location));
-  }
-  if (result.region) {
-    signals.regions.push(normalizeValue(result.region));
-  }
-  if (result.city) {
-    signals.regions.push(normalizeValue(result.city));
-  }
-  if (result.country) {
-    signals.regions.push(normalizeValue(result.country));
-  }
+    // Extract industries
+    if (obj.industry) {
+      signals.industries.push(normalizeValue(obj.industry));
+    }
+    if (obj.industries && Array.isArray(obj.industries)) {
+      signals.industries.push(...obj.industries.map(normalizeValue));
+    }
+    if (obj.type) {
+      signals.keywords.push(normalizeValue(obj.type));
+    }
 
-  // Extract contact types
-  if (result.contactType) {
-    signals.contactTypes.push(normalizeValue(result.contactType));
-  }
-  if (result.leadType) {
-    signals.contactTypes.push(normalizeValue(result.leadType));
-  }
+    // Extract regions/locations
+    if (obj.location) {
+      signals.regions.push(normalizeValue(obj.location));
+    }
+    if (obj.region) {
+      signals.regions.push(normalizeValue(obj.region));
+    }
+    if (obj.city) {
+      signals.regions.push(normalizeValue(obj.city));
+    }
+    if (obj.country) {
+      signals.regions.push(normalizeValue(obj.country));
+    }
 
-  // Extract keywords from description or query
-  if (result.description) {
-    signals.keywords.push(...extractKeywords(result.description));
-  }
-  if (result.query) {
-    signals.keywords.push(...extractKeywords(result.query));
+    // Extract contact types
+    if (obj.contactType) {
+      signals.contactTypes.push(normalizeValue(obj.contactType));
+    }
+    if (obj.leadType) {
+      signals.contactTypes.push(normalizeValue(obj.leadType));
+    }
+
+    // Extract keywords from description, query, or name
+    if (obj.description) {
+      signals.keywords.push(...extractKeywords(obj.description));
+    }
+    if (obj.query) {
+      signals.keywords.push(...extractKeywords(obj.query));
+    }
+    if (obj.name) {
+      signals.keywords.push(...extractKeywords(obj.name));
+    }
+  };
+
+  // Extract from top level
+  extractFromNested(result);
+
+  // Extract from nested entities (brewery, pub, restaurant, etc.)
+  const entityKeys = ['brewery', 'pub', 'restaurant', 'venue', 'company', 'contact', 'lead'];
+  for (const key of entityKeys) {
+    if (result[key]) {
+      extractFromNested(result[key]);
+      // Also add entity type as keyword
+      signals.keywords.push(key);
+    }
   }
 
   return signals;
@@ -278,15 +301,9 @@ async function storePreferences(
     } else if (update.memoryId) {
       // Update existing preference memory
       await updateMemory({
-        memoryId: update.memoryId,
-        title,
-        description,
+        id: update.memoryId,
         tags,
-        confidenceScore: update.weight,
-        metadata: {
-          engagementCount: update.engagementCount,
-          lastEngaged: update.lastEngaged
-        }
+        confidenceScore: update.weight
       });
       console.log(`[PREFERENCE_LEARNER] Updated preference: ${update.value} (weight: ${update.weight.toFixed(2)})`);
     }
@@ -311,7 +328,7 @@ export async function getUserPreferences(userId: string): Promise<UserPreference
   // Retrieve preference memories
   const memories = await getActiveMemories({
     userId,
-    memoryType: 'preference',
+    types: ['preference'],
     limit: 100
   });
 
@@ -319,9 +336,9 @@ export async function getUserPreferences(userId: string): Promise<UserPreference
   for (const memory of memories) {
     const prefItem: PreferenceItem = {
       value: memory.title.replace('Preference: ', ''),
-      weight: memory.confidence_score,
-      engagementCount: memory.metadata?.engagementCount || memory.access_count,
-      lastEngaged: memory.last_accessed_at || memory.created_at,
+      weight: memory.confidenceScore,
+      engagementCount: memory.metadata?.engagementCount || memory.accessCount,
+      lastEngaged: memory.lastAccessedAt || memory.createdAt,
       memoryId: memory.id
     };
 

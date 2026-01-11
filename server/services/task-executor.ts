@@ -11,6 +11,26 @@ import { createMemoriesFromSuccess, createMemoriesFromFailure } from './memory-w
 import { learnFromFeedback } from './preference-learner';
 import { getUserPreferences } from './preference-learner';
 import { getWeightsForUser } from './wabs-feedback';
+import { scoreResult } from './wabs-scorer';
+import { sendInterestingResultEmail, getUserEmail } from './email-notifier';
+import { interpretTask } from './task-interpreter';
+import pg from 'pg';
+
+const { Pool } = pg;
+
+// PostgreSQL connection for task_executions storage
+let taskExecutionsPool: pg.Pool | null = null;
+
+function getTaskExecutionsPool(): pg.Pool {
+  if (!taskExecutionsPool) {
+    const DATABASE_URL = process.env.DATABASE_URL;
+    if (!DATABASE_URL) {
+      throw new Error('DATABASE_URL not configured');
+    }
+    taskExecutionsPool = new Pool({ connectionString: DATABASE_URL });
+  }
+  return taskExecutionsPool;
+}
 
 // ========================================
 // TYPES
@@ -22,8 +42,19 @@ export interface TaskExecutionResult {
   status: 'success' | 'failed' | 'partial';
   executionTime: number;
   toolResponse?: any;
+  toolCall?: {
+    tool: string;
+    params: Record<string, any>;
+  };
   interesting: boolean;
   interestingReason?: string;
+  wabsScore?: number;
+  wabsSignals?: {
+    relevance: number;
+    novelty: number;
+    actionability: number;
+    urgency: number;
+  };
   error?: string;
 }
 
@@ -37,9 +68,13 @@ export interface BatchExecutionResult {
 }
 
 interface ToolEndpointRequest {
-  task: GeneratedTask;
+  tool: string;
+  params: Record<string, any>;
   userId: string;
-  taskId: string;
+  metadata?: {
+    taskId: string;
+    originalTask: string;
+  };
 }
 
 interface ToolEndpointResponse {
@@ -83,11 +118,22 @@ export async function executeTask(
   };
 
   try {
-    // Call unified tool endpoint
+    // Interpret task to determine which tool to call (P3: Task Intelligence Layer)
+    const toolCall = await interpretTask(task);
+    console.log(`[TASK_INTERPRETER] Tool: ${toolCall.tool}, Params: ${JSON.stringify(toolCall.params)}`);
+
+    // Store tool call in result for activity logging
+    result.toolCall = toolCall;
+
+    // Call unified tool endpoint with interpreted tool call
     const toolResponse = await callToolEndpoint({
-      task,
+      tool: toolCall.tool,
+      params: toolCall.params,
       userId,
-      taskId
+      metadata: {
+        taskId,
+        originalTask: task.description
+      }
     });
 
     result.executionTime = Date.now() - startTime;
@@ -100,8 +146,40 @@ export async function executeTask(
       const evaluation = await evaluateResults(task, toolResponse.data, userId);
       result.interesting = evaluation.interesting;
       result.interestingReason = evaluation.reason;
+      result.wabsScore = evaluation.wabsScore;
+      result.wabsSignals = evaluation.wabsSignals;
 
       console.log(`[TASK_EXECUTOR] ✅ Task completed successfully (${result.executionTime}ms)`);
+
+      // Send email notification for interesting results (P3-T3)
+      if (result.interesting && result.wabsScore && result.wabsSignals) {
+        try {
+          const userEmail = await getUserEmail(userId);
+          if (userEmail) {
+            console.log(`[TASK_EXECUTOR] 🌟 Interesting result detected - sending email notification`);
+            const emailResult = await sendInterestingResultEmail({
+              userId,
+              userEmail,
+              taskTitle: task.title,
+              score: result.wabsScore,
+              signals: result.wabsSignals,
+              result: toolResponse.data,
+              explanation: result.interestingReason
+            });
+
+            if (emailResult.sent) {
+              console.log(`[EMAIL] ✅ Notification sent (${emailResult.messageId})`);
+            } else {
+              console.log(`[EMAIL] ⚠️ Notification not sent: ${emailResult.error}`);
+            }
+          } else {
+            console.log(`[EMAIL] ⚠️ No email address for user ${userId}`);
+          }
+        } catch (emailError: any) {
+          console.error(`[EMAIL] Failed to send notification:`, emailError.message);
+        }
+      }
+
       if (result.interesting) {
         console.log(`[TASK_EXECUTOR] 🌟 Interesting result: ${result.interestingReason}`);
       }
@@ -120,6 +198,9 @@ export async function executeTask(
 
   // Log activity to database
   await logTaskActivity(userId, result);
+
+  // Store task execution with WABS scores (P3-T5)
+  await storeTaskExecution(userId, result);
 
   // Store outcome in memory for learning (P2-T2)
   try {
@@ -243,6 +324,18 @@ async function callToolEndpoint(request: ToolEndpointRequest): Promise<ToolEndpo
     }
 
     const data = await response.json();
+
+    // wyshbone-ui returns {ok: boolean}, but we expect {success: boolean}
+    // Map the response format
+    if ('ok' in data) {
+      return {
+        success: data.ok,
+        data: data.data,
+        error: data.error,
+        executionTime: data.executionTime
+      };
+    }
+
     return data;
 
   } catch (error: any) {
@@ -275,7 +368,7 @@ async function callToolEndpoint(request: ToolEndpointRequest): Promise<ToolEndpo
 /**
  * Evaluate if task results are "interesting" using WABS scoring engine
  *
- * WABS (What's Actually Been Said) scoring considers:
+ * WABS (Worth A Bloody Share) scoring considers:
  * - Relevance to user preferences
  * - Novelty (new vs. seen before)
  * - Actionability (can user do something with this?)
@@ -287,48 +380,47 @@ async function evaluateResults(
   task: GeneratedTask,
   data: any,
   userId: string
-): Promise<{ interesting: boolean; reason?: string }> {
+): Promise<{ interesting: boolean; reason?: string; wabsScore?: number; wabsSignals?: any }> {
   if (!data) {
     return { interesting: false };
   }
 
   try {
-    // Get user preferences for context
-    const preferences = await getUserPreferences(userId);
+    // Get user preferences for personalization
+    const preferencesObj = await getUserPreferences(userId);
 
-    // Get calibrated weights for this user (P3-T3: Learn from feedback)
-    const weights = await getWeightsForUser(userId);
+    // Convert preferences object to array format expected by scorer
+    const userPreferences = [
+      ...preferencesObj.industries.map(p => ({ key: p.value, weight: p.weight })),
+      ...preferencesObj.regions.map(p => ({ key: p.value, weight: p.weight })),
+      ...preferencesObj.contactTypes.map(p => ({ key: p.value, weight: p.weight })),
+      ...preferencesObj.keywords.map(p => ({ key: p.value, weight: p.weight }))
+    ];
 
-    // Build user context for WABS scorer
-    const userContext = {
-      preferences: {
-        industries: preferences.industries,
-        regions: preferences.regions,
-        contactTypes: preferences.contactTypes
-      },
-      keywords: preferences.keywords.map(k => k.value),
-      goals: {
-        primary: task.description // Use task description as goal context
-      },
-      recentResults: [], // TODO P3-T2: Track recent results to detect novelty
-      seenEntities: []   // TODO P3-T2: Track seen entities
-    };
+    // Score the result using WABS 4-signal algorithm
+    const scoring = await scoreResult({
+      result: data,
+      query: task.description,
+      userId,
+      userPreferences
+    });
 
-    // Import WABS scorer dynamically (from wyshbone-control-tower)
-    const wabsScorerPath = '../../wyshbone-control-tower/lib/wabs-scorer.js';
-    const { scoreInterestingness } = await import(wabsScorerPath);
+    // Results scoring >=70 are considered interesting (P3 threshold)
+    const interesting = scoring.isInteresting;
 
-    // Score the result with calibrated weights
-    const scoring = scoreInterestingness(data, userContext, weights);
-
-    // Results scoring >70 are considered interesting (P3-T2 threshold)
-    const interesting = scoring.score >= 70;
-
+    // Log WABS scoring details
     console.log(`[WABS] Score: ${scoring.score}/100 | Signals: R=${scoring.signals.relevance} N=${scoring.signals.novelty} A=${scoring.signals.actionability} U=${scoring.signals.urgency}`);
+
+    if (interesting) {
+      console.log(`[WABS] ⭐ Interesting result detected!`);
+      console.log(`[WABS] ${scoring.explanation}`);
+    }
 
     return {
       interesting,
-      reason: interesting ? `WABS Score: ${scoring.score}/100 - ${scoring.explanation}` : undefined
+      reason: interesting ? `WABS Score: ${scoring.score}/100 - ${scoring.explanation}` : undefined,
+      wabsScore: scoring.score,
+      wabsSignals: scoring.signals
     };
 
   } catch (scoringError: any) {
@@ -383,45 +475,84 @@ async function logTaskActivity(
   }
 
   try {
+    // Generate unique activity ID
+    const activityId = `activity_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
     const { error } = await supabase
       .from('agent_activities')
       .insert({
+        id: activityId,
         user_id: userId,
-        agent_type: 'task_executor',
-        activity_type: 'execute_task',
-        input_data: {
-          task: {
-            title: result.task.title,
-            description: result.task.description,
-            priority: result.task.priority,
-            estimatedDuration: result.task.estimatedDuration
-          }
-        },
-        output_data: {
-          status: result.status,
-          interesting: result.interesting,
-          interestingReason: result.interestingReason,
-          toolResponse: result.toolResponse
-        },
+        timestamp: Date.now(),
+        task_generated: result.task.description,
+        action_taken: result.toolCall?.tool || 'unknown',
+        action_params: result.toolCall?.params || {},
+        results: result.toolResponse,
+        interesting_flag: result.interesting ? 1 : 0,
+        status: result.status,
+        error_message: result.error || null,
+        duration_ms: result.executionTime || null,
+        conversation_id: null,
+        run_id: result.taskId,
         metadata: {
           taskId: result.taskId,
-          executionTime: result.executionTime,
-          error: result.error
+          taskTitle: result.task.title,
+          taskPriority: result.task.priority,
+          interestingReason: result.interestingReason
         },
-        status: result.status === 'success' ? 'completed' : 'failed',
-        error: result.error,
-        created_at: Date.now(),
-        completed_at: Date.now()
+        created_at: Date.now()
       });
 
     if (error) {
       console.error('[TASK_EXECUTOR] Error logging activity:', error);
     } else {
-      console.log('[TASK_EXECUTOR] Activity logged to database');
+      console.log('[TASK_EXECUTOR] ✅ Activity logged to agent_activities table');
     }
 
   } catch (error: any) {
     console.error('[TASK_EXECUTOR] Exception logging activity:', error.message);
+  }
+}
+
+/**
+ * Store task execution with WABS scores to task_executions table (PostgreSQL)
+ * PHASE 3: WABS Judgement System - Persistence
+ */
+async function storeTaskExecution(
+  userId: string,
+  result: TaskExecutionResult
+): Promise<void> {
+  // Only store if WABS score was calculated
+  if (result.wabsScore === undefined) {
+    return;
+  }
+
+  try {
+    const pool = getTaskExecutionsPool();
+
+    await pool.query(`
+      INSERT INTO task_executions (task_id, user_id, wabs_score, wabs_signals, result, created_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
+    `, [
+      result.taskId,
+      userId,
+      result.wabsScore,
+      JSON.stringify(result.wabsSignals),
+      JSON.stringify({
+        task: result.task,
+        status: result.status,
+        executionTime: result.executionTime,
+        interesting: result.interesting,
+        interestingReason: result.interestingReason,
+        error: result.error
+      })
+    ]);
+
+    console.log(`[TASK_EXECUTOR] ✅ WABS score stored to database (${result.wabsScore}/100)`);
+
+  } catch (error: any) {
+    // Don't fail task execution if storage fails
+    console.error('[TASK_EXECUTOR] Failed to store task execution:', error.message);
   }
 }
 

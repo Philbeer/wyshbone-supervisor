@@ -1,16 +1,16 @@
 // Schema imports - use server/schema.ts for env-aware schema selection
-import { 
-  users, 
-  suggestedLeads, 
+import {
+  users,
+  suggestedLeads,
   userSignals,
   processedSignals,
   supervisorState,
   planExecutions,
   plans,
   subconsciousNudges,
-  type User, 
-  type InsertUser, 
-  type SuggestedLead, 
+  type User,
+  type InsertUser,
+  type SuggestedLead,
   type UserSignal,
   type PlanExecution,
   type Plan,
@@ -59,6 +59,10 @@ export interface IStorage {
   resolveSubconNudge(id: string): Promise<void>;
   dismissSubconNudge(id: string): Promise<void>;
   getUnresolvedSubconNudges(accountId: string): Promise<DBSubconsciousNudge[]>;
+  // P2-T1: Agent memory storage (ADAPT phase)
+  storeAgentMemory(memory: InsertAgentMemory): Promise<AgentMemory>;
+  getAgentMemories(params: { userId: string; toolUsed?: string; limit?: number; offset?: number }): Promise<AgentMemory[]>;
+  updateMemoryFeedback(id: string, userFeedback: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -362,6 +366,52 @@ export class DatabaseStorage implements IStorage {
       )
       .orderBy(desc(subconsciousNudges.importance), desc(subconsciousNudges.createdAt));
     return nudges;
+  }
+
+  // P2-T1: Agent memory storage (ADAPT phase)
+
+  async storeAgentMemory(memory: InsertAgentMemory): Promise<AgentMemory> {
+    const [result] = await db
+      .insert(agentMemory)
+      .values(memory)
+      .returning();
+    console.log(`[Storage] Stored agent memory for user ${memory.userId}, tool: ${memory.toolUsed}`);
+    return result;
+  }
+
+  async getAgentMemories(params: { userId: string; toolUsed?: string; limit?: number; offset?: number }): Promise<AgentMemory[]> {
+    let query = db
+      .select()
+      .from(agentMemory)
+      .where(eq(agentMemory.userId, params.userId))
+      .orderBy(desc(agentMemory.learnedAt));
+
+    if (params.toolUsed) {
+      query = db
+        .select()
+        .from(agentMemory)
+        .where(
+          and(
+            eq(agentMemory.userId, params.userId),
+            eq(agentMemory.toolUsed, params.toolUsed)
+          )
+        )
+        .orderBy(desc(agentMemory.learnedAt));
+    }
+
+    const memories = await query
+      .limit(params.limit || 50)
+      .offset(params.offset || 0);
+
+    return memories;
+  }
+
+  async updateMemoryFeedback(id: string, userFeedback: string): Promise<void> {
+    await db
+      .update(agentMemory)
+      .set({ userFeedback })
+      .where(eq(agentMemory.id, id));
+    console.log(`[Storage] Updated memory ${id} feedback: ${userFeedback}`);
   }
 }
 

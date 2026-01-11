@@ -101,6 +101,25 @@ export const subconsciousNudges = pgTable("subconscious_nudges", {
   accountIdIdx: index("subconscious_nudges_account_id_idx").on(table.accountId),
 }));
 
+// P2-T1: Agent memory for learning system (ADAPT phase)
+export const agentMemory = pgTable("agent_memory", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull(),
+  accountId: varchar("account_id"), // Multi-account isolation
+  toolUsed: text("tool_used").notNull(), // Tool that was executed
+  query: jsonb("query").notNull(), // Query/params passed to tool
+  outcome: jsonb("outcome").notNull(), // Result from tool execution
+  userFeedback: text("user_feedback"), // 'helpful', 'not_helpful', or null
+  confidenceScore: real("confidence_score"), // 0.0 to 1.0
+  planId: varchar("plan_id"), // Link to plan if part of plan execution
+  taskId: varchar("task_id"), // Link to specific task
+  learnedAt: timestamp("learned_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(), // Auto-expire after 90 days
+}, (table) => ({
+  userIdIdx: index("agent_memory_user_id_idx").on(table.userId),
+  learnedAtIdx: index("agent_memory_learned_at_idx").on(table.learnedAt),
+}));
+
 export const insertUserSignalSchema = createInsertSchema(userSignals).omit({
   id: true,
   createdAt: true,
@@ -125,8 +144,15 @@ export const insertSubconsciousNudgeSchema = createInsertSchema(subconsciousNudg
   createdAt: true,
 });
 
+export const insertAgentMemorySchema = createInsertSchema(agentMemory).omit({
+  id: true,
+  learnedAt: true,
+});
+
 export type InsertUserSignal = z.infer<typeof insertUserSignalSchema>;
 export type InsertSuggestedLead = z.infer<typeof insertSuggestedLeadSchema>;
+export type InsertAgentMemory = z.infer<typeof insertAgentMemorySchema>;
+export type AgentMemory = typeof agentMemory.$inferSelect;
 export type InsertPlanExecution = z.infer<typeof insertPlanExecutionSchema>;
 export type InsertPlan = z.infer<typeof insertPlanSchema>;
 export type InsertSubconsciousNudge = z.infer<typeof insertSubconsciousNudgeSchema>;

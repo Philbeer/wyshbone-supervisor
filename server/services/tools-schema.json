@@ -1,0 +1,195 @@
+{
+  "tools": [
+    {
+      "name": "search_google_places",
+      "aliases": ["SEARCH_PLACES", "search_wyshbone_database"],
+      "description": "Search for businesses using Google Places API",
+      "params": {
+        "query": {
+          "type": "string",
+          "description": "Search query (e.g., 'craft breweries')",
+          "required": true
+        },
+        "location": {
+          "type": "string",
+          "description": "Location to search (e.g., 'Leeds, UK')",
+          "required": false
+        },
+        "maxResults": {
+          "type": "number",
+          "description": "Maximum results to return (default: 30)",
+          "required": false,
+          "default": 30
+        },
+        "country": {
+          "type": "string",
+          "description": "Country code for region (default: 'GB')",
+          "required": false,
+          "default": "GB"
+        }
+      },
+      "requiresAuth": false
+    },
+    {
+      "name": "deep_research",
+      "aliases": ["DEEP_RESEARCH"],
+      "description": "Start background research job with AI analysis",
+      "params": {
+        "prompt": {
+          "type": "string",
+          "description": "Research topic or prompt",
+          "required": true
+        },
+        "label": {
+          "type": "string",
+          "description": "Label for the research run (optional)",
+          "required": false
+        },
+        "mode": {
+          "type": "string",
+          "description": "Research mode: 'report' or other (default: 'report')",
+          "required": false,
+          "default": "report"
+        },
+        "counties": {
+          "type": "string",
+          "description": "Counties to focus research on (optional)",
+          "required": false
+        },
+        "windowMonths": {
+          "type": "number",
+          "description": "Time window in months (optional)",
+          "required": false
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "name": "batch_contact_finder",
+      "aliases": ["BATCH_CONTACT_FINDER"],
+      "description": "Find and enrich contacts for businesses, send to SalesHandy",
+      "params": {
+        "query": {
+          "type": "string",
+          "description": "Business type query (e.g., 'pubs')",
+          "required": true
+        },
+        "location": {
+          "type": "string",
+          "description": "Location to search (e.g., 'Manchester')",
+          "required": true
+        },
+        "country": {
+          "type": "string",
+          "description": "Country code (default: 'GB')",
+          "required": false,
+          "default": "GB"
+        },
+        "targetRole": {
+          "type": "string",
+          "description": "Target contact role (default: 'General Manager')",
+          "required": false,
+          "default": "General Manager"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max businesses to process (default: 30)",
+          "required": false,
+          "default": 30
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "name": "draft_email",
+      "aliases": ["DRAFT_EMAIL"],
+      "description": "Generate draft email content for outreach",
+      "params": {
+        "to_role": {
+          "type": "string",
+          "description": "Recipient role (default: 'General Manager')",
+          "required": false,
+          "default": "General Manager"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Email purpose (default: 'intro')",
+          "required": false,
+          "default": "intro"
+        },
+        "product": {
+          "type": "string",
+          "description": "Product/service to mention (default: 'your product')",
+          "required": false,
+          "default": "your product"
+        }
+      },
+      "requiresAuth": false
+    },
+    {
+      "name": "create_scheduled_monitor",
+      "aliases": ["CREATE_SCHEDULED_MONITOR"],
+      "description": "Create scheduled monitoring job that runs periodically",
+      "params": {
+        "label": {
+          "type": "string",
+          "description": "Monitor label (required)",
+          "required": true
+        },
+        "description": {
+          "type": "string",
+          "description": "Monitor description (optional)",
+          "required": false
+        },
+        "schedule": {
+          "type": "string",
+          "description": "Schedule frequency: 'hourly', 'daily', 'weekly', 'biweekly', 'monthly' (default: 'weekly')",
+          "required": false,
+          "default": "weekly"
+        },
+        "scheduleDay": {
+          "type": "number",
+          "description": "Day of week for weekly/biweekly (0-6, 0=Sunday)",
+          "required": false
+        },
+        "scheduleTime": {
+          "type": "string",
+          "description": "Time to run in HH:MM format (default: '09:00')",
+          "required": false,
+          "default": "09:00"
+        },
+        "monitorType": {
+          "type": "string",
+          "description": "Type of monitor (default: 'deep_research')",
+          "required": false,
+          "default": "deep_research"
+        },
+        "config": {
+          "type": "object",
+          "description": "Monitor configuration object (optional)",
+          "required": false
+        },
+        "emailAddress": {
+          "type": "string",
+          "description": "Email for notifications (optional)",
+          "required": false
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "name": "get_nudges",
+      "aliases": ["GET_NUDGES"],
+      "description": "Get AI-generated suggestions and nudges for follow-ups",
+      "params": {
+        "limit": {
+          "type": "number",
+          "description": "Maximum nudges to return (default: 10)",
+          "required": false,
+          "default": 10
+        }
+      },
+      "requiresAuth": true
+    }
+  ]
+}

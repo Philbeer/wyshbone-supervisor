@@ -3,9 +3,30 @@
  *
  * Stores user feedback on WABS scoring accuracy.
  * Calibrates scoring weights based on feedback history.
+ *
+ * Refactored to use direct PostgreSQL connection (no Supabase client dependency)
  */
 
-import { supabase } from '../supabase';
+import pg from 'pg';
+const { Pool } = pg;
+
+// Database connection (lazy initialization)
+let pool: pg.Pool | null = null;
+
+function getPool(): pg.Pool {
+  if (!pool) {
+    const DATABASE_URL = process.env.DATABASE_URL;
+    if (!DATABASE_URL) {
+      throw new Error('DATABASE_URL not configured');
+    }
+    pool = new Pool({ connectionString: DATABASE_URL });
+  }
+  return pool;
+}
+
+// ========================================
+// TYPES
+// ========================================
 
 export interface WABSFeedback {
   userId: string;
@@ -23,44 +44,59 @@ export interface WABSFeedback {
   timestamp: number;
 }
 
+export interface SignalWeights {
+  relevance: number;
+  novelty: number;
+  actionability: number;
+  urgency: number;
+}
+
+// Default weights
+const DEFAULT_WEIGHTS: SignalWeights = {
+  relevance: 0.35,
+  novelty: 0.25,
+  actionability: 0.25,
+  urgency: 0.15
+};
+
+// ========================================
+// FEEDBACK STORAGE
+// ========================================
+
 /**
  * Store WABS feedback in agent_memory
  */
 export async function storeWABSFeedback(feedback: WABSFeedback): Promise<string> {
-  if (!supabase) {
-    console.warn('[WABS_FEEDBACK] Supabase not configured');
-    return '';
-  }
+  const memoryId = `wabs_feedback_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const now = Date.now();
 
   try {
-    const memoryId = `wabs_feedback_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-
-    const { error } = await supabase
-      .from('agent_memory')
-      .insert({
-        id: memoryId,
-        user_id: feedback.userId,
-        memory_type: 'wabs_feedback',
-        content: `WABS scored this result ${feedback.wabsScore}/100 (${feedback.wabsSignals.relevance}R ${feedback.wabsSignals.novelty}N ${feedback.wabsSignals.actionability}A ${feedback.wabsSignals.urgency}U). User feedback: ${feedback.userFeedback}${feedback.feedbackReason ? ` - ${feedback.feedbackReason}` : ''}`,
-        context: JSON.stringify({
-          taskId: feedback.taskId,
-          score: feedback.wabsScore,
-          signals: feedback.wabsSignals,
-          feedback: feedback.userFeedback,
-          reason: feedback.feedbackReason
-        }),
-        metadata: {
-          result_data: feedback.resultData,
-          wabs_score: feedback.wabsScore,
-          signals: feedback.wabsSignals
-        },
-        created_at: feedback.timestamp
-      });
-
-    if (error) {
-      console.error('[WABS_FEEDBACK] Error storing feedback:', error);
-      throw error;
-    }
+    await getPool().query(`
+      INSERT INTO agent_memory (
+        id, user_id, memory_type, title, description,
+        tags, metadata, created_at, source, is_deprecated
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+      )
+    `, [
+      memoryId,
+      feedback.userId,
+      'wabs_feedback',
+      `WABS Feedback: ${feedback.userFeedback}`,
+      `WABS scored this result ${feedback.wabsScore}/100 (${feedback.wabsSignals.relevance}R ${feedback.wabsSignals.novelty}N ${feedback.wabsSignals.actionability}A ${feedback.wabsSignals.urgency}U). User feedback: ${feedback.userFeedback}${feedback.feedbackReason ? ` - ${feedback.feedbackReason}` : ''}`,
+      ['wabs', 'feedback', feedback.userFeedback],
+      JSON.stringify({
+        taskId: feedback.taskId,
+        score: feedback.wabsScore,
+        signals: feedback.wabsSignals,
+        feedback: feedback.userFeedback,
+        reason: feedback.feedbackReason,
+        result_data: feedback.resultData
+      }),
+      now,
+      'user_feedback',
+      false
+    ]);
 
     console.log(`[WABS_FEEDBACK] Stored feedback for task ${feedback.taskId}: ${feedback.userFeedback}`);
 
@@ -72,6 +108,10 @@ export async function storeWABSFeedback(feedback: WABSFeedback): Promise<string>
   }
 }
 
+// ========================================
+// FEEDBACK RETRIEVAL
+// ========================================
+
 /**
  * Get WABS feedback history for a user
  */
@@ -79,43 +119,35 @@ export async function getWABSFeedbackHistory(
   userId: string,
   limit: number = 100
 ): Promise<WABSFeedback[]> {
-  if (!supabase) {
-    console.warn('[WABS_FEEDBACK] Supabase not configured');
-    return [];
-  }
-
   try {
-    const { data, error } = await supabase
-      .from('agent_memory')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('memory_type', 'wabs_feedback')
-      .order('created_at', { ascending: false })
-      .limit(limit);
+    const result = await getPool().query(`
+      SELECT id, user_id, metadata, created_at
+      FROM agent_memory
+      WHERE user_id = $1
+        AND memory_type = 'wabs_feedback'
+        AND is_deprecated = false
+      ORDER BY created_at DESC
+      LIMIT $2
+    `, [userId, limit]);
 
-    if (error) {
-      console.error('[WABS_FEEDBACK] Error fetching feedback history:', error);
-      return [];
-    }
-
-    if (!data || data.length === 0) {
+    if (result.rows.length === 0) {
       return [];
     }
 
     // Parse feedback from memory records
-    return data.map(record => {
-      const context = typeof record.context === 'string'
-        ? JSON.parse(record.context)
-        : record.context;
+    return result.rows.map(record => {
+      const metadata = typeof record.metadata === 'string'
+        ? JSON.parse(record.metadata)
+        : record.metadata;
 
       return {
         userId: record.user_id,
-        taskId: context.taskId,
-        resultData: record.metadata?.result_data,
-        wabsScore: context.score,
-        wabsSignals: context.signals,
-        userFeedback: context.feedback,
-        feedbackReason: context.reason,
+        taskId: metadata.taskId,
+        resultData: metadata.result_data,
+        wabsScore: metadata.score,
+        wabsSignals: metadata.signals,
+        userFeedback: metadata.feedback,
+        feedbackReason: metadata.reason,
         timestamp: record.created_at
       };
     });
@@ -126,19 +158,18 @@ export async function getWABSFeedbackHistory(
   }
 }
 
+// ========================================
+// WEIGHT CALIBRATION
+// ========================================
+
 /**
  * Calibrate WABS scoring weights based on user feedback
  *
  * Uses feedback history to determine which signals best predict
  * user satisfaction. Returns optimized weights.
  */
-export async function calibrateWeightsForUser(userId: string): Promise<{
-  relevance: number;
-  novelty: number;
-  actionability: number;
-  urgency: number;
-} | null> {
-  const feedbackHistory = await getWABSFeedbackHistory(userId);
+export async function calibrateWeightsForUser(userId: string): Promise<SignalWeights | null> {
+  const feedbackHistory = await getWABSFeedbackHistory(userId, 20);
 
   if (feedbackHistory.length < 10) {
     console.log(`[WABS_FEEDBACK] Not enough feedback for calibration (${feedbackHistory.length}/10)`);
@@ -146,19 +177,65 @@ export async function calibrateWeightsForUser(userId: string): Promise<{
   }
 
   try {
-    // Import WABS scorer calibration function
-    const wabsScorerPath = '../../wyshbone-control-tower/lib/wabs-scorer.js';
-    const { calibrateWeights } = await import(wabsScorerPath);
+    // Separate helpful vs not helpful
+    const helpful = feedbackHistory.filter(f => f.userFeedback === 'helpful');
+    const notHelpful = feedbackHistory.filter(f => f.userFeedback === 'not_helpful');
 
-    // Format feedback for calibration
-    const formattedFeedback = feedbackHistory.map(f => ({
-      feedback: f.userFeedback,
-      signals: f.wabsSignals
-    }));
+    if (helpful.length === 0 || notHelpful.length === 0) {
+      console.log('[WABS_FEEDBACK] Need both helpful and not_helpful feedback to calibrate');
+      return null;
+    }
 
-    const calibratedWeights = calibrateWeights(formattedFeedback);
+    // Calculate average signal values for helpful vs not helpful
+    const avgSignals = (list: WABSFeedback[]) => {
+      if (list.length === 0) return { relevance: 50, novelty: 50, actionability: 50, urgency: 50 };
 
-    console.log(`[WABS_FEEDBACK] Calibrated weights for user ${userId}:`, calibratedWeights);
+      const sum = list.reduce((acc, f) => {
+        const signals = f.wabsSignals;
+        return {
+          relevance: acc.relevance + signals.relevance,
+          novelty: acc.novelty + signals.novelty,
+          actionability: acc.actionability + signals.actionability,
+          urgency: acc.urgency + signals.urgency
+        };
+      }, { relevance: 0, novelty: 0, actionability: 0, urgency: 0 });
+
+      return {
+        relevance: sum.relevance / list.length,
+        novelty: sum.novelty / list.length,
+        actionability: sum.actionability / list.length,
+        urgency: sum.urgency / list.length
+      };
+    };
+
+    const helpfulAvg = avgSignals(helpful);
+    const notHelpfulAvg = avgSignals(notHelpful);
+
+    // Calculate discrimination: how much each signal differs between helpful and not helpful
+    const discrimination = {
+      relevance: Math.abs(helpfulAvg.relevance - notHelpfulAvg.relevance),
+      novelty: Math.abs(helpfulAvg.novelty - notHelpfulAvg.novelty),
+      actionability: Math.abs(helpfulAvg.actionability - notHelpfulAvg.actionability),
+      urgency: Math.abs(helpfulAvg.urgency - notHelpfulAvg.urgency)
+    };
+
+    // Signals with higher discrimination get higher weight
+    const totalDiscrimination = discrimination.relevance + discrimination.novelty +
+                                discrimination.actionability + discrimination.urgency;
+
+    if (totalDiscrimination === 0) {
+      console.log('[WABS_FEEDBACK] No discrimination between signals, using defaults');
+      return null;
+    }
+
+    const calibratedWeights: SignalWeights = {
+      relevance: discrimination.relevance / totalDiscrimination,
+      novelty: discrimination.novelty / totalDiscrimination,
+      actionability: discrimination.actionability / totalDiscrimination,
+      urgency: discrimination.urgency / totalDiscrimination
+    };
+
+    console.log(`[WABS_FEEDBACK] Calibrated weights from ${feedbackHistory.length} feedbacks:`, calibratedWeights);
 
     return calibratedWeights;
 
@@ -171,12 +248,7 @@ export async function calibrateWeightsForUser(userId: string): Promise<{
 /**
  * Get calibrated weights or default if insufficient feedback
  */
-export async function getWeightsForUser(userId: string): Promise<{
-  relevance: number;
-  novelty: number;
-  actionability: number;
-  urgency: number;
-}> {
+export async function getWeightsForUser(userId: string): Promise<SignalWeights> {
   const calibrated = await calibrateWeightsForUser(userId);
 
   if (calibrated) {
@@ -184,13 +256,12 @@ export async function getWeightsForUser(userId: string): Promise<{
   }
 
   // Return defaults
-  return {
-    relevance: 0.35,
-    novelty: 0.25,
-    actionability: 0.25,
-    urgency: 0.15
-  };
+  return DEFAULT_WEIGHTS;
 }
+
+// ========================================
+// EXPORTS
+// ========================================
 
 export default {
   storeWABSFeedback,
