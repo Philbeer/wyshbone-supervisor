@@ -1,0 +1,67 @@
+
+> rest-express@1.0.0 dev
+> cross-env NODE_ENV=development EXPORT_KEY=dev-wyshbone-supervisor tsx server/index.ts
+
+[DB] Using PostgreSQL (Neon)
+⚠️  SUPABASE_URL or SUPABASE_SERVICE_ROLE not configured
+⚠️  Supervisor chat integration will not work until credentials are added
+⚠️  Please add SUPABASE_URL and SUPABASE_SERVICE_ROLE to your secrets
+[CLAUDE_API] Initialized successfully
+[DB] Connected to PostgreSQL
+✅ Using EXPORT_KEY from environment
+7:01:35 PM [express] serving on http://127.0.0.1:3001
+🤖 Supervisor service started - monitoring for new signals...
+[SubconEngine] Initializing...
+[SubconRegistry] Registered pack: stale_leads
+[SubconEngine] Initialization complete
+[SubconScheduler] Starting scheduler...
+[SubconScheduler] Tick interval: 60000ms
+[SubconScheduler] Schedules: 1 defined, 1 enabled
+[SubconScheduler] Tick #1 - 1 schedule(s) due
+[SubconScheduler] Running schedule: stale_leads_hourly (pack: stale_leads)
+[SubconRegistry] Running pack: stale_leads for user: system
+[StaleLeadsPack] Running for user: system, account: system
+[SubconScheduler] Scheduler started
+🕐 Starting daily agent cron job...
+   Schedule: 0 9 * * * (Daily at 9:00 AM)
+   Next run: Not scheduled
+✅ Daily agent cron job started successfully
+
+[SubconRegistry] Pack stale_leads failed: relation "suggested_leads" does not exist
+[SubconScheduler] Schedule stale_leads_hourly returned failure: relation "suggested_leads" does not exist
+[SubconScheduler] Tick #61 - 1 schedule(s) due
+[SubconScheduler] Running schedule: stale_leads_hourly (pack: stale_leads)
+[SubconRegistry] Running pack: stale_leads for user: system
+[StaleLeadsPack] Running for user: system, account: system
+[SubconRegistry] Pack stale_leads failed: relation "suggested_leads" does not exist
+[SubconScheduler] Schedule stale_leads_hourly returned failure: relation "suggested_leads" does not exist
+[SubconScheduler] Tick #121 - 1 schedule(s) due
+[SubconScheduler] Running schedule: stale_leads_hourly (pack: stale_leads)
+[SubconRegistry] Running pack: stale_leads for user: system
+[StaleLeadsPack] Running for user: system, account: system
+[SubconRegistry] Pack stale_leads failed: relation "suggested_leads" does not exist
+[SubconScheduler] Schedule stale_leads_hourly returned failure: relation "suggested_leads" does not exist
+[SubconScheduler] Tick #181 - 1 schedule(s) due
+[SubconScheduler] Running schedule: stale_leads_hourly (pack: stale_leads)
+[SubconRegistry] Running pack: stale_leads for user: system
+[StaleLeadsPack] Running for user: system, account: system
+[SubconRegistry] Pack stale_leads failed: relation "suggested_leads" does not exist
+[SubconScheduler] Schedule stale_leads_hourly returned failure: relation "suggested_leads" does not exist
+[SubconScheduler] Tick #241 - 1 schedule(s) due
+[SubconScheduler] Running schedule: stale_leads_hourly (pack: stale_leads)
+[SubconRegistry] Running pack: stale_leads for user: system
+[StaleLeadsPack] Running for user: system, account: system
+[SubconRegistry] Pack stale_leads failed: relation "suggested_leads" does not exist
+[SubconScheduler] Schedule stale_leads_hourly returned failure: relation "suggested_leads" does not exist
+[SubconScheduler] Tick #301 - 1 schedule(s) due
+[SubconScheduler] Running schedule: stale_leads_hourly (pack: stale_leads)
+[SubconRegistry] Running pack: stale_leads for user: system
+[StaleLeadsPack] Running for user: system, account: system
+[SubconRegistry] Pack stale_leads failed: relation "suggested_leads" does not exist
+[SubconScheduler] Schedule stale_leads_hourly returned failure: relation "suggested_leads" does not exist
+[SubconScheduler] Tick #361 - 1 schedule(s) due
+[SubconScheduler] Running schedule: stale_leads_hourly (pack: stale_leads)
+[SubconRegistry] Running pack: stale_leads for user: system
+[StaleLeadsPack] Running for user: system, account: system
+[SubconRegistry] Pack stale_leads failed: relation "suggested_leads" does not exist
+[SubconScheduler] Schedule stale_leads_hourly returned failure: relation "suggested_leads" does not exist
