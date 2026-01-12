@@ -351,6 +351,83 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ========================================
+  // UNIFIED TOOL EXECUTION ENDPOINT
+  // ========================================
+
+  /**
+   * POST /api/tools/execute
+   * Unified tool execution endpoint
+   * Executes tools via action registry
+   */
+  app.post("/api/tools/execute", async (req, res) => {
+    try {
+      const { tool, params = {}, userId, sessionId } = req.body;
+
+      console.log(`[TOOLS_EXECUTE] Request received - tool: ${tool}`);
+
+      if (!tool) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Missing required field: tool'
+        });
+      }
+
+      // Map tool names to ActionTypes
+      // Legacy tool names map to canonical action types
+      const toolToActionMap: Record<string, string> = {
+        'search_google_places': 'GLOBAL_DB',
+        'deep_research': 'DEEP_RESEARCH',
+        'email_finder': 'EMAIL_FINDER',
+        'create_scheduled_monitor': 'SCHEDULED_MONITOR',
+        'get_nudges': 'SCHEDULED_MONITOR',
+        // Direct action type names also supported
+        'GLOBAL_DB': 'GLOBAL_DB',
+        'DEEP_RESEARCH': 'DEEP_RESEARCH',
+        'EMAIL_FINDER': 'EMAIL_FINDER',
+        'SCHEDULED_MONITOR': 'SCHEDULED_MONITOR'
+      };
+
+      const actionType = toolToActionMap[tool];
+
+      if (!actionType) {
+        console.log(`[TOOLS_EXECUTE] Unknown tool: ${tool}`);
+        return res.status(400).json({
+          ok: false,
+          error: `Unknown tool: ${tool}. Supported tools: ${Object.keys(toolToActionMap).join(', ')}`
+        });
+      }
+
+      console.log(`[TOOLS_EXECUTE] Mapped ${tool} -> ${actionType}`);
+
+      // Import and execute via registry
+      const { executeAction } = await import('./actions/registry');
+
+      const result = await executeAction(actionType as any, {
+        ...params,
+        userId,
+        sessionId: sessionId || `supervisor_${Date.now()}`
+      });
+
+      console.log(`[TOOLS_EXECUTE] ${tool} completed - success: ${result.success}`);
+
+      // Return in UI-compatible format
+      return res.status(200).json({
+        ok: result.success,
+        data: result.data,
+        note: result.summary,
+        error: result.error
+      });
+
+    } catch (error: any) {
+      console.error('[TOOLS_EXECUTE] Error:', error);
+      return res.status(500).json({
+        ok: false,
+        error: error.message || 'Internal server error'
+      });
+    }
+  });
+
+  // ========================================
   // EXISTING ENDPOINTS
   // ========================================
 
