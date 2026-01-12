@@ -46,6 +46,7 @@ class SupervisorService {
   private isRunning: boolean = false;
   private timeoutId?: NodeJS.Timeout;
   private batchSize: number = 50; // Process up to 50 signals per poll
+  private missingTableWarned: boolean = false; // Track if we've warned about missing table
 
   async start() {
     if (this.isRunning) {
@@ -195,6 +196,16 @@ class SupervisorService {
       .limit(10);
 
     if (error) {
+      // PGRST205 = table not found - likely migration hasn't been run yet
+      if (error.code === 'PGRST205') {
+        if (!this.missingTableWarned) {
+          console.warn('⚠️  supervisor_tasks table not found in Supabase.');
+          console.warn('   Run migrations/supabase-supervisor-integration.sql in Supabase SQL Editor');
+          console.warn('   Chat integration will be unavailable until migration is complete.');
+          this.missingTableWarned = true;
+        }
+        return;
+      }
       console.error('Error fetching supervisor tasks:', error);
       return;
     }

@@ -2,6 +2,46 @@
 
 You have `tldr` available on PATH for token-efficient code analysis.
 
+## TLDR-First File Access Policy (MANDATORY)
+
+**CRITICAL RULE:** Before reading any file over 200 lines or approximately 10KB, you MUST run `tldr extract <file>` or `tldr structure <path>` first.
+
+### Policy Requirements
+
+1. **Check file size before reading:**
+   - Files > 200 lines or ~10KB → Use TLDR first
+   - Only read small, targeted line ranges afterwards (e.g., Read with offset/limit)
+
+2. **Full-file reads require justification:**
+   - You MAY do a full-file read ONLY if you explicitly state: "TLDR not sufficient because..." and provide a clear reason
+   - Valid reasons: configuration files, small utilities, TLDR doesn't support file type, etc.
+
+3. **Workflow:**
+   ```bash
+   # Step 1: Get overview
+   tldr extract path/to/large-file.ts
+
+   # Step 2: Read only targeted sections if needed
+   # (Use Read tool with offset/limit to get specific line ranges)
+   ```
+
+### Why This Matters
+
+- **Token efficiency:** TLDR provides structured summaries using 90% fewer tokens than full reads
+- **Context preservation:** More room for implementation work vs. file reading
+- **Speed:** Faster understanding of large codebases
+
+### Enforcement
+
+This rule applies to ALL repos in the Wyshbone project:
+- wyshbone-ui
+- wyshbone-supervisor
+- wyshbone-control-tower
+- wyshbone-behaviour
+- Parent directory work across multiple repos
+
+**Violation:** If you read a large file without using TLDR first and without explicit justification, you're wasting tokens and violating this mandatory policy.
+
 ## Commands
 
 ```bash
