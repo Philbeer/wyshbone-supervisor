@@ -10,20 +10,52 @@ import crypto from "crypto";
 const app = express();
 
 // CORS configuration for cross-origin requests
+const isDevelopment = process.env.NODE_ENV !== 'production';
 const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:5173',
-  'http://localhost:5000',
+  // Development origins only - both localhost and 127.0.0.1
+  ...(isDevelopment ? [
+    'http://localhost:3000',    // Tower
+    'http://127.0.0.1:3000',
+    'http://localhost:3001',    // Additional service
+    'http://127.0.0.1:3001',
+    'http://localhost:5173',    // UI (Vite)
+    'http://127.0.0.1:5173',
+    'http://localhost:5001',    // Backend API
+    'http://127.0.0.1:5001',
+  ] : []),
+  // Production origins
   process.env.FRONTEND_URL,
   process.env.UI_URL,
 ].filter(Boolean) as string[];
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app') || origin.endsWith('.onrender.com')) {
+    // Allow requests with no origin (curl, Postman) in development only
+    if (!origin) {
+      if (isDevelopment) {
+        console.log('[CORS][DEV] Allowing request with no origin (curl/Postman)');
+      }
+      return callback(null, isDevelopment);
+    }
+
+    // Check if origin is allowed
+    const isAllowed = allowedOrigins.includes(origin) ||
+                      origin.endsWith('.vercel.app') ||
+                      origin.endsWith('.onrender.com');
+
+    if (isAllowed) {
+      if (isDevelopment) {
+        console.log(`[CORS][DEV] Allowing origin: ${origin}`);
+      }
       return callback(null, true);
     }
+
+    // Log rejected origins in development
+    if (isDevelopment) {
+      console.warn(`[CORS][DEV] REJECTED origin: ${origin}`);
+      console.warn(`[CORS][DEV] Allowed origins:`, allowedOrigins);
+    }
+
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
