@@ -6,25 +6,60 @@ import cors from "cors";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { supervisor } from "./supervisor";
+import { startSubconScheduler } from "./subcon";
+import { startDailyAgentCron } from "./cron/daily-agent";
 import crypto from "crypto";
 
 const app = express();
 
 // CORS configuration for cross-origin requests
+const isDevelopment = process.env.NODE_ENV !== 'production';
 const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:5173',
-  'http://localhost:5000',
+  // Development origins only - both localhost and 127.0.0.1
+  ...(isDevelopment ? [
+    'http://localhost:3000',    // Tower
+    'http://127.0.0.1:3000',
+    'http://localhost:3001',    // Additional service
+    'http://127.0.0.1:3001',
+    'http://localhost:5173',    // UI (Vite)
+    'http://127.0.0.1:5173',
+    'http://localhost:5000',    // Backend API (from main)
+    'http://localhost:5001',    // Backend API alt
+    'http://127.0.0.1:5001',
+  ] : []),
+  // Production origins
   process.env.FRONTEND_URL,
   process.env.UI_URL,
 ].filter(Boolean) as string[];
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app') || origin.endsWith('.onrender.com')) {
+    // Allow requests with no origin (curl, Postman) in development only
+    if (!origin) {
+      if (isDevelopment) {
+        console.log('[CORS][DEV] Allowing request with no origin (curl/Postman)');
+      }
+      return callback(null, isDevelopment);
+    }
+
+    // Check if origin is allowed
+    const isAllowed = allowedOrigins.includes(origin) ||
+                      origin.endsWith('.vercel.app') ||
+                      origin.endsWith('.onrender.com');
+
+    if (isAllowed) {
+      if (isDevelopment) {
+        console.log(`[CORS][DEV] Allowing origin: ${origin}`);
+      }
       return callback(null, true);
     }
+
+    // Log rejected origins in development
+    if (isDevelopment) {
+      console.warn(`[CORS][DEV] REJECTED origin: ${origin}`);
+      console.warn(`[CORS][DEV] Allowed origins:`, allowedOrigins);
+    }
+
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
@@ -132,16 +167,24 @@ app.use((req, res, next) => {
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || '5000', 10);
   // Use 127.0.0.1 for Windows dev (0.0.0.0 causes ENOTSUP), 0.0.0.0 for production
-  const host = process.env.NODE_ENV === 'development' ? '127.0.0.1' : '0.0.0.0';
+  const host = process.env.HOST || (isDevelopment ? '127.0.0.1' : '0.0.0.0');
   server.listen({
     port,
     host,
   }, () => {
-    log(`serving on port ${port}`);
+    log(`serving on http://${host}:${port}`);
     
     // Start the supervisor service
     supervisor.start().catch(error => {
       console.error('Failed to start supervisor:', error);
     });
+    
+    // Start the subconscious scheduler (SUP-11)
+    // Disable with SUBCON_SCHEDULER_ENABLED=false
+    startSubconScheduler();
+
+    // Start the daily agent cron job (Phase 2 Task 5)
+    // Runs at 9am daily - disable with DAILY_AGENT_ENABLED=false
+    startDailyAgentCron();
   });
 })();

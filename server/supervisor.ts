@@ -8,6 +8,7 @@ import { monitorGoalsOnce, publishGoalMonitorEvents } from './goal-monitoring';
 interface UserContext {
   userId: string;
   accountId?: string; // SUP-012: Account ID for multi-account isolation
+  verticalId?: import('./core/verticals/types').VerticalId; // SUP-17: Vertical ID for vertical-aware features
   profile?: {
     companyName?: string;
     companyDomain?: string;
@@ -45,6 +46,7 @@ class SupervisorService {
   private isRunning: boolean = false;
   private timeoutId?: NodeJS.Timeout;
   private batchSize: number = 50; // Process up to 50 signals per poll
+  private missingTableWarned: boolean = false; // Track if we've warned about missing table
 
   async start() {
     if (this.isRunning) {
@@ -194,6 +196,16 @@ class SupervisorService {
       .limit(10);
 
     if (error) {
+      // PGRST205 = table not found - likely migration hasn't been run yet
+      if (error.code === 'PGRST205') {
+        if (!this.missingTableWarned) {
+          console.warn('⚠️  supervisor_tasks table not found in Supabase.');
+          console.warn('   Run migrations/supabase-supervisor-integration.sql in Supabase SQL Editor');
+          console.warn('   Chat integration will be unavailable until migration is complete.');
+          this.missingTableWarned = true;
+        }
+        return;
+      }
       console.error('Error fetching supervisor tasks:', error);
       return;
     }
@@ -690,8 +702,10 @@ Would you like me to find leads based on any of these insights?`;
   private async buildUserContext(userId: string): Promise<UserContext> {
     console.log(`🔍 Building comprehensive context for user: ${userId}`);
     
+    // SUP-17: Initialize with default verticalId = 'brewery'
     const context: UserContext = {
       userId,
+      verticalId: 'brewery', // SUP-17: Default to brewery
       facts: [],
       recentMessages: [],
       monitors: [],
@@ -704,10 +718,10 @@ Would you like me to find leads based on any of these insights?`;
     }
 
     try {
-      // Get user profile including accountId for SUP-012 isolation
+      // Get user profile including accountId for SUP-012 isolation and verticalId for SUP-17
       const { data: userProfile } = await supabase
         .from('users')
-        .select('company_name, company_domain, inferred_industry, primary_objective, secondary_objectives, target_markets, products_or_services, confidence, account_id')
+        .select('company_name, company_domain, inferred_industry, primary_objective, secondary_objectives, target_markets, products_or_services, confidence, account_id, vertical_id')
         .eq('id', userId)
         .single();
 
@@ -723,7 +737,10 @@ Would you like me to find leads based on any of these insights?`;
           confidence: userProfile.confidence
         };
         context.accountId = userProfile.account_id || undefined; // SUP-012: Account isolation
+        // SUP-17: Set verticalId, defaulting to 'brewery'
+        context.verticalId = (userProfile.vertical_id as UserContext['verticalId']) || 'brewery';
         console.log(`  📋 Profile: ${userProfile.company_name || 'Unknown'} (${userProfile.inferred_industry || 'Unknown industry'})`);
+        console.log(`  🏭 Vertical: ${context.verticalId}`);
       }
 
       // Get top ranked facts (score >= 70)

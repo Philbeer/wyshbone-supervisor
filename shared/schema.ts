@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, jsonb, real } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, jsonb, real, integer, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -34,6 +34,11 @@ export const suggestedLeads = pgTable("suggested_leads", {
   score: real("score").notNull(),
   lead: jsonb("lead").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  // SUP-12: Stale leads tracking fields
+  lastContactedAt: timestamp("last_contacted_at"),
+  pipelineStage: text("pipeline_stage"),
+  pipelineStageChangedAt: timestamp("pipeline_stage_changed_at"),
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 export const processedSignals = pgTable("processed_signals", {
@@ -78,6 +83,43 @@ export const planExecutions = pgTable("plan_executions", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// SUP-13: Subconscious nudges storage
+export const subconsciousNudges = pgTable("subconscious_nudges", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  userId: text("user_id"),
+  nudgeType: text("nudge_type").notNull(),
+  title: text("title").notNull(),
+  message: text("message").notNull(),
+  importance: integer("importance").notNull(),
+  leadId: text("lead_id"),
+  context: jsonb("context"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  resolvedAt: timestamp("resolved_at"),
+  dismissedAt: timestamp("dismissed_at"),
+}, (table) => ({
+  accountIdIdx: index("subconscious_nudges_account_id_idx").on(table.accountId),
+}));
+
+// P2-T1: Agent memory for learning system (ADAPT phase)
+export const agentMemory = pgTable("agent_memory", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull(),
+  accountId: varchar("account_id"), // Multi-account isolation
+  toolUsed: text("tool_used").notNull(), // Tool that was executed
+  query: jsonb("query").notNull(), // Query/params passed to tool
+  outcome: jsonb("outcome").notNull(), // Result from tool execution
+  userFeedback: text("user_feedback"), // 'helpful', 'not_helpful', or null
+  confidenceScore: real("confidence_score"), // 0.0 to 1.0
+  planId: varchar("plan_id"), // Link to plan if part of plan execution
+  taskId: varchar("task_id"), // Link to specific task
+  learnedAt: timestamp("learned_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(), // Auto-expire after 90 days
+}, (table) => ({
+  userIdIdx: index("agent_memory_user_id_idx").on(table.userId),
+  learnedAtIdx: index("agent_memory_learned_at_idx").on(table.learnedAt),
+}));
+
 export const insertUserSignalSchema = createInsertSchema(userSignals).omit({
   id: true,
   createdAt: true,
@@ -98,11 +140,24 @@ export const insertPlanSchema = createInsertSchema(plans).omit({
   updatedAt: true,
 });
 
+export const insertSubconsciousNudgeSchema = createInsertSchema(subconsciousNudges).omit({
+  createdAt: true,
+});
+
+export const insertAgentMemorySchema = createInsertSchema(agentMemory).omit({
+  id: true,
+  learnedAt: true,
+});
+
 export type InsertUserSignal = z.infer<typeof insertUserSignalSchema>;
 export type InsertSuggestedLead = z.infer<typeof insertSuggestedLeadSchema>;
+export type InsertAgentMemory = z.infer<typeof insertAgentMemorySchema>;
+export type AgentMemory = typeof agentMemory.$inferSelect;
 export type InsertPlanExecution = z.infer<typeof insertPlanExecutionSchema>;
 export type InsertPlan = z.infer<typeof insertPlanSchema>;
+export type InsertSubconsciousNudge = z.infer<typeof insertSubconsciousNudgeSchema>;
 export type SuggestedLead = typeof suggestedLeads.$inferSelect;
 export type UserSignal = typeof userSignals.$inferSelect;
 export type PlanExecution = typeof planExecutions.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
+export type SubconsciousNudge = typeof subconsciousNudges.$inferSelect;

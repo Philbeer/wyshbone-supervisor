@@ -5,6 +5,7 @@ export default function SuggestionsPanelExample() {
     {
       id: "1",
       userId: "user-1",
+      accountId: null,
       rationale: "Based on brewery near Manchester",
       source: "google_places_new",
       score: 0.85,
@@ -15,11 +16,16 @@ export default function SuggestionsPanelExample() {
         emailCandidates: ["info@craftbeershop.co.uk"],
         tags: []
       },
-      createdAt: new Date()
+      createdAt: new Date(),
+      lastContactedAt: null,
+      pipelineStage: null,
+      pipelineStageChangedAt: null,
+      updatedAt: null
     },
     {
       id: "2",
       userId: "user-1",
+      accountId: null,
       rationale: "Freehouse pub matching profile",
       source: "google_places_new",
       score: 0.72,
@@ -30,7 +36,11 @@ export default function SuggestionsPanelExample() {
         emailCandidates: [],
         tags: ["freehouse"]
       },
-      createdAt: new Date()
+      createdAt: new Date(),
+      lastContactedAt: null,
+      pipelineStage: null,
+      pipelineStageChangedAt: null,
+      updatedAt: null
     }
   ];
 

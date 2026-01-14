@@ -8,4 +8,12 @@ vite.config.ts.*
 # Environment files (secrets)
 .env
 .env.local
-.env.*
+.env.development
+.env.production
+# Keep .env.example in git
+!.env.example
+
+# SQLite dev database
+*.db
+*.db-wal
+*.db-shm

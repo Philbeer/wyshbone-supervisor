@@ -1,25 +1,29 @@
-// Referenced from blueprint:javascript_database
-import { 
-  users, 
-  suggestedLeads, 
+// Schema imports - use server/schema.ts for env-aware schema selection
+import {
+  users,
+  suggestedLeads,
   userSignals,
   processedSignals,
   supervisorState,
   planExecutions,
   plans,
-  type User, 
-  type InsertUser, 
-  type SuggestedLead, 
+  subconsciousNudges,
+  type User,
+  type InsertUser,
+  type SuggestedLead,
   type UserSignal,
   type PlanExecution,
   type Plan,
   type InsertSuggestedLead,
   type InsertUserSignal,
   type InsertPlanExecution,
-  type InsertPlan
-} from "@shared/schema";
+  type InsertPlan,
+  type SubconsciousNudge as DBSubconsciousNudge,
+  type InsertSubconsciousNudge
+} from "./schema";
 import { db } from "./db";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, isNull, and } from "drizzle-orm";
+import type { SubconNudge } from "./subcon/types";
 import { supabase } from "./supabase";
 
 export interface SupervisorCheckpoint {
@@ -32,6 +36,7 @@ export interface IStorage {
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   getSuggestedLeads(userId: string): Promise<SuggestedLead[]>;
+  getSuggestedLeadsByAccount(accountId: string): Promise<SuggestedLead[]>; // SUP-12
   getRecentSignals(userId: string): Promise<UserSignal[]>;
   createSuggestedLead(lead: InsertSuggestedLead): Promise<SuggestedLead>;
   createSignal(signal: InsertUserSignal): Promise<UserSignal>;
@@ -48,6 +53,16 @@ export interface IStorage {
   updatePlan(planId: string, updates: Partial<InsertPlan>): Promise<void>;
   updatePlanStatus(planId: string, status: string): Promise<void>;
   getUserActivePlan(userId: string): Promise<Plan | undefined>;
+  // SUP-13: Subconscious nudges storage
+  saveSubconNudges(accountId: string, nudges: SubconNudge[]): Promise<void>;
+  getSubconNudgesByAccount(accountId: string): Promise<DBSubconsciousNudge[]>;
+  resolveSubconNudge(id: string): Promise<void>;
+  dismissSubconNudge(id: string): Promise<void>;
+  getUnresolvedSubconNudges(accountId: string): Promise<DBSubconsciousNudge[]>;
+  // P2-T1: Agent memory storage (ADAPT phase)
+  storeAgentMemory(memory: InsertAgentMemory): Promise<AgentMemory>;
+  getAgentMemories(params: { userId: string; toolUsed?: string; limit?: number; offset?: number }): Promise<AgentMemory[]>;
+  updateMemoryFeedback(id: string, userFeedback: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -75,6 +90,16 @@ export class DatabaseStorage implements IStorage {
       .from(suggestedLeads)
       .where(eq(suggestedLeads.userId, userId))
       .orderBy(desc(suggestedLeads.score));
+    return leads;
+  }
+
+  // SUP-12: Get leads by account for stale leads detection
+  async getSuggestedLeadsByAccount(accountId: string): Promise<SuggestedLead[]> {
+    const leads = await db
+      .select()
+      .from(suggestedLeads)
+      .where(eq(suggestedLeads.accountId, accountId))
+      .orderBy(desc(suggestedLeads.createdAt));
     return leads;
   }
 
@@ -259,6 +284,134 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(plans.createdAt))
       .limit(1);
     return plan || undefined;
+  }
+
+  // SUP-13: Subconscious nudges storage
+
+  /**
+   * Convert priority to importance score (0-100 scale)
+   */
+  private priorityToImportance(priority: 'low' | 'medium' | 'high'): number {
+    switch (priority) {
+      case 'high': return 90;
+      case 'medium': return 60;
+      case 'low': return 30;
+      default: return 50;
+    }
+  }
+
+  /**
+   * Generate a title from nudge type
+   */
+  private nudgeTypeToTitle(type: string): string {
+    switch (type) {
+      case 'stale_lead': return 'Stale Lead Alert';
+      case 'follow_up': return 'Follow-up Reminder';
+      default: return type.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    }
+  }
+
+  async saveSubconNudges(accountId: string, nudges: SubconNudge[]): Promise<void> {
+    if (nudges.length === 0) return;
+
+    const insertData: InsertSubconsciousNudge[] = nudges.map(nudge => ({
+      id: `nudge_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+      accountId,
+      userId: null, // Could be set from context if needed
+      nudgeType: nudge.type,
+      title: this.nudgeTypeToTitle(nudge.type),
+      message: nudge.message,
+      importance: this.priorityToImportance(nudge.priority),
+      leadId: nudge.entityId || null,
+      context: nudge.metadata ? (nudge.metadata as Record<string, unknown>) : null,
+    }));
+
+    await db.insert(subconsciousNudges).values(insertData);
+    console.log(`[Storage] Saved ${nudges.length} subconscious nudges for account ${accountId}`);
+  }
+
+  async getSubconNudgesByAccount(accountId: string): Promise<DBSubconsciousNudge[]> {
+    const nudges = await db
+      .select()
+      .from(subconsciousNudges)
+      .where(eq(subconsciousNudges.accountId, accountId))
+      .orderBy(desc(subconsciousNudges.createdAt));
+    return nudges;
+  }
+
+  async resolveSubconNudge(id: string): Promise<void> {
+    await db
+      .update(subconsciousNudges)
+      .set({ resolvedAt: new Date() })
+      .where(eq(subconsciousNudges.id, id));
+  }
+
+  async dismissSubconNudge(id: string): Promise<void> {
+    await db
+      .update(subconsciousNudges)
+      .set({ dismissedAt: new Date() })
+      .where(eq(subconsciousNudges.id, id));
+  }
+
+  async getUnresolvedSubconNudges(accountId: string): Promise<DBSubconsciousNudge[]> {
+    const nudges = await db
+      .select()
+      .from(subconsciousNudges)
+      .where(
+        and(
+          eq(subconsciousNudges.accountId, accountId),
+          isNull(subconsciousNudges.resolvedAt),
+          isNull(subconsciousNudges.dismissedAt)
+        )
+      )
+      .orderBy(desc(subconsciousNudges.importance), desc(subconsciousNudges.createdAt));
+    return nudges;
+  }
+
+  // P2-T1: Agent memory storage (ADAPT phase)
+
+  async storeAgentMemory(memory: InsertAgentMemory): Promise<AgentMemory> {
+    const [result] = await db
+      .insert(agentMemory)
+      .values(memory)
+      .returning();
+    console.log(`[Storage] Stored agent memory for user ${memory.userId}, tool: ${memory.toolUsed}`);
+    return result;
+  }
+
+  async getAgentMemories(params: { userId: string; toolUsed?: string; limit?: number; offset?: number }): Promise<AgentMemory[]> {
+    let query = db
+      .select()
+      .from(agentMemory)
+      .where(eq(agentMemory.userId, params.userId))
+      .orderBy(desc(agentMemory.learnedAt));
+
+    if (params.toolUsed) {
+      query = db
+        .select()
+        .from(agentMemory)
+        .where(
+          and(
+            eq(agentMemory.userId, params.userId),
+            eq(agentMemory.toolUsed, params.toolUsed)
+          )
+        )
+        .orderBy(desc(agentMemory.learnedAt));
+    }
+
+    const memories = await query
+      .limit(params.limit || 50)
+      .offset(params.offset || 0);
+
+    return memories;
+  }
+
+  async updateMemoryFeedback(id: string, userFeedback: string): Promise<void> {
+    await db
+      .update(agentMemory)
+      .set({ userFeedback })
+      .where(eq(agentMemory.id, id));
+    console.log(`[Storage] Updated memory ${id} feedback: ${userFeedback}`);
   }
 }
 

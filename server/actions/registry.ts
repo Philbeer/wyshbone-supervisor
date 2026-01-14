@@ -34,7 +34,7 @@ export async function executeAction(type: ActionType, input: ActionInput): Promi
     console.log(`[ACTION_REGISTRY] Executing ${type} with input:`, JSON.stringify(input).substring(0, 200));
     
     // Dynamically import executors to avoid circular dependency
-    const { executors } = await import('./executors');
+    const { executors } = await import('./ui-tool-client');
     
     let executor: ActionExecutor;
     switch (type) {

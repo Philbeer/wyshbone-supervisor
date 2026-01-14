@@ -1,0 +1,101 @@
+---
+description: QA Gate - Mandatory verification before declaring any task complete
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# QA Gate Rules
+
+## MANDATORY: Do NOT declare a task complete until ALL of the following pass:
+
+### 1. Boot Supervisor Service Locally
+```bash
+npm run dev
+```
+- Server must start without crashes
+- No unhandled promise rejections
+- No TypeScript compilation errors
+
+### 2. Run Smoke Test
+```bash
+npm run smoke
+```
+- All endpoint checks must pass (✅ ALL TESTS PASSED)
+- If smoke test fails, diagnose and fix before proceeding
+
+### 3. Verify No Errors
+- Console shows no unhandled errors
+- No 404 on expected endpoints
+- No 500 errors on any API calls
+- Check for: `ERROR`, `FATAL`, `Unhandled`, `ECONNREFUSED`
+
+### 4. Task-Specific Checks (add 1-3 based on changes)
+For each task, add specific verification:
+
+**If you modified routes:**
+- Verify the specific endpoint returns expected status
+- Test with valid AND invalid inputs
+
+**If you modified database/schema:**
+- Verify migrations run without error
+- Test CRUD operations work
+
+**If you modified plan execution:**
+- Create a test plan via `/api/plan/start`
+- Approve via `/api/plan/approve`
+- Verify status updates to `executing` → `completed`
+
+**If you modified UI components:**
+- Verify no React errors in browser console
+- Check the specific page renders correctly
+
+### 5. QA Report Format
+Before declaring done, output this report:
+
+```
+## QA Report
+
+### Smoke Test: ✅ PASSED / ❌ FAILED
+- Endpoints checked: X/Y passed
+- [List any failures]
+
+### Task-Specific Checks:
+- [ ] Check 1: [result]
+- [ ] Check 2: [result]
+- [ ] Check 3: [result]
+
+### Fixes Applied:
+- [List any fixes made during QA]
+
+### Files Changed:
+- [List files modified in this task]
+
+### Status: ✅ READY TO COMMIT / ❌ NEEDS FIX
+```
+
+## If ANY Check Fails:
+1. Do NOT declare task complete
+2. Diagnose the root cause
+3. Apply fix
+4. Re-run ALL checks from step 1
+5. Repeat until all green
+
+## Exceptions
+- Documentation-only changes: Skip smoke test, verify markdown renders
+- Config-only changes: Verify config loads correctly
+- Test file changes: Run the specific test suite instead
+
+## Quick Commands Reference
+```bash
+# Start dev server
+npm run dev
+
+# Run smoke test (REQUIRED before declaring work complete)
+npm run smoke
+
+# Type check
+npm run check
+
+# Database migration
+npm run db:migrate
+```

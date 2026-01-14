@@ -6,6 +6,7 @@ import { storage } from './storage';
 import { updateStepStatus, completePlan, failPlan } from './plan-progress';
 import type { LeadGenPlan, LeadGenPlanStep } from './types/lead-gen-plan';
 import { executeAction, type ActionType, type ActionInput } from './actions/registry';
+import { validateDAG, type DAGValidationResult } from './dag-mutator';
 
 /**
  * Map legacy tool identifiers to canonical action types
@@ -106,7 +107,7 @@ async function executeStep(
  */
 export async function executeLeadGenerationPlan(planId: string): Promise<void> {
   console.log(`PLAN_EXEC_START: Beginning execution for plan ${planId}`);
-  
+
   try {
     // Load plan from database
     const dbPlan = await storage.getPlan(planId);
@@ -117,6 +118,17 @@ export async function executeLeadGenerationPlan(planId: string): Promise<void> {
     const plan = dbPlan.planData as LeadGenPlan;
     const userId = dbPlan.userId;
     console.log(`PLAN_EXEC_START: Loaded plan with ${plan.steps.length} steps for user ${userId}`);
+
+    // Validate DAG before execution
+    console.log('[PLAN_EXEC] Validating DAG structure...');
+    const validation = validateDAG(plan);
+    if (!validation.valid) {
+      throw new Error(`DAG validation failed: ${validation.errors.join(', ')}`);
+    }
+    if (validation.warnings.length > 0) {
+      console.warn('[PLAN_EXEC] DAG validation warnings:', validation.warnings);
+    }
+    console.log('[PLAN_EXEC] DAG validation passed');
 
     // Track results from previous steps to pass to next steps
     const stepResults = new Map<string, any>();

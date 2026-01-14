@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertUserSignalSchema, insertSuggestedLeadSchema } from "@shared/schema";
+import { insertUserSignalSchema, insertSuggestedLeadSchema } from "./schema";
 import { fromError } from "zod-validation-error";
 import { supabase } from "./supabase";
 import { supervisor } from "./supervisor";
@@ -20,6 +20,15 @@ import {
   failPlan,
   getProgress 
 } from "./plan-progress";
+import { runFeature } from "./services/FeatureRunner";
+import type { FeatureType } from "./features/types";
+import { 
+  saveLead as saveLeadToStore, 
+  listSavedLeads,
+  type IncomingLeadPayload,
+  type SaveLeadResponse,
+  type ListLeadsResponse
+} from "./features/saveLead";
 
 // Helper to get userId from request (simple version for MVP)
 function getUserId(req: any): string {
@@ -338,6 +347,83 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: any) {
       console.error("[PLAN_STATUS] ERROR:", error);
       res.status(500).json({ error: error.message || "Failed to fetch plan status" });
+    }
+  });
+
+  // ========================================
+  // UNIFIED TOOL EXECUTION ENDPOINT
+  // ========================================
+
+  /**
+   * POST /api/tools/execute
+   * Unified tool execution endpoint
+   * Executes tools via action registry
+   */
+  app.post("/api/tools/execute", async (req, res) => {
+    try {
+      const { tool, params = {}, userId, sessionId } = req.body;
+
+      console.log(`[TOOLS_EXECUTE] Request received - tool: ${tool}`);
+
+      if (!tool) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Missing required field: tool'
+        });
+      }
+
+      // Map tool names to ActionTypes
+      // Legacy tool names map to canonical action types
+      const toolToActionMap: Record<string, string> = {
+        'search_google_places': 'GLOBAL_DB',
+        'deep_research': 'DEEP_RESEARCH',
+        'email_finder': 'EMAIL_FINDER',
+        'create_scheduled_monitor': 'SCHEDULED_MONITOR',
+        'get_nudges': 'SCHEDULED_MONITOR',
+        // Direct action type names also supported
+        'GLOBAL_DB': 'GLOBAL_DB',
+        'DEEP_RESEARCH': 'DEEP_RESEARCH',
+        'EMAIL_FINDER': 'EMAIL_FINDER',
+        'SCHEDULED_MONITOR': 'SCHEDULED_MONITOR'
+      };
+
+      const actionType = toolToActionMap[tool];
+
+      if (!actionType) {
+        console.log(`[TOOLS_EXECUTE] Unknown tool: ${tool}`);
+        return res.status(400).json({
+          ok: false,
+          error: `Unknown tool: ${tool}. Supported tools: ${Object.keys(toolToActionMap).join(', ')}`
+        });
+      }
+
+      console.log(`[TOOLS_EXECUTE] Mapped ${tool} -> ${actionType}`);
+
+      // Import and execute via registry
+      const { executeAction } = await import('./actions/registry');
+
+      const result = await executeAction(actionType as any, {
+        ...params,
+        userId,
+        sessionId: sessionId || `supervisor_${Date.now()}`
+      });
+
+      console.log(`[TOOLS_EXECUTE] ${tool} completed - success: ${result.success}`);
+
+      // Return in UI-compatible format
+      return res.status(200).json({
+        ok: result.success,
+        data: result.data,
+        note: result.summary,
+        error: result.error
+      });
+
+    } catch (error: any) {
+      console.error('[TOOLS_EXECUTE] Error:', error);
+      return res.status(500).json({
+        ok: false,
+        error: error.message || 'Internal server error'
+      });
     }
   });
 
@@ -739,6 +825,619 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ 
         error: 'Internal server error',
         message: 'Failed to retrieve file' 
+      });
+    }
+  });
+
+  // ========================================
+  // SAVE LEAD API (SUP-7)
+  // ========================================
+
+  // POST /api/leads/save - Save a lead to in-memory store
+  app.post("/api/leads/save", async (req, res) => {
+    try {
+      const { lead, ownerUserId } = req.body;
+
+      // Validate required fields
+      if (!lead) {
+        return res.status(400).json({ 
+          status: "error",
+          error: "lead object is required" 
+        });
+      }
+
+      if (!lead.businessName) {
+        return res.status(400).json({ 
+          status: "error",
+          error: "lead.businessName is required" 
+        });
+      }
+
+      if (!lead.address) {
+        return res.status(400).json({ 
+          status: "error",
+          error: "lead.address is required" 
+        });
+      }
+
+      if (!ownerUserId) {
+        return res.status(400).json({ 
+          status: "error",
+          error: "ownerUserId is required" 
+        });
+      }
+
+      // Validate source if provided
+      const validSources = ["google", "database", "manual"];
+      if (lead.source && !validSources.includes(lead.source)) {
+        return res.status(400).json({ 
+          status: "error",
+          error: `Invalid lead.source. Valid values: ${validSources.join(", ")}` 
+        });
+      }
+
+      const payload: IncomingLeadPayload = {
+        lead: {
+          businessName: lead.businessName,
+          address: lead.address,
+          placeId: lead.placeId,
+          website: lead.website,
+          phone: lead.phone,
+          lat: lead.lat,
+          lng: lead.lng,
+          source: lead.source || "manual"
+        },
+        ownerUserId
+      };
+
+      const savedLead = saveLeadToStore(payload);
+
+      const response: SaveLeadResponse = {
+        status: "ok",
+        leadId: savedLead.id,
+        savedLead
+      };
+
+      res.json(response);
+    } catch (error: any) {
+      console.error("[LEADS API] Error saving lead:", error);
+      res.status(500).json({ 
+        status: "error",
+        error: error.message || "Failed to save lead" 
+      });
+    }
+  });
+
+  // GET /api/leads/saved - List saved leads from in-memory store
+  app.get("/api/leads/saved", async (req, res) => {
+    try {
+      const ownerUserId = req.query.ownerUserId as string | undefined;
+      
+      const leads = listSavedLeads(ownerUserId);
+
+      const response: ListLeadsResponse = {
+        status: "ok",
+        leads
+      };
+
+      res.json(response);
+    } catch (error: any) {
+      console.error("[LEADS API] Error listing saved leads:", error);
+      res.status(500).json({ 
+        status: "error",
+        error: error.message || "Failed to list saved leads" 
+      });
+    }
+  });
+
+  // ========================================
+  // SUBCONSCIOUS NUDGES API (SUP-13)
+  // ========================================
+
+  // GET /api/subcon/nudges/account/:accountId - Get all nudges for an account
+  app.get("/api/subcon/nudges/account/:accountId", async (req, res) => {
+    try {
+      const { accountId } = req.params;
+      const { unresolved } = req.query;
+
+      if (!accountId) {
+        return res.status(400).json({ error: "accountId is required" });
+      }
+
+      let nudges;
+      if (unresolved === 'true') {
+        nudges = await storage.getUnresolvedSubconNudges(accountId);
+      } else {
+        nudges = await storage.getSubconNudgesByAccount(accountId);
+      }
+
+      res.json({ 
+        status: "ok",
+        nudges,
+        count: nudges.length
+      });
+    } catch (error: any) {
+      console.error("[SUBCON API] Error fetching nudges:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch nudges" });
+    }
+  });
+
+  // POST /api/subcon/nudges/resolve/:id - Resolve a nudge
+  app.post("/api/subcon/nudges/resolve/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!id) {
+        return res.status(400).json({ error: "nudge id is required" });
+      }
+
+      await storage.resolveSubconNudge(id);
+
+      res.json({ 
+        status: "ok",
+        message: `Nudge ${id} resolved`
+      });
+    } catch (error: any) {
+      console.error("[SUBCON API] Error resolving nudge:", error);
+      res.status(500).json({ error: error.message || "Failed to resolve nudge" });
+    }
+  });
+
+  // POST /api/subcon/nudges/dismiss/:id - Dismiss a nudge
+  app.post("/api/subcon/nudges/dismiss/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!id) {
+        return res.status(400).json({ error: "nudge id is required" });
+      }
+
+      await storage.dismissSubconNudge(id);
+
+      res.json({ 
+        status: "ok",
+        message: `Nudge ${id} dismissed`
+      });
+    } catch (error: any) {
+      console.error("[SUBCON API] Error dismissing nudge:", error);
+      res.status(500).json({ error: error.message || "Failed to dismiss nudge" });
+    }
+  });
+
+  // ========================================
+  // FEATURE RUNNER API (SUP-6, SUP-9)
+  // ========================================
+
+  // POST /api/features/run - Run a feature
+  app.post("/api/features/run", async (req, res) => {
+    try {
+      const { feature, params } = req.body;
+
+      if (!feature) {
+        return res.status(400).json({ error: "feature is required" });
+      }
+
+      // Validate feature type
+      const validFeatures: FeatureType[] = ["leadFinder"];
+      if (!validFeatures.includes(feature)) {
+        return res.status(400).json({ 
+          error: `Invalid feature type: ${feature}. Valid types: ${validFeatures.join(", ")}` 
+        });
+      }
+
+      console.log(`[FEATURES API] Running feature: ${feature}`);
+      
+      const result = await runFeature(feature as FeatureType, params || {});
+
+      // SUP-9: Handle feature disabled status
+      if (result.status === "feature_disabled") {
+        return res.status(403).json({
+          status: "feature_disabled",
+          error: result.error,
+          errorCode: result.errorCode
+        });
+      }
+
+      if (result.status === "error") {
+        return res.status(500).json({ 
+          status: "error",
+          error: result.error,
+          errorCode: result.errorCode
+        });
+      }
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("[FEATURES API] Error running feature:", error);
+      res.status(500).json({ 
+        status: "error",
+        error: error.message || "Failed to run feature" 
+      });
+    }
+  });
+
+  // ========================================
+  // DAILY AGENT CRON API (Phase 2 Task 5)
+  // ========================================
+
+  // POST /api/agent/trigger - Manually trigger daily agent
+  app.post("/api/agent/trigger", async (req, res) => {
+    try {
+      console.log('[AGENT API] Manual trigger requested');
+
+      const { triggerDailyAgentManually } = await import('./cron/daily-agent');
+      const result = await triggerDailyAgentManually();
+
+      res.json({
+        status: 'success',
+        message: 'Daily agent executed successfully',
+        result: {
+          cronJobId: result.cronJobId,
+          totalUsers: result.totalUsers,
+          successfulUsers: result.successfulUsers,
+          failedUsers: result.failedUsers,
+          totalTasksGenerated: result.totalTasksGenerated,
+          totalTasksExecuted: result.totalTasksExecuted,
+          totalSuccessfulTasks: result.totalSuccessfulTasks,
+          totalInterestingResults: result.totalInterestingResults,
+          duration: result.duration
+        }
+      });
+    } catch (error: any) {
+      console.error('[AGENT API] Error triggering daily agent:', error);
+      res.status(500).json({
+        status: 'error',
+        error: error.message || 'Failed to trigger daily agent'
+      });
+    }
+  });
+
+  // GET /api/agent/status - Get cron job status
+  app.get("/api/agent/status", async (req, res) => {
+    try {
+      const { isDailyAgentCronRunning, getNextCronRunTime } = await import('./cron/daily-agent');
+
+      const isRunning = isDailyAgentCronRunning();
+      const nextRun = getNextCronRunTime();
+
+      res.json({
+        enabled: isRunning,
+        schedule: process.env.DAILY_AGENT_CRON_SCHEDULE || '0 9 * * *',
+        nextRun,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+      });
+    } catch (error: any) {
+      console.error('[AGENT API] Error getting agent status:', error);
+      res.status(500).json({
+        status: 'error',
+        error: error.message || 'Failed to get agent status'
+      });
+    }
+  });
+
+  // ========================================
+  // DAG MUTATION API (Phase 3 Task 5)
+  // ========================================
+
+  // POST /api/plan/:planId/dag/add-step - Add a step to the plan
+  app.post("/api/plan/:planId/dag/add-step", async (req, res) => {
+    try {
+      const { planId } = req.params;
+      const { step, insertAfter, insertBefore, reason } = req.body;
+
+      if (!step) {
+        return res.status(400).json({ error: "step is required" });
+      }
+
+      const { addStep } = await import('./dag-mutator');
+      const result = await addStep(planId, step, {
+        insertAfter,
+        insertBefore,
+        reason,
+        automatic: false
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({
+        success: true,
+        mutationId: result.mutationId,
+        warnings: result.warnings
+      });
+    } catch (error: any) {
+      console.error('[DAG API] Error adding step:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // DELETE /api/plan/:planId/dag/step/:stepId - Remove a step
+  app.delete("/api/plan/:planId/dag/step/:stepId", async (req, res) => {
+    try {
+      const { planId, stepId } = req.params;
+      const { updateDependencies, reason } = req.body;
+
+      const { removeStep } = await import('./dag-mutator');
+      const result = await removeStep(planId, stepId, {
+        updateDependencies: updateDependencies !== false, // Default true
+        reason,
+        automatic: false
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({
+        success: true,
+        mutationId: result.mutationId,
+        warnings: result.warnings
+      });
+    } catch (error: any) {
+      console.error('[DAG API] Error removing step:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PUT /api/plan/:planId/dag/step/:stepId/dependencies - Modify step dependencies
+  app.put("/api/plan/:planId/dag/step/:stepId/dependencies", async (req, res) => {
+    try {
+      const { planId, stepId } = req.params;
+      const { dependencies, reason } = req.body;
+
+      if (!Array.isArray(dependencies)) {
+        return res.status(400).json({ error: "dependencies must be an array" });
+      }
+
+      const { modifyStepDependencies } = await import('./dag-mutator');
+      const result = await modifyStepDependencies(planId, stepId, dependencies, {
+        reason,
+        automatic: false
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({
+        success: true,
+        mutationId: result.mutationId,
+        warnings: result.warnings
+      });
+    } catch (error: any) {
+      console.error('[DAG API] Error modifying dependencies:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PUT /api/plan/:planId/dag/step/:stepId/replace - Replace a step
+  app.put("/api/plan/:planId/dag/step/:stepId/replace", async (req, res) => {
+    try {
+      const { planId, stepId } = req.params;
+      const { newStep, reason } = req.body;
+
+      if (!newStep) {
+        return res.status(400).json({ error: "newStep is required" });
+      }
+
+      const { replaceStep } = await import('./dag-mutator');
+      const result = await replaceStep(planId, stepId, newStep, {
+        reason,
+        automatic: false
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({
+        success: true,
+        mutationId: result.mutationId,
+        warnings: result.warnings
+      });
+    } catch (error: any) {
+      console.error('[DAG API] Error replacing step:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /api/plan/:planId/dag/validate - Validate DAG structure
+  app.post("/api/plan/:planId/dag/validate", async (req, res) => {
+    try {
+      const { planId } = req.params;
+
+      const dbPlan = await storage.getPlan(planId);
+      if (!dbPlan) {
+        return res.status(404).json({ error: 'Plan not found' });
+      }
+
+      const plan = dbPlan.planData;
+      const { validateDAG } = await import('./dag-mutator');
+      const validation = validateDAG(plan);
+
+      res.json(validation);
+    } catch (error: any) {
+      console.error('[DAG API] Error validating DAG:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // GET /api/plan/:planId/dag/mutations - Get mutation history
+  app.get("/api/plan/:planId/dag/mutations", async (req, res) => {
+    try {
+      const { planId } = req.params;
+
+      const { getMutationHistory } = await import('./dag-mutator');
+      const history = getMutationHistory(planId);
+
+      res.json({
+        planId,
+        mutations: history,
+        count: history.length
+      });
+    } catch (error: any) {
+      console.error('[DAG API] Error getting mutations:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ========================================
+  // AGENT MEMORY API (Phase 2: ADAPT)
+  // ========================================
+
+  // POST /api/memory/store - Store a new memory from tool execution
+  app.post("/api/memory/store", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { toolUsed, query, outcome, userFeedback, confidenceScore, planId, taskId } = req.body;
+
+      if (!toolUsed || !query || !outcome) {
+        return res.status(400).json({ error: "toolUsed, query, and outcome are required" });
+      }
+
+      // Calculate expiration date (90 days from now)
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + 90);
+
+      const memory = await storage.storeAgentMemory({
+        userId,
+        accountId: req.body.accountId,
+        toolUsed,
+        query,
+        outcome,
+        userFeedback: userFeedback || null,
+        confidenceScore: confidenceScore || null,
+        planId: planId || null,
+        taskId: taskId || null,
+        expiresAt
+      });
+
+      console.log(`[MEMORY API] Stored memory for user ${userId}, tool: ${toolUsed}`);
+
+      res.json({
+        status: "success",
+        memory
+      });
+    } catch (error: any) {
+      console.error("[MEMORY API] Error storing memory:", error);
+      res.status(500).json({ error: error.message || "Failed to store memory" });
+    }
+  });
+
+  // GET /api/memory - Retrieve memories for a user
+  app.get("/api/memory", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { toolUsed, limit = 50, offset = 0 } = req.query;
+
+      const memories = await storage.getAgentMemories({
+        userId,
+        toolUsed: toolUsed as string,
+        limit: parseInt(limit as string),
+        offset: parseInt(offset as string)
+      });
+
+      res.json({
+        status: "success",
+        memories,
+        count: memories.length
+      });
+    } catch (error: any) {
+      console.error("[MEMORY API] Error retrieving memories:", error);
+      res.status(500).json({ error: error.message || "Failed to retrieve memories" });
+    }
+  });
+
+  // GET /api/preferences - Get user's learned preferences (P2-T4)
+  app.get("/api/preferences", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+
+      // Import preference learner (dynamic to avoid circular dependencies)
+      const { getUserPreferences } = await import("./services/preference-learner");
+
+      const preferences = await getUserPreferences(userId);
+
+      res.json({
+        success: true,
+        preferences,
+        updatedAt: Date.now()
+      });
+    } catch (error: any) {
+      console.error("[PREFERENCES API] Error retrieving preferences:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message || "Failed to retrieve preferences"
+      });
+    }
+  });
+
+  // POST /api/memory/:id/feedback - Update user feedback on a memory
+  app.post("/api/memory/:id/feedback", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { userFeedback } = req.body;
+
+      if (!userFeedback || !['helpful', 'not_helpful'].includes(userFeedback)) {
+        return res.status(400).json({ error: "userFeedback must be 'helpful' or 'not_helpful'" });
+      }
+
+      await storage.updateMemoryFeedback(id, userFeedback);
+
+      res.json({
+        status: "success",
+        message: `Memory ${id} marked as ${userFeedback}`
+      });
+    } catch (error: any) {
+      console.error("[MEMORY API] Error updating feedback:", error);
+      res.status(500).json({ error: error.message || "Failed to update feedback" });
+    }
+  });
+
+  // POST /api/wabs/feedback - Submit WABS scoring feedback (P3-T3)
+  app.post("/api/wabs/feedback", async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      const { taskId, resultData, wabsScore, wabsSignals, userFeedback, feedbackReason } = req.body;
+
+      if (!taskId || !wabsScore || !wabsSignals || !userFeedback) {
+        return res.status(400).json({
+          error: "Missing required fields: taskId, wabsScore, wabsSignals, userFeedback"
+        });
+      }
+
+      if (!['helpful', 'not_helpful'].includes(userFeedback)) {
+        return res.status(400).json({
+          error: "userFeedback must be 'helpful' or 'not_helpful'"
+        });
+      }
+
+      // Import WABS feedback service
+      const { storeWABSFeedback } = await import("./services/wabs-feedback");
+
+      const memoryId = await storeWABSFeedback({
+        userId,
+        taskId,
+        resultData: resultData || {},
+        wabsScore,
+        wabsSignals,
+        userFeedback,
+        feedbackReason,
+        timestamp: Date.now()
+      });
+
+      res.json({
+        success: true,
+        memoryId,
+        message: `WABS feedback recorded: ${userFeedback}`
+      });
+
+    } catch (error: any) {
+      console.error("[WABS FEEDBACK API] Error storing feedback:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message || "Failed to store WABS feedback"
       });
     }
   });

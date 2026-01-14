@@ -1,0 +1,335 @@
+# Wyshbone Supervisor – Task Plan (SUP Series)
+
+This document defines the full Supervisor task sequence. 
+Each task should be implemented in its own feature branch (e.g., sup-1-core-folder).
+
+Supervisor is responsible for: 
+• Running agents  
+• Managing tasks  
+• Routing events  
+• Handling internal state  
+• Coordinating with Tower  
+• Executing workflows  
+
+---
+
+## ✅ SUP-1 – Create /core/ folder + base interfaces
+Goal: foundational types + minimal shared interfaces.
+
+Includes:  
+• BaseSupervisorEvent  
+• BaseAgentConfig  
+• BaseTaskDefinition  
+• MessageEnvelope / EventEnvelope  
+• Shared type aliases
+
+---
+
+## ✅ SUP-2 – Implement SupervisorEventBus
+Goal: internal message routing system.
+
+Includes:
+• pub/sub model  
+• subscribe()  
+• publish()  
+• internal channel registry  
+• typed event envelopes  
+• async handling
+
+---
+
+## SUP-3 – Create AgentRegistry
+Goal: register, retrieve, and initialise agents.
+
+Includes:
+• registerAgent()  
+• getAgent()  
+• listAgents()  
+• Registry map structure  
+• Validation for unique agent IDs
+
+---
+
+## SUP-4 – BaseAgent interface
+Goal: shared blueprint for all agents.
+
+Includes:
+• id  
+• description  
+• onEvent()  
+• start() / stop()  
+• config typing  
+• metadata structure
+
+---
+
+## SUP-5 – Task Execution Engine (TaskRunner)
+Goal: the engine that runs tasks for agents.
+
+Includes:
+• runTask()  
+• lifecycle hooks  
+• logging hooks  
+• timeout handling  
+• success/error wrapping
+
+---
+
+## SUP-6 – Internal Logging + RunTrace format
+Goal: structured logging standard used across Supervisor + Tower.
+
+Includes:
+• trace IDs  
+• timestamps  
+• event logs  
+• agent logs  
+• output dumps  
+• error stack normalisation
+
+---
+
+## SUP-7 – SupervisorState store
+Goal: persistent state store for agents + tasks.
+
+Includes:
+• in-memory store  
+• saveState()  
+• loadState()  
+• clearState()  
+• JSON-serialisable model
+
+---
+
+## SUP-8 – AgentContext builder
+Goal: pass unified context to all agents.
+
+Includes:
+• logger  
+• state store  
+• event bus  
+• task runner  
+• metadata  
+• environment helpers
+
+---
+
+## SUP-9 – Add SystemAgent (Supervisor internal agent)
+Goal: internal automation agent for housekeeping.
+
+Includes:
+• cleanup  
+• monitoring  
+• internal diagnostics  
+
+---
+
+## SUP-10 – ErrorBoundary system
+Goal: catch unexpected errors at Supervisor level.
+
+Includes:
+• try/catch wrappers  
+• SupervisorError types  
+• Safe execution wrappers
+
+---
+
+## SUP-11 – Add workflow runner (sequential)
+Goal: allow Supervisor to run multi-step workflows.
+
+Includes:
+• sequence definitions  
+• step functions  
+• step failure logic  
+• passing output between steps
+
+---
+
+## SUP-12 – Add workflow runner (parallel)
+Goal: run multiple tasks concurrently.
+
+Includes:
+• parallel task sets  
+• promise pools  
+• timeout groups  
+• merging results
+
+---
+
+## SUP-13 – Heartbeat + monitoring loop
+Goal: Supervisor reports its status.
+
+Includes:
+• heartbeat interval  
+• metrics snapshot  
+• agent health  
+
+---
+
+## SUP-14 – Basic API surface for Tower
+Goal: methods Tower can call.
+
+Includes:
+• runTaskForAgent  
+• getState  
+• sendEvent  
+• getHealth  
+
+---
+
+## SUP-15 – Add “execution summary” generator
+Goal: summarise each run for Tower UI.
+
+---
+
+## SUP-16 – Add structured SupervisorConfig
+Goal: allow config injection.
+
+---
+
+## SUP-17 – Add message queue abstraction (MQ)
+Goal: allow future external queue plug-ins.
+
+---
+
+## SUP-18 – Add panic recovery system
+Goal: detect agent crashes, restart safely.
+
+---
+
+## SUP-19 – Add Supervisor shutdown lifecycle
+Goal: graceful shutdown, cleanup, flush logs.
+
+---
+
+## SUP-20 – Add AgentSandbox wrapper
+Goal: isolate agents from Supervisor core.
+
+---
+
+## SUP-21 – Add system events
+Goal: internal events such as:
+• supervisor.start  
+• supervisor.stop  
+• agent.registered  
+• task.completed
+
+---
+
+## SUP-22 – Add history store
+Goal: store past tasks + logs.
+
+---
+
+## SUP-23 – Add schedule engine
+Goal: cron-like lightweight scheduler.
+
+---
+
+## SUP-24 – Add Tower request translator
+Goal: standardise Tower’s API calls.
+
+---
+
+## SUP-25 – Add Supervisor run report model
+Goal: unify reporting across agents.
+
+---
+
+## SUP-26 – Add AgentManifest system
+Goal: declare agent metadata + capabilities.
+
+---
+
+## SUP-27 – Add memory interface for agents
+Goal: provide consistent memory access.
+
+---
+
+## SUP-28 – Add mock/test agent
+Goal: allow testing Supervisor without real agents.
+
+---
+
+## SUP-29 – Add Supervisor debugger hooks
+Goal: deep debugging integration for Tower.
+
+---
+
+## SUP-30 – Add security sandbox (phase 1)
+Goal: prevent dangerous agent actions.
+
+---
+
+## SUP-31 – Add event filtering system
+Goal: prevent event spam or invalid events.
+
+---
+
+## SUP-32 – Add parallel agent runner
+Goal: run multiple agents at once.
+
+---
+
+## SUP-33 – Add AgentLoader plugin system
+Goal: load agents dynamically.
+
+---
+
+## SUP-34 – Add plugin architecture for Supervisor
+Goal: extensions for queue, memory, logging.
+
+---
+
+## SUP-35 – Add Supervisor metrics collector
+Goal: usable metrics for UI + Tower.
+
+---
+
+## SUP-36 – Add retry logic for tasks
+Goal: automatic retries and limits.
+
+---
+
+## SUP-37 – Add rate limiting
+Goal: prevent runaway workloads.
+
+---
+
+## SUP-38 – Add validation layer for tasks
+Goal: ensure valid inputs to runTask.
+
+---
+
+## SUP-39 – Add Supervisor config loader
+Goal: load config from file/env/tower.
+
+---
+
+## SUP-40 – Add snapshot system
+Goal: snapshot current state for diagnostics.
+
+---
+
+## SUP-41 – Add Supervisor restart logic
+Goal: hot-restart + restore state.
+
+---
+
+## SUP-42 – Add distributed Supervisor (future)
+Goal: multi-agent cluster support.
+
+---
+
+## SUP-43 – Add lightweight RPC interface
+Goal: Supervisor <-> Tower communication.
+
+---
+
+## SUP-44 – Add long-running task support
+Goal: background jobs.
+
+---
+
+## SUP-45 – Final polish + architecture cleanup
+Goal: complete Supervisor v1.
+
