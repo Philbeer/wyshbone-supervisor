@@ -1,0 +1,26 @@
+Context: We are migrating Wyshbone back into Replit as separate apps (UI / Supervisor / Tower).
+Right now this Replit project is ONLY the Supervisor repo. UI is already in Replit; Tower is not yet.
+
+Critical constraints:
+- Do NOT create a new Supabase project.
+- Do NOT switch databases.
+- Supabase is the single source of data.
+- This app uses backend-only Supabase access (no VITE anon keys). Use SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY and/or DATABASE_URL.
+- The “relation does not exist” errors we saw previously strongly suggest the app was pointed at the wrong Postgres (wrong/missing DATABASE_URL), not missing code.
+
+What we have done:
+- Merged v1-2-capabilities-and-plan-outputs into main and resolved conflicts.
+- main now includes server/env.ts env loading, improved HOST/PORT handling, and CORS updates (incl localhost:5000 and 127.0.0.1:5000).
+- This Replit app has installed packages (cross-env etc.) and is now running, but we need to verify it’s using the correct DB and that migrations are only run if needed.
+
+Your tasks (in this order):
+1) Print out which environment variables are present (only the variable NAMES, not secrets): SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, DATABASE_URL, PORT, HOST, NODE_ENV.
+2) Confirm which connection is actually being used by the Supervisor code (DATABASE_URL vs Supabase client URL + service role). Point me to the exact file(s) and logic that decide this.
+3) Verify we are connected to the intended Supabase project:
+   - Query the database to list tables and confirm these exist: lead_gen_plans, deep_research_runs, activity_log, conversations.
+   - If they do not exist, STOP and tell me exactly what DB it is connected to (host/db name) so we can correct DATABASE_URL (do NOT create anything).
+4) Only if tables are genuinely missing in the correct Supabase DB: run the existing migrations ONCE (Drizzle), then re-check the tables.
+5) Ensure CORS allows the Replit UI origin and localhost dev origins. Do NOT broaden to '*' unless absolutely necessary.
+6) Output a short “Runbook” for this Supervisor Replit: the correct run command, required env vars, and a simple health-check endpoint to confirm it’s alive.
+
+Do not make unrelated refactors. Do not change auth model. Do not add anon keys.
