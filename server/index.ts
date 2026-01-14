@@ -1,3 +1,6 @@
+// CRITICAL: Load environment variables FIRST (from repo root .env.local)
+import './env.js';
+
 import express, { type Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { registerRoutes } from "./routes";
@@ -20,7 +23,8 @@ const allowedOrigins = [
     'http://127.0.0.1:3001',
     'http://localhost:5173',    // UI (Vite)
     'http://127.0.0.1:5173',
-    'http://localhost:5001',    // Backend API
+    'http://localhost:5000',    // Backend API (from main)
+    'http://localhost:5001',    // Backend API alt
     'http://127.0.0.1:5001',
   ] : []),
   // Production origins
@@ -162,8 +166,12 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || '5000', 10);
-  const host = process.env.HOST || '127.0.0.1';
-  server.listen(port, host, () => {
+  // Use 127.0.0.1 for Windows dev (0.0.0.0 causes ENOTSUP), 0.0.0.0 for production
+  const host = process.env.HOST || (isDevelopment ? '127.0.0.1' : '0.0.0.0');
+  server.listen({
+    port,
+    host,
+  }, () => {
     log(`serving on http://${host}:${port}`);
     
     // Start the supervisor service
