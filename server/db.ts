@@ -19,7 +19,9 @@ config();
 
 // Treat as development unless explicitly set to production
 const isProduction = process.env.NODE_ENV === 'production';
-const hasDbUrl = !!process.env.DATABASE_URL;
+// Use SUPABASE_DATABASE_URL (preferred) or fall back to DATABASE_URL
+const dbUrl = process.env.SUPABASE_DATABASE_URL || process.env.DATABASE_URL;
+const hasDbUrl = !!dbUrl;
 
 let db: any;
 let pool: any = null;
@@ -66,8 +68,7 @@ if (!hasDbUrl && !isProduction) {
   
   console.log('[DB] Mock database initialized');
 } else if (hasDbUrl) {
-  // Real database mode
-  const dbUrl = process.env.DATABASE_URL!;
+  // Real database mode - use SUPABASE_DATABASE_URL or DATABASE_URL
   
   if (dbUrl.startsWith('file:') || dbUrl.endsWith('.db')) {
     // SQLite mode - but only if better-sqlite3 is available
