@@ -24,6 +24,7 @@ const allowedOrigins = [
     'http://localhost:5173',    // UI (Vite)
     'http://127.0.0.1:5173',
     'http://localhost:5000',    // Backend API (from main)
+    'http://127.0.0.1:5000',    // Backend API (from main)
     'http://localhost:5001',    // Backend API alt
     'http://127.0.0.1:5001',
   ] : []),
@@ -45,7 +46,9 @@ app.use(cors({
     // Check if origin is allowed
     const isAllowed = allowedOrigins.includes(origin) ||
                       origin.endsWith('.vercel.app') ||
-                      origin.endsWith('.onrender.com');
+                      origin.endsWith('.onrender.com') ||
+                      origin.endsWith('.replit.dev') ||
+                      origin.endsWith('.replit.app');
 
     if (isAllowed) {
       if (isDevelopment) {
