@@ -2,10 +2,11 @@
  * Action Executor - Single execution spine for Supervisor
  * 
  * Minimal implementation for Session 1 - only supports SEARCH_PLACES
- * Re-implements equivalent behavior from UI executeAction()
+ * Uses native Google Places API directly (no UI tool endpoint dependency)
  */
 
 import type { PlanStep } from './types/plan';
+import { searchPlaces } from './google-places';
 
 export interface ActionResult {
   success: boolean;
@@ -58,29 +59,19 @@ async function executeSearchPlaces(
   
   console.log(`[ACTION_EXECUTOR] SEARCH_PLACES: ${query} in ${location}, ${country}`);
   
-  try {
-    const { executeAction: registryExecuteAction } = await import('../actions/registry');
-    
-    const result = await registryExecuteAction('GLOBAL_DB', {
-      query,
-      region: location,
-      country,
-      maxResults: 10,
-      userId
-    });
-    
+  const result = await searchPlaces(query, location, country, 20);
+  
+  if (result.success) {
     return {
-      success: result.success,
-      summary: result.summary,
-      data: result.data as Record<string, unknown>,
-      error: result.error
+      success: true,
+      summary: `Found ${result.places.length} places for "${query}" in ${location}, ${country}`,
+      data: { places: result.places, count: result.places.length }
     };
-  } catch (error: any) {
-    console.error('[ACTION_EXECUTOR] SEARCH_PLACES failed:', error.message);
+  } else {
     return {
       success: false,
-      summary: `Search failed: ${error.message}`,
-      error: error.message
+      summary: `Search failed: ${result.error}`,
+      error: result.error
     };
   }
 }
