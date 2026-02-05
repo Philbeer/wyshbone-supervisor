@@ -29,6 +29,9 @@ import {
   type SaveLeadResponse,
   type ListLeadsResponse
 } from "./features/saveLead";
+import { planExecutionRouter } from "./supervisor/plan-execution";
+
+const SUPERVISOR_EXECUTION_ENABLED = process.env.SUPERVISOR_EXECUTION_ENABLED === 'true';
 
 // Helper to get userId from request (simple version for MVP)
 function getUserId(req: any): string {
@@ -53,6 +56,12 @@ function mapToolToActionType(tool: string): string | undefined {
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // ========================================
+  // SUPERVISOR PLAN EXECUTION (Feature-flagged)
+  // ========================================
+  app.use('/api/supervisor', planExecutionRouter);
+  console.log(`[ROUTES] Supervisor execution enabled: ${SUPERVISOR_EXECUTION_ENABLED}`);
+
   // ========================================
   // PLAN EXECUTION PIPELINE
   // ========================================
@@ -207,10 +216,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log(`[PLAN_APPROVE] Starting progress tracking for plan ${planId}...`);
       startPlanProgress(plan.id, plan.id, plan.steps);
 
-      // Execute plan asynchronously (fire-and-forget)
-      console.log(`[PLAN_APPROVE] Kicking off execution for plan ${planId}...`);
-      const { startPlanExecution } = await import('./plan-executor');
-      startPlanExecution(planId);
+      // Execute plan - either via Supervisor or UI based on feature flag
+      if (SUPERVISOR_EXECUTION_ENABLED) {
+        console.log(`[PLAN_APPROVE] SUPERVISOR_EXECUTION_ENABLED=true - delegating to Supervisor`);
+        
+        const { startPlanExecutionAsync } = await import('./supervisor/plan-executor');
+        startPlanExecutionAsync({
+          planId: plan.id,
+          userId,
+          conversationId: undefined,
+          goal: dbPlan.goalText || 'Lead generation',
+          steps: plan.steps.map(step => ({
+            id: step.id,
+            type: step.type || 'search',
+            label: step.label || step.tool,
+            description: step.note
+          })),
+          toolMetadata: plan.steps[0]?.input ? {
+            toolName: 'SEARCH_PLACES',
+            toolArgs: plan.steps[0].input
+          } : undefined
+        });
+      } else {
+        console.log(`[PLAN_APPROVE] SUPERVISOR_EXECUTION_ENABLED=false - using UI executor`);
+        const { startPlanExecution } = await import('./plan-executor');
+        startPlanExecution(planId);
+      }
 
       const elapsed = Date.now() - startTime;
       console.log(`\n${'='.repeat(60)}`);
