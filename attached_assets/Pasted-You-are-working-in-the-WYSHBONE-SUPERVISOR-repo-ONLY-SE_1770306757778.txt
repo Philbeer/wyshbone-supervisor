@@ -1,0 +1,67 @@
+You are working in the WYSHBONE SUPERVISOR repo ONLY.
+
+SESSION 2 - MIGRATION: Deep Research polling to Supervisor
+
+Context:
+- UI deepResearch.ts poller is now OFF by default and only runs if ENABLE_DEEP_RESEARCH_POLLER or ENABLE_UI_BACKGROUND_WORKERS is true.
+- We want Supervisor to own deep research polling so it runs reliably without the UI.
+
+Goal:
+Implement a Supervisor jobType "deep-research-poll" that runs ONE polling cycle (pollAllPendingRuns once), emits AFR events, and can be scheduled inside Supervisor.
+
+Tasks:
+1) Locate the existing deep research polling logic currently in the UI repo:
+   server/deepResearch.ts, specifically pollAllPendingRuns (or equivalent function).
+   Recreate the minimal required parts in Supervisor so Supervisor can run the poll cycle.
+
+2) Implement a Supervisor handler:
+   server/supervisor/jobs/handlers/deep-research-poll.ts
+   This should:
+   - Find pending deep research runs in storage/DB
+   - Process them (call the same execution logic used today)
+   - Update run status in DB
+   - Be safe to run repeatedly (idempotent, no double-processing)
+   - No-op cleanly if there are no pending runs
+
+3) Update Supervisor job runner routing:
+   jobType === "deep-research-poll" -> real handler
+
+4) Add overlap protection:
+   Prevent two deep-research-poll jobs from running concurrently (lock like monitor-worker).
+
+AFR requirements:
+- job_started at beginning
+- job_progress milestones at least:
+  - "found N pending runs"
+  - "processed X/Y"
+- job_completed with resultSummary: { pendingFound, processed, succeeded, failed, durationMs }
+- job_failed with error details
+
+Scheduling in Supervisor:
+Add a Supervisor-side scheduler (interval or cron) that triggers this job periodically.
+Rules:
+- Default OFF.
+- Enable only if env var ENABLE_DEEP_RESEARCH_POLLER === "true"
+- Log clearly on startup:
+  - "Deep Research poller: disabled" OR
+  - "Deep Research poller: enabled, interval = Xms"
+- Scheduler should call the same internal function as the jobs handler (not HTTP).
+- Interval should be configurable via env var (eg DEEP_RESEARCH_POLL_INTERVAL_MS, default 3000 or 5000).
+
+Acceptance tests:
+A) With ENABLE_DEEP_RESEARCH_POLLER not set:
+   - Supervisor starts and logs "disabled"
+   - No polling starts
+B) With ENABLE_DEEP_RESEARCH_POLLER=true:
+   - Supervisor starts and logs "enabled"
+   - Poll job runs periodically
+   - AFR events show job_started/progress/completed
+C) Manual trigger works:
+   - POST /api/supervisor/jobs/start with {jobType:"deep-research-poll", payload:{}, requestedBy:"ui"}
+   - Returns jobId immediately and job completes
+
+Output required:
+- Files changed
+- How to enable in Replit (env vars)
+- Example AFR resultSummary output
+Do not modify the UI repo in this task.
