@@ -7,7 +7,8 @@
  * Handler routing:
  * - "nightly-maintenance" -> real handler
  * - "xero-sync" -> real handler (safely no-ops if no Xero integrations)
- * - "monitor-worker" -> real handler (checks monitors, creates alerts)
+ * - "monitor-worker" -> real handler (checks monitors for issues, creates alerts)
+ * - "monitor-executor" -> real handler (executes scheduled monitors, generates leads)
  * - other job types -> stub runner (2 second placeholder)
  */
 
@@ -16,6 +17,7 @@ import { logAFREvent } from './afr-logger';
 import { runNightlyMaintenance } from './jobs/handlers/nightly-maintenance';
 import { runXeroSync } from './jobs/handlers/xero-sync';
 import { runMonitorWorker, acquireMonitorWorkerLock, releaseMonitorWorkerLock, isMonitorWorkerRunning } from './jobs/handlers/monitor-worker';
+import { runMonitorExecutor, acquireMonitorExecutorLock, releaseMonitorExecutorLock, isMonitorExecutorRunning } from './jobs/handlers/monitor-executor';
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -324,6 +326,77 @@ async function runMonitorWorkerJob(job: Job): Promise<void> {
   }
 }
 
+async function runMonitorExecutorJob(job: Job): Promise<void> {
+  if (!acquireMonitorExecutorLock()) {
+    console.log(`[JOBS] monitor-executor job already running - refusing to start duplicate`);
+    job.status = 'failed';
+    job.endedAt = new Date().toISOString();
+    job.message = 'Job already running - refused to start duplicate';
+    job.resultSummary = { success: false, error: 'A monitor-executor job is already in progress' };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_failed', job, { 
+      error: 'A monitor-executor job is already in progress',
+      reason: 'already_running'
+    });
+    return;
+  }
+
+  try {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    job.message = 'Starting monitor executor...';
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_started', job);
+    
+    const result = await runMonitorExecutor(job, async (progress, message) => {
+      const currentJob = jobStore.get(job.jobId);
+      if (currentJob?.status === 'cancelled') {
+        throw new Error('Job cancelled by user');
+      }
+      await emitProgressEvent(job, progress, message);
+    });
+    
+    const currentJob = jobStore.get(job.jobId);
+    if (currentJob?.status === 'cancelled') {
+      return;
+    }
+    
+    job.status = 'completed';
+    job.endedAt = new Date().toISOString();
+    job.progress = 100;
+    job.message = result.monitorsExecuted === 0
+      ? 'Monitor executor completed (no monitors to execute)'
+      : `Monitor executor completed: ${result.plansSucceeded} succeeded, ${result.plansFailed} failed, ${result.leadsGenerated} leads`;
+    job.resultSummary = {
+      success: result.success,
+      jobType: job.jobType,
+      durationMs: result.durationMs,
+      monitorsLoaded: result.monitorsLoaded,
+      monitorsExecuted: result.monitorsExecuted,
+      plansCreated: result.plansCreated,
+      plansSucceeded: result.plansSucceeded,
+      plansFailed: result.plansFailed,
+      leadsGenerated: result.leadsGenerated
+    };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_completed', job, { resultSummary: job.resultSummary });
+    
+  } catch (error: any) {
+    job.status = 'failed';
+    job.endedAt = new Date().toISOString();
+    job.message = `Failed: ${error.message}`;
+    job.resultSummary = { success: false, error: error.message };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_failed', job, { error: error.message });
+  } finally {
+    releaseMonitorExecutorLock();
+  }
+}
+
 async function runJobAsync(job: Job): Promise<void> {
   if (job.jobType === 'nightly-maintenance') {
     return runNightlyMaintenanceJob(job);
@@ -335,6 +408,10 @@ async function runJobAsync(job: Job): Promise<void> {
   
   if (job.jobType === 'monitor-worker') {
     return runMonitorWorkerJob(job);
+  }
+  
+  if (job.jobType === 'monitor-executor') {
+    return runMonitorExecutorJob(job);
   }
   
   return runStubJob(job);
