@@ -1,0 +1,43 @@
+You are working in the WYSHBONE SUPERVISOR repo ONLY.
+
+SESSION 2 CLOSE-OUT HYGIENE (SUPERVISOR)
+
+Goals:
+1) Ensure no debug endpoints or test helpers are exposed unintentionally.
+2) Add production safety warnings for scheduler flags.
+3) Add a clear Session 2 completion note in docs.
+
+Tasks:
+
+A) Debug endpoints gating
+- Search for any /api/debug/* endpoints or "temporary debug" routes added during Session 2.
+- If any exist, gate them so they are only mounted when:
+  ENABLE_DEBUG_ENDPOINTS === "true" AND NODE_ENV !== "production"
+- If none exist, state "no debug endpoints found" and do not add any.
+
+B) Deep research scheduler production warning
+- On Supervisor startup, where the deep research scheduler logs enabled/disabled:
+  - If NODE_ENV === "production" and ENABLE_DEEP_RESEARCH_POLLER === "true", print a loud warning that this will run polling continuously.
+  - If NODE_ENV === "production" and DEEP_RESEARCH_POLL_INTERVAL_MS is very low (for example < 3000), print a warning.
+
+C) Session 2 close-out note (docs)
+- Update replit.md with a short "Session 2 Complete" section:
+  - Supervisor is authoritative executor for long-running jobs
+  - Job types implemented: nightly-maintenance, xero-sync, monitor-worker, monitor-executor, deep-research-poll
+  - Scheduler default OFF, enabled only by ENABLE_DEEP_RESEARCH_POLLER=true
+  - Overlap guard present for poller and monitors
+  - UI should delegate, not execute
+
+Acceptance checks:
+1) With default env, no debug routes mounted, scheduler logs "disabled".
+2) With ENABLE_DEEP_RESEARCH_POLLER=true, scheduler logs enabled.
+3) With NODE_ENV=production and ENABLE_DEEP_RESEARCH_POLLER=true, confirm warning prints.
+
+Output:
+- Files changed
+- Any debug endpoints found and how they are gated (or confirm none exist)
+- Exact warning log lines (copy/paste)
+- Confirmation acceptance checks ran and passed
+
+Do not modify UI repo in this task.
+Do not change the job handlers themselves in this task, only gating/logging/docs.
