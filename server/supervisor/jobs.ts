@@ -7,6 +7,7 @@
  * Handler routing:
  * - "nightly-maintenance" -> real handler
  * - "xero-sync" -> real handler (safely no-ops if no Xero integrations)
+ * - "monitor-worker" -> real handler (checks monitors, creates alerts)
  * - other job types -> stub runner (2 second placeholder)
  */
 
@@ -14,6 +15,7 @@ import { randomUUID } from 'crypto';
 import { logAFREvent } from './afr-logger';
 import { runNightlyMaintenance } from './jobs/handlers/nightly-maintenance';
 import { runXeroSync } from './jobs/handlers/xero-sync';
+import { runMonitorWorker, acquireMonitorWorkerLock, releaseMonitorWorkerLock, isMonitorWorkerRunning } from './jobs/handlers/monitor-worker';
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -252,6 +254,76 @@ async function runXeroSyncJob(job: Job): Promise<void> {
   }
 }
 
+async function runMonitorWorkerJob(job: Job): Promise<void> {
+  if (!acquireMonitorWorkerLock()) {
+    console.log(`[JOBS] monitor-worker job already running - refusing to start duplicate`);
+    job.status = 'failed';
+    job.endedAt = new Date().toISOString();
+    job.message = 'Job already running - refused to start duplicate';
+    job.resultSummary = { success: false, error: 'A monitor-worker job is already in progress' };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_failed', job, { 
+      error: 'A monitor-worker job is already in progress',
+      reason: 'already_running'
+    });
+    return;
+  }
+
+  try {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    job.message = 'Starting monitor worker...';
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_started', job);
+    
+    const result = await runMonitorWorker(job, async (progress, message) => {
+      const currentJob = jobStore.get(job.jobId);
+      if (currentJob?.status === 'cancelled') {
+        throw new Error('Job cancelled by user');
+      }
+      await emitProgressEvent(job, progress, message);
+    });
+    
+    const currentJob = jobStore.get(job.jobId);
+    if (currentJob?.status === 'cancelled') {
+      return;
+    }
+    
+    job.status = 'completed';
+    job.endedAt = new Date().toISOString();
+    job.progress = 100;
+    job.message = result.issuesFound === 0
+      ? 'Monitor worker completed (no issues found)'
+      : `Monitor worker completed: ${result.issuesFound} issues found, ${result.alertsCreated} alerts created`;
+    job.resultSummary = {
+      success: result.success,
+      jobType: job.jobType,
+      durationMs: result.durationMs,
+      monitorsLoaded: result.monitorsLoaded,
+      monitorsChecked: result.monitorsChecked,
+      issuesFound: result.issuesFound,
+      alertsCreated: result.alertsCreated,
+      eventsByStatus: result.eventsByStatus
+    };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_completed', job, { resultSummary: job.resultSummary });
+    
+  } catch (error: any) {
+    job.status = 'failed';
+    job.endedAt = new Date().toISOString();
+    job.message = `Failed: ${error.message}`;
+    job.resultSummary = { success: false, error: error.message };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_failed', job, { error: error.message });
+  } finally {
+    releaseMonitorWorkerLock();
+  }
+}
+
 async function runJobAsync(job: Job): Promise<void> {
   if (job.jobType === 'nightly-maintenance') {
     return runNightlyMaintenanceJob(job);
@@ -259,6 +331,10 @@ async function runJobAsync(job: Job): Promise<void> {
   
   if (job.jobType === 'xero-sync') {
     return runXeroSyncJob(job);
+  }
+  
+  if (job.jobType === 'monitor-worker') {
+    return runMonitorWorkerJob(job);
   }
   
   return runStubJob(job);
