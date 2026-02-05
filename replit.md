@@ -112,3 +112,39 @@ The frontend uses a React with TypeScript stack, built with Vite and Wouter for 
 - **TanStack Query**: For server state management and caching.
 - **Tailwind CSS**: Utility-first CSS framework for styling.
 - **Zod**: Runtime schema validation library.
+
+---
+
+## Session 2 Complete
+
+**Status**: ✅ Complete (February 2026)
+
+### Summary
+Supervisor is now the authoritative executor for all long-running background jobs. The UI should delegate job execution to Supervisor rather than executing jobs locally.
+
+### Job Types Implemented
+| Job Type | Description |
+|----------|-------------|
+| `nightly-maintenance` | Cleans up stale memories and executes autonomous agent tasks |
+| `xero-sync` | Syncs Xero integrations for users with connected accounts |
+| `monitor-worker` | Checks all active monitors for issues (stalled, no_plan, repeated_failures) |
+| `monitor-executor` | Executes scheduled monitors to generate leads using SUP-001/SUP-002 |
+| `deep-research-poll` | Polls pending deep research runs and updates their status |
+
+### Scheduler Configuration
+- **Default**: Scheduler is OFF
+- **Enable**: Set `ENABLE_DEEP_RESEARCH_POLLER=true`
+- **Interval**: Configure with `DEEP_RESEARCH_POLL_INTERVAL_MS` (default: 5000ms)
+
+### Safety Features
+- **Overlap Guard**: Prevents concurrent runs of the same job type (poller and monitors)
+- **Production Warnings**: Loud console warnings when poller is enabled in production
+- **Aggressive Polling Warning**: Additional warning when poll interval < 3000ms in production
+- **Debug Endpoints**: Gated behind `ENABLE_DEBUG_ENDPOINTS=true` AND `NODE_ENV !== production`
+
+### Architecture Principle
+UI should delegate long-running jobs to Supervisor, not execute them locally. Supervisor handles:
+- Job lifecycle management
+- AFR event logging
+- Overlap prevention
+- Error handling and retries

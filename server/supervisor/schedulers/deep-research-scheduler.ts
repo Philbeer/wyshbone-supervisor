@@ -81,6 +81,8 @@ async function executePollCycle(): Promise<void> {
  * Start the deep research poller scheduler
  */
 export function startDeepResearchScheduler(): void {
+  const isProduction = process.env.NODE_ENV === 'production';
+  
   if (!POLLER_ENABLED) {
     console.log('[DEEP_RESEARCH_SCHEDULER] Deep Research poller: disabled');
     console.log('   Set ENABLE_DEEP_RESEARCH_POLLER=true to enable');
@@ -90,6 +92,27 @@ export function startDeepResearchScheduler(): void {
   if (isSchedulerRunning) {
     console.log('[DEEP_RESEARCH_SCHEDULER] Scheduler already running');
     return;
+  }
+
+  // Production safety warnings
+  if (isProduction) {
+    console.log('');
+    console.log('⚠️ '.repeat(20));
+    console.log('[DEEP_RESEARCH_SCHEDULER] ⚠️  PRODUCTION WARNING ⚠️');
+    console.log('[DEEP_RESEARCH_SCHEDULER] Deep Research poller is ENABLED in production.');
+    console.log('[DEEP_RESEARCH_SCHEDULER] This will poll continuously and consume API resources.');
+    console.log('⚠️ '.repeat(20));
+    
+    if (POLL_INTERVAL_MS < 3000) {
+      console.log('');
+      console.log('🚨 '.repeat(20));
+      console.log('[DEEP_RESEARCH_SCHEDULER] 🚨 AGGRESSIVE POLLING WARNING 🚨');
+      console.log(`[DEEP_RESEARCH_SCHEDULER] DEEP_RESEARCH_POLL_INTERVAL_MS is ${POLL_INTERVAL_MS}ms (< 3000ms).`);
+      console.log('[DEEP_RESEARCH_SCHEDULER] This is an aggressive polling interval for production!');
+      console.log('[DEEP_RESEARCH_SCHEDULER] Consider increasing to 5000ms or higher.');
+      console.log('🚨 '.repeat(20));
+    }
+    console.log('');
   }
 
   console.log('[DEEP_RESEARCH_SCHEDULER] Deep Research poller: enabled');

@@ -549,71 +549,80 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Debug endpoint - check agent_activities (AFR events)
-  app.get("/api/debug/agent-activities", async (req, res) => {
-    try {
-      const { data, error } = await supabase
-        .from('agent_activities')
-        .select('id, user_id, action_taken, status, task_generated, run_id, metadata, timestamp')
-        .order('timestamp', { ascending: false })
-        .limit(20);
-      
-      if (error) {
-        return res.status(500).json({ error: error.message });
+  // Debug endpoints - gated behind ENABLE_DEBUG_ENDPOINTS=true AND non-production
+  const debugEndpointsEnabled = process.env.ENABLE_DEBUG_ENDPOINTS === 'true' && process.env.NODE_ENV !== 'production';
+  
+  if (debugEndpointsEnabled) {
+    console.log('[DEBUG] Debug endpoints enabled at /api/debug/*');
+    
+    // Debug endpoint - check agent_activities (AFR events)
+    app.get("/api/debug/agent-activities", async (req, res) => {
+      try {
+        const { data, error } = await supabase
+          .from('agent_activities')
+          .select('id, user_id, action_taken, status, task_generated, run_id, metadata, timestamp')
+          .order('timestamp', { ascending: false })
+          .limit(20);
+        
+        if (error) {
+          return res.status(500).json({ error: error.message });
+        }
+        
+        res.json({ activities: data });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
       }
-      
-      res.json({ activities: data });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+    });
 
-  // Debug endpoint - check what's in Supabase
-  app.get("/api/debug/supabase", async (req, res) => {
-    try {
-      // Check users table
-      const { data: users, error: usersError } = await supabase.from('users').select('*').limit(5);
-      
-      // Check user_signals table
-      const { data: signals, error: signalsError } = await supabase
-        .from('user_signals')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(5);
-      
-      // Check facts table
-      const { data: facts, error: factsError } = await supabase
-        .from('facts')
-        .select('*')
-        .order('score', { ascending: false })
-        .limit(5);
-      
-      // Check messages table
-      const { data: messages, error: messagesError } = await supabase
-        .from('messages')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(5);
-      
-      // Check conversations table
-      const { data: conversations, error: conversationsError } = await supabase
-        .from('conversations')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(5);
-      
-      res.json({
-        users: { data: users, error: usersError },
-        signals: { data: signals, error: signalsError },
-        facts: { data: facts, error: factsError },
-        messages: { data: messages, error: messagesError },
-        conversations: { data: conversations, error: conversationsError }
-      });
-    } catch (error) {
-      console.error("Error fetching Supabase debug data:", error);
-      res.status(500).json({ error: "Failed to fetch debug data" });
-    }
-  });
+    // Debug endpoint - check what's in Supabase
+    app.get("/api/debug/supabase", async (req, res) => {
+      try {
+        // Check users table
+        const { data: users, error: usersError } = await supabase.from('users').select('*').limit(5);
+        
+        // Check user_signals table
+        const { data: signals, error: signalsError } = await supabase
+          .from('user_signals')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(5);
+        
+        // Check facts table
+        const { data: facts, error: factsError } = await supabase
+          .from('facts')
+          .select('*')
+          .order('score', { ascending: false })
+          .limit(5);
+        
+        // Check messages table
+        const { data: messages, error: messagesError } = await supabase
+          .from('messages')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(5);
+        
+        // Check conversations table
+        const { data: conversations, error: conversationsError } = await supabase
+          .from('conversations')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(5);
+        
+        res.json({
+          users: { data: users, error: usersError },
+          signals: { data: signals, error: signalsError },
+          facts: { data: facts, error: factsError },
+          messages: { data: messages, error: messagesError },
+          conversations: { data: conversations, error: conversationsError }
+        });
+      } catch (error) {
+        console.error("Error fetching Supabase debug data:", error);
+        res.status(500).json({ error: "Failed to fetch debug data" });
+      }
+    });
+  } else {
+    console.log('[DEBUG] Debug endpoints disabled (ENABLE_DEBUG_ENDPOINTS !== "true" or NODE_ENV === "production")');
+  }
 
   // Get user context (profile, facts, messages, etc.)
   app.get("/api/user/context", async (req, res) => {
