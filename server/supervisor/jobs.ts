@@ -6,12 +6,14 @@
  * 
  * Handler routing:
  * - "nightly-maintenance" -> real handler
+ * - "xero-sync" -> real handler (safely no-ops if no Xero integrations)
  * - other job types -> stub runner (2 second placeholder)
  */
 
 import { randomUUID } from 'crypto';
 import { logAFREvent } from './afr-logger';
 import { runNightlyMaintenance } from './jobs/handlers/nightly-maintenance';
+import { runXeroSync } from './jobs/handlers/xero-sync';
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -196,9 +198,67 @@ async function runStubJob(job: Job): Promise<void> {
   }
 }
 
+async function runXeroSyncJob(job: Job): Promise<void> {
+  try {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    job.message = 'Starting Xero sync...';
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_started', job);
+    
+    const result = await runXeroSync(job, async (progress, message) => {
+      const currentJob = jobStore.get(job.jobId);
+      if (currentJob?.status === 'cancelled') {
+        throw new Error('Job cancelled by user');
+      }
+      await emitProgressEvent(job, progress, message);
+    });
+    
+    const currentJob = jobStore.get(job.jobId);
+    if (currentJob?.status === 'cancelled') {
+      return;
+    }
+    
+    job.status = 'completed';
+    job.endedAt = new Date().toISOString();
+    job.progress = 100;
+    job.message = result.usersWithXero === 0 
+      ? 'Xero sync completed (no integrations configured)'
+      : `Xero sync completed: ${result.usersSynced} users synced`;
+    job.resultSummary = {
+      success: result.success,
+      jobType: job.jobType,
+      durationMs: result.durationMs,
+      usersWithXero: result.usersWithXero,
+      usersSynced: result.usersSynced,
+      usersSkipped: result.usersSkipped,
+      usersFailed: result.usersFailed,
+      totalContactsSynced: result.totalContactsSynced,
+      totalInvoicesSynced: result.totalInvoicesSynced
+    };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_completed', job, { resultSummary: job.resultSummary });
+    
+  } catch (error: any) {
+    job.status = 'failed';
+    job.endedAt = new Date().toISOString();
+    job.message = `Failed: ${error.message}`;
+    job.resultSummary = { success: false, error: error.message };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_failed', job, { error: error.message });
+  }
+}
+
 async function runJobAsync(job: Job): Promise<void> {
   if (job.jobType === 'nightly-maintenance') {
     return runNightlyMaintenanceJob(job);
+  }
+  
+  if (job.jobType === 'xero-sync') {
+    return runXeroSyncJob(job);
   }
   
   return runStubJob(job);
