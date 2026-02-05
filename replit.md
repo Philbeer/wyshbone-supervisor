@@ -54,6 +54,7 @@ The frontend uses a React with TypeScript stack, built with Vite and Wouter for 
     - `nightly-maintenance` - Cleans up stale memories and executes autonomous agent tasks
     - `xero-sync` - Syncs Xero integrations for users with connected accounts
     - `monitor-worker` - Checks all active monitors for issues (stalled, no_plan, repeated_failures), publishes alerts
+    - `monitor-executor` - Executes scheduled monitors to generate leads using SUP-001 (planner) + SUP-002 (executor)
   - AFR events: job_started, job_progress (multiple milestones), job_completed/job_failed with resultSummary
   - Safety: "already running" guard prevents overlapping runs of same jobType
 - Database schema includes `users`, `user_signals`, `suggested_leads`, `plan_executions`, and `plans` tables.

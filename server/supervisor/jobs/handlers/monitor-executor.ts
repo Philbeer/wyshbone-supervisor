@@ -107,7 +107,7 @@ export async function runMonitorExecutor(
 
     const { data: monitors, error: monitorsError } = await supabase
       .from('scheduled_monitors')
-      .select('id, user_id, label, description, monitor_type, created_at, last_execution_at')
+      .select('id, user_id, label, description, monitor_type, created_at')
       .eq('is_active', 1);
 
     if (monitorsError) {
@@ -208,11 +208,6 @@ export async function runMonitorExecutor(
           executionDetail.error = 'Plan did not complete successfully';
           console.log(`[MONITOR_EXECUTOR] Plan status: ${planStatus}`);
         }
-
-        await supabase
-          .from('scheduled_monitors')
-          .update({ last_execution_at: new Date().toISOString() })
-          .eq('id', monitor.id);
 
         result.monitorsExecuted++;
 
