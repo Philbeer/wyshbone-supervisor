@@ -1,0 +1,249 @@
+SUPERVISOR TRANSFER PACK
+Migration: LeadGen Plan Execution from UI to Supervisor
+Session 1 Scope: Feature-flagged plan execution handoff
+
+1) Supervisor Endpoint(s) to Add
+POST /api/supervisor/execute-plan
+This is the single endpoint Supervisor must expose. UI will call this when SUPERVISOR_EXECUTION_ENABLED=true.
+
+Request JSON Shape:
+
+{
+  "planId": "plan_1738765432_abc12",
+  "userId": "user-uuid",
+  "sessionId": "session-uuid",
+  "conversationId": "conv-uuid",
+  "goal": "Find pubs in Sussex",
+  "steps": [
+    {
+      "id": "step_1",
+      "type": "search",
+      "label": "Search Wyshbone Global Database",
+      "description": "Find businesses matching your criteria",
+      "estimatedTime": "1-2 minutes"
+    },
+    {
+      "id": "step_2",
+      "type": "enrich",
+      "label": "Enrich Contact Data",
+      "description": "Find verified email addresses and contact details",
+      "estimatedTime": "2-3 minutes"
+    }
+  ],
+  "toolMetadata": {
+    "toolName": "SEARCH_PLACES",
+    "toolArgs": {
+      "query": "pubs",
+      "location": "sussex",
+      "country": "GB"
+    },
+    "userId": "user-uuid"
+  }
+}
+Response JSON Shape (immediate acknowledgment):
+
+{
+  "ok": true,
+  "planId": "plan_1738765432_abc12",
+  "status": "executing",
+  "message": "Plan execution started"
+}
+Error Response:
+
+{
+  "ok": false,
+  "error": "Plan validation failed: missing steps",
+  "planId": "plan_1738765432_abc12"
+}
+2) Minimal Supervisor File List
+File Path (suggested)	Purpose
+src/routes/plan-execution.ts	Express route handler for POST /api/supervisor/execute-plan
+src/lib/plan-executor.ts	Core execution logic: iterate steps, call tools, handle errors
+src/lib/action-executor.ts	Single "spine" to execute actions (SEARCH_PLACES, BATCH_CONTACT_FINDER, etc.)
+src/lib/afr-logger.ts	Log AFR events to agent_activities table for Live Activity Panel
+src/lib/lead-persister.ts	Upsert leads to leads table (same logic as UI's persistLeadsToSupabase)
+src/types/plan.ts	TypeScript interfaces for LeadGenPlan, LeadGenStep, PlanExecution
+Summary of Responsibilities:
+plan-execution.ts: Validates incoming plan request, returns 200 immediately, kicks off async execution
+plan-executor.ts: Sequential step execution loop, updates step status, logs AFR events per step
+action-executor.ts: Maps step types to tool calls (SEARCH_PLACES → Google Places API, etc.)
+afr-logger.ts: Writes to agent_activities table with correct schema
+lead-persister.ts: Upserts leads to Supabase leads table
+3) UI Repo Files Containing Logic Being Moved
+These files contain the execution logic that Supervisor must re-implement:
+
+UI File Path	What Moves to Supervisor
+server/leadgen-executor.ts	ENTIRE FILE - startPlanExecution(), executeStepsInBackground(), executeStep() logic
+server/lib/actions.ts	executeAction() function - the single spine that routes action types to tool implementations
+server/lib/activity-logger.ts	logPlanEvent(), logToolCall(), logToolResult() - AFR event logging
+server/supabase-client.ts	persistLeadsToSupabase() - lead upsert logic (only if Supervisor uses same DB)
+server/googlePlaces.ts	searchPlaces() - Google Places API wrapper (copy or share as npm package)
+Key Functions to Re-implement:
+// From leadgen-executor.ts:
+async function startPlanExecution(plan: LeadGenPlan): Promise<PlanExecution>
+async function executeStepsInBackground(execution: PlanExecution): Promise<void>
+async function executeStep(step: LeadGenStep, execution: PlanExecution): Promise<void>
+// From actions.ts:
+async function executeAction(params: {
+  action: string;
+  params: any;
+  userId?: string;
+}): Promise<ActionResult>
+// From activity-logger.ts:
+async function logPlanEvent(params: LogPlanEventParams): Promise<string>
+async function logToolCall(params: LogToolCallParams): Promise<string>
+async function logToolResult(params: LogToolResultParams): Promise<string>
+4) AFR Event Logging for Live Activity Panel
+Supervisor must write to the agent_activities table so the UI's Live Activity Panel displays real-time progress.
+
+Table: agent_activities
+CREATE TABLE agent_activities (
+  id UUID PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  timestamp BIGINT NOT NULL,
+  created_at BIGINT NOT NULL,
+  task_generated TEXT,           -- Human-readable label for the event
+  action_taken TEXT,             -- Action type: 'plan_execution', 'SEARCH_PLACES', etc.
+  status TEXT,                   -- 'pending' | 'success' | 'failed'
+  conversation_id TEXT,
+  run_id TEXT,                   -- The planId for plan events
+  action_params JSONB,           -- Tool parameters
+  results JSONB,                 -- Tool results
+  error_message TEXT,            -- Error details if failed
+  duration_ms INTEGER,
+  metadata JSONB,                -- Must include { "runType": "plan" | "tool" }
+  interesting_flag INTEGER DEFAULT 0,
+  client_request_id TEXT,        -- Correlation ID for grouping
+  router_decision TEXT,          -- 'supervisor_plan' for plan execution
+  router_reason TEXT,
+  parent_activity_id UUID
+);
+Event Types to Log:
+Event	runType	status	task_generated example
+Plan started	plan	pending	Plan execution started: Find pubs in Sussex
+Step started	tool	pending	Tool: SEARCH_PLACES
+Step completed	tool	success	Tool: SEARCH_PLACES
+Step failed	tool	failed	Tool: SEARCH_PLACES
+Plan completed	plan	success	Plan execution completed: Find pubs in Sussex
+Plan failed	plan	failed	Plan execution failed: Step 2 failed
+Example AFR Log Call (Supervisor-side):
+// Log plan execution started
+await db.insert(agentActivities).values({
+  id: crypto.randomUUID(),
+  userId: plan.userId,
+  timestamp: Date.now(),
+  createdAt: Date.now(),
+  taskGenerated: `Plan execution started: ${plan.goal.substring(0, 80)}`,
+  actionTaken: 'plan_execution',
+  status: 'pending',
+  conversationId: plan.conversationId || null,
+  runId: plan.id,
+  actionParams: null,
+  results: null,
+  errorMessage: null,
+  durationMs: null,
+  metadata: { runType: 'plan', stepCount: plan.steps.length },
+  interestingFlag: 0,
+  clientRequestId: plan.sessionId, // or dedicated client_request_id if provided
+  routerDecision: 'supervisor_plan',
+  routerReason: null,
+  parentActivityId: null,
+});
+// Log tool execution
+await db.insert(agentActivities).values({
+  id: crypto.randomUUID(),
+  userId: plan.userId,
+  timestamp: Date.now(),
+  createdAt: Date.now(),
+  taskGenerated: `Tool: ${toolName}`,
+  actionTaken: toolName,
+  status: 'pending', // then update to 'success' or 'failed'
+  runId: plan.id,
+  actionParams: toolArgs,
+  metadata: { runType: 'tool', stepId: step.id, stepLabel: step.label },
+  routerDecision: 'tool_call',
+  // ... other fields
+});
+5) How UI Will Call Supervisor When Feature Flag is Enabled
+Environment Variable:
+SUPERVISOR_EXECUTION_ENABLED=true
+SUPERVISOR_URL=https://supervisor.yourapp.com  # or http://localhost:4000 for dev
+UI Code Change in server/routes.ts (POST /api/plan/approve):
+// In POST /api/plan/approve handler (around line 4482)
+// Check feature flag
+const supervisorEnabled = process.env.SUPERVISOR_EXECUTION_ENABLED === 'true';
+const supervisorUrl = process.env.SUPERVISOR_URL;
+if (supervisorEnabled && supervisorUrl) {
+  // Delegate execution to Supervisor
+  console.log(`🔀 [APPROVE_API] Supervisor execution enabled, delegating to ${supervisorUrl}`);
+  
+  try {
+    const supervisorResponse = await fetch(`${supervisorUrl}/api/supervisor/execute-plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        planId: approvedPlan.id,
+        userId: approvedPlan.userId,
+        sessionId: approvedPlan.sessionId,
+        conversationId: approvedPlan.conversationId,
+        goal: approvedPlan.goal,
+        steps: approvedPlan.steps,
+        toolMetadata: approvedPlan.toolMetadata,
+      }),
+    });
+    
+    if (!supervisorResponse.ok) {
+      const errorData = await supervisorResponse.json();
+      throw new Error(errorData.error || 'Supervisor execution failed');
+    }
+    
+    console.log(`✅ [APPROVE_API] Supervisor accepted plan execution`);
+    // Do NOT start local execution
+    return;
+  } catch (err) {
+    console.error(`❌ [APPROVE_API] Supervisor call failed, falling back to local:`, err);
+    // Fall through to local execution as fallback
+  }
+}
+// Existing local execution code (unchanged)
+setImmediate(async () => {
+  await startPlanExecution(approvedPlan);
+});
+UI Feature Flag Check Summary:
+Check SUPERVISOR_EXECUTION_ENABLED === 'true'
+If true, POST plan to ${SUPERVISOR_URL}/api/supervisor/execute-plan
+If Supervisor returns ok: true, do NOT run local execution
+If Supervisor fails, fall back to local execution (graceful degradation)
+6) Session 1 Acceptance Checklist
+Must Pass:
+ Supervisor endpoint exists: POST /api/supervisor/execute-plan returns 200 with { ok: true, status: 'executing' }
+ Supervisor executes steps: Given a plan with 2 steps, both steps execute in sequence
+ AFR events appear in database: Check agent_activities table has entries with run_id = planId
+ UI Live Activity Panel shows events: With SUPERVISOR_EXECUTION_ENABLED=true, approve a plan and see events stream in
+ Feature flag works: With flag OFF, execution happens locally (check UI server logs for [PLAN_EXEC] messages)
+ Feature flag works: With flag ON, execution happens in Supervisor (check Supervisor logs, NOT UI logs)
+ Leads are persisted: After SEARCH_PLACES executes, new rows appear in leads table
+Verification Commands:
+# 1. Verify no local execution when Supervisor enabled
+grep -c "PLAN_EXEC" ui-server.log  # Should be 0 when Supervisor enabled
+# 2. Verify Supervisor is executing
+grep "execute-plan" supervisor.log  # Should show incoming requests
+# 3. Verify AFR events in database
+psql -c "SELECT id, task_generated, status, metadata->>'runType' FROM agent_activities WHERE run_id = 'plan_xxx' ORDER BY timestamp;"
+# 4. Verify leads created
+psql -c "SELECT COUNT(*) FROM leads WHERE plan_id = 'plan_xxx';"
+Boundary Conditions:
+ Plan with 0 steps: Returns error, no execution
+ Plan with missing toolMetadata: Falls back to goal-parsing logic
+ Supervisor unavailable: UI falls back to local execution
+ Step fails mid-execution: Plan status updates to 'failed', AFR shows failure event
+Summary
+Component	UI Repo (keep)	Supervisor (add)
+Plan creation	leadgen-plan.ts	-
+Plan approval route	routes.ts (modified)	-
+Execution orchestration	-	plan-executor.ts
+Action spine	-	action-executor.ts (copy from actions.ts)
+AFR logging	-	afr-logger.ts (copy from activity-logger.ts)
+Lead persistence	-	lead-persister.ts (copy from supabase-client.ts)
+Google Places API	-	googlePlaces.ts (copy) or shared package
+The UI continues to own plan creation and approval. Supervisor owns execution once the feature flag is ON.
