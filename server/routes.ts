@@ -30,6 +30,7 @@ import {
   type ListLeadsResponse
 } from "./features/saveLead";
 import { planExecutionRouter } from "./supervisor/plan-execution";
+import { jobsRouter } from "./supervisor/jobs-router";
 
 const SUPERVISOR_EXECUTION_ENABLED = process.env.SUPERVISOR_EXECUTION_ENABLED === 'true';
 
@@ -60,8 +61,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // SUPERVISOR PLAN EXECUTION (Feature-flagged)
   // ========================================
   app.use('/api/supervisor', planExecutionRouter);
+  app.use('/api/supervisor/jobs', jobsRouter);
   console.log(`[ROUTES] Supervisor execution enabled: ${SUPERVISOR_EXECUTION_ENABLED}`);
   console.log(`[ROUTES] Registered: POST /api/supervisor/execute-plan`);
+  console.log(`[ROUTES] Registered: POST /api/supervisor/jobs/start`);
+  console.log(`[ROUTES] Registered: GET /api/supervisor/jobs/:jobId`);
+  console.log(`[ROUTES] Registered: POST /api/supervisor/jobs/:jobId/cancel`);
 
   // ========================================
   // PLAN EXECUTION PIPELINE
