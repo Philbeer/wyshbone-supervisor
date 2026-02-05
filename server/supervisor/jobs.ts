@@ -3,10 +3,15 @@
  * 
  * Provides job lifecycle management with AFR event logging.
  * Jobs run asynchronously in the background.
+ * 
+ * Handler routing:
+ * - "nightly-maintenance" -> real handler
+ * - other job types -> stub runner (2 second placeholder)
  */
 
 import { randomUUID } from 'crypto';
 import { logAFREvent } from './afr-logger';
+import { runNightlyMaintenance } from './jobs/handlers/nightly-maintenance';
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -78,7 +83,80 @@ async function emitJobEvent(
   console.log(`[JOBS] Event: ${eventType} | jobId: ${job.jobId} | status: ${job.status}`);
 }
 
-async function runJobAsync(job: Job): Promise<void> {
+async function emitProgressEvent(job: Job, progress: number, message: string): Promise<void> {
+  job.progress = progress;
+  job.message = message;
+  jobStore.set(job.jobId, job);
+  
+  await logAFREvent({
+    userId: job.userId || 'system',
+    runId: job.jobId,
+    conversationId: undefined,
+    actionTaken: 'job_progress',
+    status: 'pending',
+    taskGenerated: `job_progress: ${job.jobType} (${progress}%)`,
+    runType: 'tool',
+    metadata: {
+      jobType: job.jobType,
+      jobStatus: job.status,
+      requestedBy: job.requestedBy,
+      progress,
+      message
+    }
+  });
+  
+  console.log(`[JOBS] Progress: ${job.jobId} | ${progress}% | ${message}`);
+}
+
+async function runNightlyMaintenanceJob(job: Job): Promise<void> {
+  try {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    job.message = 'Starting nightly maintenance...';
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_started', job);
+    
+    const result = await runNightlyMaintenance(job, async (progress, message) => {
+      const currentJob = jobStore.get(job.jobId);
+      if (currentJob?.status === 'cancelled') {
+        throw new Error('Job cancelled by user');
+      }
+      await emitProgressEvent(job, progress, message);
+    });
+    
+    const currentJob = jobStore.get(job.jobId);
+    if (currentJob?.status === 'cancelled') {
+      return;
+    }
+    
+    job.status = 'completed';
+    job.endedAt = new Date().toISOString();
+    job.progress = 100;
+    job.message = 'Nightly maintenance completed successfully';
+    job.resultSummary = {
+      success: result.success,
+      jobType: job.jobType,
+      durationMs: result.durationMs,
+      memoryCleanup: result.memoryCleanup,
+      taskExecution: result.taskExecution
+    };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_completed', job, { resultSummary: job.resultSummary });
+    
+  } catch (error: any) {
+    job.status = 'failed';
+    job.endedAt = new Date().toISOString();
+    job.message = `Failed: ${error.message}`;
+    job.resultSummary = { success: false, error: error.message };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_failed', job, { error: error.message });
+  }
+}
+
+async function runStubJob(job: Job): Promise<void> {
   try {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
@@ -116,6 +194,14 @@ async function runJobAsync(job: Job): Promise<void> {
     
     await emitJobEvent('job_failed', job, { error: error.message });
   }
+}
+
+async function runJobAsync(job: Job): Promise<void> {
+  if (job.jobType === 'nightly-maintenance') {
+    return runNightlyMaintenanceJob(job);
+  }
+  
+  return runStubJob(job);
 }
 
 export async function startJob(request: StartJobRequest): Promise<string> {
