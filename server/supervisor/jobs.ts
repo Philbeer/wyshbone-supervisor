@@ -9,6 +9,7 @@
  * - "xero-sync" -> real handler (safely no-ops if no Xero integrations)
  * - "monitor-worker" -> real handler (checks monitors for issues, creates alerts)
  * - "monitor-executor" -> real handler (executes scheduled monitors, generates leads)
+ * - "deep-research-poll" -> real handler (polls pending deep research runs)
  * - other job types -> stub runner (2 second placeholder)
  */
 
@@ -18,6 +19,7 @@ import { runNightlyMaintenance } from './jobs/handlers/nightly-maintenance';
 import { runXeroSync } from './jobs/handlers/xero-sync';
 import { runMonitorWorker, acquireMonitorWorkerLock, releaseMonitorWorkerLock, isMonitorWorkerRunning } from './jobs/handlers/monitor-worker';
 import { runMonitorExecutor, acquireMonitorExecutorLock, releaseMonitorExecutorLock, isMonitorExecutorRunning } from './jobs/handlers/monitor-executor';
+import { runDeepResearchPoll, acquireDeepResearchPollLock, releaseDeepResearchPollLock, isDeepResearchPollRunning } from './jobs/handlers/deep-research-poll';
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -397,6 +399,76 @@ async function runMonitorExecutorJob(job: Job): Promise<void> {
   }
 }
 
+async function runDeepResearchPollJob(job: Job): Promise<void> {
+  if (!acquireDeepResearchPollLock()) {
+    console.log(`[JOBS] deep-research-poll job already running - refusing to start duplicate`);
+    job.status = 'failed';
+    job.endedAt = new Date().toISOString();
+    job.message = 'Job already running - refused to start duplicate';
+    job.resultSummary = { success: false, error: 'A deep-research-poll job is already in progress' };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_failed', job, { 
+      error: 'A deep-research-poll job is already in progress',
+      reason: 'already_running'
+    });
+    return;
+  }
+
+  try {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    job.message = 'Starting deep research poll...';
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_started', job);
+    
+    const result = await runDeepResearchPoll(job, async (progress, message) => {
+      const currentJob = jobStore.get(job.jobId);
+      if (currentJob?.status === 'cancelled') {
+        throw new Error('Job cancelled by user');
+      }
+      await emitProgressEvent(job, progress, message);
+    });
+    
+    const currentJob = jobStore.get(job.jobId);
+    if (currentJob?.status === 'cancelled') {
+      return;
+    }
+    
+    job.status = 'completed';
+    job.endedAt = new Date().toISOString();
+    job.progress = 100;
+    job.message = result.pendingFound === 0
+      ? 'Deep research poll completed (no pending runs)'
+      : `Deep research poll completed: ${result.processed} processed (${result.succeeded} succeeded, ${result.failed} failed)`;
+    job.resultSummary = {
+      success: result.success,
+      jobType: job.jobType,
+      durationMs: result.durationMs,
+      pendingFound: result.pendingFound,
+      processed: result.processed,
+      succeeded: result.succeeded,
+      failed: result.failed,
+      skipped: result.skipped
+    };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_completed', job, { resultSummary: job.resultSummary });
+    
+  } catch (error: any) {
+    job.status = 'failed';
+    job.endedAt = new Date().toISOString();
+    job.message = `Failed: ${error.message}`;
+    job.resultSummary = { success: false, error: error.message };
+    jobStore.set(job.jobId, job);
+    
+    await emitJobEvent('job_failed', job, { error: error.message });
+  } finally {
+    releaseDeepResearchPollLock();
+  }
+}
+
 async function runJobAsync(job: Job): Promise<void> {
   if (job.jobType === 'nightly-maintenance') {
     return runNightlyMaintenanceJob(job);
@@ -412,6 +484,10 @@ async function runJobAsync(job: Job): Promise<void> {
   
   if (job.jobType === 'monitor-executor') {
     return runMonitorExecutorJob(job);
+  }
+  
+  if (job.jobType === 'deep-research-poll') {
+    return runDeepResearchPollJob(job);
   }
   
   return runStubJob(job);

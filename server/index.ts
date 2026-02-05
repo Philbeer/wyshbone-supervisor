@@ -8,6 +8,7 @@ import { setupVite, serveStatic, log } from "./vite";
 import { supervisor } from "./supervisor";
 import { startSubconScheduler } from "./subcon";
 import { startDailyAgentCron } from "./cron/daily-agent";
+import { startDeepResearchScheduler } from "./supervisor/schedulers/deep-research-scheduler";
 import crypto from "crypto";
 
 const app = express();
@@ -189,5 +190,9 @@ app.use((req, res, next) => {
     // Start the daily agent cron job (Phase 2 Task 5)
     // Runs at 9am daily - disable with DAILY_AGENT_ENABLED=false
     startDailyAgentCron();
+
+    // Start the deep research poller scheduler (Session 2)
+    // Disabled by default - enable with ENABLE_DEEP_RESEARCH_POLLER=true
+    startDeepResearchScheduler();
   });
 })();

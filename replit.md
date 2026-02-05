@@ -55,8 +55,32 @@ The frontend uses a React with TypeScript stack, built with Vite and Wouter for 
     - `xero-sync` - Syncs Xero integrations for users with connected accounts
     - `monitor-worker` - Checks all active monitors for issues (stalled, no_plan, repeated_failures), publishes alerts
     - `monitor-executor` - Executes scheduled monitors to generate leads using SUP-001 (planner) + SUP-002 (executor)
+    - `deep-research-poll` - Polls pending deep research runs and updates their status (migrated from UI)
   - AFR events: job_started, job_progress (multiple milestones), job_completed/job_failed with resultSummary
   - Safety: "already running" guard prevents overlapping runs of same jobType
+- **Deep Research Poller Scheduler** (Session 2 Migration):
+  - Replaces UI deep research polling to run reliably in Supervisor
+  - **Environment Variables**:
+    - `ENABLE_DEEP_RESEARCH_POLLER` - Set to "true" to enable (default: disabled)
+    - `DEEP_RESEARCH_POLL_INTERVAL_MS` - Polling interval in ms (default: 5000)
+  - Logs on startup: "Deep Research poller: disabled" or "Deep Research poller: enabled, interval = Xms"
+  - Manual trigger via: `POST /api/supervisor/jobs/start` with `{jobType:"deep-research-poll", payload:{}, requestedBy:"ui"}`
+  - Example resultSummary output:
+    ```json
+    {
+      "success": true,
+      "jobType": "deep-research-poll",
+      "durationMs": 150,
+      "pendingFound": 3,
+      "processed": 3,
+      "succeeded": 2,
+      "failed": 0,
+      "skipped": 1
+    }
+    ```
+    - `succeeded`: Runs that completed successfully
+    - `failed`: Runs that failed permanently (marked as failed in DB)
+    - `skipped`: Runs still processing or couldn't be polled (API errors, no API key)
 - Database schema includes `users`, `user_signals`, `suggested_leads`, `plan_executions`, and `plans` tables.
 - Signals represent user actions that trigger lead discovery.
 - Leads include enriched data (e.g., emails, places) and trigger email notifications.
