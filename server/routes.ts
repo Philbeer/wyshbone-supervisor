@@ -61,6 +61,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // ========================================
   app.use('/api/supervisor', planExecutionRouter);
   console.log(`[ROUTES] Supervisor execution enabled: ${SUPERVISOR_EXECUTION_ENABLED}`);
+  console.log(`[ROUTES] Registered: POST /api/supervisor/execute-plan`);
 
   // ========================================
   // PLAN EXECUTION PIPELINE
