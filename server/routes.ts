@@ -549,6 +549,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Debug endpoint - check agent_activities (AFR events)
+  app.get("/api/debug/agent-activities", async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from('agent_activities')
+        .select('id, user_id, action_taken, status, task_generated, run_id, metadata, timestamp')
+        .order('timestamp', { ascending: false })
+        .limit(20);
+      
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+      
+      res.json({ activities: data });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Debug endpoint - check what's in Supabase
   app.get("/api/debug/supabase", async (req, res) => {
     try {
