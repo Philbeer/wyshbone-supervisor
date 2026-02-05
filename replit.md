@@ -46,6 +46,16 @@ The frontend uses a React with TypeScript stack, built with Vite and Wouter for 
   - Sequential execution: Stops on first failure, no retries (Session 1 scope)
   - Native SEARCH_PLACES: Uses Google Places Text Search API directly (requires GOOGLE_MAPS_API_KEY)
   - Test script: `./scripts/test-supervisor-plan.sh` tests endpoint with sample "pubs in Kent GB" query
+- **Supervisor Jobs API** (Session 2):
+  - POST `/api/supervisor/jobs/start` - Start a new background job
+  - GET `/api/supervisor/jobs/:jobId` - Get job status
+  - POST `/api/supervisor/jobs/:jobId/cancel` - Cancel a job
+  - **Job Handlers**:
+    - `nightly-maintenance` - Cleans up stale memories and executes autonomous agent tasks
+    - `xero-sync` - Syncs Xero integrations for users with connected accounts
+    - `monitor-worker` - Checks all active monitors for issues (stalled, no_plan, repeated_failures), publishes alerts
+  - AFR events: job_started, job_progress (multiple milestones), job_completed/job_failed with resultSummary
+  - Safety: "already running" guard prevents overlapping runs of same jobType
 - Database schema includes `users`, `user_signals`, `suggested_leads`, `plan_executions`, and `plans` tables.
 - Signals represent user actions that trigger lead discovery.
 - Leads include enriched data (e.g., emails, places) and trigger email notifications.
