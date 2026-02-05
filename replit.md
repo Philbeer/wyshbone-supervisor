@@ -44,6 +44,8 @@ The frontend uses a React with TypeScript stack, built with Vite and Wouter for 
   - Feature flag: SUPERVISOR_EXECUTION_ENABLED (default: false) gates execution path in /api/plan/approve
   - AFR logging: Writes to agent_activities table for display in UI Live Activity panel
   - Sequential execution: Stops on first failure, no retries (Session 1 scope)
+  - Native SEARCH_PLACES: Uses Google Places Text Search API directly (requires GOOGLE_MAPS_API_KEY)
+  - Test script: `./scripts/test-supervisor-plan.sh` tests endpoint with sample "pubs in Kent GB" query
 - Database schema includes `users`, `user_signals`, `suggested_leads`, `plan_executions`, and `plans` tables.
 - Signals represent user actions that trigger lead discovery.
 - Leads include enriched data (e.g., emails, places) and trigger email notifications.
