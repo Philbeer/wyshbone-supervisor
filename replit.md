@@ -36,9 +36,14 @@ The frontend uses a React with TypeScript stack, built with Vite and Wouter for 
 - RESTful API endpoints for leads, user context, signals, and plan execution.
 - **Plan Execution API**:
   - POST `/api/plan/start` - Creates a plan using SUP-001 + SUP-012, stores in database with "pending_approval" status
-  - POST `/api/plan/approve` - Validates ownership, starts execution asynchronously with comprehensive logging
+  - POST `/api/plan/approve` - Validates ownership, starts execution asynchronously with comprehensive logging. When SUPERVISOR_EXECUTION_ENABLED=true, routes to Supervisor backend execution.
   - GET `/api/plan/progress?planId=xxx` - Returns real-time progress for specific plan or user's most recent plan
   - GET `/api/plan-status` - Alias for `/api/plan/progress` with enhanced logging for UI integration
+- **Supervisor Execution API** (Session 1):
+  - POST `/api/supervisor/execute-plan` - Accepts plan execution requests, validates input, returns immediately with ok=true, executes steps asynchronously in background
+  - Feature flag: SUPERVISOR_EXECUTION_ENABLED (default: false) gates execution path in /api/plan/approve
+  - AFR logging: Writes to agent_activities table for display in UI Live Activity panel
+  - Sequential execution: Stops on first failure, no retries (Session 1 scope)
 - Database schema includes `users`, `user_signals`, `suggested_leads`, `plan_executions`, and `plans` tables.
 - Signals represent user actions that trigger lead discovery.
 - Leads include enriched data (e.g., emails, places) and trigger email notifications.
