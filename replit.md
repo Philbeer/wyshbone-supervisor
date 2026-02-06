@@ -54,3 +54,13 @@ The frontend is a React with TypeScript application built with Vite, using Woute
 - **Tailwind CSS**: Utility-first CSS framework.
 - **Zod**: Runtime schema validation library.
 - **Tower Judgement API**: External service for agentic decision-making and evaluation of plan execution.
+
+## Recent Changes
+
+### 2026-02-06: Agent Run Tracking for AFR Runs List
+- Added `agentRuns` table definition to `shared/schema.ts` matching the Supabase DB schema (bigint for `created_at`/`updated_at`/`last_event_at`, timestamptz for `started_at`/`ended_at`)
+- Added `createAgentRun`, `updateAgentRun`, `getAgentRuns` storage methods in `server/storage.ts`
+- Added GET `/api/afr/runs` endpoint to return agent runs from the database
+- Updated POST `/api/debug/demo-plan-run` to create an `agent_runs` row on start and update it on completion/halt/failure
+- Fixed Supabase DB trigger `set_updated_at()` — was using `now()` (timestamp) for a bigint column, causing all UPDATEs to fail. Changed to `(extract(epoch from now()) * 1000)::bigint`. Migration script: `migrations/001_fix_set_updated_at_trigger.sql`
+- **Important**: The `execute_sql_tool` queries the Replit DATABASE_URL, NOT the Supabase DB. Use `psql "$SUPABASE_DATABASE_URL"` for Supabase schema inspection.

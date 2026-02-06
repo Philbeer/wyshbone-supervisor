@@ -25,7 +25,7 @@ import {
   type InsertAgentRun,
 } from "./schema";
 import { db } from "./db";
-import { eq, desc, isNull, and, sql } from "drizzle-orm";
+import { eq, desc, isNull, and } from "drizzle-orm";
 import type { SubconNudge } from "./subcon/types";
 import { supabase } from "./supabase";
 
@@ -438,17 +438,18 @@ export class DatabaseStorage implements IStorage {
     metadata?: Record<string, unknown> | null;
     endedAt?: Date | null;
   }): Promise<void> {
-    await db.execute(sql`
-      UPDATE agent_runs SET
-        updated_at = ${Date.now()},
-        status = COALESCE(${updates.status ?? null}, status),
-        terminal_state = ${updates.terminalState !== undefined ? updates.terminalState : sql`terminal_state`},
-        error = ${updates.error !== undefined ? updates.error : sql`error`},
-        error_details = ${updates.errorDetails !== undefined ? (updates.errorDetails ? JSON.stringify(updates.errorDetails) : null) : sql`error_details`}::jsonb,
-        metadata = ${updates.metadata !== undefined ? (updates.metadata ? JSON.stringify(updates.metadata) : null) : sql`metadata`}::jsonb,
-        ended_at = ${updates.endedAt !== undefined ? (updates.endedAt ? updates.endedAt.toISOString() : null) : sql`ended_at`}::timestamptz
-      WHERE id = ${id}
-    `);
+    const setClause: Record<string, unknown> = {};
+    if (updates.status !== undefined) setClause.status = updates.status;
+    if (updates.terminalState !== undefined) setClause.terminalState = updates.terminalState;
+    if (updates.error !== undefined) setClause.error = updates.error;
+    if (updates.errorDetails !== undefined) setClause.errorDetails = updates.errorDetails;
+    if (updates.metadata !== undefined) setClause.metadata = updates.metadata;
+    if (updates.endedAt !== undefined) setClause.endedAt = updates.endedAt;
+
+    await db
+      .update(agentRuns)
+      .set(setClause)
+      .where(eq(agentRuns.id, id));
     console.log(`[Storage] Updated agent run ${id}`);
   }
 
