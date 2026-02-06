@@ -1,0 +1,104 @@
+SUPERVISOR – SESSION 3 PROOF PROMPT
+
+TASK: Add a dev-only “Demo Plan Run” endpoint to force a multi-step plan through plan-executor.ts, so we can prove Session 3 agentic judgement + halt in AFR.
+
+Context
+
+The UI currently triggers “Single action – Auto-executing”, which bypasses plan-executor.ts.
+
+Session 3 judgement logic is already implemented in:
+
+server/supervisor/tower-judgement.ts
+
+integrated into server/supervisor/plan-executor.ts
+
+We need one guaranteed multi-step execution that must go through plan-executor.ts so Tower judgement can fire.
+
+Requirements
+
+Add a dev-only HTTP endpoint, gated behind existing debug / dev guards (same pattern as other debug routes), for example:
+
+POST /api/debug/demo-plan-run
+
+
+This endpoint must:
+
+construct a hardcoded demo plan with at least 4 steps
+
+steps should use an existing working action/tool
+
+prefer SEARCH_PLACES
+
+it is completely fine if the search returns empty results
+
+example plan shape:
+
+Step 1: SEARCH_PLACES("kent pubs", small limit)
+
+Step 2: SEARCH_PLACES("kent pubs", small limit)
+
+Step 3: SEARCH_PLACES("kent pubs", small limit)
+
+Step 4: SEARCH_PLACES("kent pubs", small limit)
+
+Execute this plan using the real plan execution path:
+
+must go through server/supervisor/plan-executor.ts
+
+must emit standard AFR events (job_started, job_progress, etc.)
+
+The run must:
+
+generate a real run_id
+
+trigger the Tower judgement loop after each step
+
+halt early when Tower returns STOP
+
+On STOP:
+
+ensure job_halted_by_judgement AFR event is emitted
+
+job status must be halted, not completed
+
+locks / guards must release cleanly
+
+The endpoint response should be:
+
+{ "run_id": "<uuid>" }
+
+
+so the run can be inspected in AFR.
+
+Production safety:
+
+endpoint must be disabled by default
+
+loud warning log if enabled outside dev
+
+no secrets logged
+
+Success criteria (non-negotiable)
+After calling this endpoint once, AFR must show one run with:
+
+job_started
+
+multiple job_progress events (multiple steps)
+
+judgement_requested
+
+judgement_received (STOP, any valid reason)
+
+job_halted_by_judgement
+
+If the run completes normally, the task is not done.
+
+IMPORTANT
+
+Rewrite full files when editing (no partial diffs)
+
+Keep the demo plan simple and deterministic
+
+Empty or failing searches are acceptable and expected
+
+Implement, commit, and report completion.

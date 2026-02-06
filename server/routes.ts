@@ -574,6 +574,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     });
 
+    // Debug endpoint - demo plan run (Session 3 proof)
+    // Forces a multi-step plan through plan-executor.ts to prove Tower judgement + halt in AFR
+    app.post("/api/debug/demo-plan-run", async (_req, res) => {
+      const { randomUUID } = await import('crypto');
+      const { executePlan } = await import('./supervisor/plan-executor');
+
+      if (process.env.NODE_ENV === 'production') {
+        console.warn('[DEBUG] ⚠️  demo-plan-run called outside dev — this should never happen in production');
+      }
+
+      const planId = `demo_${randomUUID().replace(/-/g, '').substring(0, 12)}`;
+      const userId = 'demo-user';
+
+      const plan = {
+        planId,
+        userId,
+        goal: 'Demo plan run – prove Session 3 Tower judgement loop',
+        steps: [
+          { id: 'demo-step-1', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 1)' },
+          { id: 'demo-step-2', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 2)' },
+          { id: 'demo-step-3', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 3)' },
+          { id: 'demo-step-4', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 4)' },
+        ],
+        toolMetadata: {
+          toolName: 'SEARCH_PLACES',
+          toolArgs: { query: 'pubs', location: 'Kent', country: 'GB' },
+        },
+      };
+
+      console.log(`[DEBUG] demo-plan-run: starting plan ${planId} with ${plan.steps.length} steps`);
+
+      res.json({ run_id: planId });
+
+      executePlan(plan).then(result => {
+        if (result.haltedByJudgement) {
+          console.log(`[DEBUG] demo-plan-run ${planId}: HALTED by Tower judgement — ${result.haltReason}`);
+        } else if (result.success) {
+          console.log(`[DEBUG] demo-plan-run ${planId}: completed ${result.stepsCompleted}/${result.totalSteps} steps`);
+        } else {
+          console.error(`[DEBUG] demo-plan-run ${planId}: failed — ${result.error}`);
+        }
+      }).catch(err => {
+        console.error(`[DEBUG] demo-plan-run ${planId}: threw — ${err.message}`);
+      });
+    });
+
     // Debug endpoint - check what's in Supabase
     app.get("/api/debug/supabase", async (req, res) => {
       try {

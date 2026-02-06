@@ -191,6 +191,13 @@ Supervisor now calls the Tower Judgement API after each step during plan executi
 - `stall_min_delta_leads`: 1
 - `max_failures`: 3
 
+### Debug: Demo Plan Run Endpoint
+- `POST /api/debug/demo-plan-run` — fires a hardcoded 4-step SEARCH_PLACES plan through `plan-executor.ts`
+- Gated behind `ENABLE_DEBUG_ENDPOINTS=true` AND `NODE_ENV !== 'production'`
+- Returns `{ "run_id": "<id>" }` immediately; execution runs in background
+- Proves Tower judgement loop fires after each step (judgement_requested, judgement_received, job_halted_by_judgement)
+- Usage: `curl -X POST http://localhost:5000/api/debug/demo-plan-run`
+
 ### Environment Variables
 - `TOWER_URL` (required): Base URL of Tower service (trailing slash safely stripped)
 - `TOWER_API_KEY` or `EXPORT_KEY`: API key for Tower authentication
