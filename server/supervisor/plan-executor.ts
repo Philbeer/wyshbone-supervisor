@@ -3,9 +3,10 @@
  * 
  * Iterates steps sequentially, logs AFR events, and calls action executor.
  * Session 1 scope: No retries, stop on first failure.
+ * Session 3: Agentic decision loop – calls Tower Judgement API after each step.
  */
 
-import type { Plan, PlanStep } from './types/plan';
+import type { Plan } from './types/plan';
 import { executeStep } from './action-executor';
 import {
   logPlanStarted,
@@ -15,12 +16,22 @@ import {
   logPlanCompleted,
   logPlanFailed
 } from './afr-logger';
+import {
+  LEADGEN_SUCCESS_DEFAULTS,
+  createRunSummary,
+  updateRunSummary,
+  buildSnapshot,
+  requestJudgement,
+  type TowerSuccessCriteria,
+} from './tower-judgement';
 
 export interface PlanExecutionResult {
   success: boolean;
   stepsCompleted: number;
   totalSteps: number;
   error?: string;
+  haltedByJudgement?: boolean;
+  haltReason?: string;
 }
 
 export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
@@ -33,6 +44,10 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   await logPlanStarted(userId, planId, goal, conversationId);
   
   let stepsCompleted = 0;
+
+  const missionType = 'leadgen';
+  const successCriteria: TowerSuccessCriteria = { ...LEADGEN_SUCCESS_DEFAULTS };
+  const runSummary = createRunSummary();
   
   try {
     for (let i = 0; i < steps.length; i++) {
@@ -48,6 +63,13 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         if (!result.success) {
           console.error(`[PLAN_EXECUTOR] Step ${step.id} failed:`, result.error);
           await logStepFailed(userId, planId, step.id, step.label, result.error || 'Unknown error', conversationId);
+
+          updateRunSummary(runSummary, {
+            success: false,
+            leadsFound: 0,
+            costUnits: 0.25,
+          });
+
           await logPlanFailed(userId, planId, result.error || 'Step execution failed', conversationId);
           
           return {
@@ -58,6 +80,18 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           };
         }
         
+        const leadsFound = (result.data?.places as any[])?.length
+          ?? (result.data?.leads as any[])?.length
+          ?? (result.data?.count as number)
+          ?? 0;
+
+        updateRunSummary(runSummary, {
+          success: true,
+          leadsFound,
+          costUnits: 0.25,
+          validLeads: leadsFound,
+        });
+
         await logStepCompleted(userId, planId, step.id, step.label, result.summary, conversationId);
         stepsCompleted++;
         
@@ -66,6 +100,12 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       } catch (stepError: any) {
         const errorMessage = stepError.message || 'Step execution threw an exception';
         console.error(`[PLAN_EXECUTOR] Step ${step.id} threw error:`, errorMessage);
+
+        updateRunSummary(runSummary, {
+          success: false,
+          leadsFound: 0,
+          costUnits: 0.25,
+        });
         
         await logStepFailed(userId, planId, step.id, step.label, errorMessage, conversationId);
         await logPlanFailed(userId, planId, errorMessage, conversationId);
@@ -75,6 +115,34 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           stepsCompleted,
           totalSteps: steps.length,
           error: errorMessage
+        };
+      }
+
+      // ----- Tower Judgement: after each step -----
+      const snapshot = buildSnapshot(runSummary, successCriteria.stall_window_steps);
+      const judgement = await requestJudgement(
+        planId,
+        userId,
+        missionType,
+        successCriteria,
+        snapshot,
+        conversationId,
+      );
+
+      if (judgement.shouldStop) {
+        const haltReason = judgement.verdict
+          ? `${judgement.verdict.reason_code}: ${judgement.verdict.explanation}`
+          : 'Tower issued STOP';
+
+        console.log(`[PLAN_EXECUTOR] Halted by Tower judgement after step ${i + 1}: ${haltReason}`);
+
+        return {
+          success: false,
+          stepsCompleted,
+          totalSteps: steps.length,
+          error: `Halted by judgement: ${haltReason}`,
+          haltedByJudgement: true,
+          haltReason,
         };
       }
     }
@@ -109,7 +177,9 @@ export function startPlanExecutionAsync(plan: Plan): void {
   console.log(`[PLAN_EXECUTOR] Starting async execution for plan ${plan.planId}`);
   
   executePlan(plan).then(result => {
-    if (result.success) {
+    if (result.haltedByJudgement) {
+      console.log(`[PLAN_EXECUTOR] Plan ${plan.planId} halted by Tower judgement: ${result.haltReason}`);
+    } else if (result.success) {
       console.log(`[PLAN_EXECUTOR] Async execution completed for plan ${plan.planId}`);
     } else {
       console.error(`[PLAN_EXECUTOR] Async execution failed for plan ${plan.planId}:`, result.error);
