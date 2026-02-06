@@ -586,17 +586,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const planId = `demo_${randomUUID().replace(/-/g, '').substring(0, 12)}`;
       const userId = 'demo-user';
+      const goalText = 'Demo plan run – prove Session 3 Tower judgement loop';
+
+      const steps = [
+        { id: 'demo-step-1', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 1)' },
+        { id: 'demo-step-2', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 2)' },
+        { id: 'demo-step-3', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 3)' },
+        { id: 'demo-step-4', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 4)' },
+      ];
+
+      try {
+        await storage.createPlan({
+          id: planId,
+          userId,
+          status: 'executing',
+          goalText,
+          planData: { id: planId, steps },
+        });
+      } catch (dbErr: any) {
+        console.error(`[DEBUG] demo-plan-run: failed to persist plan — ${dbErr.message}`);
+      }
+
+      startPlanProgress(planId, planId, steps);
 
       const plan = {
         planId,
         userId,
-        goal: 'Demo plan run – prove Session 3 Tower judgement loop',
-        steps: [
-          { id: 'demo-step-1', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 1)' },
-          { id: 'demo-step-2', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 2)' },
-          { id: 'demo-step-3', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 3)' },
-          { id: 'demo-step-4', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 4)' },
-        ],
+        goal: goalText,
+        steps,
         toolMetadata: {
           toolName: 'SEARCH_PLACES',
           toolArgs: { query: 'pubs', location: 'Kent', country: 'GB' },
@@ -607,7 +624,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       res.json({ run_id: planId });
 
-      executePlan(plan).then(result => {
+      executePlan(plan).then(async result => {
         if (result.haltedByJudgement) {
           console.log(`[DEBUG] demo-plan-run ${planId}: HALTED by Tower judgement — ${result.haltReason}`);
         } else if (result.success) {

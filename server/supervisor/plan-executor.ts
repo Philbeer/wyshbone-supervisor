@@ -4,6 +4,7 @@
  * Iterates steps sequentially, logs AFR events, and calls action executor.
  * Session 1 scope: No retries, stop on first failure.
  * Session 3: Agentic decision loop – calls Tower Judgement API after each step.
+ *            Persists plan status and progress to the same stores the UI reads.
  */
 
 import type { Plan } from './types/plan';
@@ -24,6 +25,12 @@ import {
   requestJudgement,
   type TowerSuccessCriteria,
 } from './tower-judgement';
+import { storage } from '../storage';
+import {
+  updateStepStatus,
+  completePlan as completeProgress,
+  failPlan as failProgress,
+} from '../plan-progress';
 
 export interface PlanExecutionResult {
   success: boolean;
@@ -34,6 +41,14 @@ export interface PlanExecutionResult {
   haltReason?: string;
 }
 
+async function safeUpdatePlanStatus(planId: string, status: string): Promise<void> {
+  try {
+    await storage.updatePlanStatus(planId, status);
+  } catch (err: any) {
+    console.warn(`[PLAN_EXECUTOR] Could not update plan status to '${status}': ${err.message}`);
+  }
+}
+
 export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   const { planId, userId, conversationId, goal, steps, toolMetadata } = plan;
   
@@ -42,6 +57,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   console.log(`[PLAN_EXECUTOR] Steps: ${steps.length}`);
   
   await logPlanStarted(userId, planId, goal, conversationId);
+  await safeUpdatePlanStatus(planId, 'executing');
   
   let stepsCompleted = 0;
 
@@ -56,6 +72,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       console.log(`[PLAN_EXECUTOR] Step ${i + 1}/${steps.length}: ${step.label}`);
       
       await logStepStarted(userId, planId, step.id, step.label, conversationId);
+      updateStepStatus(planId, step.id, 'running');
       
       try {
         const result = await executeStep(step, toolMetadata, userId);
@@ -63,6 +80,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         if (!result.success) {
           console.error(`[PLAN_EXECUTOR] Step ${step.id} failed:`, result.error);
           await logStepFailed(userId, planId, step.id, step.label, result.error || 'Unknown error', conversationId);
+          updateStepStatus(planId, step.id, 'failed', result.error);
 
           updateRunSummary(runSummary, {
             success: false,
@@ -71,6 +89,8 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           });
 
           await logPlanFailed(userId, planId, result.error || 'Step execution failed', conversationId);
+          failProgress(planId, result.error);
+          await safeUpdatePlanStatus(planId, 'failed');
           
           return {
             success: false,
@@ -93,6 +113,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         });
 
         await logStepCompleted(userId, planId, step.id, step.label, result.summary, conversationId);
+        updateStepStatus(planId, step.id, 'completed', result.summary);
         stepsCompleted++;
         
         console.log(`[PLAN_EXECUTOR] Step ${i + 1} completed: ${result.summary}`);
@@ -108,7 +129,10 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         });
         
         await logStepFailed(userId, planId, step.id, step.label, errorMessage, conversationId);
+        updateStepStatus(planId, step.id, 'failed', errorMessage);
         await logPlanFailed(userId, planId, errorMessage, conversationId);
+        failProgress(planId, errorMessage);
+        await safeUpdatePlanStatus(planId, 'failed');
         
         return {
           success: false,
@@ -136,6 +160,9 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
 
         console.log(`[PLAN_EXECUTOR] Halted by Tower judgement after step ${i + 1}: ${haltReason}`);
 
+        failProgress(planId, `Halted: ${haltReason}`);
+        await safeUpdatePlanStatus(planId, 'halted');
+
         return {
           success: false,
           stepsCompleted,
@@ -149,6 +176,8 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     
     const summary = `Plan completed successfully - ${stepsCompleted}/${steps.length} steps`;
     await logPlanCompleted(userId, planId, summary, conversationId);
+    completeProgress(planId);
+    await safeUpdatePlanStatus(planId, 'completed');
     
     console.log(`[PLAN_EXECUTOR] ${summary}`);
     
@@ -163,6 +192,8 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     console.error(`[PLAN_EXECUTOR] Plan execution error:`, errorMessage);
     
     await logPlanFailed(userId, planId, errorMessage, conversationId);
+    failProgress(planId, errorMessage);
+    await safeUpdatePlanStatus(planId, 'failed');
     
     return {
       success: false,
