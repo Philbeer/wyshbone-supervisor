@@ -1,203 +1,56 @@
 # Wyshbone Supervisor Suite
 
 ## Overview
-
-Wyshbone Supervisor is a proactive lead generation system designed as a B2B productivity tool. It automatically finds and scores prospects based on user signals, monitoring user behavior and preferences to identify and suggest relevant leads with contact information.
-
-**Key Capabilities:**
-- **Email Notifications**: Automatically sends email notifications when new leads are found.
-- **Chat Integration**: Supervisor's AI participates directly in Wyshbone UI chat conversations.
-- **Real-time Responses**: Provides intelligent lead-finding responses within 30 seconds.
-- **Multi-channel Communication**: Delivers insights via both email and chat.
-
-The system features a Linear-inspired design system optimized for data density and workflow efficiency. It consists of a React frontend, a Node.js/Express backend, PostgreSQL (via Neon) for data persistence, and Drizzle ORM for database operations. The Supervisor backend integrates with the separate Wyshbone UI application through a shared Supabase database.
+Wyshbone Supervisor is a proactive B2B lead generation system that automatically identifies and scores prospects based on user behavior and preferences. It provides real-time lead suggestions with contact information, delivering insights via email notifications and direct chat integration within the Wyshbone UI. The system is designed for high data density and workflow efficiency, featuring a Linear-inspired aesthetic. It integrates with the Wyshbone UI application through a shared Supabase database.
 
 ## User Preferences
-
 Preferred communication style: Simple, everyday language.
 
 ## System Architecture
 
 ### UI/UX Decisions
-The frontend uses a React with TypeScript stack, built with Vite and Wouter for routing. Styling is managed with Tailwind CSS, utilizing custom design tokens. The UI component system is built on `shadcn/ui` (Radix UI primitives) with a "New York" style variant, inspired by Linear's B2B aesthetic. Key components include Dashboard, LeadCard, and a sidebar navigation.
+The frontend is a React with TypeScript application built with Vite, using Wouter for routing. Styling is handled by Tailwind CSS with custom design tokens. The UI components are built on `shadcn/ui` (Radix UI primitives) in a "New York" style variant, inspired by Linear's B2B design.
 
 ### Technical Implementations
-- **Frontend**: React with TypeScript, Vite, Wouter, TanStack Query for server state management.
-- **Backend**: Node.js with Express and TypeScript, using ESM module system.
-- **Data Storage**: PostgreSQL via Neon serverless, managed with Drizzle ORM for type-safe queries and migrations.
+- **Frontend**: React with TypeScript, Vite, Wouter, and TanStack Query for server state management.
+- **Backend**: Node.js with Express and TypeScript, utilizing ESM modules.
+- **Data Storage**: PostgreSQL (via Neon serverless) managed with Drizzle ORM for type-safe queries and migrations.
 - **Lead Generation Logic**:
-    - **Branching Plans (SUP-010)**: Supports conditional step execution in lead generation plans based on runtime results (e.g., `too_many_results`, `too_few_results`, `data_source_failed`).
-    - **Fallback Data Sources (SUP-011)**: Implements automatic fallback between ordered data sources if a primary source fails to meet minimum thresholds, tracking the source used and the fallback chain.
-    - **Historical Performance (SUP-012)**: Uses past plan executions and lead outcomes to guide future planning decisions. Analyzes strategy performance across niche, region, data source, and outreach channel dimensions. Includes user AND account isolation to prevent cross-user and cross-account data leakage.
-    - **Plan Execution Pipeline**: Complete workflow from plan creation → approval → execution → real-time progress tracking. Plans stored in PostgreSQL `plans` table. Progress tracked in-memory keyed by planId, supporting concurrent executions by same user. Event system uses Map-based registry for isolated event streams per plan.
-- **Chat Integration**: Supervisor's AI integrates into Wyshbone UI chat via a queue-based architecture using shared Supabase tables (`messages`, `supervisor_tasks`). The UI detects Supervisor intent, creates tasks, and streams Supervisor responses.
+    - Supports conditional step execution and automatic fallback between ordered data sources based on runtime results.
+    - Utilizes historical performance data of past plan executions to inform future planning decisions, ensuring user and account isolation.
+    - Features a comprehensive plan execution pipeline from creation and approval to real-time progress tracking, supporting concurrent executions.
+- **Chat Integration**: Uses a queue-based architecture with shared Supabase tables (`messages`, `supervisor_tasks`) for seamless AI interaction within the Wyshbone UI chat.
+- **Job Execution**: Handles all long-running background jobs, including nightly maintenance, Xero syncing, monitor checks, and lead generation execution, with lifecycle management and overlap prevention.
+- **Agentic Decision Loop**: Integrates with the Tower Judgement API to evaluate plan execution against success criteria after each step, determining whether to continue or halt execution based on verdicts.
+- **Logging**: Implements a three-tier logging system (API, Executor, Tower Integration) for monitoring and debugging.
+- **Progress Tracking**: Uses an in-memory store keyed by `planId` for real-time progress tracking of concurrent plan executions.
+- **Event System**: Employs a Map-based registry per `planId` for isolated event streams during concurrent plan executions.
 
 ### Feature Specifications
-- RESTful API endpoints for leads, user context, signals, and plan execution.
-- **Plan Execution API**:
-  - POST `/api/plan/start` - Creates a plan using SUP-001 + SUP-012, stores in database with "pending_approval" status
-  - POST `/api/plan/approve` - Validates ownership, starts execution asynchronously with comprehensive logging. When SUPERVISOR_EXECUTION_ENABLED=true, routes to Supervisor backend execution.
-  - GET `/api/plan/progress?planId=xxx` - Returns real-time progress for specific plan or user's most recent plan
-  - GET `/api/plan-status` - Alias for `/api/plan/progress` with enhanced logging for UI integration
-- **Supervisor Execution API** (Session 1):
-  - POST `/api/supervisor/execute-plan` - Accepts plan execution requests, validates input, returns immediately with ok=true, executes steps asynchronously in background
-  - Feature flag: SUPERVISOR_EXECUTION_ENABLED (default: false) gates execution path in /api/plan/approve
-  - AFR logging: Writes to agent_activities table for display in UI Live Activity panel
-  - Sequential execution: Stops on first failure, no retries (Session 1 scope)
-  - Native SEARCH_PLACES: Uses Google Places Text Search API directly (requires GOOGLE_MAPS_API_KEY)
-  - Test script: `./scripts/test-supervisor-plan.sh` tests endpoint with sample "pubs in Kent GB" query
-- **Supervisor Jobs API** (Session 2):
-  - POST `/api/supervisor/jobs/start` - Start a new background job
-  - GET `/api/supervisor/jobs/:jobId` - Get job status
-  - POST `/api/supervisor/jobs/:jobId/cancel` - Cancel a job
-  - **Job Handlers**:
-    - `nightly-maintenance` - Cleans up stale memories and executes autonomous agent tasks
-    - `xero-sync` - Syncs Xero integrations for users with connected accounts
-    - `monitor-worker` - Checks all active monitors for issues (stalled, no_plan, repeated_failures), publishes alerts
-    - `monitor-executor` - Executes scheduled monitors to generate leads using SUP-001 (planner) + SUP-002 (executor)
-    - `deep-research-poll` - Polls pending deep research runs and updates their status (migrated from UI)
-  - AFR events: job_started, job_progress (multiple milestones), job_completed/job_failed with resultSummary
-  - Safety: "already running" guard prevents overlapping runs of same jobType
-- **Deep Research Poller Scheduler** (Session 2 Migration):
-  - Replaces UI deep research polling to run reliably in Supervisor
-  - **Environment Variables**:
-    - `ENABLE_DEEP_RESEARCH_POLLER` - Set to "true" to enable (default: disabled)
-    - `DEEP_RESEARCH_POLL_INTERVAL_MS` - Polling interval in ms (default: 5000)
-  - Logs on startup: "Deep Research poller: disabled" or "Deep Research poller: enabled, interval = Xms"
-  - Manual trigger via: `POST /api/supervisor/jobs/start` with `{jobType:"deep-research-poll", payload:{}, requestedBy:"ui"}`
-  - Example resultSummary output:
-    ```json
-    {
-      "success": true,
-      "jobType": "deep-research-poll",
-      "durationMs": 150,
-      "pendingFound": 3,
-      "processed": 3,
-      "succeeded": 2,
-      "failed": 0,
-      "skipped": 1
-    }
-    ```
-    - `succeeded`: Runs that completed successfully
-    - `failed`: Runs that failed permanently (marked as failed in DB)
-    - `skipped`: Runs still processing or couldn't be polled (API errors, no API key)
-- Database schema includes `users`, `user_signals`, `suggested_leads`, `plan_executions`, and `plans` tables.
-- Signals represent user actions that trigger lead discovery.
-- Leads include enriched data (e.g., emails, places) and trigger email notifications.
-- Plans support concurrent execution with isolated progress tracking and event streams.
+- RESTful API for managing leads, user context, signals, and plan execution.
+- API endpoints for plan creation, approval, and real-time progress monitoring.
+- Supervisor APIs for executing plans, managing background jobs, and polling deep research runs.
+- Database schema supports users, signals, suggested leads, plan executions, and plans.
 
 ### System Design Choices
-- `IStorage` interface for database abstraction, with `DatabaseStorage` using Drizzle ORM.
-- Hardcoded "demo-user" for current authentication, with future support for username/password and session management planned.
-- **Logging Infrastructure**: Three-tier logging system for production debugging and monitoring:
-  - **API Layer** (`server/routes.ts`): Structured logs for all plan-related endpoints with timing metrics, user context, and error details
-  - **Executor Layer** (`server/types/lead-gen-plan.ts`): Step-by-step execution logs with visual status indicators and performance metrics
-  - **Tower Integration** (`server/tower-logger.ts`): JSON-formatted logs for Control Tower monitoring with source identifier "plan_executor"
-- **Progress Tracking**: In-memory store keyed by planId (not sessionId) to support concurrent plan executions by same user. Includes cleanup functions to prevent memory leaks.
-- **Event System**: Map-based registry keyed by planId for isolated event streams. Each plan execution has its own event handler, preventing cross-contamination between concurrent plans.
-- **Error Handling**: Both success and failure paths use planId for progress updates, ensuring failed plans are correctly marked and can be cleaned up.
+- `IStorage` interface provides an abstraction layer for database operations.
+- Robust logging infrastructure with structured logs and Tower integration.
+- In-memory progress tracking and a Map-based event system ensure isolated and efficient handling of concurrent plan executions.
+- Comprehensive error handling ensures proper status updates for failed plans.
 
 ## External Dependencies
 
-- **Supabase**: Used as the shared database for both Wyshbone UI and Supervisor. It stores user profiles, conversations, facts, scheduled monitors, deep research runs, integrations, and user signals. Supervisor polls Supabase for new signals and task management for chat integration.
-- **Resend**: Transactional email service used for sending lead notification emails to users.
-- **Google Places API**: Utilized for finding physical business locations and enriching lead data.
-- **Hunter.io**: An email discovery service used to populate `emailCandidates` for leads.
-- **Radix UI**: Provides accessible, unstyled primitive components for UI development.
-- **shadcn/ui**: Component library built on Radix UI, providing custom-themed components.
-- **PostgreSQL (Neon)**: Serverless relational database for data persistence.
+- **Supabase**: Shared database for Wyshbone UI and Supervisor, storing user profiles, conversations, facts, monitors, deep research runs, integrations, and user signals. Used for polling signals and chat task management.
+- **Resend**: Transactional email service for sending lead notification emails.
+- **Google Places API**: Used for finding business locations and enriching lead data.
+- **Hunter.io**: Email discovery service for populating `emailCandidates` for leads.
+- **Radix UI**: Provides accessible, unstyled primitive UI components.
+- **shadcn/ui**: Component library built on Radix UI.
+- **PostgreSQL (Neon)**: Serverless relational database.
 - **Drizzle ORM**: Type-safe ORM for database interactions.
-- **Vite**: Build tool and development server for the frontend.
+- **Vite**: Frontend build tool and development server.
 - **Wouter**: Lightweight client-side router.
 - **TanStack Query**: For server state management and caching.
-- **Tailwind CSS**: Utility-first CSS framework for styling.
+- **Tailwind CSS**: Utility-first CSS framework.
 - **Zod**: Runtime schema validation library.
-
----
-
-## Session 2 Complete
-
-**Status**: ✅ Complete (February 2026)
-
-### Summary
-Supervisor is now the authoritative executor for all long-running background jobs. The UI should delegate job execution to Supervisor rather than executing jobs locally.
-
-### Job Types Implemented
-| Job Type | Description |
-|----------|-------------|
-| `nightly-maintenance` | Cleans up stale memories and executes autonomous agent tasks |
-| `xero-sync` | Syncs Xero integrations for users with connected accounts |
-| `monitor-worker` | Checks all active monitors for issues (stalled, no_plan, repeated_failures) |
-| `monitor-executor` | Executes scheduled monitors to generate leads using SUP-001/SUP-002 |
-| `deep-research-poll` | Polls pending deep research runs and updates their status |
-
-### Scheduler Configuration
-- **Default**: Scheduler is OFF
-- **Enable**: Set `ENABLE_DEEP_RESEARCH_POLLER=true`
-- **Interval**: Configure with `DEEP_RESEARCH_POLL_INTERVAL_MS` (default: 5000ms)
-
-### Safety Features
-- **Overlap Guard**: Prevents concurrent runs of the same job type (poller and monitors)
-- **Production Warnings**: Loud console warnings when poller is enabled in production
-- **Aggressive Polling Warning**: Additional warning when poll interval < 3000ms in production
-- **Debug Endpoints**: Gated behind `ENABLE_DEBUG_ENDPOINTS=true` AND `NODE_ENV !== production`
-
-### Architecture Principle
-UI should delegate long-running jobs to Supervisor, not execute them locally. Supervisor handles:
-- Job lifecycle management
-- AFR event logging
-- Overlap prevention
-- Error handling and retries
-
----
-
-## Session 3 Complete
-
-**Status**: In Progress (February 2026)
-
-### Agentic Decision Loop (Tower Judgement Integration)
-Supervisor now calls the Tower Judgement API after each step during plan execution. Tower evaluates runtime metrics against success criteria and returns CONTINUE or STOP verdicts.
-
-### Key Files
-| File | Purpose |
-|------|---------|
-| `server/supervisor/tower-judgement.ts` | Tower Judgement client, success thresholds, run summary tracking, AFR event helpers |
-| `server/supervisor/plan-executor.ts` | Updated execution loop with per-step judgement calls |
-| `server/supervisor/test-tower-judgement.ts` | Integration test script (`npx tsx server/supervisor/test-tower-judgement.ts`) |
-
-### How It Works
-1. Each plan execution creates a `RunSummary` (steps_completed, leads_found, failures_count, total_cost_gbp, avg_quality_score)
-2. After each step, a `TowerSnapshot` is built from the run summary
-3. The snapshot + hardcoded `LEADGEN_SUCCESS_DEFAULTS` are POSTed to `${TOWER_URL}/api/tower/evaluate`
-4. Tower returns a verdict (CONTINUE/STOP) with reason_code and explanation
-5. If STOP: execution halts immediately, `job_halted_by_judgement` AFR event is emitted
-6. If call fails: defaults to CONTINUE (logged loudly, `judgement_failed` AFR event emitted)
-
-### AFR Events Added
-| Event | When |
-|-------|------|
-| `judgement_requested` | Before calling Tower (includes success criteria + snapshot) |
-| `judgement_received` | After Tower responds (includes verdict, reason_code, explanation) |
-| `job_halted_by_judgement` | When Tower returns STOP verdict |
-| `judgement_failed` | When Tower call fails (network error, HTTP error, etc.) |
-
-### Default Success Thresholds (demo-friendly)
-- `target_leads`: 5
-- `max_cost_per_lead_gbp`: 0.50
-- `max_cost_gbp`: 2.00
-- `max_steps`: 8
-- `min_quality_score`: 0.6
-- `stall_window_steps`: 3
-- `stall_min_delta_leads`: 1
-- `max_failures`: 3
-
-### Debug: Demo Plan Run Endpoint
-- `POST /api/debug/demo-plan-run` — fires a hardcoded 4-step SEARCH_PLACES plan through `plan-executor.ts`
-- Gated behind `ENABLE_DEBUG_ENDPOINTS=true` AND `NODE_ENV !== 'production'`
-- Returns `{ "run_id": "<id>" }` immediately; execution runs in background
-- Proves Tower judgement loop fires after each step (judgement_requested, judgement_received, job_halted_by_judgement)
-- Usage: `curl -X POST http://localhost:5000/api/debug/demo-plan-run`
-
-### Environment Variables
-- `TOWER_URL` (required): Base URL of Tower service (trailing slash safely stripped)
-- `TOWER_API_KEY` or `EXPORT_KEY`: API key for Tower authentication
+- **Tower Judgement API**: External service for agentic decision-making and evaluation of plan execution.
