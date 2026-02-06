@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, jsonb, real, integer, index } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, jsonb, real, integer, index, bigint } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -161,3 +161,26 @@ export type UserSignal = typeof userSignals.$inferSelect;
 export type PlanExecution = typeof planExecutions.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
 export type SubconsciousNudge = typeof subconsciousNudges.$inferSelect;
+
+export const agentRuns = pgTable("agent_runs", {
+  id: text("id").primaryKey(),
+  clientRequestId: text("client_request_id").notNull(),
+  userId: text("user_id").notNull(),
+  conversationId: text("conversation_id"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  status: text("status").notNull().default("starting"),
+  terminalState: text("terminal_state"),
+  uiReady: integer("ui_ready").notNull().default(0),
+  lastEventAt: integer("last_event_at"),
+  error: text("error"),
+  errorDetails: jsonb("error_details"),
+  metadata: jsonb("metadata"),
+  startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+  endedAt: timestamp("ended_at", { withTimezone: true }),
+});
+
+export const insertAgentRunSchema = createInsertSchema(agentRuns).omit({});
+
+export type InsertAgentRun = z.infer<typeof insertAgentRunSchema>;
+export type AgentRun = typeof agentRuns.$inferSelect;

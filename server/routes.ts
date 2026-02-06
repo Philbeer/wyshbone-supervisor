@@ -576,16 +576,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     // Debug endpoint - demo plan run (Session 3 proof)
     // Forces a multi-step plan through plan-executor.ts to prove Tower judgement + halt in AFR
-    app.post("/api/debug/demo-plan-run", async (_req, res) => {
+    app.post("/api/debug/demo-plan-run", async (req, res) => {
       const { randomUUID } = await import('crypto');
       const { executePlan } = await import('./supervisor/plan-executor');
 
       if (process.env.NODE_ENV === 'production') {
-        console.warn('[DEBUG] ⚠️  demo-plan-run called outside dev — this should never happen in production');
+        console.warn('[DEBUG] demo-plan-run called outside dev — this should never happen in production');
       }
 
       const planId = `demo_${randomUUID().replace(/-/g, '').substring(0, 12)}`;
-      const userId = 'demo-user';
+      const userId = getUserId(req);
       const goalText = 'Demo plan run – prove Session 3 Tower judgement loop';
 
       const steps = [
@@ -605,6 +605,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       } catch (dbErr: any) {
         console.error(`[DEBUG] demo-plan-run: failed to persist plan — ${dbErr.message}`);
+      }
+
+      const now = Date.now();
+      try {
+        await storage.createAgentRun({
+          id: planId,
+          clientRequestId: planId,
+          userId,
+          status: 'executing',
+          createdAt: now,
+          updatedAt: now,
+          uiReady: 1,
+          metadata: { planId, goalText },
+        });
+      } catch (dbErr: any) {
+        console.error(`[DEBUG] demo-plan-run: failed to persist agent_run — ${dbErr.message}`);
       }
 
       startPlanProgress(planId, planId, steps);
@@ -627,13 +643,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
       executePlan(plan).then(async result => {
         if (result.haltedByJudgement) {
           console.log(`[DEBUG] demo-plan-run ${planId}: HALTED by Tower judgement — ${result.haltReason}`);
+          try {
+            await storage.updateAgentRun(planId, {
+              status: 'stopped',
+              terminalState: 'stopped',
+              endedAt: new Date(),
+              error: result.haltReason || 'Halted by Tower judgement',
+              metadata: { planId, goalText, verdict: 'STOP', reason: result.haltReason },
+            });
+          } catch (dbErr: any) {
+            console.error(`[DEBUG] demo-plan-run: failed to update agent_run after halt — ${dbErr.message}`);
+          }
         } else if (result.success) {
           console.log(`[DEBUG] demo-plan-run ${planId}: completed ${result.stepsCompleted}/${result.totalSteps} steps`);
+          try {
+            await storage.updateAgentRun(planId, {
+              status: 'completed',
+              terminalState: 'completed',
+              endedAt: new Date(),
+              metadata: { planId, goalText },
+            });
+          } catch (dbErr: any) {
+            console.error(`[DEBUG] demo-plan-run: failed to update agent_run after success — ${dbErr.message}`);
+          }
         } else {
           console.error(`[DEBUG] demo-plan-run ${planId}: failed — ${result.error}`);
+          try {
+            await storage.updateAgentRun(planId, {
+              status: 'failed',
+              terminalState: 'failed',
+              endedAt: new Date(),
+              error: result.error || 'Plan execution failed',
+              metadata: { planId, goalText },
+            });
+          } catch (dbErr: any) {
+            console.error(`[DEBUG] demo-plan-run: failed to update agent_run after failure — ${dbErr.message}`);
+          }
         }
-      }).catch(err => {
+      }).catch(async err => {
         console.error(`[DEBUG] demo-plan-run ${planId}: threw — ${err.message}`);
+        try {
+          await storage.updateAgentRun(planId, {
+            status: 'failed',
+            terminalState: 'failed',
+            endedAt: new Date(),
+            error: err.message || 'Unexpected error',
+            metadata: { planId, goalText },
+          });
+        } catch (dbErr: any) {
+          console.error(`[DEBUG] demo-plan-run: failed to update agent_run after throw — ${dbErr.message}`);
+        }
       });
     });
 
@@ -1567,6 +1626,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         success: false,
         error: error.message || "Failed to store WABS feedback"
       });
+    }
+  });
+
+  app.get("/api/afr/runs", async (req, res) => {
+    try {
+      const userId = req.query.user_id as string | undefined;
+      const runs = await storage.getAgentRuns(userId);
+      res.json(runs);
+    } catch (error: any) {
+      console.error("[AFR RUNS] Error fetching runs:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch runs" });
     }
   });
 

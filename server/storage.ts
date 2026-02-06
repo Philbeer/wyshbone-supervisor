@@ -8,6 +8,7 @@ import {
   planExecutions,
   plans,
   subconsciousNudges,
+  agentRuns,
   type User,
   type InsertUser,
   type SuggestedLead,
@@ -19,10 +20,12 @@ import {
   type InsertPlanExecution,
   type InsertPlan,
   type SubconsciousNudge as DBSubconsciousNudge,
-  type InsertSubconsciousNudge
+  type InsertSubconsciousNudge,
+  type AgentRun,
+  type InsertAgentRun,
 } from "./schema";
 import { db } from "./db";
-import { eq, desc, isNull, and } from "drizzle-orm";
+import { eq, desc, isNull, and, sql } from "drizzle-orm";
 import type { SubconNudge } from "./subcon/types";
 import { supabase } from "./supabase";
 
@@ -63,6 +66,10 @@ export interface IStorage {
   storeAgentMemory(memory: InsertAgentMemory): Promise<AgentMemory>;
   getAgentMemories(params: { userId: string; toolUsed?: string; limit?: number; offset?: number }): Promise<AgentMemory[]>;
   updateMemoryFeedback(id: string, userFeedback: string): Promise<void>;
+  // Agent runs (AFR runs list)
+  createAgentRun(run: InsertAgentRun): Promise<AgentRun>;
+  updateAgentRun(id: string, updates: Partial<InsertAgentRun>): Promise<void>;
+  getAgentRuns(userId?: string): Promise<AgentRun[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -412,6 +419,51 @@ export class DatabaseStorage implements IStorage {
       .set({ userFeedback })
       .where(eq(agentMemory.id, id));
     console.log(`[Storage] Updated memory ${id} feedback: ${userFeedback}`);
+  }
+
+  async createAgentRun(run: InsertAgentRun): Promise<AgentRun> {
+    const [newRun] = await db
+      .insert(agentRuns)
+      .values(run)
+      .returning();
+    console.log(`[Storage] Created agent run ${run.id} for user ${run.userId}`);
+    return newRun;
+  }
+
+  async updateAgentRun(id: string, updates: {
+    status?: string;
+    terminalState?: string | null;
+    error?: string | null;
+    errorDetails?: Record<string, unknown> | null;
+    metadata?: Record<string, unknown> | null;
+    endedAt?: Date | null;
+  }): Promise<void> {
+    await db.execute(sql`
+      UPDATE agent_runs SET
+        updated_at = ${Date.now()},
+        status = COALESCE(${updates.status ?? null}, status),
+        terminal_state = ${updates.terminalState !== undefined ? updates.terminalState : sql`terminal_state`},
+        error = ${updates.error !== undefined ? updates.error : sql`error`},
+        error_details = ${updates.errorDetails !== undefined ? (updates.errorDetails ? JSON.stringify(updates.errorDetails) : null) : sql`error_details`}::jsonb,
+        metadata = ${updates.metadata !== undefined ? (updates.metadata ? JSON.stringify(updates.metadata) : null) : sql`metadata`}::jsonb,
+        ended_at = ${updates.endedAt !== undefined ? (updates.endedAt ? updates.endedAt.toISOString() : null) : sql`ended_at`}::timestamptz
+      WHERE id = ${id}
+    `);
+    console.log(`[Storage] Updated agent run ${id}`);
+  }
+
+  async getAgentRuns(userId?: string): Promise<AgentRun[]> {
+    if (userId) {
+      return db
+        .select()
+        .from(agentRuns)
+        .where(eq(agentRuns.userId, userId))
+        .orderBy(desc(agentRuns.createdAt));
+    }
+    return db
+      .select()
+      .from(agentRuns)
+      .orderBy(desc(agentRuns.createdAt));
   }
 }
 
