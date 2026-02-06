@@ -148,3 +148,49 @@ UI should delegate long-running jobs to Supervisor, not execute them locally. Su
 - AFR event logging
 - Overlap prevention
 - Error handling and retries
+
+---
+
+## Session 3 Complete
+
+**Status**: In Progress (February 2026)
+
+### Agentic Decision Loop (Tower Judgement Integration)
+Supervisor now calls the Tower Judgement API after each step during plan execution. Tower evaluates runtime metrics against success criteria and returns CONTINUE or STOP verdicts.
+
+### Key Files
+| File | Purpose |
+|------|---------|
+| `server/supervisor/tower-judgement.ts` | Tower Judgement client, success thresholds, run summary tracking, AFR event helpers |
+| `server/supervisor/plan-executor.ts` | Updated execution loop with per-step judgement calls |
+| `server/supervisor/test-tower-judgement.ts` | Integration test script (`npx tsx server/supervisor/test-tower-judgement.ts`) |
+
+### How It Works
+1. Each plan execution creates a `RunSummary` (steps_completed, leads_found, failures_count, total_cost_gbp, avg_quality_score)
+2. After each step, a `TowerSnapshot` is built from the run summary
+3. The snapshot + hardcoded `LEADGEN_SUCCESS_DEFAULTS` are POSTed to `${TOWER_URL}/api/tower/evaluate`
+4. Tower returns a verdict (CONTINUE/STOP) with reason_code and explanation
+5. If STOP: execution halts immediately, `job_halted_by_judgement` AFR event is emitted
+6. If call fails: defaults to CONTINUE (logged loudly, `judgement_failed` AFR event emitted)
+
+### AFR Events Added
+| Event | When |
+|-------|------|
+| `judgement_requested` | Before calling Tower (includes success criteria + snapshot) |
+| `judgement_received` | After Tower responds (includes verdict, reason_code, explanation) |
+| `job_halted_by_judgement` | When Tower returns STOP verdict |
+| `judgement_failed` | When Tower call fails (network error, HTTP error, etc.) |
+
+### Default Success Thresholds (demo-friendly)
+- `target_leads`: 5
+- `max_cost_per_lead_gbp`: 0.50
+- `max_cost_gbp`: 2.00
+- `max_steps`: 8
+- `min_quality_score`: 0.6
+- `stall_window_steps`: 3
+- `stall_min_delta_leads`: 1
+- `max_failures`: 3
+
+### Environment Variables
+- `TOWER_URL` (required): Base URL of Tower service (trailing slash safely stripped)
+- `TOWER_API_KEY` or `EXPORT_KEY`: API key for Tower authentication
