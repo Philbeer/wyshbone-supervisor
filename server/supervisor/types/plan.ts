@@ -15,6 +15,7 @@ export interface Plan {
   planId: string;
   userId: string;
   conversationId?: string;
+  clientRequestId?: string;
   goal: string;
   steps: PlanStep[];
   toolMetadata?: {

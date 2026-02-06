@@ -50,13 +50,14 @@ async function safeUpdatePlanStatus(planId: string, status: string): Promise<voi
 }
 
 export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
-  const { planId, userId, conversationId, goal, steps, toolMetadata } = plan;
+  const { planId, userId, conversationId, clientRequestId, goal, steps, toolMetadata } = plan;
   
   console.log(`[PLAN_EXECUTOR] Starting execution of plan ${planId}`);
   console.log(`[PLAN_EXECUTOR] Goal: ${goal}`);
   console.log(`[PLAN_EXECUTOR] Steps: ${steps.length}`);
+  if (clientRequestId) console.log(`[PLAN_EXECUTOR] clientRequestId: ${clientRequestId}`);
   
-  await logPlanStarted(userId, planId, goal, conversationId);
+  await logPlanStarted(userId, planId, goal, conversationId, clientRequestId);
   await safeUpdatePlanStatus(planId, 'executing');
   
   let stepsCompleted = 0;
@@ -71,7 +72,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       
       console.log(`[PLAN_EXECUTOR] Step ${i + 1}/${steps.length}: ${step.label}`);
       
-      await logStepStarted(userId, planId, step.id, step.label, conversationId);
+      await logStepStarted(userId, planId, step.id, step.label, conversationId, clientRequestId);
       updateStepStatus(planId, step.id, 'running');
       
       try {
@@ -79,7 +80,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         
         if (!result.success) {
           console.error(`[PLAN_EXECUTOR] Step ${step.id} failed:`, result.error);
-          await logStepFailed(userId, planId, step.id, step.label, result.error || 'Unknown error', conversationId);
+          await logStepFailed(userId, planId, step.id, step.label, result.error || 'Unknown error', conversationId, clientRequestId);
           updateStepStatus(planId, step.id, 'failed', result.error);
 
           updateRunSummary(runSummary, {
@@ -88,7 +89,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             costUnits: 0.25,
           });
 
-          await logPlanFailed(userId, planId, result.error || 'Step execution failed', conversationId);
+          await logPlanFailed(userId, planId, result.error || 'Step execution failed', conversationId, clientRequestId);
           failProgress(planId, result.error);
           await safeUpdatePlanStatus(planId, 'failed');
           
@@ -112,7 +113,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           validLeads: leadsFound,
         });
 
-        await logStepCompleted(userId, planId, step.id, step.label, result.summary, conversationId);
+        await logStepCompleted(userId, planId, step.id, step.label, result.summary, conversationId, clientRequestId);
         updateStepStatus(planId, step.id, 'completed', result.summary);
         stepsCompleted++;
         
@@ -128,9 +129,9 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           costUnits: 0.25,
         });
         
-        await logStepFailed(userId, planId, step.id, step.label, errorMessage, conversationId);
+        await logStepFailed(userId, planId, step.id, step.label, errorMessage, conversationId, clientRequestId);
         updateStepStatus(planId, step.id, 'failed', errorMessage);
-        await logPlanFailed(userId, planId, errorMessage, conversationId);
+        await logPlanFailed(userId, planId, errorMessage, conversationId, clientRequestId);
         failProgress(planId, errorMessage);
         await safeUpdatePlanStatus(planId, 'failed');
         
@@ -175,7 +176,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     }
     
     const summary = `Plan completed successfully - ${stepsCompleted}/${steps.length} steps`;
-    await logPlanCompleted(userId, planId, summary, conversationId);
+    await logPlanCompleted(userId, planId, summary, conversationId, clientRequestId);
     completeProgress(planId);
     await safeUpdatePlanStatus(planId, 'completed');
     
@@ -191,7 +192,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     const errorMessage = error.message || 'Plan execution failed unexpectedly';
     console.error(`[PLAN_EXECUTOR] Plan execution error:`, errorMessage);
     
-    await logPlanFailed(userId, planId, errorMessage, conversationId);
+    await logPlanFailed(userId, planId, errorMessage, conversationId, clientRequestId);
     failProgress(planId, errorMessage);
     await safeUpdatePlanStatus(planId, 'failed');
     

@@ -12,6 +12,7 @@ interface AFRLogParams {
   userId: string;
   runId: string;
   conversationId?: string;
+  clientRequestId?: string;
   actionTaken: string;
   status: 'pending' | 'success' | 'failed';
   taskGenerated: string;
@@ -46,6 +47,7 @@ export async function logAFREvent(params: AFRLogParams): Promise<void> {
         run_id: params.runId,
         metadata: {
           runType: params.runType,
+          ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
           ...params.metadata
         },
         created_at: Date.now()
@@ -65,12 +67,14 @@ export async function logPlanStarted(
   userId: string,
   planId: string,
   goal: string,
-  conversationId?: string
+  conversationId?: string,
+  clientRequestId?: string
 ): Promise<void> {
   await logAFREvent({
     userId,
     runId: planId,
     conversationId,
+    clientRequestId,
     actionTaken: 'plan_execution_started',
     status: 'pending',
     taskGenerated: `Started execution: ${goal}`,
@@ -83,12 +87,14 @@ export async function logStepStarted(
   planId: string,
   stepId: string,
   stepLabel: string,
-  conversationId?: string
+  conversationId?: string,
+  clientRequestId?: string
 ): Promise<void> {
   await logAFREvent({
     userId,
     runId: planId,
     conversationId,
+    clientRequestId,
     actionTaken: `step_started:${stepId}`,
     status: 'pending',
     taskGenerated: `Running: ${stepLabel}`,
@@ -103,12 +109,14 @@ export async function logStepCompleted(
   stepId: string,
   stepLabel: string,
   summary?: string,
-  conversationId?: string
+  conversationId?: string,
+  clientRequestId?: string
 ): Promise<void> {
   await logAFREvent({
     userId,
     runId: planId,
     conversationId,
+    clientRequestId,
     actionTaken: `step_completed:${stepId}`,
     status: 'success',
     taskGenerated: summary || `Completed: ${stepLabel}`,
@@ -123,12 +131,14 @@ export async function logStepFailed(
   stepId: string,
   stepLabel: string,
   errorMessage: string,
-  conversationId?: string
+  conversationId?: string,
+  clientRequestId?: string
 ): Promise<void> {
   await logAFREvent({
     userId,
     runId: planId,
     conversationId,
+    clientRequestId,
     actionTaken: `step_failed:${stepId}`,
     status: 'failed',
     taskGenerated: `Failed: ${stepLabel} - ${errorMessage}`,
@@ -141,12 +151,14 @@ export async function logPlanCompleted(
   userId: string,
   planId: string,
   summary: string,
-  conversationId?: string
+  conversationId?: string,
+  clientRequestId?: string
 ): Promise<void> {
   await logAFREvent({
     userId,
     runId: planId,
     conversationId,
+    clientRequestId,
     actionTaken: 'plan_execution_completed',
     status: 'success',
     taskGenerated: summary,
@@ -158,12 +170,14 @@ export async function logPlanFailed(
   userId: string,
   planId: string,
   errorMessage: string,
-  conversationId?: string
+  conversationId?: string,
+  clientRequestId?: string
 ): Promise<void> {
   await logAFREvent({
     userId,
     runId: planId,
     conversationId,
+    clientRequestId,
     actionTaken: 'plan_execution_failed',
     status: 'failed',
     taskGenerated: `Plan failed: ${errorMessage}`,
