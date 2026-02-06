@@ -1,0 +1,65 @@
+TASK: Implement Session 3 agent loop in Supervisor: “Execute → Evaluate in Tower → Adapt (STOP)”, with AFR ground-truth events.
+
+Goal: Supervisor must call Tower’s /api/tower/evaluate during execution and obey the verdict. This must be visible in AFR as real events.
+
+Requirements:
+
+Identify the mission/job execution path for leadgen/search (whatever triggers place search / plan execution).
+
+Add a “judgement loop” that runs:
+
+after each step, OR after each batch of N steps (choose simplest, default after each step).
+
+Build a snapshot object (no DB heavy queries—use in-memory counters or existing job state):
+
+steps_completed
+
+leads_found
+
+leads_new_last_window (use sliding window of last stall_window_steps)
+
+failures_count
+
+total_cost_gbp (or credits; if you don’t have GBP, use “credits” consistently but name it cost_units and treat it as cost)
+
+avg_quality_score (if no quality model exists yet, use a placeholder score like 1.0 for “valid lead” and average it; must be consistent)
+
+Define a success definition for the mission:
+
+Pull from mission config if available; otherwise create a default success object for leadgen.
+
+Call Tower endpoint using env var:
+
+TOWER_BASE_URL (already exists or add)
+
+POST to /api/tower/evaluate
+
+Emit AFR events (these are must-have):
+
+judgement_requested with snapshot + success summary
+
+judgement_received with verdict + reason_code + explanation
+
+if verdict STOP: emit job_halted_by_judgement and halt execution immediately (mark job completed with a “halted” status, not “success”)
+
+Ensure overlap guards / locks remain correct:
+
+A judgement-triggered stop must release locks cleanly.
+
+Production safety:
+
+If Tower is unreachable: do NOT crash the job; emit AFR judgement_failed and default to CONTINUE (or STOP if you prefer safer—pick one and be consistent; I recommend CONTINUE for now but log loudly).
+
+Add a single “demo mode” configuration that makes STOP easy to trigger:
+
+e.g. low max_cost or stall threshold.
+
+Deliverables:
+
+Code committed.
+
+A run produces AFR events showing requested/received judgement and a stop.
+
+Include a basic local test (or a scripted mission run) that demonstrates STOP is triggered by Tower’s response.
+
+IMPORTANT: Rewrite full files when editing; don’t give partial diffs.
