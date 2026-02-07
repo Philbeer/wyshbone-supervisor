@@ -77,6 +77,17 @@ This project uses a **dual database** setup. These rules are absolute:
 
 ## Recent Changes
 
+### 2026-02-07: Step Artefacts + Tower Judgement + Supervisor Reaction
+- **Step artefacts**: At the end of each completed step, a `step_result` artefact is created with goal, step_id, step_title, step_index, step_status, outputs, and timestamps. Both successful and failed steps produce artefacts.
+- **Tower artefact judgement**: After each step artefact, Tower is called via `POST /api/tower/judge-artefact` to judge the artefact. Response: `{ verdict, reasons[], metrics{}, action }` where action in `["continue","stop","retry","change_plan"]`.
+- **Stub mode**: If `TOWER_BASE_URL` / `TOWER_URL` is not set, or `TOWER_ARTEFACT_JUDGE_STUB=true`, the judge returns `{ verdict:"pass", action:"continue" }` automatically. This is the current default.
+- **tower_judgements table**: Created in Supabase via `db:migrate:supabase`. Fields: id, run_id, artefact_id, verdict, action, reasons_json, metrics_json, created_at.
+- **Storage methods**: `createTowerJudgement()`, `getTowerJudgementsByRunId()` added.
+- **AFR events**: `artefact_created` and `tower_judgement` events are emitted and interleaved in Live Activity. Tower judgement metadata includes artefactId, verdict, action, shortReason, stubbed flag.
+- **Supervisor reaction**: If Tower action is "stop" or verdict is "fail", execution halts cleanly. If Tower call fails, a warning is logged and execution continues.
+- **Testing**: Run a demo execution (POST `/api/debug/demo-plan-run`). Check Supabase for `step_result` rows in `artefacts` and corresponding rows in `tower_judgements`. Live Activity shows interleaved `artefact_created` + `tower_judgement` events.
+- **Files**: `server/supervisor/tower-artefact-judge.ts` (client+stub), `server/supervisor/plan-executor.ts` (wiring), `shared/schema.ts` + `server/storage.ts` (tower_judgements schema/storage)
+
 ### 2026-02-07: Artefact Persistence & Creation
 - Added `artefacts` table to `shared/schema.ts` with fields: id (uuid), run_id, type, title, summary, payload_json (jsonb), created_at
 - Added `createArtefact`, `getArtefactsByRunId`, `getArtefact` storage methods

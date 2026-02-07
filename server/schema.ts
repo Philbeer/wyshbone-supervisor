@@ -25,6 +25,7 @@ export const {
   planExecutions,
   subconsciousNudges,
   artefacts,
+  towerJudgements,
   agentRuns,
   insertUserSchema,
   insertUserSignalSchema,
@@ -33,10 +34,10 @@ export const {
   insertPlanSchema,
   insertSubconsciousNudgeSchema,
   insertArtefactSchema,
+  insertTowerJudgementSchema,
   insertAgentRunSchema,
 } = schema;
 
-// Re-export types
 export type {
   User,
   InsertUser,
@@ -52,6 +53,8 @@ export type {
   InsertSubconsciousNudge,
   Artefact,
   InsertArtefact,
+  TowerJudgement,
+  InsertTowerJudgement,
   AgentRun,
   InsertAgentRun,
 } from '@shared/schema';

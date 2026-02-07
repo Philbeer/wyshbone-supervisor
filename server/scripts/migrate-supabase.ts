@@ -80,6 +80,23 @@ const migrations: Array<{ name: string; sql: string }> = [
       CREATE INDEX IF NOT EXISTS artefacts_run_id_idx ON artefacts(run_id);
     `,
   },
+  {
+    name: 'tower_judgements',
+    sql: `
+      CREATE TABLE IF NOT EXISTS tower_judgements (
+        id           VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
+        run_id       TEXT    NOT NULL,
+        artefact_id  TEXT    NOT NULL,
+        verdict      TEXT    NOT NULL,
+        action       TEXT    NOT NULL,
+        reasons_json JSONB,
+        metrics_json JSONB,
+        created_at   TIMESTAMPTZ DEFAULT now() NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS tower_judgements_run_id_idx ON tower_judgements(run_id);
+      CREATE INDEX IF NOT EXISTS tower_judgements_artefact_id_idx ON tower_judgements(artefact_id);
+    `,
+  },
 ];
 
 async function run() {

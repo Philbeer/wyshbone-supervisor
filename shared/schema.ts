@@ -182,6 +182,28 @@ export const insertArtefactSchema = createInsertSchema(artefacts).omit({
 export type InsertArtefact = z.infer<typeof insertArtefactSchema>;
 export type Artefact = typeof artefacts.$inferSelect;
 
+export const towerJudgements = pgTable("tower_judgements", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  runId: text("run_id").notNull(),
+  artefactId: text("artefact_id").notNull(),
+  verdict: text("verdict").notNull(),
+  action: text("action").notNull(),
+  reasonsJson: jsonb("reasons_json"),
+  metricsJson: jsonb("metrics_json"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  runIdIdx: index("tower_judgements_run_id_idx").on(table.runId),
+  artefactIdIdx: index("tower_judgements_artefact_id_idx").on(table.artefactId),
+}));
+
+export const insertTowerJudgementSchema = createInsertSchema(towerJudgements).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertTowerJudgement = z.infer<typeof insertTowerJudgementSchema>;
+export type TowerJudgement = typeof towerJudgements.$inferSelect;
+
 export const agentRuns = pgTable("agent_runs", {
   id: text("id").primaryKey(),
   clientRequestId: text("client_request_id").notNull(),

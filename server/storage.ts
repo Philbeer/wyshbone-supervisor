@@ -9,6 +9,7 @@ import {
   plans,
   subconsciousNudges,
   artefacts,
+  towerJudgements,
   agentRuns,
   type User,
   type InsertUser,
@@ -24,6 +25,8 @@ import {
   type InsertSubconsciousNudge,
   type Artefact,
   type InsertArtefact,
+  type TowerJudgement,
+  type InsertTowerJudgement,
   type AgentRun,
   type InsertAgentRun,
 } from "./schema";
@@ -72,6 +75,8 @@ export interface IStorage {
   createArtefact(artefact: InsertArtefact): Promise<Artefact>;
   getArtefactsByRunId(runId: string): Promise<Artefact[]>;
   getArtefact(id: string): Promise<Artefact | undefined>;
+  createTowerJudgement(judgement: InsertTowerJudgement): Promise<TowerJudgement>;
+  getTowerJudgementsByRunId(runId: string): Promise<TowerJudgement[]>;
   // Agent runs (AFR runs list)
   createAgentRun(run: InsertAgentRun): Promise<AgentRun>;
   updateAgentRun(id: string, updates: Partial<InsertAgentRun>): Promise<void>;
@@ -451,6 +456,23 @@ export class DatabaseStorage implements IStorage {
       .where(eq(artefacts.id, id))
       .limit(1);
     return result || undefined;
+  }
+
+  async createTowerJudgement(judgement: InsertTowerJudgement): Promise<TowerJudgement> {
+    const [result] = await db
+      .insert(towerJudgements)
+      .values(judgement)
+      .returning();
+    console.log(`[Storage] Created tower judgement (verdict=${judgement.verdict}, action=${judgement.action}) for run ${judgement.runId}`);
+    return result;
+  }
+
+  async getTowerJudgementsByRunId(runId: string): Promise<TowerJudgement[]> {
+    return db
+      .select()
+      .from(towerJudgements)
+      .where(eq(towerJudgements.runId, runId))
+      .orderBy(desc(towerJudgements.createdAt));
   }
 
   async createAgentRun(run: InsertAgentRun): Promise<AgentRun> {

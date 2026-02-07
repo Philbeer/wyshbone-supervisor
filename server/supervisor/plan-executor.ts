@@ -32,6 +32,7 @@ import {
   failPlan as failProgress,
 } from '../plan-progress';
 import { createArtefact } from './artefacts';
+import { judgeArtefact } from './tower-artefact-judge';
 
 export interface PlanExecutionResult {
   success: boolean;
@@ -85,6 +86,29 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           await logStepFailed(userId, planId, step.id, step.label, result.error || 'Unknown error', conversationId, clientRequestId);
           updateStepStatus(planId, step.id, 'failed', result.error);
 
+          try {
+            await createArtefact({
+              runId: planId,
+              type: 'step_result',
+              title: `Step result: ${step.label}`,
+              summary: `Failed: ${result.error || 'Unknown error'}`,
+              payload: {
+                goal,
+                run_id: planId,
+                step_id: step.id,
+                step_title: step.label,
+                step_index: i,
+                step_status: 'fail',
+                outputs_summary: result.error || null,
+                timestamps: { completed_at: new Date().toISOString() },
+              },
+              userId,
+              conversationId,
+            });
+          } catch (artefactErr: any) {
+            console.error(`[PLAN_EXECUTOR] Failed step artefact creation failed (continuing): ${artefactErr.message}`);
+          }
+
           updateRunSummary(runSummary, {
             success: false,
             leadsFound: 0,
@@ -120,7 +144,58 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         stepsCompleted++;
         
         console.log(`[PLAN_EXECUTOR] Step ${i + 1} completed: ${result.summary}`);
-        
+
+        try {
+          const stepArtefact = await createArtefact({
+            runId: planId,
+            type: 'step_result',
+            title: `Step result: ${step.label}`,
+            summary: result.summary || `Step ${step.id} completed successfully`,
+            payload: {
+              goal,
+              run_id: planId,
+              step_id: step.id,
+              step_title: step.label,
+              step_index: i,
+              step_status: 'success',
+              outputs_summary: result.summary || null,
+              outputs_raw: result.data && JSON.stringify(result.data).length < 5000 ? result.data : undefined,
+              timestamps: {
+                completed_at: new Date().toISOString(),
+              },
+            },
+            userId,
+            conversationId,
+          });
+
+          const judgeResult = await judgeArtefact({
+            artefact: stepArtefact,
+            runId: planId,
+            goal,
+            userId,
+            conversationId,
+          });
+
+          if (judgeResult.shouldStop) {
+            const haltReason = `Tower judgement: ${judgeResult.judgement.verdict} — ${judgeResult.judgement.reasons[0] || 'artefact rejected'}`;
+            console.log(`[PLAN_EXECUTOR] Halted by artefact judgement after step ${i + 1}: ${haltReason}`);
+
+            failProgress(planId, `Halted: ${haltReason}`);
+            await safeUpdatePlanStatus(planId, 'halted');
+
+            return {
+              success: false,
+              stepsCompleted,
+              totalSteps: steps.length,
+              error: `Halted by artefact judgement: ${haltReason}`,
+              haltedByJudgement: true,
+              haltReason,
+            };
+          }
+        } catch (artefactErr: any) {
+          console.error(`[PLAN_EXECUTOR] Step artefact/judgement failed (continuing): ${artefactErr.message}`);
+        }
+
       } catch (stepError: any) {
         const errorMessage = stepError.message || 'Step execution threw an exception';
         console.error(`[PLAN_EXECUTOR] Step ${step.id} threw error:`, errorMessage);
