@@ -12,6 +12,7 @@
     "db:push": "drizzle-kit push",
     "db:migrate": "tsx server/scripts/migrate.ts",
     "db:reset": "tsx server/scripts/reset-db.ts",
+    "db:migrate:supabase": "tsx server/scripts/migrate-supabase.ts",
     "db:seed": "tsx server/scripts/seed.ts",
     "test:goals": "tsx server/scripts/test-goal-generator.ts",
     "test:executor": "tsx server/scripts/test-task-executor.ts",
