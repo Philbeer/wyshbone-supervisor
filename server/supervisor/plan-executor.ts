@@ -31,6 +31,7 @@ import {
   completePlan as completeProgress,
   failPlan as failProgress,
 } from '../plan-progress';
+import { createArtefact } from './artefacts';
 
 export interface PlanExecutionResult {
   success: boolean;
@@ -182,6 +183,41 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     await logPlanCompleted(userId, planId, summary, conversationId, clientRequestId);
     completeProgress(planId);
     await safeUpdatePlanStatus(planId, 'completed');
+
+    try {
+      const stepSummaries = steps.map((s, i) => ({
+        stepId: s.id,
+        label: s.label,
+        type: s.type,
+        index: i,
+      }));
+
+      const artefactTitle = `Result: ${goal}`;
+      const artefactSummary = `${stepsCompleted}/${steps.length} steps completed.`;
+
+      await createArtefact({
+        runId: planId,
+        type: 'plan_result',
+        title: artefactTitle,
+        summary: artefactSummary,
+        payload: {
+          goal,
+          stepsCompleted,
+          totalSteps: steps.length,
+          runStats: {
+            itemsFound: runSummary.leads_found,
+            costUnits: runSummary.total_cost_gbp,
+            stepsExecuted: runSummary.steps_completed,
+            failuresCount: runSummary.failures_count,
+          },
+          steps: stepSummaries,
+        },
+        userId,
+        conversationId,
+      });
+    } catch (artefactError: any) {
+      console.error(`[PLAN_EXECUTOR] Failed to create artefact for plan ${planId}:`, artefactError.message);
+    }
     
     console.log(`[PLAN_EXECUTOR] ${summary}`);
     

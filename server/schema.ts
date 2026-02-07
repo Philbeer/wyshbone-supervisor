@@ -24,6 +24,7 @@ export const {
   plans,
   planExecutions,
   subconsciousNudges,
+  artefacts,
   agentRuns,
   insertUserSchema,
   insertUserSignalSchema,
@@ -31,6 +32,7 @@ export const {
   insertPlanExecutionSchema,
   insertPlanSchema,
   insertSubconsciousNudgeSchema,
+  insertArtefactSchema,
   insertAgentRunSchema,
 } = schema;
 
@@ -48,6 +50,8 @@ export type {
   InsertPlan,
   SubconsciousNudge,
   InsertSubconsciousNudge,
+  Artefact,
+  InsertArtefact,
   AgentRun,
   InsertAgentRun,
 } from '@shared/schema';

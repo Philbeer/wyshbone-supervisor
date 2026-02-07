@@ -162,6 +162,26 @@ export type PlanExecution = typeof planExecutions.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
 export type SubconsciousNudge = typeof subconsciousNudges.$inferSelect;
 
+export const artefacts = pgTable("artefacts", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  runId: varchar("run_id").notNull(),
+  type: text("type").notNull(),
+  title: text("title").notNull(),
+  summary: text("summary"),
+  payloadJson: jsonb("payload_json"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  runIdIdx: index("artefacts_run_id_idx").on(table.runId),
+}));
+
+export const insertArtefactSchema = createInsertSchema(artefacts).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertArtefact = z.infer<typeof insertArtefactSchema>;
+export type Artefact = typeof artefacts.$inferSelect;
+
 export const agentRuns = pgTable("agent_runs", {
   id: text("id").primaryKey(),
   clientRequestId: text("client_request_id").notNull(),

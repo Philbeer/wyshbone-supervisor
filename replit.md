@@ -57,6 +57,14 @@ The frontend is a React with TypeScript application built with Vite, using Woute
 
 ## Recent Changes
 
+### 2026-02-07: Artefact Persistence & Creation
+- Added `artefacts` table to `shared/schema.ts` with fields: id (uuid), run_id, type, title, summary, payload_json (jsonb), created_at
+- Added `createArtefact`, `getArtefactsByRunId`, `getArtefact` storage methods
+- Created `server/supervisor/artefacts.ts` helper: inserts artefact row and emits `artefact_created` AFR event with artefactId, type, title, summary in metadata
+- Wired artefact creation into `server/supervisor/plan-executor.ts` at end of successful plan execution (wrapped in try/catch so failures don't crash the run)
+- Artefact type is generic `plan_result`, payload includes goal, step summaries, and run stats
+- Live Activity shows "Artefact created: <title>" via AFR; AFR rows include artefact_id in metadata
+
 ### 2026-02-07: AFR Stream Endpoint & Live Activity Page
 - Created GET `/api/afr/stream` SSE endpoint that polls `agent_activities` table and streams events to the frontend
 - Event mapping supports: `plan_execution_started`, `plan_execution_completed`, `plan_execution_failed`, `step_started:*`, `step_completed:*`, `step_failed:*` (prefixed and unprefixed forms)

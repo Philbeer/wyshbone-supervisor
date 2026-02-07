@@ -8,6 +8,7 @@ import {
   planExecutions,
   plans,
   subconsciousNudges,
+  artefacts,
   agentRuns,
   type User,
   type InsertUser,
@@ -21,6 +22,8 @@ import {
   type InsertPlan,
   type SubconsciousNudge as DBSubconsciousNudge,
   type InsertSubconsciousNudge,
+  type Artefact,
+  type InsertArtefact,
   type AgentRun,
   type InsertAgentRun,
 } from "./schema";
@@ -66,6 +69,9 @@ export interface IStorage {
   storeAgentMemory(memory: InsertAgentMemory): Promise<AgentMemory>;
   getAgentMemories(params: { userId: string; toolUsed?: string; limit?: number; offset?: number }): Promise<AgentMemory[]>;
   updateMemoryFeedback(id: string, userFeedback: string): Promise<void>;
+  createArtefact(artefact: InsertArtefact): Promise<Artefact>;
+  getArtefactsByRunId(runId: string): Promise<Artefact[]>;
+  getArtefact(id: string): Promise<Artefact | undefined>;
   // Agent runs (AFR runs list)
   createAgentRun(run: InsertAgentRun): Promise<AgentRun>;
   updateAgentRun(id: string, updates: Partial<InsertAgentRun>): Promise<void>;
@@ -419,6 +425,32 @@ export class DatabaseStorage implements IStorage {
       .set({ userFeedback })
       .where(eq(agentMemory.id, id));
     console.log(`[Storage] Updated memory ${id} feedback: ${userFeedback}`);
+  }
+
+  async createArtefact(artefact: InsertArtefact): Promise<Artefact> {
+    const [result] = await db
+      .insert(artefacts)
+      .values(artefact)
+      .returning();
+    console.log(`[Storage] Created artefact '${artefact.title}' (type=${artefact.type}) for run ${artefact.runId}`);
+    return result;
+  }
+
+  async getArtefactsByRunId(runId: string): Promise<Artefact[]> {
+    return db
+      .select()
+      .from(artefacts)
+      .where(eq(artefacts.runId, runId))
+      .orderBy(desc(artefacts.createdAt));
+  }
+
+  async getArtefact(id: string): Promise<Artefact | undefined> {
+    const [result] = await db
+      .select()
+      .from(artefacts)
+      .where(eq(artefacts.id, id))
+      .limit(1);
+    return result || undefined;
   }
 
   async createAgentRun(run: InsertAgentRun): Promise<AgentRun> {
