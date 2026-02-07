@@ -88,6 +88,104 @@ function extractMetrics(stepType: string, data: Record<string, unknown>): Record
   return m;
 }
 
+const LEADS_LIST_CAP = 200;
+
+interface LeadItem {
+  place_id: string;
+  name: string;
+  address?: string;
+  postcode?: string;
+  phone?: string;
+  website?: string;
+  score?: number;
+}
+
+function extractPostcode(address: string): string | undefined {
+  const match = address.match(/[A-Z]{1,2}\d[\dA-Z]?\s*\d[A-Z]{2}/i);
+  return match ? match[0].toUpperCase() : undefined;
+}
+
+function accumulateLeads(
+  step: { toolName?: string; toolArgs?: Record<string, unknown> },
+  data: Record<string, unknown> | undefined,
+  leadsMap: Map<string, Record<string, unknown>>,
+  filters: Record<string, string>,
+): void {
+  if (!data) return;
+  const toolName = step.toolName || '';
+
+  if (step.toolArgs) {
+    if (step.toolArgs.query) filters.query = String(step.toolArgs.query);
+    if (step.toolArgs.location) filters.location = String(step.toolArgs.location);
+    if (step.toolArgs.country) filters.country = String(step.toolArgs.country);
+  }
+
+  if (toolName === 'SEARCH_PLACES' && Array.isArray(data.places)) {
+    for (const p of data.places as any[]) {
+      if (!p.place_id) continue;
+      const existing = leadsMap.get(p.place_id) || {};
+      leadsMap.set(p.place_id, {
+        ...existing,
+        place_id: p.place_id,
+        name: p.name || existing.name,
+        address: p.formatted_address || existing.address,
+        postcode: extractPostcode(p.formatted_address || '') || existing.postcode,
+      });
+    }
+  }
+
+  if (toolName === 'ENRICH_LEADS' && Array.isArray(data.leads)) {
+    for (const l of data.leads as any[]) {
+      if (!l.place_id) continue;
+      const existing = leadsMap.get(l.place_id) || {};
+      leadsMap.set(l.place_id, {
+        ...existing,
+        place_id: l.place_id,
+        name: l.name || existing.name,
+        address: l.address || existing.address,
+        postcode: extractPostcode(l.address || '') || existing.postcode,
+        phone: l.phone || existing.phone,
+        website: l.website || existing.website,
+      });
+    }
+  }
+
+  if (toolName === 'SCORE_LEADS' && Array.isArray(data.leads)) {
+    for (const s of data.leads as any[]) {
+      if (!s.place_id) continue;
+      const existing = leadsMap.get(s.place_id) || {};
+      leadsMap.set(s.place_id, {
+        ...existing,
+        place_id: s.place_id,
+        name: s.name || existing.name,
+        score: typeof s.score === 'number' ? s.score : existing.score,
+      });
+    }
+  }
+}
+
+function buildLeadsList(
+  leadsMap: Map<string, Record<string, unknown>>,
+  filters: Record<string, string>,
+): { items: LeadItem[]; total: number; capped: boolean; filters: Record<string, string> } {
+  const all: LeadItem[] = [];
+  for (const raw of Array.from(leadsMap.values())) {
+    all.push({
+      place_id: String(raw.place_id || ''),
+      name: String(raw.name || ''),
+      address: raw.address ? String(raw.address) : undefined,
+      postcode: raw.postcode ? String(raw.postcode) : undefined,
+      phone: raw.phone ? String(raw.phone) : undefined,
+      website: raw.website ? String(raw.website) : undefined,
+      score: typeof raw.score === 'number' ? raw.score : undefined,
+    });
+  }
+  all.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const capped = all.length > LEADS_LIST_CAP;
+  const items = capped ? all.slice(0, LEADS_LIST_CAP) : all;
+  return { items, total: all.length, capped, filters };
+}
+
 export interface PlanExecutionResult {
   success: boolean;
   stepsCompleted: number;
@@ -118,6 +216,8 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   await safeUpdatePlanStatus(planId, 'executing');
   
   let stepsCompleted = 0;
+  const leadsMap = new Map<string, Record<string, unknown>>();
+  const leadsFilters: Record<string, string> = {};
 
   const missionType = 'leadgen';
   const successCriteria: TowerSuccessCriteria = { ...LEADGEN_SUCCESS_DEFAULTS };
@@ -256,6 +356,8 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           console.error(`[PLAN_EXECUTOR] Step artefact/judgement failed (continuing): ${artefactErr.message}`);
         }
 
+        accumulateLeads(step, result.data, leadsMap, leadsFilters);
+
       } catch (stepError: any) {
         const errorMessage = stepError.message || 'Step execution threw an exception';
         console.error(`[PLAN_EXECUTOR] Step ${step.id} threw error:`, errorMessage);
@@ -318,6 +420,29 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     await logPlanCompleted(userId, planId, summary, conversationId, clientRequestId);
     completeProgress(planId);
     await safeUpdatePlanStatus(planId, 'completed');
+
+    if (leadsMap.size > 0) {
+      try {
+        const leadsList = buildLeadsList(leadsMap, leadsFilters);
+        await createArtefact({
+          runId: planId,
+          type: 'leads_list',
+          title: `Leads: ${goal}`,
+          summary: `${leadsList.total} leads collected${leadsList.capped ? ` (capped to ${LEADS_LIST_CAP})` : ''}`,
+          payload: {
+            items: leadsList.items,
+            total: leadsList.total,
+            capped: leadsList.capped,
+            filters: leadsList.filters,
+          },
+          userId,
+          conversationId,
+        });
+        console.log(`[PLAN_EXECUTOR] leads_list artefact created: ${leadsList.total} leads`);
+      } catch (leadsErr: any) {
+        console.error(`[PLAN_EXECUTOR] leads_list artefact creation failed (continuing): ${leadsErr.message}`);
+      }
+    }
 
     try {
       const stepSummaries = steps.map((s, i) => ({
