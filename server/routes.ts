@@ -1699,6 +1699,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
               else if (actionTaken === "step_started" || actionTaken.startsWith("step_started:")) eventType = "step_started";
               else if (actionTaken === "step_completed" || actionTaken.startsWith("step_completed:")) eventType = "step_completed";
               else if (actionTaken === "step_failed" || actionTaken.startsWith("step_failed:")) eventType = "step_failed";
+              else if (actionTaken === "tower_evaluation_completed") eventType = "tower_evaluation";
+              else if (actionTaken === "tower_decision_stop") eventType = "tower_decision";
+              else if (actionTaken === "tower_decision_change_plan") eventType = "tower_decision";
 
               const payload = {
                 id: row.id,

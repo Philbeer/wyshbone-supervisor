@@ -7,7 +7,7 @@
  * Session 3: Agentic decision loop integration.
  */
 
-import { logAFREvent } from './afr-logger';
+import { logAFREvent, logTowerEvaluationCompleted, logTowerDecisionStop, logTowerDecisionChangePlan } from './afr-logger';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,7 +41,7 @@ export interface TowerEvaluateRequest {
 }
 
 export interface TowerEvaluateResponse {
-  verdict: 'CONTINUE' | 'STOP';
+  verdict: 'CONTINUE' | 'STOP' | 'CHANGE_PLAN';
   reason_code: string;
   explanation: string;
   evaluated_at: string;
@@ -218,7 +218,7 @@ export async function requestJudgement(
   try {
     const verdict = await callTowerEvaluate(request);
 
-    // AFR: judgement_received
+    // AFR: judgement_received (legacy)
     await logAFREvent({
       userId,
       runId,
@@ -236,12 +236,32 @@ export async function requestJudgement(
       },
     });
 
+    const towerMetrics: Record<string, unknown> = {
+      steps_completed: snapshot.steps_completed,
+      leads_found: snapshot.leads_found,
+      leads_new_last_window: snapshot.leads_new_last_window,
+      avg_quality_score: snapshot.avg_quality_score,
+      total_cost_gbp: snapshot.total_cost_gbp,
+      failures_count: snapshot.failures_count,
+      reason_code: verdict.reason_code,
+      evaluated_at: verdict.evaluated_at,
+    };
+
+    await logTowerEvaluationCompleted(
+      userId,
+      runId,
+      verdict.verdict,
+      verdict.explanation,
+      towerMetrics,
+      conversationId,
+    );
+
     console.log(
       `[TOWER_JUDGEMENT] Verdict: ${verdict.verdict} | reason: ${verdict.reason_code} | ${verdict.explanation}`
     );
 
-    if (verdict.verdict === 'STOP') {
-      // AFR: job_halted_by_judgement
+    if (verdict.verdict === 'STOP' || verdict.verdict === 'CHANGE_PLAN') {
+      // AFR: job_halted_by_judgement (legacy)
       await logAFREvent({
         userId,
         runId,
@@ -256,6 +276,24 @@ export async function requestJudgement(
           snapshot,
         },
       });
+
+      if (verdict.verdict === 'CHANGE_PLAN') {
+        await logTowerDecisionChangePlan(
+          userId,
+          runId,
+          verdict.explanation,
+          towerMetrics,
+          conversationId,
+        );
+      } else {
+        await logTowerDecisionStop(
+          userId,
+          runId,
+          verdict.explanation,
+          towerMetrics,
+          conversationId,
+        );
+      }
 
       return { shouldStop: true, verdict };
     }

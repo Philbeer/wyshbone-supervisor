@@ -185,3 +185,79 @@ export async function logPlanFailed(
     metadata: { error: errorMessage }
   });
 }
+
+export async function logTowerEvaluationCompleted(
+  userId: string,
+  planId: string,
+  verdict: string,
+  reason: string,
+  metrics: Record<string, unknown>,
+  conversationId?: string,
+  clientRequestId?: string
+): Promise<void> {
+  await logAFREvent({
+    userId,
+    runId: planId,
+    conversationId,
+    clientRequestId,
+    actionTaken: 'tower_evaluation_completed',
+    status: 'success',
+    taskGenerated: `Tower verdict: ${verdict} — ${reason}`,
+    runType: 'plan',
+    metadata: {
+      tower_verdict: verdict.toLowerCase(),
+      reason,
+      ...metrics,
+    }
+  });
+}
+
+export async function logTowerDecisionStop(
+  userId: string,
+  planId: string,
+  reason: string,
+  metrics: Record<string, unknown>,
+  conversationId?: string,
+  clientRequestId?: string
+): Promise<void> {
+  await logAFREvent({
+    userId,
+    runId: planId,
+    conversationId,
+    clientRequestId,
+    actionTaken: 'tower_decision_stop',
+    status: 'failed',
+    taskGenerated: `Tower halted execution: ${reason}`,
+    runType: 'plan',
+    metadata: {
+      tower_verdict: 'stop',
+      reason,
+      ...metrics,
+    }
+  });
+}
+
+export async function logTowerDecisionChangePlan(
+  userId: string,
+  planId: string,
+  reason: string,
+  metrics: Record<string, unknown>,
+  conversationId?: string,
+  clientRequestId?: string
+): Promise<void> {
+  await logAFREvent({
+    userId,
+    runId: planId,
+    conversationId,
+    clientRequestId,
+    actionTaken: 'tower_decision_change_plan',
+    status: 'pending',
+    taskGenerated: `Tower requested plan change: ${reason}`,
+    runType: 'plan',
+    metadata: {
+      tower_verdict: 'change_plan',
+      reason,
+      ...metrics,
+    }
+  });
+}
