@@ -1,4 +1,4 @@
-import { Home, Settings, Activity, TrendingUp } from "lucide-react";
+import { Home, Settings, Activity, TrendingUp, Radio } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import {
   Sidebar,
@@ -18,6 +18,7 @@ const navItems = [
   { title: "Dashboard", url: "/", icon: Home },
   { title: "Leads", url: "/leads", icon: TrendingUp },
   { title: "Signals", url: "/signals", icon: Activity },
+  { title: "Live Activity", url: "/activity", icon: Radio },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 

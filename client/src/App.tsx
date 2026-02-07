@@ -9,6 +9,7 @@ import Dashboard from "@/pages/Dashboard";
 import Leads from "@/pages/Leads";
 import Settings from "@/pages/Settings";
 import Signals from "@/pages/Signals";
+import Activity from "@/pages/Activity";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -18,6 +19,7 @@ function Router() {
       <Route path="/leads" component={Leads} />
       <Route path="/settings" component={Settings} />
       <Route path="/signals" component={Signals} />
+      <Route path="/activity" component={Activity} />
       <Route component={NotFound} />
     </Switch>
   );

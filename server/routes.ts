@@ -1649,6 +1649,88 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.get("/api/afr/stream", async (req, res) => {
+    if (!supabase) {
+      res.status(503).json({ error: "Supabase not configured" });
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.flushHeaders();
+
+    const runId = req.query.run_id as string | undefined;
+    let lastTimestamp = 0;
+    let alive = true;
+
+    req.on("close", () => { alive = false; });
+
+    const poll = async () => {
+      while (alive) {
+        try {
+          let query = supabase
+            .from("agent_activities")
+            .select("id, user_id, action_taken, status, task_generated, run_id, metadata, timestamp, error_message")
+            .gt("timestamp", lastTimestamp)
+            .order("timestamp", { ascending: true })
+            .limit(50);
+
+          if (runId) {
+            query = query.eq("run_id", runId);
+          }
+
+          const { data, error } = await query;
+
+          if (error) {
+            console.error("[AFR_STREAM] query error:", error.message);
+          } else if (data && data.length > 0) {
+            for (const row of data) {
+              if (!alive) break;
+
+              const actionTaken = row.action_taken || "";
+              let eventType = "activity";
+              if (actionTaken === "plan_execution_started") eventType = "plan_started";
+              else if (actionTaken === "plan_execution_completed") eventType = "plan_completed";
+              else if (actionTaken === "plan_execution_failed") eventType = "plan_failed";
+              else if (actionTaken === "step_started" || actionTaken.startsWith("step_started:")) eventType = "step_started";
+              else if (actionTaken === "step_completed" || actionTaken.startsWith("step_completed:")) eventType = "step_completed";
+              else if (actionTaken === "step_failed" || actionTaken.startsWith("step_failed:")) eventType = "step_failed";
+
+              const payload = {
+                id: row.id,
+                eventType,
+                actionTaken,
+                status: row.status,
+                summary: row.task_generated || actionTaken,
+                runId: row.run_id,
+                timestamp: row.timestamp,
+                errorMessage: row.error_message || null,
+                metadata: row.metadata || {},
+              };
+
+              res.write(`event: ${eventType}\ndata: ${JSON.stringify(payload)}\n\n`);
+
+              if (row.timestamp > lastTimestamp) {
+                lastTimestamp = row.timestamp;
+              }
+            }
+          }
+        } catch (err: any) {
+          console.error("[AFR_STREAM] poll error:", err.message);
+        }
+
+        await new Promise(r => setTimeout(r, 500));
+      }
+    };
+
+    res.write(`event: connected\ndata: ${JSON.stringify({ ok: true })}\n\n`);
+    poll();
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }

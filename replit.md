@@ -57,6 +57,14 @@ The frontend is a React with TypeScript application built with Vite, using Woute
 
 ## Recent Changes
 
+### 2026-02-07: AFR Stream Endpoint & Live Activity Page
+- Created GET `/api/afr/stream` SSE endpoint that polls `agent_activities` table and streams events to the frontend
+- Event mapping supports: `plan_execution_started`, `plan_execution_completed`, `plan_execution_failed`, `step_started:*`, `step_completed:*`, `step_failed:*` (prefixed and unprefixed forms)
+- Preserves original `task_generated` text as event summary — no overwriting
+- Created `/activity` page (`client/src/pages/Activity.tsx`) with "Run Supervisor Demo" button and real-time SSE event display
+- Added "Live Activity" to sidebar navigation with Radio icon
+- Enforced Supabase-only database: removed `DATABASE_URL` fallback from `db.ts` and 5 service files (`wabs-scorer`, `wabs-feedback`, `task-executor`, `memory-writer`, `memory-reader`)
+
 ### 2026-02-06: Agent Run Tracking for AFR Runs List
 - Added `agentRuns` table definition to `shared/schema.ts` matching the Supabase DB schema (bigint for `created_at`/`updated_at`/`last_event_at`, timestamptz for `started_at`/`ended_at`)
 - Added `createAgentRun`, `updateAgentRun`, `getAgentRuns` storage methods in `server/storage.ts`
