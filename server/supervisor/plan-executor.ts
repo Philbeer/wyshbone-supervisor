@@ -34,6 +34,60 @@ import {
 import { createArtefact } from './artefacts';
 import { judgeArtefact } from './tower-artefact-judge';
 
+function compactInputs(args: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (v !== undefined && v !== null && v !== '') {
+      result[k] = typeof v === 'string' && v.length > 200 ? v.substring(0, 200) : v;
+    }
+  }
+  return result;
+}
+
+function compactOutputs(data: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (Array.isArray(v)) {
+      result[`${k}_count`] = v.length;
+    } else if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') {
+      result[k] = v;
+    }
+  }
+  return result;
+}
+
+function extractMetrics(stepType: string, data: Record<string, unknown>): Record<string, number> {
+  const m: Record<string, number> = {};
+  switch (stepType) {
+    case 'SEARCH_PLACES':
+      if (typeof data.count === 'number') m.places_found = data.count;
+      else if (Array.isArray(data.places)) m.places_found = data.places.length;
+      break;
+    case 'ENRICH_LEADS':
+      if (typeof data.count === 'number') m.leads_enriched = data.count;
+      else if (Array.isArray(data.leads)) m.leads_enriched = data.leads.length;
+      break;
+    case 'SCORE_LEADS':
+      if (typeof data.count === 'number') m.leads_scored = data.count;
+      else if (Array.isArray(data.leads)) m.leads_scored = data.leads.length;
+      if (typeof data.avgScore === 'number') m.avg_score = data.avgScore;
+      if (typeof data.aboveThreshold === 'number') m.above_threshold = data.aboveThreshold;
+      break;
+    case 'EVALUATE_RESULTS':
+      if (typeof data.overallQuality === 'number') m.overall_quality = data.overallQuality;
+      if (typeof data.coverageRate === 'number') m.coverage_rate = data.coverageRate;
+      if (typeof data.scoringRate === 'number') m.scoring_rate = data.scoringRate;
+      if (typeof data.totalSearched === 'number') m.total_searched = data.totalSearched;
+      if (typeof data.totalEnriched === 'number') m.total_enriched = data.totalEnriched;
+      if (typeof data.totalScored === 'number') m.total_scored = data.totalScored;
+      break;
+    default:
+      if (typeof data.count === 'number') m.count = data.count;
+      break;
+  }
+  return m;
+}
+
 export interface PlanExecutionResult {
   success: boolean;
   stepsCompleted: number;
@@ -87,20 +141,23 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           updateStepStatus(planId, step.id, 'failed', result.error);
 
           try {
+            const stepType = step.toolName || toolMetadata?.toolName || 'UNKNOWN';
+            const stepArgs = step.toolArgs || toolMetadata?.toolArgs;
+            const stepInputs = stepArgs ? compactInputs(stepArgs) : {};
             await createArtefact({
               runId: planId,
               type: 'step_result',
               title: `Step result: ${step.label}`,
               summary: `Failed: ${result.error || 'Unknown error'}`,
               payload: {
-                goal,
-                run_id: planId,
-                step_id: step.id,
-                step_title: step.label,
                 step_index: i,
+                step_title: step.label,
+                step_type: stepType,
                 step_status: 'fail',
-                outputs_summary: result.error || null,
-                timestamps: { completed_at: new Date().toISOString() },
+                inputs: stepInputs,
+                outputs: {},
+                metrics: {},
+                errors: [result.error || 'Unknown error'],
               },
               userId,
               conversationId,
@@ -146,23 +203,26 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         console.log(`[PLAN_EXECUTOR] Step ${i + 1} completed: ${result.summary}`);
 
         try {
+          const stepType = step.toolName || toolMetadata?.toolName || 'UNKNOWN';
+          const stepArgs = step.toolArgs || toolMetadata?.toolArgs;
+          const stepInputs = stepArgs ? compactInputs(stepArgs) : {};
+          const stepOutputs = result.data ? compactOutputs(result.data) : {};
+          const stepMetrics = result.data ? extractMetrics(stepType, result.data) : {};
+
           const stepArtefact = await createArtefact({
             runId: planId,
             type: 'step_result',
             title: `Step result: ${step.label}`,
             summary: result.summary || `Step ${step.id} completed successfully`,
             payload: {
-              goal,
-              run_id: planId,
-              step_id: step.id,
-              step_title: step.label,
               step_index: i,
-              step_status: 'success',
-              outputs_summary: result.summary || null,
-              outputs_raw: result.data && JSON.stringify(result.data).length < 5000 ? result.data : undefined,
-              timestamps: {
-                completed_at: new Date().toISOString(),
-              },
+              step_title: step.label,
+              step_type: stepType,
+              step_status: 'pass',
+              inputs: stepInputs,
+              outputs: stepOutputs,
+              metrics: stepMetrics,
+              errors: [],
             },
             userId,
             conversationId,
