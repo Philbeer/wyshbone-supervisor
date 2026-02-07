@@ -10,6 +10,7 @@ import { startSubconScheduler } from "./subcon";
 import { startDailyAgentCron } from "./cron/daily-agent";
 import { startDeepResearchScheduler } from "./supervisor/schedulers/deep-research-scheduler";
 import crypto from "crypto";
+import { assertTowerConfig } from "./supervisor/tower-artefact-judge";
 
 const app = express();
 
@@ -145,6 +146,8 @@ app.use((req, res, next) => {
       console.log('✅ Using EXPORT_KEY from environment');
     }
   }
+
+  assertTowerConfig();
 
   const server = await registerRoutes(app);
 

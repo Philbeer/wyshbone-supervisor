@@ -24,7 +24,33 @@ function getTowerBaseUrl(): string | null {
 }
 
 function isStubMode(): boolean {
-  return process.env.TOWER_ARTEFACT_JUDGE_STUB === 'true' || !getTowerBaseUrl();
+  if (process.env.TOWER_ARTEFACT_JUDGE_STUB === 'true') {
+    return true;
+  }
+  return false;
+}
+
+export function assertTowerConfig(): void {
+  const stub = process.env.TOWER_ARTEFACT_JUDGE_STUB === 'true';
+  const baseUrl = getTowerBaseUrl();
+  const masked = baseUrl ? baseUrl.replace(/(:\/\/[^:]+:)[^@]+@/, '$1***@').substring(0, 60) + '...' : '(not set)';
+
+  console.log('============================================================');
+  console.log('[TOWER] Tower Artefact Judge Configuration');
+  console.log('============================================================');
+  console.log(`   TOWER_BASE_URL / TOWER_URL: ${masked}`);
+  console.log(`   TOWER_ARTEFACT_JUDGE_STUB:  ${stub ? 'ON (stub mode)' : 'OFF (real calls)'}`);
+
+  if (!stub && !baseUrl) {
+    console.error('   FATAL: Stub mode is OFF but no TOWER_BASE_URL or TOWER_URL is set.');
+    console.error('   Tower judgement calls will fail at runtime.');
+    console.error('   Set TOWER_BASE_URL / TOWER_URL, or set TOWER_ARTEFACT_JUDGE_STUB=true');
+    console.log('============================================================');
+    throw new Error('[TOWER] Cannot start: TOWER_BASE_URL / TOWER_URL required when stub mode is OFF');
+  }
+
+  console.log(`   Status: ${stub ? 'STUB MODE — auto-passing all judgements' : 'LIVE — real HTTP calls to Tower'}`);
+  console.log('============================================================');
 }
 
 async function callTowerJudgeArtefact(
@@ -96,6 +122,29 @@ export async function judgeArtefact(params: {
     judgement = stubJudgement(request);
     stubbed = true;
   } else {
+    const baseUrl = getTowerBaseUrl();
+    if (!baseUrl) {
+      const errorMsg = 'TOWER_BASE_URL / TOWER_URL not configured and stub mode is OFF — refusing to silently bypass Tower';
+      console.error(`[TOWER_JUDGE] ${errorMsg}`);
+
+      await logAFREvent({
+        userId,
+        runId,
+        conversationId,
+        actionTaken: 'tower_judgement_failed',
+        status: 'failed',
+        taskGenerated: `Tower artefact judgement blocked: ${errorMsg}`,
+        runType: 'plan',
+        metadata: { artefactId: artefact.id, error: errorMsg },
+      });
+
+      return {
+        judgement: { verdict: 'error', reasons: [errorMsg], metrics: {}, action: 'stop' },
+        shouldStop: true,
+        stubbed: false,
+      };
+    }
+
     try {
       judgement = await callTowerJudgeArtefact(request);
     } catch (err: any) {
