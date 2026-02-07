@@ -23,11 +23,12 @@ let taskExecutionsPool: pg.Pool | null = null;
 
 function getTaskExecutionsPool(): pg.Pool {
   if (!taskExecutionsPool) {
-    const DATABASE_URL = process.env.DATABASE_URL;
-    if (!DATABASE_URL) {
-      throw new Error('DATABASE_URL not configured');
+    // Supabase-only: no DATABASE_URL fallback permitted
+    const connStr = process.env.SUPABASE_DATABASE_URL;
+    if (!connStr) {
+      throw new Error('SUPABASE_DATABASE_URL not configured');
     }
-    taskExecutionsPool = new Pool({ connectionString: DATABASE_URL });
+    taskExecutionsPool = new Pool({ connectionString: connStr });
   }
   return taskExecutionsPool;
 }

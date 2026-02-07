@@ -70,8 +70,8 @@ if (envResult.loaded) {
   }
 }
 
-// Check key env vars - prefer SUPABASE_DATABASE_URL over DATABASE_URL
-const keyVars = ['SUPABASE_DATABASE_URL', 'DATABASE_URL', 'SUPABASE_URL'];
+// Check key env vars — only SUPABASE_DATABASE_URL is permitted for DB access
+const keyVars = ['SUPABASE_DATABASE_URL', 'SUPABASE_URL'];
 console.log(`\n   Key variables:`);
 for (const key of keyVars) {
   const isSet = process.env[key] ? '✅' : '❌';

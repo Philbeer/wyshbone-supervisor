@@ -15,11 +15,12 @@ let pool: pg.Pool | null = null;
 
 function getPool(): pg.Pool {
   if (!pool) {
-    const DATABASE_URL = process.env.DATABASE_URL;
-    if (!DATABASE_URL) {
-      throw new Error('DATABASE_URL not configured');
+    // Supabase-only: no DATABASE_URL fallback permitted
+    const connStr = process.env.SUPABASE_DATABASE_URL;
+    if (!connStr) {
+      throw new Error('SUPABASE_DATABASE_URL not configured');
     }
-    pool = new Pool({ connectionString: DATABASE_URL });
+    pool = new Pool({ connectionString: connStr });
   }
   return pool;
 }
