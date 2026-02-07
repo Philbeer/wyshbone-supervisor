@@ -1,0 +1,69 @@
+Implement “step artefacts + Tower judgement + Supervisor reaction”.
+
+Context:
+- We already have artefacts table in Supabase and helper createArtefact() that emits artefact_created AFR activity.
+- Today: we need artefacts during the plan, not just at the end, and Tower must judge them.
+
+Requirements:
+1) Create step_result artefacts
+- At the end of EACH completed step (not each tool call), create an artefact:
+  type: "step_result"
+  title: "Step result: <step_id or step title>"
+  summary: 1-2 lines human readable
+  payload_json must include:
+    goal
+    step_id
+    step_title
+    step_index
+    step_status (success/fail)
+    inputs (redacted if needed)
+    outputs_summary (small)
+    outputs_raw (optional, only if not huge)
+    run_id
+    timestamps
+
+2) Call Tower to judge each step_result artefact
+- Add a Tower client (env var TOWER_BASE_URL).
+- After artefact creation, POST to Tower endpoint (you define):
+  /api/tower/judge-artefact
+  body: { runId, artefactId, goal, successCriteria?, artefactType }
+- Receive response: { verdict, reasons[], metrics{}, action } where action in ["continue","stop","retry","change_plan"]
+
+3) Persist judgement (Supervisor-owned)
+- Create a new table tower_judgements in Supabase (migration) with:
+  id uuid pk
+  run_id text
+  artefact_id text
+  verdict text
+  action text
+  reasons_json jsonb
+  metrics_json jsonb
+  created_at timestamp default now()
+- Add storage methods: createTowerJudgement(), getTowerJudgementsByRunId()
+
+4) Emit AFR activity for judgement
+- Emit an activity type "tower_judgement" (or "tower_judgement_received") with metadata:
+  artefactId, verdict, action, shortReason
+- Live Activity must show a [Tower] badge for this event (already supported by prefix matching).
+
+5) Supervisor reaction
+- Minimal reaction logic:
+  - if action == "stop" or verdict == "fail": mark run stopped/failed and end execution cleanly.
+  - else continue normally.
+- Keep it safe: if Tower call fails, log and continue execution (do not crash the run).
+
+6) Keep it generic
+- No lead specific naming.
+- Artefacts and judgements must work for any future plan types.
+
+Deliverables:
+- Supabase migration for tower_judgements table (use the same safe “db:migrate:supabase” pattern).
+- Code changes wired into the plan executor so step_result artefacts appear during the run.
+- Tower judgement events appear in AFR and Live Activity.
+- A short note in replit.md describing the flow and how to test it.
+
+After implementation:
+- Run a demo execution and confirm:
+  - multiple step_result artefacts exist for the run
+  - tower_judgements rows exist
+  - Live Activity shows artefact_created and tower_judgement events interleaved
