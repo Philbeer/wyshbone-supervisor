@@ -55,6 +55,26 @@ The frontend is a React with TypeScript application built with Vite, using Woute
 - **Zod**: Runtime schema validation library.
 - **Tower Judgement API**: External service for agentic decision-making and evaluation of plan execution.
 
+## DATABASE RULES (NON-NEGOTIABLE)
+
+This project uses a **dual database** setup. These rules are absolute:
+
+| Database | Env Var | Purpose |
+|---|---|---|
+| **Supabase** | `SUPABASE_DATABASE_URL` | Production source of truth. ALL persistent tables live here. |
+| **Replit dev DB** | `DATABASE_URL` | Local dev only. Used by `drizzle-kit` for schema diffing. Never receives real schema. |
+
+### Migration Rules
+- **ALWAYS** use `npm run db:migrate:supabase` for creating or altering tables.
+- **NEVER** use `drizzle-kit push` (`npm run db:push`) for real schema changes — it targets the Replit dev DB.
+- The migration script (`server/scripts/migrate-supabase.ts`) has built-in safety guards: it refuses to run unless the DB host contains "supabase" or `CONFIRM_SUPABASE_MIGRATE=true` is set.
+- Add new migrations to the `migrations` array in `server/scripts/migrate-supabase.ts`.
+
+### Runtime Rules
+- `server/db.ts` connects **only** to `SUPABASE_DATABASE_URL`. If it is missing, the server crashes immediately.
+- On startup, the server logs the active DB host so you can confirm the correct database is connected.
+- The `execute_sql_tool` in Replit targets `DATABASE_URL` (local dev DB), **NOT** Supabase. Use `psql "$SUPABASE_DATABASE_URL"` for Supabase inspection.
+
 ## Recent Changes
 
 ### 2026-02-07: Artefact Persistence & Creation

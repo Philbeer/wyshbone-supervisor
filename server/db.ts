@@ -1,11 +1,18 @@
 /**
  * Database Connection Module — Supabase-only
  *
- * GUARD: This application MUST connect to the Supabase-hosted PostgreSQL
- * database via SUPABASE_DATABASE_URL.  No fallback to DATABASE_URL, no
- * mock mode, no SQLite.  If the variable is missing the process crashes
- * immediately so misconfigurations are caught at deploy time, not at
- * runtime when a query silently returns nothing.
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │  SOURCE OF TRUTH: Supabase PostgreSQL (SUPABASE_DATABASE_URL)  │
+ * │                                                                │
+ * │  The Replit-provisioned DATABASE_URL is a local dev database   │
+ * │  used only by drizzle-kit for diffing.  It must NEVER receive  │
+ * │  production schema, data, or migrations.  All persistent       │
+ * │  tables (artefacts, agent_runs, tower_judgements, etc.) live    │
+ * │  exclusively in Supabase.                                      │
+ * │                                                                │
+ * │  To apply migrations: npm run db:migrate:supabase              │
+ * │  NEVER use: drizzle-kit push for real schema changes           │
+ * └─────────────────────────────────────────────────────────────────┘
  */
 
 import { config } from 'dotenv';
@@ -41,7 +48,15 @@ import * as schema from '@shared/schema';
 
 neonConfig.webSocketConstructor = ws;
 
-console.log('[DB] Using PostgreSQL (Neon) — Supabase-only mode');
+// ── Runtime host logging ─────────────────────────────────────────────
+const hostMatch = dbUrl.match(/@([^:/]+)/);
+const dbHost = hostMatch?.[1] ?? 'unknown';
+console.log(`[DB] Using PostgreSQL (Neon) — Supabase-only mode`);
+console.log(`[DB] Active host: ${dbHost}`);
+
+if (!dbHost.toLowerCase().includes('supabase')) {
+  console.warn('[DB] WARNING: DB host does not contain "supabase". Verify SUPABASE_DATABASE_URL is correct.');
+}
 
 const pool = new Pool({ connectionString: dbUrl });
 const db = drizzle({ client: pool, schema });

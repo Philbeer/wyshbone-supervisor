@@ -1,11 +1,20 @@
 /**
  * Supabase Database Migration Script
  *
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │  SOURCE OF TRUTH: Supabase PostgreSQL (SUPABASE_DATABASE_URL)  │
+ * │                                                                │
+ * │  This script is the ONLY sanctioned way to apply schema        │
+ * │  changes to the production database.  The Replit-provisioned   │
+ * │  DATABASE_URL is a local dev database used by drizzle-kit for  │
+ * │  diffing and must NEVER receive production schema.             │
+ * │                                                                │
+ * │  Usage:  npm run db:migrate:supabase                           │
+ * │  NEVER:  drizzle-kit push for real schema changes              │
+ * └─────────────────────────────────────────────────────────────────┘
+ *
  * Runs migrations against the SUPABASE_DATABASE_URL database.
  * This is intentionally separate from the local dev DB flow.
- *
- * Usage:
- *   npm run db:migrate:supabase
  *
  * Safety guards:
  *   - Requires SUPABASE_DATABASE_URL to be set
