@@ -50,12 +50,13 @@ async function safeUpdatePlanStatus(planId: string, status: string): Promise<voi
 }
 
 export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
-  const { planId, userId, conversationId, clientRequestId, goal, steps, toolMetadata } = plan;
+  const { planId, userId, conversationId, clientRequestId, goal, steps, skipJudgement, toolMetadata } = plan;
   
   console.log(`[PLAN_EXECUTOR] Starting execution of plan ${planId}`);
   console.log(`[PLAN_EXECUTOR] Goal: ${goal}`);
   console.log(`[PLAN_EXECUTOR] Steps: ${steps.length}`);
   if (clientRequestId) console.log(`[PLAN_EXECUTOR] clientRequestId: ${clientRequestId}`);
+  if (skipJudgement) console.log(`[PLAN_EXECUTOR] Tower judgement: SKIPPED (skipJudgement=true)`);
   
   await logPlanStarted(userId, planId, goal, conversationId, clientRequestId);
   await safeUpdatePlanStatus(planId, 'executing');
@@ -143,35 +144,37 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         };
       }
 
-      // ----- Tower Judgement: after each step -----
-      const snapshot = buildSnapshot(runSummary, successCriteria.stall_window_steps);
-      const judgement = await requestJudgement(
-        planId,
-        userId,
-        missionType,
-        successCriteria,
-        snapshot,
-        conversationId,
-      );
+      // ----- Tower Judgement: after each step (unless skipped) -----
+      if (!skipJudgement) {
+        const snapshot = buildSnapshot(runSummary, successCriteria.stall_window_steps);
+        const judgement = await requestJudgement(
+          planId,
+          userId,
+          missionType,
+          successCriteria,
+          snapshot,
+          conversationId,
+        );
 
-      if (judgement.shouldStop) {
-        const haltReason = judgement.verdict
-          ? `${judgement.verdict.reason_code}: ${judgement.verdict.explanation}`
-          : 'Tower issued STOP';
+        if (judgement.shouldStop) {
+          const haltReason = judgement.verdict
+            ? `${judgement.verdict.reason_code}: ${judgement.verdict.explanation}`
+            : 'Tower issued STOP';
 
-        console.log(`[PLAN_EXECUTOR] Halted by Tower judgement after step ${i + 1}: ${haltReason}`);
+          console.log(`[PLAN_EXECUTOR] Halted by Tower judgement after step ${i + 1}: ${haltReason}`);
 
-        failProgress(planId, `Halted: ${haltReason}`);
-        await safeUpdatePlanStatus(planId, 'halted');
+          failProgress(planId, `Halted: ${haltReason}`);
+          await safeUpdatePlanStatus(planId, 'halted');
 
-        return {
-          success: false,
-          stepsCompleted,
-          totalSteps: steps.length,
-          error: `Halted by judgement: ${haltReason}`,
-          haltedByJudgement: true,
-          haltReason,
-        };
+          return {
+            success: false,
+            stepsCompleted,
+            totalSteps: steps.length,
+            error: `Halted by judgement: ${haltReason}`,
+            haltedByJudgement: true,
+            haltReason,
+          };
+        }
       }
     }
     

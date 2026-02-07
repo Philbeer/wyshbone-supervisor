@@ -574,8 +574,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     });
 
-    // Debug endpoint - demo plan run (Session 3 proof)
-    // Forces a multi-step plan through plan-executor.ts to prove Tower judgement + halt in AFR
+    // Debug endpoint - demo plan run
+    // Runs a 5-step diverse plan through plan-executor.ts to prove AFR activity logging
     app.post("/api/debug/demo-plan-run", async (req, res) => {
       const { randomUUID } = await import('crypto');
       const { executePlan } = await import('./supervisor/plan-executor');
@@ -587,15 +587,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const clientRequestId = randomUUID();
       const runId = `demo_${randomUUID().replace(/-/g, '').substring(0, 12)}`;
       const userId = getUserId(req);
-      const goalText = 'Demo plan run – prove AFR activity logging with clientRequestId';
+      const goalText = 'Demo: search → enrich → score → evaluate lead-gen pipeline';
 
       console.log(`[DEBUG] demo-plan-run: clientRequestId=${clientRequestId}, runId=${runId}`);
 
       const steps = [
-        { id: 'demo-step-1', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 1)' },
-        { id: 'demo-step-2', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 2)' },
-        { id: 'demo-step-3', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 3)' },
-        { id: 'demo-step-4', type: 'SEARCH_PLACES', label: 'Search pubs in Kent (batch 4)' },
+        {
+          id: 'demo-search-1', type: 'SEARCH_PLACES', label: 'Search pubs in Kent',
+          toolName: 'SEARCH_PLACES',
+          toolArgs: { query: 'pubs', location: 'Kent', country: 'GB' },
+        },
+        {
+          id: 'demo-search-2', type: 'SEARCH_PLACES', label: 'Search restaurants in Canterbury',
+          toolName: 'SEARCH_PLACES',
+          toolArgs: { query: 'restaurants', location: 'Canterbury', country: 'GB' },
+        },
+        {
+          id: 'demo-enrich', type: 'ENRICH_LEADS', label: 'Enrich leads with detail data',
+          toolName: 'ENRICH_LEADS',
+          toolArgs: { query: 'pubs', location: 'Kent', country: 'GB', enrichType: 'detail' },
+        },
+        {
+          id: 'demo-score', type: 'SCORE_LEADS', label: 'Score and rank leads',
+          toolName: 'SCORE_LEADS',
+          toolArgs: { query: 'pubs', location: 'Kent', country: 'GB', scoreModel: 'quality-v1' },
+        },
+        {
+          id: 'demo-evaluate', type: 'EVALUATE_RESULTS', label: 'Evaluate pipeline results',
+          toolName: 'EVALUATE_RESULTS',
+          toolArgs: { totalSearched: 40, totalEnriched: 10, totalScored: 10, goalDescription: 'Kent hospitality lead gen' },
+        },
       ];
 
       try {
@@ -632,33 +653,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         planId: runId,
         userId,
         clientRequestId,
+        skipJudgement: true,
         goal: goalText,
         steps,
-        toolMetadata: {
-          toolName: 'SEARCH_PLACES',
-          toolArgs: { query: 'pubs', location: 'Kent', country: 'GB' },
-        },
       };
 
-      console.log(`[DEBUG] demo-plan-run: starting plan ${runId} with ${plan.steps.length} steps`);
+      console.log(`[DEBUG] demo-plan-run: starting plan ${runId} with ${plan.steps.length} steps (judgement skipped)`);
 
       res.json({ ok: true, clientRequestId, runId });
 
       executePlan(plan).then(async result => {
-        if (result.haltedByJudgement) {
-          console.log(`[DEBUG] demo-plan-run ${runId}: HALTED by Tower judgement — ${result.haltReason}`);
-          try {
-            await storage.updateAgentRun(runId, {
-              status: 'stopped',
-              terminalState: 'stopped',
-              endedAt: new Date(),
-              error: result.haltReason || 'Halted by Tower judgement',
-              metadata: { planId: runId, goalText, clientRequestId, verdict: 'STOP', reason: result.haltReason },
-            });
-          } catch (dbErr: any) {
-            console.error(`[DEBUG] demo-plan-run: failed to update agent_run after halt — ${dbErr.message}`);
-          }
-        } else if (result.success) {
+        if (result.success) {
           console.log(`[DEBUG] demo-plan-run ${runId}: completed ${result.stepsCompleted}/${result.totalSteps} steps`);
           try {
             await storage.updateAgentRun(runId, {

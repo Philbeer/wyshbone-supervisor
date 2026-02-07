@@ -9,6 +9,8 @@ export interface PlanStep {
   label: string;
   description?: string;
   dependsOn?: string[];
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
 }
 
 export interface Plan {
@@ -18,6 +20,7 @@ export interface Plan {
   clientRequestId?: string;
   goal: string;
   steps: PlanStep[];
+  skipJudgement?: boolean;
   toolMetadata?: {
     toolName: string;
     toolArgs: Record<string, unknown>;
