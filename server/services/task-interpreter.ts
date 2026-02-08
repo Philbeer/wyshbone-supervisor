@@ -10,7 +10,7 @@
 import 'dotenv/config';
 import type { GeneratedTask } from '../autonomous-agent';
 import Anthropic from '@anthropic-ai/sdk';
-import { buildToolPromptSection, isToolEnabled } from '../supervisor/tool-registry';
+import { buildToolPromptSection, isToolEnabled, checkIntentGate } from '../supervisor/tool-registry';
 
 interface ToolCall {
   tool: string;
@@ -104,8 +104,23 @@ export async function interpretTask(task: GeneratedTask): Promise<ToolCall> {
     }
 
     if (!isToolEnabled(parsed.tool)) {
-      console.warn(`[TASK_INTERPRETER] Claude selected disabled tool ${parsed.tool} — falling back`);
+      console.warn(`[TASK_INTERPRETER] REJECTED tool=${parsed.tool} reason="tool is disabled" — replanning via fallback`);
       return fallbackInterpretation(task);
+    }
+
+    const queryStr = parsed.params.query || parsed.params.prompt || task.description;
+    const intentCheck = checkIntentGate(parsed.tool, queryStr);
+    if (!intentCheck.allowed) {
+      console.warn(`[TASK_INTERPRETER] REJECTED tool=${parsed.tool} reason="${intentCheck.reason}" — replanning to SEARCH_PLACES`);
+      return {
+        tool: 'SEARCH_PLACES',
+        params: {
+          query: queryStr,
+          location: parsed.params.location || 'UK',
+          maxResults: 20,
+          country: parsed.params.country || 'GB',
+        },
+      };
     }
 
     console.log(`[TASK_INTERPRETER] Mapped "${task.description}" → ${parsed.tool}`);
@@ -125,18 +140,35 @@ function extractLocation(text: string): string {
 }
 
 function guardToolCall(candidate: ToolCall): ToolCall {
-  if (isToolEnabled(candidate.tool)) return candidate;
+  if (!isToolEnabled(candidate.tool)) {
+    console.warn(`[TASK_INTERPRETER] REJECTED tool=${candidate.tool} reason="tool is disabled" — defaulting to SEARCH_PLACES`);
+    return {
+      tool: 'SEARCH_PLACES',
+      params: {
+        query: candidate.params.query || candidate.params.prompt || 'businesses',
+        location: candidate.params.location || 'UK',
+        maxResults: 30,
+        country: 'GB',
+      },
+    };
+  }
 
-  console.warn(`[TASK_INTERPRETER] Fallback picked disabled tool ${candidate.tool} — defaulting to SEARCH_PLACES`);
-  return {
-    tool: 'SEARCH_PLACES',
-    params: {
-      query: candidate.params.query || candidate.params.prompt || 'businesses',
-      location: candidate.params.location || 'UK',
-      maxResults: 30,
-      country: 'GB',
-    },
-  };
+  const queryStr = candidate.params.query || candidate.params.prompt || '';
+  const intentCheck = checkIntentGate(candidate.tool, queryStr);
+  if (!intentCheck.allowed) {
+    console.warn(`[TASK_INTERPRETER] REJECTED tool=${candidate.tool} reason="${intentCheck.reason}" — defaulting to SEARCH_PLACES`);
+    return {
+      tool: 'SEARCH_PLACES',
+      params: {
+        query: candidate.params.query || candidate.params.prompt || 'businesses',
+        location: candidate.params.location || 'UK',
+        maxResults: 30,
+        country: 'GB',
+      },
+    };
+  }
+
+  return candidate;
 }
 
 /**

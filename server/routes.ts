@@ -707,11 +707,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     // Debug endpoint - inspect tool registry state
     app.get("/api/debug/tool-registry", async (_req, res) => {
-      const { getAllTools, getEnabledTools, getDisabledTools } = await import('./supervisor/tool-registry');
+      const { getAllTools, getEnabledTools, getDisabledTools, isHospitalityQuery } = await import('./supervisor/tool-registry');
+      const wyshboneDbReady = (process.env.WYSHBONE_DB_READY || 'false').toLowerCase().trim();
       res.json({
         all: getAllTools(),
         enabled: getEnabledTools().map(t => t.id),
         disabled: getDisabledTools().map(t => t.id),
+        gating: {
+          WYSHBONE_DB_READY: wyshboneDbReady,
+          sampleIntentChecks: {
+            'pubs in London': isHospitalityQuery('pubs in London'),
+            'hat shops in London': isHospitalityQuery('hat shops in London'),
+            'pet shops in Kent': isHospitalityQuery('pet shops in Kent'),
+            'breweries in Manchester': isHospitalityQuery('breweries in Manchester'),
+          },
+        },
       });
     });
 

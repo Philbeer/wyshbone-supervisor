@@ -7,13 +7,14 @@
 
 import type { PlanStep } from './types/plan';
 import { searchPlaces } from './google-places';
-import { isToolEnabled, checkRoutingRules } from './tool-registry';
+import { isToolEnabled, checkRoutingRules, checkIntentGate } from './tool-registry';
 
 export interface ActionResult {
   success: boolean;
   summary: string;
   data?: Record<string, unknown>;
   error?: string;
+  replannedTool?: string;
 }
 
 export interface ActionInput {
@@ -27,23 +28,56 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
   
   console.log(`[ACTION_EXECUTOR] Executing ${toolName} with args:`, JSON.stringify(toolArgs).substring(0, 200));
 
+  const queryStr = String(toolArgs.query || toolArgs.prompt || '');
+
   if (!isToolEnabled(toolName)) {
-    console.warn(`[ACTION_EXECUTOR] Tool ${toolName} is disabled in tool-registry — refusing to execute`);
+    console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="tool is disabled in registry"`);
+
+    if (toolName === 'SEARCH_WYSHBONE_DB') {
+      console.log(`[ACTION_EXECUTOR] Auto-replanning: ${toolName} → SEARCH_PLACES`);
+      return executeAction({
+        toolName: 'SEARCH_PLACES',
+        toolArgs: {
+          query: queryStr || 'businesses',
+          location: (toolArgs.location as string) || 'UK',
+          country: (toolArgs.country as string) || 'GB',
+          maxResults: 20,
+        },
+        userId,
+      }).then(result => ({ ...result, replannedTool: 'SEARCH_PLACES' }));
+    }
+
     return {
       success: false,
-      summary: `Tool ${toolName} is disabled`,
-      error: `Tool ${toolName} is currently disabled in the tool registry`
+      summary: `Tool ${toolName} is disabled — DB not available; use Google Places instead`,
+      error: `Tool ${toolName} is currently disabled in the tool registry`,
     };
   }
 
-  const queryStr = String(toolArgs.query || toolArgs.prompt || '');
+  const intentGate = checkIntentGate(toolName, queryStr);
+  if (!intentGate.allowed) {
+    console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="${intentGate.reason}"`);
+
+    console.log(`[ACTION_EXECUTOR] Auto-replanning: ${toolName} → SEARCH_PLACES (intent gate failed)`);
+    return executeAction({
+      toolName: 'SEARCH_PLACES',
+      toolArgs: {
+        query: queryStr || 'businesses',
+        location: (toolArgs.location as string) || 'UK',
+        country: (toolArgs.country as string) || 'GB',
+        maxResults: 20,
+      },
+      userId,
+    }).then(result => ({ ...result, replannedTool: 'SEARCH_PLACES' }));
+  }
+
   const routing = checkRoutingRules(toolName, queryStr);
   if (!routing.allowed) {
-    console.warn(`[ACTION_EXECUTOR] Tool ${toolName} blocked by routing rule: ${routing.reason}`);
+    console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="${routing.reason}"`);
     return {
       success: false,
       summary: `Tool ${toolName} blocked: ${routing.reason}`,
-      error: routing.reason
+      error: routing.reason,
     };
   }
 

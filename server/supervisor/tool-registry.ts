@@ -9,6 +9,14 @@
  *  - paramsSchema: JSON-schema-style description of accepted parameters
  *  - category:    rough grouping (search | enrich | score | evaluate)
  *  - routingRules: optional constraints (e.g. "only for pub queries")
+ *
+ * Hard-gating for SEARCH_WYSHBONE_DB:
+ *   1. Env flag:  WYSHBONE_DB_READY (default "false"). When false the tool is
+ *      force-disabled at boot and hidden from planning prompts.
+ *   2. Intent gate: even when enabled, the tool is only allowed for queries whose
+ *      intent is pubs / bars / breweries / hospitality.
+ *   3. Execution guard: if the planner still picks it despite both gates, the
+ *      action-executor rejects the call and replans via SEARCH_PLACES.
  */
 
 export interface ToolParamSchema {
@@ -35,6 +43,18 @@ export interface ToolDefinition {
   routingRules?: ToolRoutingRule[];
 }
 
+const HOSPITALITY_KEYWORDS = [
+  'pub', 'pubs', 'bar', 'bars', 'brewery', 'breweries',
+  'tavern', 'taverns', 'inn', 'inns', 'landlord', 'landlords',
+  'hospitality', 'ale', 'ales', 'beer garden', 'taproom',
+  'gastropub', 'freehouse', 'free house', 'public house',
+];
+
+function isWyshboneDbReady(): boolean {
+  const flag = (process.env.WYSHBONE_DB_READY || 'false').toLowerCase().trim();
+  return flag === 'true' || flag === '1' || flag === 'yes';
+}
+
 const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     id: 'SEARCH_PLACES',
@@ -52,7 +72,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     id: 'SEARCH_WYSHBONE_DB',
     label: 'Wyshbone Internal Database Search',
-    description: 'Search the Wyshbone internal leads database. Only useful for pub/bar/brewery queries when the DB is populated.',
+    description: 'Search the Wyshbone internal leads database. ONLY for pub/bar/brewery/hospitality queries when DB is populated.',
     enabled: false,
     category: 'search',
     paramsSchema: {
@@ -64,8 +84,8 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
       {
         field: 'query',
         operator: 'contains',
-        value: 'pub|bar|brewery|tavern|inn|landlord',
-        reason: 'SEARCH_WYSHBONE_DB is only suitable for pub/bar/brewery queries',
+        value: HOSPITALITY_KEYWORDS.join('|'),
+        reason: 'SEARCH_WYSHBONE_DB is only suitable for pub/bar/brewery/hospitality queries',
       },
     ],
   },
@@ -115,6 +135,21 @@ for (const tool of TOOL_DEFINITIONS) {
   registry.set(tool.id, tool);
 }
 
+applyEnvOverrides();
+
+function applyEnvOverrides(): void {
+  const dbTool = registry.get('SEARCH_WYSHBONE_DB');
+  if (!dbTool) return;
+
+  if (!isWyshboneDbReady()) {
+    dbTool.enabled = false;
+    console.log('[TOOL_REGISTRY] WYSHBONE_DB_READY is false — SEARCH_WYSHBONE_DB force-disabled');
+  } else {
+    dbTool.enabled = true;
+    console.log('[TOOL_REGISTRY] WYSHBONE_DB_READY is true — SEARCH_WYSHBONE_DB enabled (intent gating still applies)');
+  }
+}
+
 export function getToolDefinition(toolId: string): ToolDefinition | undefined {
   return registry.get(toolId);
 }
@@ -143,10 +178,39 @@ export function setToolEnabled(toolId: string, enabled: boolean): boolean {
   return true;
 }
 
+export function isHospitalityQuery(query: string): boolean {
+  const lower = query.toLowerCase();
+  return HOSPITALITY_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+export function checkIntentGate(toolId: string, query: string): { allowed: boolean; reason?: string } {
+  if (toolId !== 'SEARCH_WYSHBONE_DB') return { allowed: true };
+
+  if (!isWyshboneDbReady()) {
+    return {
+      allowed: false,
+      reason: 'SEARCH_WYSHBONE_DB rejected: WYSHBONE_DB_READY env flag is false — DB not available; use Google Places instead',
+    };
+  }
+
+  if (!isHospitalityQuery(query)) {
+    return {
+      allowed: false,
+      reason: `SEARCH_WYSHBONE_DB rejected: query "${query.substring(0, 60)}" is not a pub/bar/brewery/hospitality query — use Google Places instead`,
+    };
+  }
+
+  return { allowed: true };
+}
+
 export function checkRoutingRules(toolId: string, query: string): { allowed: boolean; reason?: string } {
   const tool = registry.get(toolId);
   if (!tool) return { allowed: false, reason: `Tool ${toolId} not found in registry` };
   if (!tool.enabled) return { allowed: false, reason: `Tool ${toolId} is disabled` };
+
+  const intentCheck = checkIntentGate(toolId, query);
+  if (!intentCheck.allowed) return intentCheck;
+
   if (!tool.routingRules || tool.routingRules.length === 0) return { allowed: true };
 
   for (const rule of tool.routingRules) {
@@ -211,16 +275,17 @@ export function buildToolPromptSection(): string {
 
   const disabled = getDisabledTools();
   if (disabled.length > 0) {
-    lines.push('DISABLED TOOLS (do NOT select these):');
+    lines.push('DISABLED TOOLS (do NOT select these — calls will be REJECTED):');
     disabled.forEach(tool => {
-      lines.push(`- ${tool.id} — ${tool.description} [DISABLED]`);
+      lines.push(`- ${tool.id} — ${tool.description} [DISABLED — NEVER SELECT]`);
     });
     lines.push('');
   }
 
-  lines.push('ROUTING RULES:');
-  lines.push('- Non-pub/bar/brewery queries MUST NOT use SEARCH_WYSHBONE_DB.');
-  lines.push('- If SEARCH_WYSHBONE_DB is disabled, always use SEARCH_PLACES for business discovery.');
+  lines.push('HARD RULES:');
+  lines.push('- SEARCH_WYSHBONE_DB is ONLY for pub/bar/brewery/hospitality queries. Hat shops, pet shops, restaurants, retail — NEVER use SEARCH_WYSHBONE_DB.');
+  lines.push('- If SEARCH_WYSHBONE_DB is listed as DISABLED, selecting it will cause IMMEDIATE REJECTION.');
+  lines.push('- For ALL non-hospitality business discovery, use SEARCH_PLACES.');
   lines.push('');
 
   return lines.join('\n');
