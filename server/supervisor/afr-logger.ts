@@ -186,6 +186,34 @@ export async function logPlanFailed(
   });
 }
 
+export async function logToolsUpdate(
+  userId: string,
+  planId: string,
+  toolsUsed: string[],
+  toolsRejected: { tool: string; reason: string }[],
+  replans: { from_tool: string; to_tool: string; reason: string }[],
+  stepIndex: number,
+  conversationId?: string,
+  clientRequestId?: string
+): Promise<void> {
+  await logAFREvent({
+    userId,
+    runId: planId,
+    conversationId,
+    clientRequestId,
+    actionTaken: 'tools_update',
+    status: 'success',
+    taskGenerated: `Tools so far: ${toolsUsed.join(', ') || 'none'}${toolsRejected.length > 0 ? ` | Rejected: ${toolsRejected.map(r => r.tool).join(', ')}` : ''}`,
+    runType: 'plan',
+    metadata: {
+      tools_used: toolsUsed,
+      tools_rejected: toolsRejected,
+      replans,
+      after_step_index: stepIndex,
+    },
+  });
+}
+
 export async function logTowerEvaluationCompleted(
   userId: string,
   planId: string,

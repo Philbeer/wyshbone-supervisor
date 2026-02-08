@@ -1847,6 +1847,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               else if (actionTaken === "tower_evaluation_completed") eventType = "tower_evaluation";
               else if (actionTaken === "tower_decision_stop") eventType = "tower_decision";
               else if (actionTaken === "tower_decision_change_plan") eventType = "tower_decision";
+              else if (actionTaken === "tools_update") eventType = "tools_update";
 
               const payload = {
                 id: row.id,

@@ -15,7 +15,8 @@ import {
   logStepCompleted,
   logStepFailed,
   logPlanCompleted,
-  logPlanFailed
+  logPlanFailed,
+  logToolsUpdate
 } from './afr-logger';
 import {
   LEADGEN_SUCCESS_DEFAULTS,
@@ -358,6 +359,19 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         }
 
         accumulateLeads(step, result.data, leadsMap, leadsFilters);
+
+        try {
+          await logToolsUpdate(
+            userId, planId,
+            [...toolTracker.tools_used],
+            [...toolTracker.tools_rejected],
+            [...toolTracker.replans],
+            i,
+            conversationId, clientRequestId,
+          );
+        } catch (tuErr: any) {
+          console.warn(`[PLAN_EXECUTOR] tools_update event failed (continuing): ${tuErr.message}`);
+        }
 
       } catch (stepError: any) {
         const errorMessage = stepError.message || 'Step execution threw an exception';
