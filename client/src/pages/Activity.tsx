@@ -42,15 +42,12 @@ export default function Activity() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const connectStream = useCallback((filterRunId?: string) => {
+  const connectStream = useCallback((filterRunId: string) => {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
 
-    const url = filterRunId
-      ? `/api/afr/stream?run_id=${encodeURIComponent(filterRunId)}`
-      : "/api/afr/stream";
-
+    const url = `/api/afr/stream?run_id=${encodeURIComponent(filterRunId)}`;
     const es = new EventSource(url);
     eventSourceRef.current = es;
 
@@ -61,6 +58,7 @@ export default function Activity() {
     const handleEvent = (e: MessageEvent) => {
       try {
         const parsed: ActivityEvent = JSON.parse(e.data);
+        if (parsed.runId !== filterRunId) return;
         setEvents(prev => [...prev, parsed]);
       } catch {}
     };
@@ -73,6 +71,9 @@ export default function Activity() {
       "step_completed",
       "step_failed",
       "activity",
+      "tools_update",
+      "tower_evaluation",
+      "tower_decision",
     ];
     eventTypes.forEach(t => es.addEventListener(t, handleEvent));
 
@@ -82,11 +83,10 @@ export default function Activity() {
   }, []);
 
   useEffect(() => {
-    connectStream();
     return () => {
       eventSourceRef.current?.close();
     };
-  }, [connectStream]);
+  }, []);
 
   useEffect(() => {
     if (scrollRef.current) {

@@ -1800,6 +1800,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
+    const runId = req.query.run_id as string | undefined;
+
+    if (!runId) {
+      res.status(400).json({ error: "run_id query parameter is required" });
+      return;
+    }
+
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -1808,7 +1815,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
     res.flushHeaders();
 
-    const runId = req.query.run_id as string | undefined;
     let lastTimestamp = 0;
     let alive = true;
 
@@ -1817,24 +1823,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const poll = async () => {
       while (alive) {
         try {
-          let query = supabase
+          const { data, error } = await supabase
             .from("agent_activities")
             .select("id, user_id, action_taken, status, task_generated, run_id, metadata, timestamp, error_message")
+            .eq("run_id", runId)
             .gt("timestamp", lastTimestamp)
             .order("timestamp", { ascending: true })
             .limit(50);
-
-          if (runId) {
-            query = query.eq("run_id", runId);
-          }
-
-          const { data, error } = await query;
 
           if (error) {
             console.error("[AFR_STREAM] query error:", error.message);
           } else if (data && data.length > 0) {
             for (const row of data) {
               if (!alive) break;
+
+              if (row.run_id !== runId) continue;
 
               const actionTaken = row.action_taken || "";
               let eventType = "activity";
