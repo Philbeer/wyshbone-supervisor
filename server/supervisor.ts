@@ -4,7 +4,7 @@ import { emailService } from './notifications/email-service';
 import type { SupervisorTask, SupervisorMessage, TaskResult } from './types/supervisor-chat';
 import { randomUUID } from 'crypto';
 import { monitorGoalsOnce, publishGoalMonitorEvents } from './goal-monitoring';
-import { logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './supervisor/afr-logger';
+import { logMissionReceived, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './supervisor/afr-logger';
 
 interface UserContext {
   userId: string;
@@ -252,8 +252,14 @@ class SupervisorService {
 
   private async processChatTask(task: SupervisorTask) {
     if (!supabase) return;
+
+    const chatRunId = `chat_${task.id}`;
     
     console.log(`💬 Processing chat task ${task.id} (${task.task_type})...`);
+
+    logMissionReceived(
+      task.user_id, chatRunId, task.id, task.task_type, task.conversation_id
+    ).catch(() => {});
 
     // Mark as processing - with concurrency guard
     const { data: updateResult, error: updateError } = await supabase

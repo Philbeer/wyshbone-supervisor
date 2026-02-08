@@ -468,6 +468,98 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // EXISTING ENDPOINTS
   // ========================================
 
+  app.post("/api/debug/simulate-chat-task", async (req, res) => {
+    const { logMissionReceived, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } = await import('./supervisor/afr-logger');
+    const { randomUUID } = await import('crypto');
+
+    const goalText = (req.body?.goal as string) || 'find pet shops kent';
+    const userId = getUserId(req);
+    const taskId = randomUUID();
+    const conversationId = `sim_conv_${taskId.substring(0, 8)}`;
+    const chatRunId = `chat_${taskId}`;
+
+    const locationMatch = goalText.match(/\s+in\s+(.+)$/i);
+    const city = locationMatch ? locationMatch[1].trim() : 'Kent';
+    const businessType = goalText.replace(/^find\s+/i, '').replace(/\s+in\s+.+$/i, '').trim() || 'pet shops';
+    const country = 'UK';
+
+    console.log(`[DEBUG] simulate-chat-task: goal="${goalText}", runId=${chatRunId}, taskId=${taskId}`);
+
+    try {
+      await logMissionReceived(userId, chatRunId, taskId, 'find_prospects', conversationId);
+
+      await logRouterDecision(
+        userId, chatRunId, 'SEARCH_PLACES',
+        `Chat lead generation: searching "${businessType}" in ${city} via Google Places`,
+        conversationId
+      );
+
+      await logToolCallStarted(
+        userId, chatRunId, 'SEARCH_PLACES',
+        { query: businessType, location: city, country },
+        conversationId
+      );
+
+      const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+      let placesCount = 0;
+      let placesNames: string[] = [];
+
+      if (apiKey) {
+        try {
+          const url = 'https://places.googleapis.com/v1/places:searchText';
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Goog-Api-Key': apiKey,
+              'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress'
+            },
+            body: JSON.stringify({ textQuery: `${businessType} in ${city} ${country}`, maxResultCount: 3 })
+          });
+          if (response.ok) {
+            const data = await response.json();
+            const places = data.places || [];
+            placesCount = places.length;
+            placesNames = places.map((p: any) => p.displayName?.text || 'Unknown');
+          }
+        } catch (e: any) {
+          console.log(`[DEBUG] simulate-chat-task: Google Places call failed — ${e.message}`);
+        }
+      }
+
+      if (placesCount > 0) {
+        await logToolCallCompleted(
+          userId, chatRunId, 'SEARCH_PLACES',
+          { summary: `Found ${placesCount} places for "${businessType}" in ${city}`, places_count: placesCount, places: placesNames },
+          conversationId
+        );
+      } else {
+        await logToolCallCompleted(
+          userId, chatRunId, 'SEARCH_PLACES',
+          { summary: `No API key or no results for "${businessType}" in ${city}`, places_count: 0 },
+          conversationId
+        );
+      }
+
+      res.json({
+        ok: true,
+        chatRunId,
+        taskId,
+        conversationId,
+        goal: goalText,
+        businessType,
+        location: `${city}, ${country}`,
+        placesFound: placesCount,
+        placesNames,
+        afrEvents: ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed'],
+      });
+    } catch (error: any) {
+      console.error(`[DEBUG] simulate-chat-task: error — ${error.message}`);
+      await logToolCallFailed(userId, chatRunId, 'SEARCH_PLACES', error.message, conversationId).catch(() => {});
+      res.status(500).json({ ok: false, error: error.message, chatRunId });
+    }
+  });
+
   // Test endpoint - create supervisor chat task
   app.post("/api/test/supervisor-task", async (req, res) => {
     const { userId, conversationId, taskType, searchQuery } = req.body;
@@ -1866,6 +1958,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               else if (actionTaken === "tool_call_completed") eventType = "tool_call_completed";
               else if (actionTaken === "tool_call_failed") eventType = "tool_call_failed";
               else if (actionTaken === "router_decision") eventType = "router_decision";
+              else if (actionTaken === "mission_received") eventType = "mission_received";
               else if (actionTaken === "artefact_created") eventType = "artefact_created";
 
               const payload = {

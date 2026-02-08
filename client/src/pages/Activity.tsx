@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { EmptyState } from "@/components/EmptyState";
-import { Play, Radio, CheckCircle, AlertTriangle, Clock, Loader2 } from "lucide-react";
+import { Play, Radio, CheckCircle, AlertTriangle, Clock, Loader2, Inbox } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 
 interface ActivityEvent {
@@ -27,6 +27,7 @@ function eventIcon(eventType: string, status: string) {
   if (eventType === "step_completed") return <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />;
   if (eventType === "tool_call_started") return <Loader2 className="h-4 w-4 animate-spin text-primary" />;
   if (eventType === "tool_call_completed") return <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />;
+  if (eventType === "mission_received") return <Inbox className="h-4 w-4 text-primary" />;
   if (eventType === "router_decision") return <Radio className="h-4 w-4 text-primary" />;
   if (eventType === "artefact_created") return <CheckCircle className="h-4 w-4 text-primary" />;
   return <Clock className="h-4 w-4 text-muted-foreground" />;
@@ -68,6 +69,7 @@ export default function Activity() {
     };
 
     const eventTypes = [
+      "mission_received",
       "plan_started",
       "plan_completed",
       "plan_failed",

@@ -362,6 +362,30 @@ export async function logToolCallFailed(
   });
 }
 
+export async function logMissionReceived(
+  userId: string,
+  runId: string,
+  taskId: string,
+  taskType: string,
+  conversationId?: string,
+): Promise<void> {
+  await logAFREvent({
+    userId,
+    runId,
+    conversationId,
+    actionTaken: 'mission_received',
+    status: 'pending',
+    taskGenerated: `Mission received: ${taskType} (task ${taskId})`,
+    runType: 'plan',
+    metadata: {
+      source: 'supervisor_tasks_poll',
+      task_id: taskId,
+      task_type: taskType,
+      conversation_id: conversationId || null,
+    },
+  });
+}
+
 export async function logRouterDecision(
   userId: string,
   runId: string,
