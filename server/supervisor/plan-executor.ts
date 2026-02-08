@@ -8,7 +8,7 @@
  */
 
 import type { Plan } from './types/plan';
-import { executeStep } from './action-executor';
+import { executeStep, createRunToolTracker } from './action-executor';
 import {
   logPlanStarted,
   logStepStarted,
@@ -218,6 +218,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   let stepsCompleted = 0;
   const leadsMap = new Map<string, Record<string, unknown>>();
   const leadsFilters: Record<string, string> = {};
+  const toolTracker = createRunToolTracker();
 
   const missionType = 'leadgen';
   const successCriteria: TowerSuccessCriteria = { ...LEADGEN_SUCCESS_DEFAULTS };
@@ -233,7 +234,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       updateStepStatus(planId, step.id, 'running');
       
       try {
-        const result = await executeStep(step, toolMetadata, userId);
+        const result = await executeStep(step, toolMetadata, userId, toolTracker);
         
         if (!result.success) {
           console.error(`[PLAN_EXECUTOR] Step ${step.id} failed:`, result.error);
@@ -471,6 +472,9 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             failuresCount: runSummary.failures_count,
           },
           steps: stepSummaries,
+          tools_used: toolTracker.tools_used,
+          tools_rejected: toolTracker.tools_rejected,
+          replans: toolTracker.replans,
         },
         userId,
         conversationId,

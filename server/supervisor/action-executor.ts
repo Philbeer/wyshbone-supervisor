@@ -9,6 +9,44 @@ import type { PlanStep } from './types/plan';
 import { searchPlaces } from './google-places';
 import { isToolEnabled, checkRoutingRules, checkIntentGate } from './tool-registry';
 
+export interface ToolRejection {
+  tool: string;
+  reason: string;
+}
+
+export interface ToolReplan {
+  from_tool: string;
+  to_tool: string;
+  reason: string;
+}
+
+export interface RunToolTracker {
+  tools_used: string[];
+  tools_rejected: ToolRejection[];
+  replans: ToolReplan[];
+}
+
+export function createRunToolTracker(): RunToolTracker {
+  return { tools_used: [], tools_rejected: [], replans: [] };
+}
+
+function recordUsed(tracker: RunToolTracker | undefined, tool: string): void {
+  if (!tracker) return;
+  if (!tracker.tools_used.includes(tool)) {
+    tracker.tools_used.push(tool);
+  }
+}
+
+function recordRejection(tracker: RunToolTracker | undefined, tool: string, reason: string): void {
+  if (!tracker) return;
+  tracker.tools_rejected.push({ tool, reason });
+}
+
+function recordReplan(tracker: RunToolTracker | undefined, from: string, to: string, reason: string): void {
+  if (!tracker) return;
+  tracker.replans.push({ from_tool: from, to_tool: to, reason });
+}
+
 export interface ActionResult {
   success: boolean;
   summary: string;
@@ -21,20 +59,24 @@ export interface ActionInput {
   toolName: string;
   toolArgs: Record<string, unknown>;
   userId: string;
+  tracker?: RunToolTracker;
 }
 
 export async function executeAction(input: ActionInput): Promise<ActionResult> {
-  const { toolName, toolArgs, userId } = input;
+  const { toolName, toolArgs, userId, tracker } = input;
   
   console.log(`[ACTION_EXECUTOR] Executing ${toolName} with args:`, JSON.stringify(toolArgs).substring(0, 200));
 
   const queryStr = String(toolArgs.query || toolArgs.prompt || '');
 
   if (!isToolEnabled(toolName)) {
-    console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="tool is disabled in registry"`);
+    const reason = 'tool is disabled in registry';
+    console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="${reason}"`);
+    recordRejection(tracker, toolName, reason);
 
     if (toolName === 'SEARCH_WYSHBONE_DB') {
       console.log(`[ACTION_EXECUTOR] Auto-replanning: ${toolName} → SEARCH_PLACES`);
+      recordReplan(tracker, toolName, 'SEARCH_PLACES', reason);
       return executeAction({
         toolName: 'SEARCH_PLACES',
         toolArgs: {
@@ -44,6 +86,7 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
           maxResults: 20,
         },
         userId,
+        tracker,
       }).then(result => ({ ...result, replannedTool: 'SEARCH_PLACES' }));
     }
 
@@ -56,9 +99,12 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
 
   const intentGate = checkIntentGate(toolName, queryStr);
   if (!intentGate.allowed) {
-    console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="${intentGate.reason}"`);
+    const reason = intentGate.reason || 'intent gate failed';
+    console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="${reason}"`);
+    recordRejection(tracker, toolName, reason);
 
     console.log(`[ACTION_EXECUTOR] Auto-replanning: ${toolName} → SEARCH_PLACES (intent gate failed)`);
+    recordReplan(tracker, toolName, 'SEARCH_PLACES', reason);
     return executeAction({
       toolName: 'SEARCH_PLACES',
       toolArgs: {
@@ -68,18 +114,23 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
         maxResults: 20,
       },
       userId,
+      tracker,
     }).then(result => ({ ...result, replannedTool: 'SEARCH_PLACES' }));
   }
 
   const routing = checkRoutingRules(toolName, queryStr);
   if (!routing.allowed) {
-    console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="${routing.reason}"`);
+    const reason = routing.reason || 'routing rule failed';
+    console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="${reason}"`);
+    recordRejection(tracker, toolName, reason);
     return {
       success: false,
       summary: `Tool ${toolName} blocked: ${routing.reason}`,
       error: routing.reason,
     };
   }
+
+  recordUsed(tracker, toolName);
 
   try {
     switch (toolName) {
@@ -260,7 +311,8 @@ async function executeEvaluateResults(
 export async function executeStep(
   step: PlanStep,
   toolMetadata: { toolName: string; toolArgs: Record<string, unknown> } | undefined,
-  userId: string
+  userId: string,
+  tracker?: RunToolTracker
 ): Promise<ActionResult> {
   const toolName = step.toolName || toolMetadata?.toolName;
   const toolArgs = step.toolArgs || toolMetadata?.toolArgs;
@@ -276,6 +328,7 @@ export async function executeStep(
   return executeAction({
     toolName,
     toolArgs,
-    userId
+    userId,
+    tracker,
   });
 }
