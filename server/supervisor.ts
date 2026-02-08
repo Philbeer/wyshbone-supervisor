@@ -4,6 +4,7 @@ import { emailService } from './notifications/email-service';
 import type { SupervisorTask, SupervisorMessage, TaskResult } from './types/supervisor-chat';
 import { randomUUID } from 'crypto';
 import { monitorGoalsOnce, publishGoalMonitorEvents } from './goal-monitoring';
+import { logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './supervisor/afr-logger';
 
 interface UserContext {
   userId: string;
@@ -379,18 +380,44 @@ class SupervisorService {
     const city = location.split(',')[0].trim();
     const country = location.split(',')[1]?.trim() || 'UK';
 
+    const chatRunId = `chat_${task.id}`;
+    const conversationId = task.conversation_id;
+
     console.log(`🔍 Chat request: ${businessType} in ${city}, ${country}`);
 
+    logRouterDecision(
+      task.user_id, chatRunId, 'SEARCH_PLACES',
+      `Chat lead generation: searching "${businessType}" in ${city} via Google Places`,
+      conversationId
+    ).catch(() => {});
+
     try {
+      logToolCallStarted(
+        task.user_id, chatRunId, 'SEARCH_PLACES',
+        { query: businessType, location: city, country },
+        conversationId
+      ).catch(() => {});
+
       // Search for businesses
       const businesses = await this.searchGooglePlaces(businessType, city, country);
 
       if (!businesses || businesses.length === 0) {
+        logToolCallCompleted(
+          task.user_id, chatRunId, 'SEARCH_PLACES',
+          { summary: `No results for "${businessType}" in ${city}`, places_count: 0 },
+          conversationId
+        ).catch(() => {});
         return {
           response: `I searched for ${businessType} businesses in ${city}, but didn't find any results. Would you like to try a different location or business type?`,
           leadIds: []
         };
       }
+
+      logToolCallCompleted(
+        task.user_id, chatRunId, 'SEARCH_PLACES',
+        { summary: `Found ${businesses.length} places for "${businessType}" in ${city}`, places_count: businesses.length },
+        conversationId
+      ).catch(() => {});
 
       // Generate leads for top 3 businesses
       const leadsToCreate = businesses.slice(0, 3);
@@ -467,6 +494,11 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       };
     } catch (error) {
       console.error('Error generating leads for chat:', error);
+      logToolCallFailed(
+        task.user_id, chatRunId, 'SEARCH_PLACES',
+        error instanceof Error ? error.message : String(error),
+        conversationId
+      ).catch(() => {});
       return {
         response: `I encountered an issue while searching for ${businessType} in ${city}. Let me try again in a moment!`,
         leadIds: []
@@ -557,16 +589,37 @@ Would you like me to find leads based on any of these insights?`;
     // Build comprehensive user context
     const userContext = await this.buildUserContext(signal.user_id);
 
+    const signalRunId = `signal_${signal.id || Date.now()}`;
+
     console.log(`🔍 Searching for ${industry} businesses in ${city}, ${country}...`);
 
+    logRouterDecision(
+      signal.user_id, signalRunId, 'SEARCH_PLACES',
+      `Signal-triggered search: "${industry}" in ${city} via Google Places`
+    ).catch(() => {});
+
     try {
+      logToolCallStarted(
+        signal.user_id, signalRunId, 'SEARCH_PLACES',
+        { query: industry, location: city, country }
+      ).catch(() => {});
+
       // Search for businesses using Google Places API
       const businesses = await this.searchGooglePlaces(industry, city, country);
       
       if (!businesses || businesses.length === 0) {
         console.log(`⚠️  No businesses found for ${industry} in ${city}`);
+        logToolCallCompleted(
+          signal.user_id, signalRunId, 'SEARCH_PLACES',
+          { summary: `No results for "${industry}" in ${city}`, places_count: 0 }
+        ).catch(() => {});
         return;
       }
+
+      logToolCallCompleted(
+        signal.user_id, signalRunId, 'SEARCH_PLACES',
+        { summary: `Found ${businesses.length} places for "${industry}" in ${city}`, places_count: businesses.length }
+      ).catch(() => {});
 
       // Generate one lead from the first result
       const business = businesses[0];
@@ -615,6 +668,10 @@ Would you like me to find leads based on any of these insights?`;
       await this.notifyLeadCreated(createdLead);
     } catch (error) {
       console.error(`Failed to generate lead from Google Places:`, error);
+      logToolCallFailed(
+        signal.user_id, signalRunId, 'SEARCH_PLACES',
+        error instanceof Error ? error.message : String(error)
+      ).catch(() => {});
       throw error;
     }
   }

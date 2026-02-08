@@ -14,6 +14,7 @@ import { getWeightsForUser } from './wabs-feedback';
 import { scoreResult } from './wabs-scorer';
 import { sendInterestingResultEmail, getUserEmail } from './email-notifier';
 import { interpretTask } from './task-interpreter';
+import { logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } from '../supervisor/afr-logger';
 import pg from 'pg';
 
 const { Pool } = pg;
@@ -126,6 +127,17 @@ export async function executeTask(
     // Store tool call in result for activity logging
     result.toolCall = toolCall;
 
+    const canonicalTool = (toolCall.tool || 'UNKNOWN').toUpperCase();
+    logRouterDecision(
+      userId, taskId, canonicalTool,
+      `Autonomous agent: executing "${task.title}" via ${canonicalTool}`
+    ).catch(() => {});
+
+    logToolCallStarted(
+      userId, taskId, canonicalTool,
+      { query: toolCall.params.query, location: toolCall.params.location, tool_endpoint: true }
+    ).catch(() => {});
+
     // Call unified tool endpoint with interpreted tool call
     const toolResponse = await callToolEndpoint({
       tool: toolCall.tool,
@@ -142,6 +154,10 @@ export async function executeTask(
 
     if (toolResponse.success) {
       result.status = 'success';
+      logToolCallCompleted(
+        userId, taskId, canonicalTool,
+        { summary: `Task completed in ${result.executionTime}ms`, success: true }
+      ).catch(() => {});
 
       // Evaluate if results are interesting using WABS scoring (P3-T1)
       const evaluation = await evaluateResults(task, toolResponse.data, userId);
@@ -188,6 +204,10 @@ export async function executeTask(
       result.status = 'failed';
       result.error = toolResponse.error || 'Unknown error';
       console.error(`[TASK_EXECUTOR] ❌ Task failed: ${result.error}`);
+      logToolCallFailed(
+        userId, taskId, canonicalTool,
+        result.error
+      ).catch(() => {});
     }
 
   } catch (error: any) {
@@ -195,6 +215,10 @@ export async function executeTask(
     result.status = 'failed';
     result.error = error.message || 'Unexpected error during execution';
     console.error(`[TASK_EXECUTOR] ❌ Exception during execution:`, error.message);
+    logToolCallFailed(
+      userId, taskId, result.toolCall?.tool || 'UNKNOWN',
+      result.error || 'Unknown error'
+    ).catch(() => {});
   }
 
   // Log activity to database
