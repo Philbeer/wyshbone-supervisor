@@ -180,6 +180,18 @@ app.use((req, res, next) => {
     host,
   }, () => {
     log(`serving on http://${host}:${port}`);
+
+    // Startup verification: confirm tools-schema alias state
+    import('fs').then(({ readFileSync }) => {
+      try {
+        const schema = JSON.parse(readFileSync('./server/services/tools-schema.json', 'utf-8'));
+        const allAliases: string[] = (schema.tools || []).flatMap((t: any) => t.aliases || []);
+        const hasLegacyAlias = allAliases.includes('search_wyshbone_database');
+        console.log(`[STARTUP_VERIFY] build_ts=${new Date().toISOString()} legacy_alias_present=${hasLegacyAlias} aliases=${JSON.stringify(allAliases)}`);
+      } catch (e: any) {
+        console.log(`[STARTUP_VERIFY] build_ts=${new Date().toISOString()} alias_check_error=${e.message}`);
+      }
+    });
     
     // Start the supervisor service
     supervisor.start().catch(error => {
