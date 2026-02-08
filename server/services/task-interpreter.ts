@@ -10,6 +10,7 @@
 import 'dotenv/config';
 import type { GeneratedTask } from '../autonomous-agent';
 import Anthropic from '@anthropic-ai/sdk';
+import { buildToolPromptSection, isToolEnabled } from '../supervisor/tool-registry';
 
 interface ToolCall {
   tool: string;
@@ -25,27 +26,11 @@ const anthropic = new Anthropic({
  * Includes available tools and task context
  */
 function buildPrompt(task: GeneratedTask): string {
+  const toolSection = buildToolPromptSection();
+
   return `You are a task interpreter. Convert the following natural language task into a structured tool call.
 
-AVAILABLE TOOLS:
-1. SEARCH_PLACES - Search for businesses using Google Places API
-   Required: query (string)
-   Optional: location (string), maxResults (number), country (string, default: "GB")
-
-2. DEEP_RESEARCH - Start background research job with AI analysis
-   Required: prompt (string)
-   Optional: label (string), mode (string, default: "report"), counties (string), windowMonths (number)
-
-3. BATCH_CONTACT_FINDER - Find and enrich contacts for businesses
-   Required: query (string), location (string)
-   Optional: country (string, default: "GB"), targetRole (string, default: "General Manager"), limit (number, default: 30)
-
-4. DRAFT_EMAIL - Generate draft email content for outreach
-   Optional: to_role (string, default: "General Manager"), purpose (string, default: "intro"), product (string, default: "your product")
-
-5. GET_NUDGES - Get AI-generated suggestions and nudges
-   Optional: limit (number, default: 10)
-
+${toolSection}
 TASK TO INTERPRET:
 Title: ${task.title}
 Description: ${task.description}
@@ -53,9 +38,10 @@ Priority: ${task.priority}
 ${task.reasoning ? `Reasoning: ${task.reasoning}` : ''}
 
 INSTRUCTIONS:
-1. Analyze the task description and determine which tool best fits the intent
-2. Extract relevant parameters from the description
-3. Respond with ONLY valid JSON in this exact format (no markdown, no explanation):
+1. Analyze the task description and determine which ENABLED tool best fits the intent
+2. NEVER select a DISABLED tool — if you do, the system will reject the call
+3. Extract relevant parameters from the description
+4. Respond with ONLY valid JSON in this exact format (no markdown, no explanation):
 {
   "tool": "tool_name",
   "params": {
@@ -113,12 +99,16 @@ export async function interpretTask(task: GeneratedTask): Promise<ToolCall> {
     const cleaned = cleanResponse(response);
     const parsed = JSON.parse(cleaned);
 
-    // Validate response structure
     if (!parsed.tool || !parsed.params) {
       throw new Error('Invalid response format from Claude API');
     }
 
-    console.log(`[TASK_INTERPRETER] ✅ Mapped "${task.description}" → ${parsed.tool}`);
+    if (!isToolEnabled(parsed.tool)) {
+      console.warn(`[TASK_INTERPRETER] Claude selected disabled tool ${parsed.tool} — falling back`);
+      return fallbackInterpretation(task);
+    }
+
+    console.log(`[TASK_INTERPRETER] Mapped "${task.description}" → ${parsed.tool}`);
     console.log(`[TASK_INTERPRETER]    Params: ${JSON.stringify(parsed.params)}`);
 
     return parsed as ToolCall;
@@ -129,106 +119,72 @@ export async function interpretTask(task: GeneratedTask): Promise<ToolCall> {
   }
 }
 
+function extractLocation(text: string): string {
+  const locationMatch = text.match(/in\s+([A-Z][a-zA-Z\s,]+?)(?:\s|$|,)/);
+  return locationMatch ? locationMatch[1].trim() : 'UK';
+}
+
+function guardToolCall(candidate: ToolCall): ToolCall {
+  if (isToolEnabled(candidate.tool)) return candidate;
+
+  console.warn(`[TASK_INTERPRETER] Fallback picked disabled tool ${candidate.tool} — defaulting to SEARCH_PLACES`);
+  return {
+    tool: 'SEARCH_PLACES',
+    params: {
+      query: candidate.params.query || candidate.params.prompt || 'businesses',
+      location: candidate.params.location || 'UK',
+      maxResults: 30,
+      country: 'GB',
+    },
+  };
+}
+
 /**
  * Fallback: keyword-based tool selection
- * Used when Claude API fails or returns invalid response
+ * Used when Claude API fails or returns invalid response.
+ * Every candidate is validated against the tool registry before returning.
  */
 export function fallbackInterpretation(task: GeneratedTask): ToolCall {
   const desc = task.description.toLowerCase();
   const title = task.title.toLowerCase();
   const combined = `${title} ${desc}`;
 
-  console.log(`[TASK_INTERPRETER] 🔍 Fallback interpretation for: "${task.description}"`);
+  console.log(`[TASK_INTERPRETER] Fallback interpretation for: "${task.description}"`);
 
-  // Search/Find patterns
   if (combined.match(/\b(search|find|look|locate|discover)\b.*\b(business|restaurant|pub|brewery|shop|store|company)\b/i)) {
-    // Extract location if present
-    const locationMatch = combined.match(/in\s+([A-Z][a-zA-Z\s,]+?)(?:\s|$|,)/);
-    const location = locationMatch ? locationMatch[1].trim() : 'UK';
-
-    console.log(`[TASK_INTERPRETER] ✅ Fallback → SEARCH_PLACES (location: ${location})`);
-
-    return {
+    const location = extractLocation(combined);
+    return guardToolCall({
       tool: 'SEARCH_PLACES',
-      params: {
-        query: task.description,
-        location: location,
-        maxResults: 30,
-        country: 'GB'
-      }
-    };
+      params: { query: task.description, location, maxResults: 30, country: 'GB' },
+    });
   }
 
-  // Research patterns
   if (combined.match(/\b(research|analyze|investigate|study|explore)\b/i)) {
-    console.log(`[TASK_INTERPRETER] ✅ Fallback → DEEP_RESEARCH`);
-
-    return {
-      tool: 'DEEP_RESEARCH',
-      params: {
-        prompt: task.description,
-        label: task.title,
-        mode: 'report'
-      }
-    };
+    return guardToolCall({
+      tool: 'SEARCH_PLACES',
+      params: { query: task.description, location: 'UK', maxResults: 20, country: 'GB' },
+    });
   }
 
-  // Email drafting patterns (check before contact finder)
-  if (combined.match(/\b(draft|write|compose).*\b(email|message|letter)\b/i) ||
-      combined.match(/\b(email|message).*\b(draft|write|compose)\b/i)) {
-    console.log(`[TASK_INTERPRETER] ✅ Fallback → DRAFT_EMAIL`);
-
-    return {
-      tool: 'DRAFT_EMAIL',
-      params: {
-        to_role: 'General Manager',
-        purpose: 'intro',
-        product: task.description
-      }
-    };
-  }
-
-  // Contact/Lead generation patterns
   if (combined.match(/\b(contact|lead|outreach|find.*manager|find.*owner)\b/i)) {
-    const locationMatch = combined.match(/in\s+([A-Z][a-zA-Z\s,]+?)(?:\s|$|,)/);
-    const location = locationMatch ? locationMatch[1].trim() : 'UK';
-
-    console.log(`[TASK_INTERPRETER] ✅ Fallback → BATCH_CONTACT_FINDER`);
-
-    return {
-      tool: 'BATCH_CONTACT_FINDER',
-      params: {
-        query: task.description,
-        location: location,
-        country: 'GB',
-        targetRole: 'General Manager',
-        limit: 30
-      }
-    };
+    const location = extractLocation(combined);
+    return guardToolCall({
+      tool: 'ENRICH_LEADS',
+      params: { query: task.description, location, country: 'GB', enrichType: 'detail' },
+    });
   }
 
-  // Nudge/Suggestion patterns
-  if (combined.match(/\b(nudge|suggest|recommend|idea|follow.*up)\b/i)) {
-    console.log(`[TASK_INTERPRETER] ✅ Fallback → GET_NUDGES`);
-
-    return {
-      tool: 'GET_NUDGES',
-      params: {
-        limit: 10
-      }
-    };
+  if (combined.match(/\b(score|rank|evaluate|quality)\b/i)) {
+    const location = extractLocation(combined);
+    return guardToolCall({
+      tool: 'SCORE_LEADS',
+      params: { query: task.description, location, country: 'GB', scoreModel: 'basic' },
+    });
   }
 
-  // Default: try SEARCH_PLACES as most general tool
-  console.log(`[TASK_INTERPRETER] ⚠️  No keyword match, defaulting to SEARCH_PLACES`);
-
-  return {
+  console.log(`[TASK_INTERPRETER] No keyword match, defaulting to SEARCH_PLACES`);
+  return guardToolCall({
     tool: 'SEARCH_PLACES',
-    params: {
-      query: task.description,
-      location: 'UK',
-      maxResults: 30,
-      country: 'GB'
-    }
-  };
+    params: { query: task.description, location: 'UK', maxResults: 30, country: 'GB' },
+  });
 }

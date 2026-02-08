@@ -7,6 +7,7 @@
 
 import type { PlanStep } from './types/plan';
 import { searchPlaces } from './google-places';
+import { isToolEnabled, checkRoutingRules } from './tool-registry';
 
 export interface ActionResult {
   success: boolean;
@@ -25,7 +26,27 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
   const { toolName, toolArgs, userId } = input;
   
   console.log(`[ACTION_EXECUTOR] Executing ${toolName} with args:`, JSON.stringify(toolArgs).substring(0, 200));
-  
+
+  if (!isToolEnabled(toolName)) {
+    console.warn(`[ACTION_EXECUTOR] Tool ${toolName} is disabled in tool-registry — refusing to execute`);
+    return {
+      success: false,
+      summary: `Tool ${toolName} is disabled`,
+      error: `Tool ${toolName} is currently disabled in the tool registry`
+    };
+  }
+
+  const queryStr = String(toolArgs.query || toolArgs.prompt || '');
+  const routing = checkRoutingRules(toolName, queryStr);
+  if (!routing.allowed) {
+    console.warn(`[ACTION_EXECUTOR] Tool ${toolName} blocked by routing rule: ${routing.reason}`);
+    return {
+      success: false,
+      summary: `Tool ${toolName} blocked: ${routing.reason}`,
+      error: routing.reason
+    };
+  }
+
   try {
     switch (toolName) {
       case 'SEARCH_PLACES':

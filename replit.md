@@ -77,6 +77,22 @@ This project uses a **dual database** setup. These rules are absolute:
 
 ## Recent Changes
 
+### 2026-02-08: Tool Registry + Planning Architecture Wiring
+- **Tool Registry** (`server/supervisor/tool-registry.ts`): Single source of truth for all tools the planner/executor can call. Each tool has: id, label, description, enabled flag, category, JSON paramsSchema, and optional routingRules.
+  - `SEARCH_PLACES`: enabled — Google Places API business discovery
+  - `SEARCH_WYSHBONE_DB`: **disabled** — internal DB search, only suitable for pub/bar/brewery queries when DB is populated
+  - `ENRICH_LEADS`: enabled — enriches discovered businesses
+  - `SCORE_LEADS`: enabled — scores/ranks leads
+  - `EVALUATE_RESULTS`: enabled — evaluates pipeline quality
+- **Action Executor Guard** (`server/supervisor/action-executor.ts`): Before executing any tool, checks `isToolEnabled()` and `checkRoutingRules()`. Disabled tools are rejected with clear error messages. Non-pub queries are blocked from SEARCH_WYSHBONE_DB via routing rules.
+- **Task Interpreter Prompt** (`server/services/task-interpreter.ts`): Prompt now built dynamically from `buildToolPromptSection()` so planner only sees enabled tools. Disabled tools listed with [DISABLED] tag and explicit "do NOT select" instruction. If Claude picks a disabled tool, fallback logic kicks in.
+- **Routing Rule**: SEARCH_WYSHBONE_DB has a routing rule requiring query to contain pub/bar/brewery/tavern/inn/landlord keywords.
+- **Debug Endpoints**:
+  - `GET /api/debug/tool-registry` — inspect all tools, enabled/disabled lists
+  - `POST /api/debug/demo-tool-registry` — runs a tool-registry-aware plan (default: "find pet shops in Kent"); confirms SEARCH_PLACES used + leads_list artefact produced
+- **Files**: `server/supervisor/tool-registry.ts` (new), `server/supervisor/action-executor.ts` (guard), `server/services/task-interpreter.ts` (prompt), `server/routes.ts` (debug endpoints)
+
+
 ### 2026-02-07: Step Artefacts + Tower Judgement + Supervisor Reaction
 - **Step artefacts**: At the end of each completed step, a `step_result` artefact is created with goal, step_id, step_title, step_index, step_status, outputs, and timestamps. Both successful and failed steps produce artefacts.
 - **Tower artefact judgement**: After each step artefact, Tower is called via `POST /api/tower/judge-artefact` to judge the artefact. Response: `{ verdict, reasons[], metrics{}, action }` where action in `["continue","stop","retry","change_plan"]`.

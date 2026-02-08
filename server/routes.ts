@@ -705,6 +705,141 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     });
 
+    // Debug endpoint - inspect tool registry state
+    app.get("/api/debug/tool-registry", async (_req, res) => {
+      const { getAllTools, getEnabledTools, getDisabledTools } = await import('./supervisor/tool-registry');
+      res.json({
+        all: getAllTools(),
+        enabled: getEnabledTools().map(t => t.id),
+        disabled: getDisabledTools().map(t => t.id),
+      });
+    });
+
+    // Debug endpoint - demo tool-registry-aware plan run
+    // Proves that "find pet shops in Kent" → SEARCH_PLACES (not SEARCH_WYSHBONE_DB) + leads_list artefact
+    app.post("/api/debug/demo-tool-registry", async (req, res) => {
+      const { randomUUID } = await import('crypto');
+      const { executePlan } = await import('./supervisor/plan-executor');
+      const { getEnabledTools, getDisabledTools, isToolEnabled: isEnabled } = await import('./supervisor/tool-registry');
+
+      const clientRequestId = randomUUID();
+      const runId = `demo_tr_${randomUUID().replace(/-/g, '').substring(0, 12)}`;
+      const userId = getUserId(req);
+      const goalText = req.body?.goal || 'find pet shops in Kent';
+
+      console.log(`[DEBUG] demo-tool-registry: goal="${goalText}", runId=${runId}`);
+      console.log(`[DEBUG] demo-tool-registry: enabled tools = [${getEnabledTools().map(t => t.id).join(', ')}]`);
+      console.log(`[DEBUG] demo-tool-registry: disabled tools = [${getDisabledTools().map(t => t.id).join(', ')}]`);
+      console.log(`[DEBUG] demo-tool-registry: SEARCH_PLACES enabled=${isEnabled('SEARCH_PLACES')}, SEARCH_WYSHBONE_DB enabled=${isEnabled('SEARCH_WYSHBONE_DB')}`);
+
+      const steps = [
+        {
+          id: 'search-places-1',
+          type: 'SEARCH_PLACES',
+          label: `Search: ${goalText}`,
+          toolName: 'SEARCH_PLACES',
+          toolArgs: { query: goalText, location: 'Kent', country: 'GB' },
+        },
+        {
+          id: 'enrich-1',
+          type: 'ENRICH_LEADS',
+          label: 'Enrich discovered leads',
+          toolName: 'ENRICH_LEADS',
+          toolArgs: { query: goalText, location: 'Kent', country: 'GB', enrichType: 'detail' },
+        },
+        {
+          id: 'score-1',
+          type: 'SCORE_LEADS',
+          label: 'Score and rank leads',
+          toolName: 'SCORE_LEADS',
+          toolArgs: { query: goalText, location: 'Kent', country: 'GB', scoreModel: 'basic' },
+        },
+      ];
+
+      try {
+        await storage.createPlan({
+          id: runId,
+          userId,
+          status: 'executing',
+          goalText,
+          planData: { id: runId, steps },
+        });
+      } catch (dbErr: any) {
+        console.error(`[DEBUG] demo-tool-registry: failed to persist plan — ${dbErr.message}`);
+      }
+
+      const now = Date.now();
+      try {
+        await storage.createAgentRun({
+          id: runId,
+          clientRequestId,
+          userId,
+          status: 'executing',
+          createdAt: now,
+          updatedAt: now,
+          uiReady: 1,
+          metadata: { planId: runId, goalText, clientRequestId },
+        });
+      } catch (dbErr: any) {
+        console.error(`[DEBUG] demo-tool-registry: failed to persist agent_run — ${dbErr.message}`);
+      }
+
+      startPlanProgress(runId, runId, steps);
+
+      const plan = {
+        planId: runId,
+        userId,
+        clientRequestId,
+        skipJudgement: true,
+        goal: goalText,
+        steps,
+      };
+
+      console.log(`[DEBUG] demo-tool-registry: starting plan ${runId} with ${plan.steps.length} steps`);
+
+      res.json({
+        ok: true,
+        clientRequestId,
+        runId,
+        goal: goalText,
+        toolsUsed: steps.map(s => s.toolName),
+        enabledTools: getEnabledTools().map(t => t.id),
+        disabledTools: getDisabledTools().map(t => t.id),
+        searchWyshboneDbEnabled: isEnabled('SEARCH_WYSHBONE_DB'),
+      });
+
+      executePlan(plan).then(async result => {
+        if (result.success) {
+          console.log(`[DEBUG] demo-tool-registry ${runId}: completed ${result.stepsCompleted}/${result.totalSteps} steps`);
+          try {
+            await storage.updateAgentRun(runId, {
+              status: 'completed',
+              terminalState: 'completed',
+              endedAt: new Date(),
+              metadata: { planId: runId, goalText, clientRequestId },
+            });
+          } catch (dbErr: any) {
+            console.error(`[DEBUG] demo-tool-registry: failed to update agent_run — ${dbErr.message}`);
+          }
+        } else {
+          console.error(`[DEBUG] demo-tool-registry ${runId}: failed — ${result.error}`);
+          try {
+            await storage.updateAgentRun(runId, {
+              status: 'failed',
+              terminalState: 'failed',
+              endedAt: new Date(),
+              error: result.error || 'Plan execution failed',
+              metadata: { planId: runId, goalText, clientRequestId },
+            });
+          } catch (dbErr: any) {
+            console.error(`[DEBUG] demo-tool-registry: failed to update agent_run — ${dbErr.message}`);
+          }
+        }
+      }).catch(async err => {
+        console.error(`[DEBUG] demo-tool-registry ${runId}: threw — ${err.message}`);
+      });
+    });
+
     // Debug endpoint - check what's in Supabase
     app.get("/api/debug/supabase", async (req, res) => {
       try {
