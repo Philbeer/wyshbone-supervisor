@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "search_google_places",
-      "aliases": ["SEARCH_PLACES", "search_wyshbone_database"],
+      "aliases": ["SEARCH_PLACES"],
       "description": "Search for businesses using Google Places API",
       "params": {
         "query": {
