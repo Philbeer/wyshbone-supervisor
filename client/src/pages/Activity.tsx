@@ -25,6 +25,10 @@ function eventIcon(eventType: string, status: string) {
   if (eventType === "plan_completed") return <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />;
   if (eventType === "step_started") return <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />;
   if (eventType === "step_completed") return <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />;
+  if (eventType === "tool_call_started") return <Loader2 className="h-4 w-4 animate-spin text-primary" />;
+  if (eventType === "tool_call_completed") return <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />;
+  if (eventType === "router_decision") return <Radio className="h-4 w-4 text-primary" />;
+  if (eventType === "artefact_created") return <CheckCircle className="h-4 w-4 text-primary" />;
   return <Clock className="h-4 w-4 text-muted-foreground" />;
 }
 
@@ -74,6 +78,11 @@ export default function Activity() {
       "tools_update",
       "tower_evaluation",
       "tower_decision",
+      "tool_call_started",
+      "tool_call_completed",
+      "tool_call_failed",
+      "router_decision",
+      "artefact_created",
     ];
     eventTypes.forEach(t => es.addEventListener(t, handleEvent));
 

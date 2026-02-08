@@ -1,0 +1,34 @@
+We have a concrete bug, please investigate and fix in THIS repo only (Supervisor). Keep the report short and make the smallest changes that prove truth.
+
+Symptoms (confirmed in UI):
+1) Live Activity still shows: “Heavy tool search_wyshbone_database routed through plan system” even for queries like “find pet shops kent” / “find coffee shops sussex”. We want it to show Google Places / SEARCH_PLACES (or search_google_places) — NOT Wyshbone DB.
+2) AFR Run Detail shows only 3 events (user_message_received, router_decision, run_completed). It does NOT show which tool actually executed.
+3) “View results” popup shows “No results yet” even though the run completed.
+
+Goal:
+- Make AFR / Live Activity prove what tool was chosen + executed, and stop showing “search_wyshbone_database” anywhere for these runs.
+- Ensure “View results” has something to show (even if it’s a minimal JSON artefact like {tool_used, query, top_results_count}).
+
+Tasks:
+A) Find exactly where router_decision activity metadata.reason is constructed (the string “Heavy tool … routed through plan system”). Ensure it uses the canonical tool name for places search (SEARCH_PLACES / search_google_places) and cannot output “search_wyshbone_database”.
+   - If any alias mapping exists, log canonical tool id/name only.
+B) Ensure Supervisor emits AFR activity events for tool execution:
+   - tool_call_started (include tool_id/tool_name + inputs summary)
+   - tool_call_completed (include tool_id/tool_name + outputs summary)
+   - tool_call_failed (include error)
+   These must be tied to the same run_id/client_request_id and appear in the stream.
+C) Ensure the run_result / artefact is persisted so the UI “View results” modal can display something:
+   - At minimum, persist a run artefact row containing: tool_used, query, timestamp, and a small result summary (count + maybe 3 sample names).
+   - Wire it to whatever endpoint the UI uses for “View results” (if it’s currently empty, add a minimal endpoint the UI already calls, or fill the existing one).
+
+Constraints:
+- Do not add new frameworks or big refactors.
+- Make the change in a few files max.
+- After coding, run one test query (“find pet shops kent”) and show the resulting AFR event list proving:
+   - router_decision includes canonical tool name (no wyshbone_database)
+   - tool_call_started/completed events appear
+   - “View results” returns non-empty data.
+
+Deliverable:
+- A short report: files changed + why.
+- Confirm no “search_wyshbone_database” appears in NEW runs.

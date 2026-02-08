@@ -8,6 +8,7 @@
 import type { PlanStep } from './types/plan';
 import { searchPlaces } from './google-places';
 import { isToolEnabled, checkRoutingRules, checkIntentGate } from './tool-registry';
+import { logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './afr-logger';
 
 export interface ToolRejection {
   tool: string;
@@ -60,10 +61,13 @@ export interface ActionInput {
   toolArgs: Record<string, unknown>;
   userId: string;
   tracker?: RunToolTracker;
+  runId?: string;
+  conversationId?: string;
+  clientRequestId?: string;
 }
 
 export async function executeAction(input: ActionInput): Promise<ActionResult> {
-  const { toolName, toolArgs, userId, tracker } = input;
+  const { toolName, toolArgs, userId, tracker, runId, conversationId, clientRequestId } = input;
   
   console.log(`[ACTION_EXECUTOR] Executing ${toolName} with args:`, JSON.stringify(toolArgs).substring(0, 200));
 
@@ -87,6 +91,7 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
         },
         userId,
         tracker,
+        runId, conversationId, clientRequestId,
       }).then(result => ({ ...result, replannedTool: 'SEARCH_PLACES' }));
     }
 
@@ -115,6 +120,7 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
       },
       userId,
       tracker,
+      runId, conversationId, clientRequestId,
     }).then(result => ({ ...result, replannedTool: 'SEARCH_PLACES' }));
   }
 
@@ -132,19 +138,35 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
 
   recordUsed(tracker, toolName);
 
+  const compactArgs: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(toolArgs)) {
+    if (v !== undefined && v !== null && v !== '') {
+      compactArgs[k] = typeof v === 'string' && v.length > 120 ? v.substring(0, 120) : v;
+    }
+  }
+
+  if (runId) {
+    logToolCallStarted(userId, runId, toolName, compactArgs, conversationId, clientRequestId).catch(() => {});
+  }
+
   try {
+    let result: ActionResult;
     switch (toolName) {
       case 'SEARCH_PLACES':
-        return await executeSearchPlaces(toolArgs, userId);
+        result = await executeSearchPlaces(toolArgs, userId);
+        break;
 
       case 'ENRICH_LEADS':
-        return await executeEnrichLeads(toolArgs, userId);
+        result = await executeEnrichLeads(toolArgs, userId);
+        break;
 
       case 'SCORE_LEADS':
-        return await executeScoreLeads(toolArgs, userId);
+        result = await executeScoreLeads(toolArgs, userId);
+        break;
 
       case 'EVALUATE_RESULTS':
-        return await executeEvaluateResults(toolArgs, userId);
+        result = await executeEvaluateResults(toolArgs, userId);
+        break;
       
       default:
         console.warn(`[ACTION_EXECUTOR] Unsupported tool: ${toolName}`);
@@ -154,8 +176,28 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
           error: `Tool ${toolName} is not supported`
         };
     }
+
+    if (runId) {
+      if (result.success) {
+        const outSummary: Record<string, unknown> = { summary: result.summary };
+        if (result.data) {
+          for (const [k, v] of Object.entries(result.data)) {
+            if (Array.isArray(v)) outSummary[`${k}_count`] = v.length;
+            else if (typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') outSummary[k] = v;
+          }
+        }
+        logToolCallCompleted(userId, runId, toolName, outSummary, conversationId, clientRequestId).catch(() => {});
+      } else {
+        logToolCallFailed(userId, runId, toolName, result.error || 'Unknown', conversationId, clientRequestId).catch(() => {});
+      }
+    }
+
+    return result;
   } catch (error: any) {
     console.error(`[ACTION_EXECUTOR] Error executing ${toolName}:`, error.message);
+    if (runId) {
+      logToolCallFailed(userId, runId, toolName, error.message, conversationId, clientRequestId).catch(() => {});
+    }
     return {
       success: false,
       summary: `Execution failed: ${error.message}`,
@@ -312,7 +354,10 @@ export async function executeStep(
   step: PlanStep,
   toolMetadata: { toolName: string; toolArgs: Record<string, unknown> } | undefined,
   userId: string,
-  tracker?: RunToolTracker
+  tracker?: RunToolTracker,
+  runId?: string,
+  conversationId?: string,
+  clientRequestId?: string,
 ): Promise<ActionResult> {
   const toolName = step.toolName || toolMetadata?.toolName;
   const toolArgs = step.toolArgs || toolMetadata?.toolArgs;
@@ -330,5 +375,8 @@ export async function executeStep(
     toolArgs,
     userId,
     tracker,
+    runId,
+    conversationId,
+    clientRequestId,
   });
 }

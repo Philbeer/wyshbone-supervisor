@@ -1783,6 +1783,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.get("/api/afr/runs/:runId/artefacts", async (req, res) => {
+    try {
+      const { runId } = req.params;
+      const artefacts = await storage.getArtefactsByRunId(runId);
+      res.json(artefacts);
+    } catch (error: any) {
+      console.error("[AFR ARTEFACTS] Error fetching artefacts:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch artefacts" });
+    }
+  });
+
   app.get("/api/afr/runs", async (req, res) => {
     try {
       const userId = req.query.user_id as string | undefined;
@@ -1851,6 +1862,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
               else if (actionTaken === "tower_decision_stop") eventType = "tower_decision";
               else if (actionTaken === "tower_decision_change_plan") eventType = "tower_decision";
               else if (actionTaken === "tools_update") eventType = "tools_update";
+              else if (actionTaken === "tool_call_started") eventType = "tool_call_started";
+              else if (actionTaken === "tool_call_completed") eventType = "tool_call_completed";
+              else if (actionTaken === "tool_call_failed") eventType = "tool_call_failed";
+              else if (actionTaken === "router_decision") eventType = "router_decision";
+              else if (actionTaken === "artefact_created") eventType = "artefact_created";
 
               const payload = {
                 id: row.id,

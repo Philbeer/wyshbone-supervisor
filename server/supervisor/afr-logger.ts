@@ -289,3 +289,99 @@ export async function logTowerDecisionChangePlan(
     }
   });
 }
+
+export async function logToolCallStarted(
+  userId: string,
+  runId: string,
+  toolName: string,
+  inputsSummary: Record<string, unknown>,
+  conversationId?: string,
+  clientRequestId?: string
+): Promise<void> {
+  await logAFREvent({
+    userId,
+    runId,
+    conversationId,
+    clientRequestId,
+    actionTaken: 'tool_call_started',
+    status: 'pending',
+    taskGenerated: `Executing tool: ${toolName}`,
+    runType: 'tool',
+    metadata: {
+      tool_name: toolName,
+      inputs: inputsSummary,
+    },
+  });
+}
+
+export async function logToolCallCompleted(
+  userId: string,
+  runId: string,
+  toolName: string,
+  outputsSummary: Record<string, unknown>,
+  conversationId?: string,
+  clientRequestId?: string
+): Promise<void> {
+  await logAFREvent({
+    userId,
+    runId,
+    conversationId,
+    clientRequestId,
+    actionTaken: 'tool_call_completed',
+    status: 'success',
+    taskGenerated: `Tool completed: ${toolName}`,
+    runType: 'tool',
+    metadata: {
+      tool_name: toolName,
+      outputs: outputsSummary,
+    },
+  });
+}
+
+export async function logToolCallFailed(
+  userId: string,
+  runId: string,
+  toolName: string,
+  errorMessage: string,
+  conversationId?: string,
+  clientRequestId?: string
+): Promise<void> {
+  await logAFREvent({
+    userId,
+    runId,
+    conversationId,
+    clientRequestId,
+    actionTaken: 'tool_call_failed',
+    status: 'failed',
+    taskGenerated: `Tool failed: ${toolName} — ${errorMessage}`,
+    runType: 'tool',
+    metadata: {
+      tool_name: toolName,
+      error: errorMessage,
+    },
+  });
+}
+
+export async function logRouterDecision(
+  userId: string,
+  runId: string,
+  canonicalToolName: string,
+  reason: string,
+  conversationId?: string,
+  clientRequestId?: string
+): Promise<void> {
+  await logAFREvent({
+    userId,
+    runId,
+    conversationId,
+    clientRequestId,
+    actionTaken: 'router_decision',
+    status: 'success',
+    taskGenerated: `Router: using ${canonicalToolName} — ${reason}`,
+    runType: 'plan',
+    metadata: {
+      tool_name: canonicalToolName,
+      reason,
+    },
+  });
+}

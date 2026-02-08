@@ -16,7 +16,8 @@ import {
   logStepFailed,
   logPlanCompleted,
   logPlanFailed,
-  logToolsUpdate
+  logToolsUpdate,
+  logRouterDecision,
 } from './afr-logger';
 import {
   LEADGEN_SUCCESS_DEFAULTS,
@@ -215,6 +216,13 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   
   await logPlanStarted(userId, planId, goal, conversationId, clientRequestId);
   await safeUpdatePlanStatus(planId, 'executing');
+
+  const primaryTool = steps[0]?.toolName || steps[0]?.type || 'SEARCH_PLACES';
+  logRouterDecision(
+    userId, planId, primaryTool,
+    `Supervisor executing ${steps.length}-step plan via ${primaryTool}`,
+    conversationId, clientRequestId,
+  ).catch(() => {});
   
   let stepsCompleted = 0;
   const leadsMap = new Map<string, Record<string, unknown>>();
@@ -235,7 +243,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       updateStepStatus(planId, step.id, 'running');
       
       try {
-        const result = await executeStep(step, toolMetadata, userId, toolTracker);
+        const result = await executeStep(step, toolMetadata, userId, toolTracker, planId, conversationId, clientRequestId);
         
         if (!result.success) {
           console.error(`[PLAN_EXECUTOR] Step ${step.id} failed:`, result.error);
