@@ -54,11 +54,12 @@ The frontend is built with React, TypeScript, Vite, and Wouter for routing. Styl
 
 ## Recent Changes
 
-### 2026-02-09: UI-Provided RunId + Remote Artefact POST
-- **UI-provided identifiers**: `TaskRequestData` now includes optional `run_id` and `client_request_id`. When provided by the UI in `supervisor_tasks.request_data`, Supervisor uses these as the canonical run identifiers instead of generating `chat_${task.id}`.
-- **Remote artefact POST**: After collecting Google Places results, Supervisor POSTs a leads artefact to `UI_URL/api/afr/artefacts` (the Wyshbone UI's artefact endpoint) with `runId`, `clientRequestId`, `type`, `title`, `summary`, `payloadJson` in the request body (camelCase keys).
-- **Gated events**: `artefact_created` and `run_completed` AFR events are ONLY emitted after a successful POST to the UI. If the POST fails, these events are suppressed — ensuring the Activity UI never shows stale or phantom artefact references.
-- **postArtefactToUI helper**: New private method on SupervisorService handles the POST with error logging. Strips trailing slash from UI_URL.
-- **All 3 artefact paths gated**: zero-results, success, and error/catch paths all use `postArtefactToUI` with the same gating pattern.
-- **simulate-chat-task updated**: Accepts optional `run_id` and `client_request_id` in request body, POSTs artefacts to UI instead of local storage, gates `artefact_created`/`run_completed` behind successful POST.
+### 2026-02-09: Canonical Artefact POST + Production-Grade Gating
+- **UI-provided identifiers**: `TaskRequestData` includes optional `run_id` and `client_request_id`. When provided by the UI in `supervisor_tasks.request_data`, Supervisor uses these as canonical run identifiers. If `run_id` is missing, an `run_id_missing` AFR event is emitted and a fallback `chat_${task.id}` is used.
+- **Canonical artefact body**: POSTs to `UI_URL/api/afr/artefacts` with `{ runId, clientRequestId?, type, payload: { title, summary, leads, query, tool }, createdAt }`. No `payloadJson` — uses the UI's canonical `payload` wrapper.
+- **Normalized leads**: Each lead in the payload includes `name`, `address`, `phone` (string|null), `website` (string|null), `placeId`, `source: "google_places"`, `score` (number|null).
+- **Gated events**: `artefact_created` and `run_completed` are ONLY emitted after POST returns 200 and `artefactId` is parsed from the response. The `artefactId` is included in the `artefact_created` event metadata.
+- **Failure observability**: On POST failure, emits a single `artefact_post_failed` AFR event with the HTTP status code (no PII, no stack traces). One log line: `"Posting artefact to UI: runId=<...> status=<...>"`.
+- **All 3 artefact paths**: zero-results, success, and error/catch paths use `postArtefactToUI` with the same canonical shape and gating pattern.
+- **simulate-chat-task**: Mirrors the real path — canonical body, `artefactId` in response, `artefact_post_failed` on failure.
 - **Files**: `server/supervisor.ts`, `server/types/supervisor-chat.ts`, `server/routes.ts`

@@ -503,7 +503,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       );
 
       const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-      let normalizedLeads: Array<{ name: string; address: string; phone: string; website: string; place_id: string }> = [];
+      let normalizedLeads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string; source: string; score: number | null }> = [];
 
       if (apiKey) {
         try {
@@ -523,9 +523,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
             normalizedLeads = places.map((p: any) => ({
               name: p.displayName?.text || 'Unknown',
               address: p.formattedAddress || '',
-              phone: p.nationalPhoneNumber || p.internationalPhoneNumber || '',
-              website: p.websiteUri || '',
-              place_id: p.id || '',
+              phone: p.nationalPhoneNumber || p.internationalPhoneNumber || null,
+              website: p.websiteUri || null,
+              placeId: p.id || '',
+              source: 'google_places',
+              score: null,
             }));
           }
         } catch (e: any) {
@@ -551,6 +553,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const artefactSummary = `SEARCH_PLACES returned ${placesCount} results for "${businessType}" in ${city}, ${country}`;
       const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
       let artefactPosted = false;
+      let artefactId: string | undefined;
+      let postHttpStatus: number | undefined;
 
       if (uiBaseUrl) {
         try {
@@ -561,18 +565,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
               runId: chatRunId,
               ...(clientRequestId ? { clientRequestId } : {}),
               type: 'leads',
-              title: artefactTitle,
-              summary: artefactSummary,
-              payloadJson: { leads: normalizedLeads, query: businessType, location: `${city}, ${country}` },
+              payload: {
+                title: artefactTitle,
+                summary: artefactSummary,
+                leads: normalizedLeads,
+                query: { businessType, location: `${city}, ${country}` },
+                tool: 'SEARCH_PLACES',
+              },
+              createdAt: new Date().toISOString(),
             }),
           });
+          postHttpStatus = postResp.status;
+          console.log(`[DEBUG] simulate-chat-task: Posting artefact to UI: runId=${chatRunId} status=${postResp.status}`);
           artefactPosted = postResp.ok;
-          if (!artefactPosted) {
-            const body = await postResp.text().catch(() => '');
-            console.error(`[DEBUG] simulate-chat-task: POST artefact to UI failed: ${postResp.status} ${body}`);
+          if (artefactPosted) {
+            const json = await postResp.json().catch(() => ({}));
+            artefactId = json?.artefactId || json?.id || undefined;
           }
         } catch (e: any) {
-          console.error(`[DEBUG] simulate-chat-task: POST artefact to UI error: ${e.message}`);
+          console.error(`[DEBUG] simulate-chat-task: POST artefact to UI network error: ${e.message}`);
         }
       } else {
         console.warn('[DEBUG] simulate-chat-task: UI_URL not set — skipping artefact POST');
@@ -584,7 +595,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           ...(clientRequestId ? { clientRequestId } : {}),
           actionTaken: 'artefact_created', status: 'success',
           taskGenerated: `Artefact created: ${artefactTitle}`,
-          runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle },
+          runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle, artefactId },
         });
 
         await logRunCompleted(
@@ -593,6 +604,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           { leads_count: placesCount, tool: 'SEARCH_PLACES' },
           conversationId
         );
+      } else if (uiBaseUrl) {
+        await logEvt({
+          userId, runId: chatRunId, conversationId,
+          ...(clientRequestId ? { clientRequestId } : {}),
+          actionTaken: 'artefact_post_failed', status: 'failed',
+          taskGenerated: `Artefact POST failed: HTTP ${postHttpStatus || 'network_error'}`,
+          runType: 'plan', metadata: { httpStatus: postHttpStatus },
+        });
       }
 
       res.json({
@@ -607,9 +626,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         placesFound: placesCount,
         leads: normalizedLeads,
         artefactPosted,
+        artefactId: artefactId || null,
         afrEvents: artefactPosted
           ? ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_created', 'run_completed']
-          : ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed'],
+          : ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_post_failed'],
       });
     } catch (error: any) {
       console.error(`[DEBUG] simulate-chat-task: error — ${error.message}`);

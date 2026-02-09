@@ -257,6 +257,16 @@ class SupervisorService {
     const chatRunId = requestData.run_id || `chat_${task.id}`;
     const clientRequestId = requestData.client_request_id;
     
+    if (!requestData.run_id) {
+      console.warn(`[CHAT_LEADS] Task ${task.id}: UI did not provide run_id in request_data — using fallback ${chatRunId}`);
+      logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId: task.conversation_id,
+        actionTaken: 'run_id_missing', status: 'pending',
+        taskGenerated: `UI did not provide run_id for task ${task.id} — using fallback ${chatRunId}`,
+        runType: 'plan', metadata: { taskId: task.id, fallbackRunId: chatRunId },
+      }).catch(() => {});
+    }
+
     console.log(`💬 Processing chat task ${task.id} (${task.task_type}), runId=${chatRunId}${clientRequestId ? `, clientRequestId=${clientRequestId}` : ''}...`);
 
     logMissionReceived(
@@ -374,12 +384,13 @@ class SupervisorService {
     type: string;
     title: string;
     summary: string;
-    payloadJson: Record<string, unknown>;
-  }): Promise<boolean> {
+    leads: Array<Record<string, unknown>>;
+    query: Record<string, unknown>;
+  }): Promise<{ ok: boolean; artefactId?: string; httpStatus?: number }> {
     const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
     if (!uiBaseUrl) {
       console.warn('[CHAT_LEADS] UI_URL not configured — cannot POST artefact to UI');
-      return false;
+      return { ok: false };
     }
     const url = `${uiBaseUrl}/api/afr/artefacts`;
     try {
@@ -390,21 +401,26 @@ class SupervisorService {
           runId: params.runId,
           ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
           type: params.type,
-          title: params.title,
-          summary: params.summary,
-          payloadJson: params.payloadJson,
+          payload: {
+            title: params.title,
+            summary: params.summary,
+            leads: params.leads,
+            query: params.query,
+            tool: 'SEARCH_PLACES',
+          },
+          createdAt: new Date().toISOString(),
         }),
       });
+      console.log(`[CHAT_LEADS] Posting artefact to UI: runId=${params.runId} status=${resp.status}`);
       if (!resp.ok) {
-        const body = await resp.text().catch(() => '');
-        console.error(`[CHAT_LEADS] POST artefact to UI failed: ${resp.status} ${body}`);
-        return false;
+        return { ok: false, httpStatus: resp.status };
       }
-      console.log(`[CHAT_LEADS] POST artefact to UI succeeded: ${params.title}`);
-      return true;
+      const json = await resp.json().catch(() => ({}));
+      const artefactId = json?.artefactId || json?.id || undefined;
+      return { ok: true, artefactId, httpStatus: resp.status };
     } catch (e: any) {
-      console.error(`[CHAT_LEADS] POST artefact to UI error: ${e.message}`);
-      return false;
+      console.error(`[CHAT_LEADS] POST artefact to UI network error: ${e.message}`);
+      return { ok: false };
     }
   }
 
@@ -480,22 +496,23 @@ class SupervisorService {
 
         const artefactTitle = `0 ${businessType} leads in ${city}`;
         const artefactSummary = `SEARCH_PLACES returned 0 results for "${businessType}" in ${city}, ${country}`;
-        const posted = await this.postArtefactToUI({
+        const postResult = await this.postArtefactToUI({
           runId: chatRunId,
           ...(clientRequestId ? { clientRequestId } : {}),
           type: 'leads',
           title: artefactTitle,
           summary: artefactSummary,
-          payloadJson: { leads: [], query: businessType, location: `${city}, ${country}` },
+          leads: [],
+          query: { businessType, location: `${city}, ${country}` },
         });
 
-        if (posted) {
+        if (postResult.ok) {
           logAFREvent({
             userId: task.user_id, runId: chatRunId, conversationId,
             ...(clientRequestId ? { clientRequestId } : {}),
             actionTaken: 'artefact_created', status: 'success',
             taskGenerated: `Artefact created: ${artefactTitle}`,
-            runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle },
+            runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle, artefactId: postResult.artefactId },
           }).catch(() => {});
 
           logRunCompleted(
@@ -504,6 +521,14 @@ class SupervisorService {
             { leads_count: 0, tool: 'SEARCH_PLACES' },
             conversationId
           ).catch(() => {});
+        } else {
+          logAFREvent({
+            userId: task.user_id, runId: chatRunId, conversationId,
+            ...(clientRequestId ? { clientRequestId } : {}),
+            actionTaken: 'artefact_post_failed', status: 'failed',
+            taskGenerated: `Artefact POST failed: HTTP ${postResult.httpStatus || 'network_error'}`,
+            runType: 'plan', metadata: { httpStatus: postResult.httpStatus },
+          }).catch(() => {});
         }
 
         return {
@@ -590,35 +615,35 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       const normalizedLeads = createdLeads.map(l => {
         const ld = l.lead as any;
         return {
-          id: l.id,
           name: ld.name || 'Unknown',
           address: ld.address || '',
-          phone: ld.phone || '',
-          website: ld.domain || '',
-          place_id: ld.place_id || '',
-          score: l.score,
-          emailCandidates: ld.emailCandidates || [],
+          phone: ld.phone || null,
+          website: ld.domain || null,
+          placeId: ld.place_id || '',
+          source: 'google_places' as const,
+          score: l.score ?? null,
         };
       });
 
       const successTitle = `${createdLeads.length} ${businessType} leads in ${city}`;
       const successSummary = `Found ${createdLeads.length} ${businessType} prospects in ${city}`;
-      const posted = await this.postArtefactToUI({
+      const postResult = await this.postArtefactToUI({
         runId: chatRunId,
         ...(clientRequestId ? { clientRequestId } : {}),
         type: 'leads',
         title: successTitle,
         summary: successSummary,
-        payloadJson: { leads: normalizedLeads, query: businessType, location: `${city}, ${country}` },
+        leads: normalizedLeads,
+        query: { businessType, location: `${city}, ${country}` },
       });
 
-      if (posted) {
+      if (postResult.ok) {
         logAFREvent({
           userId: task.user_id, runId: chatRunId, conversationId,
           ...(clientRequestId ? { clientRequestId } : {}),
           actionTaken: 'artefact_created', status: 'success',
           taskGenerated: `Artefact created: ${successTitle}`,
-          runType: 'plan', metadata: { artefactType: 'leads', title: successTitle },
+          runType: 'plan', metadata: { artefactType: 'leads', title: successTitle, artefactId: postResult.artefactId },
         }).catch(() => {});
 
         logRunCompleted(
@@ -627,6 +652,14 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           { leads_count: createdLeads.length, tool: 'SEARCH_PLACES' },
           conversationId
         ).catch(() => {});
+      } else {
+        logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId,
+          ...(clientRequestId ? { clientRequestId } : {}),
+          actionTaken: 'artefact_post_failed', status: 'failed',
+          taskGenerated: `Artefact POST failed: HTTP ${postResult.httpStatus || 'network_error'}`,
+          runType: 'plan', metadata: { httpStatus: postResult.httpStatus },
+        }).catch(() => {});
       }
 
       return {
@@ -643,22 +676,23 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       ).catch(() => {});
 
       const errTitle = `0 ${businessType} leads in ${city} (error)`;
-      const errPosted = await this.postArtefactToUI({
+      const errPostResult = await this.postArtefactToUI({
         runId: chatRunId,
         ...(clientRequestId ? { clientRequestId } : {}),
         type: 'leads',
         title: errTitle,
         summary: `SEARCH_PLACES failed: ${errMsg}`,
-        payloadJson: { leads: [], query: businessType, location: `${city}, ${country}`, error: errMsg },
+        leads: [],
+        query: { businessType, location: `${city}, ${country}`, error: errMsg },
       });
 
-      if (errPosted) {
+      if (errPostResult.ok) {
         logAFREvent({
           userId: task.user_id, runId: chatRunId, conversationId,
           ...(clientRequestId ? { clientRequestId } : {}),
           actionTaken: 'artefact_created', status: 'success',
           taskGenerated: `Artefact created: ${errTitle}`,
-          runType: 'plan', metadata: { artefactType: 'leads', title: errTitle },
+          runType: 'plan', metadata: { artefactType: 'leads', title: errTitle, artefactId: errPostResult.artefactId },
         }).catch(() => {});
 
         logRunCompleted(
@@ -667,6 +701,14 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           { leads_count: 0, tool: 'SEARCH_PLACES', error: errMsg },
           conversationId
         ).catch(() => {});
+      } else {
+        logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId,
+          ...(clientRequestId ? { clientRequestId } : {}),
+          actionTaken: 'artefact_post_failed', status: 'failed',
+          taskGenerated: `Artefact POST failed: HTTP ${errPostResult.httpStatus || 'network_error'}`,
+          runType: 'plan', metadata: { httpStatus: errPostResult.httpStatus },
+        }).catch(() => {});
       }
 
       return {
