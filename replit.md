@@ -77,6 +77,15 @@ This project uses a **dual database** setup. These rules are absolute:
 
 ## Recent Changes
 
+### 2026-02-09: Chat Run Outputs — Artefacts + run_completed
+- **`logRunCompleted()`**: New AFR logger function emits `run_completed` events with summary + metadata (lead count, tool used).
+- **Chat path (supervisor.ts)**: `generateLeadsForChat()` now creates a `leads` artefact with normalized lead data (name, address, phone, website, place_id, score, emailCandidates) and emits `run_completed` after leads are persisted. Fire-and-forget with `.catch()`.
+- **simulate-chat-task (routes.ts)**: Updated to request richer Places fields (websiteUri, nationalPhoneNumber, internationalPhoneNumber), create artefacts, and emit `run_completed`. Returns normalized leads array instead of just names.
+- **`GET /api/afr/artefacts?run_id=`**: New query-param endpoint for fetching artefacts by run ID (alongside existing path-param `/api/afr/runs/:runId/artefacts`).
+- **SSE mapping**: `run_completed` mapped in AFR stream; Activity.tsx renders with CheckCircle2 icon in green.
+- **Full event chain**: mission_received → router_decision (SEARCH_PLACES) → tool_call_started → tool_call_completed → artefact_created → run_completed.
+- **Files**: `server/supervisor/afr-logger.ts`, `server/supervisor.ts`, `server/routes.ts`, `client/src/pages/Activity.tsx`
+
 ### 2026-02-08: Hard Gating for SEARCH_WYSHBONE_DB
 - **Env flag `WYSHBONE_DB_READY`** (default `false`): When false, SEARCH_WYSHBONE_DB is force-disabled at boot and hidden from planning prompts. Set to `true` only when the Wyshbone internal DB is populated and ready.
 - **Intent gating** (`isHospitalityQuery()` + `checkIntentGate()`): Even when WYSHBONE_DB_READY=true, SEARCH_WYSHBONE_DB is only allowed for pub/bar/brewery/hospitality queries. Non-hospitality queries (hat shops, pet shops, restaurants, retail) are always blocked.
