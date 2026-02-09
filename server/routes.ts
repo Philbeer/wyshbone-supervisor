@@ -497,6 +497,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log(`[DEBUG] simulate-chat-task(deep_research): topic="${topic}" uiRunId=${chatRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
 
       try {
+        const { createResearchProvider } = await import('./supervisor/research-provider');
+
         await logMissionReceived(userId, chatRunId, taskId, 'deep_research', conversationId);
 
         await logEvt({
@@ -509,20 +511,47 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         await logToolCallStarted(userId, chatRunId, 'DEEP_RESEARCH', { topic }, conversationId);
 
-        await logToolCallCompleted(
-          userId, chatRunId, 'DEEP_RESEARCH',
-          { summary: `Simulated deep research completed for "${topic}"`, hasResult: true },
-          conversationId
-        );
+        let reportMarkdown = '';
+        let sources: Array<{ title: string; url: string }> = [];
+        let artefactTitle = '';
+        let artefactSummary = '';
+        let researchStatus: 'completed' | 'failed' = 'completed';
+        let researchError: string | undefined;
 
-        const artefactTitle = `Deep research: "${topic}"`;
-        const artefactSummary = `Simulated deep research completed for "${topic}"`;
-        const simulatedReport = `# Research Report: ${topic}\n\nThis is a simulated deep research report for testing purposes.\n\n## Key Findings\n- Finding 1: The market shows strong growth potential.\n- Finding 2: Key competitors include several established players.\n- Finding 3: Opportunities exist in underserved segments.`;
+        const provider = createResearchProvider();
+        if (!provider) {
+          researchStatus = 'failed';
+          researchError = 'PERPLEXITY_API_KEY not configured';
+          artefactTitle = `Deep research failed: "${topic}"`;
+          artefactSummary = `DEEP_RESEARCH failed: ${researchError}`;
+        } else {
+          try {
+            const result = await provider.research(topic, topic);
+            reportMarkdown = result.report_markdown;
+            sources = result.sources;
+            artefactTitle = result.title;
+            artefactSummary = result.summary;
+          } catch (provErr: any) {
+            researchStatus = 'failed';
+            researchError = provErr.message || 'Research provider error';
+            artefactTitle = `Deep research failed: "${topic}"`;
+            artefactSummary = `DEEP_RESEARCH failed: ${researchError}`;
+          }
+        }
+
+        if (researchError) {
+          await logToolCallFailed(userId, chatRunId, 'DEEP_RESEARCH', researchError, conversationId);
+        } else {
+          await logToolCallCompleted(
+            userId, chatRunId, 'DEEP_RESEARCH',
+            { summary: `Deep research completed for "${topic}"`, reportChars: reportMarkdown.length, sourcesCount: sources.length },
+            conversationId
+          );
+        }
 
         const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
         let artefactPosted = false;
         let artefactId: string | undefined;
-        let postHttpStatus: number = 0;
 
         if (uiBaseUrl) {
           try {
@@ -536,11 +565,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 payload: {
                   title: artefactTitle,
                   summary: artefactSummary,
-                  report: simulatedReport,
-                  sources: [],
-                  status: 'completed',
+                  report_markdown: reportMarkdown,
+                  sources,
+                  status: researchStatus,
                   topic,
                   tool: 'DEEP_RESEARCH',
+                  ...(researchError ? { error: researchError } : {}),
                 },
                 createdAt: new Date().toISOString(),
               }),
@@ -548,7 +578,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
             const rawBody = await postResp.text();
             let json: any = {};
             try { json = JSON.parse(rawBody); } catch {}
-            postHttpStatus = postResp.status;
             artefactId = json?.artefactId || json?.id || undefined;
             artefactPosted = postResp.ok && !!artefactId;
 
@@ -574,7 +603,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
 
-        console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} status=completed posted=${artefactPosted} artefactId=${artefactId || 'none'} deepResearchRunId=none`);
+        console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} status=${researchStatus} reportChars=${reportMarkdown.length} sourcesCount=${sources.length} posted=${artefactPosted} artefactId=${artefactId || 'none'}`);
 
         if (artefactPosted) {
           await logEvt({
@@ -584,19 +613,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
             runType: 'plan', metadata: { artefactType: 'deep_research_result', title: artefactTitle, artefactId },
           });
 
-          await logEvt({
-            userId, runId: chatRunId, conversationId, clientRequestId,
-            actionTaken: 'deep_research_completed', status: 'success',
-            taskGenerated: `Deep research completed: "${topic}"`,
-            runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', artefactId },
-          });
+          if (researchError) {
+            await logEvt({
+              userId, runId: chatRunId, conversationId, clientRequestId,
+              actionTaken: 'deep_research_failed', status: 'failed',
+              taskGenerated: `Deep research failed: ${researchError}`,
+              runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', error: researchError },
+            });
+          } else {
+            await logEvt({
+              userId, runId: chatRunId, conversationId, clientRequestId,
+              actionTaken: 'deep_research_completed', status: 'success',
+              taskGenerated: `Deep research completed: "${topic}"`,
+              runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', artefactId, reportChars: reportMarkdown.length, sourcesCount: sources.length },
+            });
 
-          await logRunCompleted(
-            userId, chatRunId,
-            `Deep research complete: "${topic}"`,
-            { tool: 'DEEP_RESEARCH', topic },
-            conversationId
-          );
+            await logRunCompleted(
+              userId, chatRunId,
+              `Deep research complete: "${topic}"`,
+              { tool: 'DEEP_RESEARCH', topic, reportChars: reportMarkdown.length, sourcesCount: sources.length },
+              conversationId
+            );
+          }
         }
 
         return res.json({
@@ -607,11 +645,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           clientRequestId,
           simulateType: 'deep_research',
           topic,
+          researchStatus,
+          reportChars: reportMarkdown.length,
+          sourcesCount: sources.length,
           artefactPosted,
           artefactId: artefactId || null,
           afrEvents: artefactPosted
-            ? ['mission_received', 'deep_research_started', 'tool_call_started', 'tool_call_completed', 'artefact_post_succeeded', 'artefact_created', 'deep_research_completed', 'run_completed']
-            : ['mission_received', 'deep_research_started', 'tool_call_started', 'tool_call_completed', 'artefact_post_failed'],
+            ? (researchError
+              ? ['mission_received', 'deep_research_started', 'tool_call_started', 'tool_call_failed', 'artefact_post_succeeded', 'artefact_created', 'deep_research_failed']
+              : ['mission_received', 'deep_research_started', 'tool_call_started', 'tool_call_completed', 'artefact_post_succeeded', 'artefact_created', 'deep_research_completed', 'run_completed'])
+            : ['mission_received', 'deep_research_started', 'tool_call_started', researchError ? 'tool_call_failed' : 'tool_call_completed', 'artefact_post_failed'],
         });
       } catch (error: any) {
         console.error(`[DEBUG] simulate-chat-task(deep_research): error — ${error.message}`);

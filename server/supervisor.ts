@@ -5,6 +5,7 @@ import type { SupervisorTask, SupervisorMessage, TaskResult } from './types/supe
 import { randomUUID } from 'crypto';
 import { monitorGoalsOnce, publishGoalMonitorEvents } from './goal-monitoring';
 import { logAFREvent, logMissionReceived, logRunCompleted, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './supervisor/afr-logger';
+import { createResearchProvider } from './supervisor/research-provider';
 
 interface UserContext {
   userId: string;
@@ -835,9 +836,11 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
 
     console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} status=started topic="${topic}"`);
 
-    let deepResearchRunId: string | undefined;
-    let researchResult: any = null;
+    let reportMarkdown = '';
+    let sources: Array<{ title: string; url: string }> = [];
     let researchError: string | undefined;
+    let artefactTitle = '';
+    let artefactSummary = '';
 
     try {
       logToolCallStarted(
@@ -846,102 +849,37 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         conversationId
       ).catch(() => {});
 
-      const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
-      const tavilyKey = process.env.TAVILY_API_KEY || process.env.DEEP_RESEARCH_API_KEY;
-
-      if (uiBaseUrl) {
-        const toolResp = await fetch(`${uiBaseUrl}/api/tools/execute`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tool: 'deep_research',
-            params: { topic, prompt },
-            userId: task.user_id,
-            sessionId: `supervisor_dr_${Date.now()}`,
-          }),
-        });
-
-        const toolData = await toolResp.json().catch(() => ({}));
-        deepResearchRunId = toolData?.data?.runId || toolData?.data?.id || toolData?.runId || undefined;
-
-        if (deepResearchRunId) {
-          console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} deepResearchRunId=${deepResearchRunId} — polling for completion`);
-
-          this.bridgeRunToUI(chatRunId, deepResearchRunId, clientRequestId).catch(() => {});
-
-          const POLL_INTERVAL = 5000;
-          const MAX_POLL_TIME = 5 * 60 * 1000;
-          const pollStart = Date.now();
-
-          while (Date.now() - pollStart < MAX_POLL_TIME) {
-            await new Promise(r => setTimeout(r, POLL_INTERVAL));
-
-            const { data: runRow, error: pollErr } = await supabase!
-              .from('deep_research_runs')
-              .select('*')
-              .eq('id', deepResearchRunId)
-              .single();
-
-            if (pollErr) {
-              console.warn(`[DEEP_RESEARCH] poll error for ${deepResearchRunId}: ${pollErr.message}`);
-              continue;
-            }
-
-            if (runRow?.status === 'completed') {
-              researchResult = runRow.result || runRow.data;
-              console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} deepResearchRunId=${deepResearchRunId} completed`);
-              break;
-            } else if (runRow?.status === 'failed' || runRow?.status === 'error') {
-              researchError = runRow.error || 'Deep research failed';
-              console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} deepResearchRunId=${deepResearchRunId} failed: ${researchError}`);
-              break;
-            }
-          }
-
-          if (!researchResult && !researchError) {
-            researchError = `Deep research timed out after ${MAX_POLL_TIME / 1000}s`;
-            console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} deepResearchRunId=${deepResearchRunId} TIMEOUT`);
-          }
-        } else if (toolData?.ok || toolData?.success) {
-          researchResult = toolData?.data || toolData;
-        } else {
-          researchError = toolData?.error || `UI tool returned: ${JSON.stringify(toolData).substring(0, 200)}`;
-        }
-      } else if (tavilyKey) {
-        researchError = 'Direct Tavily execution not implemented — set UI_URL';
-      } else {
-        researchError = 'No UI_URL or TAVILY_API_KEY configured for deep research';
+      const provider = createResearchProvider();
+      if (!provider) {
+        throw new Error('PERPLEXITY_API_KEY not configured — cannot run deep research');
       }
+
+      const result = await provider.research(topic, prompt);
+      reportMarkdown = result.report_markdown;
+      sources = result.sources;
+      artefactTitle = result.title;
+      artefactSummary = result.summary;
+
+      logToolCallCompleted(
+        task.user_id, chatRunId, 'DEEP_RESEARCH',
+        { summary: `Deep research completed for "${topic}"`, reportChars: reportMarkdown.length, sourcesCount: sources.length },
+        conversationId
+      ).catch(() => {});
     } catch (err: any) {
       researchError = err.message || 'Deep research execution failed';
       console.error(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} EXCEPTION: ${researchError}`);
-    }
-
-    if (researchError) {
       logToolCallFailed(
         task.user_id, chatRunId, 'DEEP_RESEARCH',
-        researchError,
-        conversationId
-      ).catch(() => {});
-    } else {
-      logToolCallCompleted(
-        task.user_id, chatRunId, 'DEEP_RESEARCH',
-        { summary: `Deep research completed for "${topic}"`, hasResult: !!researchResult },
+        researchError!,
         conversationId
       ).catch(() => {});
     }
 
-    const report = researchResult
-      ? (typeof researchResult === 'string' ? researchResult : (researchResult.report || researchResult.summary || JSON.stringify(researchResult).substring(0, 2000)))
-      : '';
-    const sources = researchResult?.sources || researchResult?.references || [];
     const status = researchError ? 'failed' : 'completed';
-    const artefactTitle = researchError
-      ? `Deep research failed: "${topic}"`
-      : `Deep research: "${topic}"`;
-    const artefactSummary = researchError
-      ? `DEEP_RESEARCH failed: ${researchError}`
-      : `Deep research completed for "${topic}"`;
+    if (researchError) {
+      artefactTitle = `Deep research failed: "${topic}"`;
+      artefactSummary = `DEEP_RESEARCH failed: ${researchError}`;
+    }
 
     const postResult = await this.postArtefactToUI({
       runId: chatRunId,
@@ -950,19 +888,18 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       payload: {
         title: artefactTitle,
         summary: artefactSummary,
-        report,
-        sources: Array.isArray(sources) ? sources : [],
+        report_markdown: reportMarkdown,
+        sources,
         status,
         topic,
         tool: 'DEEP_RESEARCH',
-        ...(deepResearchRunId ? { deep_research_run_id: deepResearchRunId } : {}),
         ...(researchError ? { error: researchError } : {}),
       },
       userId: task.user_id,
       conversationId,
     });
 
-    console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} status=${status} posted=${postResult.ok} artefactId=${postResult.artefactId || 'none'} deepResearchRunId=${deepResearchRunId || 'none'}`);
+    console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} status=${status} reportChars=${reportMarkdown.length} sourcesCount=${sources.length} posted=${postResult.ok} artefactId=${postResult.artefactId || 'none'}`);
 
     if (postResult.ok) {
       logAFREvent({
@@ -979,7 +916,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           clientRequestId,
           actionTaken: 'deep_research_failed', status: 'failed',
           taskGenerated: `Deep research failed: ${researchError}`,
-          runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', error: researchError, deepResearchRunId },
+          runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', error: researchError },
         }).catch(() => {});
       } else {
         logAFREvent({
@@ -987,13 +924,13 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           clientRequestId,
           actionTaken: 'deep_research_completed', status: 'success',
           taskGenerated: `Deep research completed: "${topic}"`,
-          runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', artefactId: postResult.artefactId, deepResearchRunId },
+          runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', artefactId: postResult.artefactId, reportChars: reportMarkdown.length, sourcesCount: sources.length },
         }).catch(() => {});
 
         logRunCompleted(
           task.user_id, chatRunId,
           `Deep research complete: "${topic}"`,
-          { tool: 'DEEP_RESEARCH', topic, deepResearchRunId },
+          { tool: 'DEEP_RESEARCH', topic, reportChars: reportMarkdown.length, sourcesCount: sources.length },
           conversationId
         ).catch(() => {});
       }
@@ -1001,7 +938,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
 
     const responseText = researchError
       ? `I ran into an issue with the deep research on "${topic}": ${researchError}. Would you like me to try again?`
-      : `Here are the results of my deep research on "${topic}":\n\n${report.substring(0, 1500)}${report.length > 1500 ? '\n\n_(Full report available in your artefacts)_' : ''}`;
+      : `Here are the results of my deep research on "${topic}":\n\n${reportMarkdown.substring(0, 1500)}${reportMarkdown.length > 1500 ? '\n\n_(Full report available in your artefacts)_' : ''}`;
 
     return { response: responseText };
   }
