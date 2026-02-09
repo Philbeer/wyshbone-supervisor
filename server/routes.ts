@@ -575,24 +575,53 @@ export async function registerRoutes(app: Express): Promise<Server> {
               createdAt: new Date().toISOString(),
             }),
           });
+          const rawBody = await postResp.text();
+          let json: any = {};
+          let hasBody = false;
+          try { json = JSON.parse(rawBody); hasBody = true; } catch { hasBody = rawBody.length > 0; }
           postHttpStatus = postResp.status;
-          console.log(`[DEBUG] simulate-chat-task: Posting artefact to UI: runId=${chatRunId} status=${postResp.status}`);
-          artefactPosted = postResp.ok;
+          artefactId = json?.artefactId || json?.id || undefined;
+          const hasArtefactId = !!artefactId;
+
+          console.log(`[ARTEFACT_POST] runId=${chatRunId} clientRequestId=${clientRequestId || 'none'} status=${postResp.status} hasArtefactId=${hasArtefactId}${hasArtefactId ? ` artefactId=${artefactId}` : ''}`);
+
+          artefactPosted = postResp.ok && hasArtefactId;
+
           if (artefactPosted) {
-            const json = await postResp.json().catch(() => ({}));
-            artefactId = json?.artefactId || json?.id || undefined;
+            await logEvt({
+              userId, runId: chatRunId, conversationId,
+              ...(clientRequestId ? { clientRequestId } : {}),
+              actionTaken: 'artefact_post_succeeded', status: 'success',
+              taskGenerated: `Artefact POST succeeded: artefactId=${artefactId}`,
+              runType: 'plan', metadata: { runId: chatRunId, artefactId },
+            }).catch(() => {});
+          } else {
+            await logEvt({
+              userId, runId: chatRunId, conversationId,
+              ...(clientRequestId ? { clientRequestId } : {}),
+              actionTaken: 'artefact_post_failed', status: 'failed',
+              taskGenerated: `Artefact POST failed: HTTP ${postResp.status}${!hasArtefactId ? ' (no artefactId in response)' : ''}`,
+              runType: 'plan', metadata: { runId: chatRunId, status: postResp.status, hasBody, errorCode: json?.error || json?.code || null },
+            }).catch(() => {});
           }
         } catch (e: any) {
-          console.error(`[DEBUG] simulate-chat-task: POST artefact to UI network error: ${e.message}`);
+          console.error(`[ARTEFACT_POST] runId=${chatRunId} clientRequestId=${clientRequestId || 'none'} NETWORK_ERROR: ${e.message}`);
+          await logEvt({
+            userId, runId: chatRunId, conversationId,
+            ...(clientRequestId ? { clientRequestId } : {}),
+            actionTaken: 'artefact_post_failed', status: 'failed',
+            taskGenerated: 'Artefact POST failed: network error',
+            runType: 'plan', metadata: { runId: chatRunId, status: 0, hasBody: false, errorCode: 'network_error' },
+          }).catch(() => {});
         }
       } else {
-        console.error('[DEBUG] simulate-chat-task: UI_URL not set — cannot POST artefact to UI. Set UI_URL env var.');
+        console.error('[ARTEFACT_POST] UI_URL not set — cannot POST artefact to UI. Set UI_URL env var.');
         await logEvt({
           userId, runId: chatRunId, conversationId,
           ...(clientRequestId ? { clientRequestId } : {}),
           actionTaken: 'artefact_post_failed', status: 'failed',
           taskGenerated: 'Artefact POST failed: UI_URL not configured',
-          runType: 'plan', metadata: { reason: 'ui_url_missing' },
+          runType: 'plan', metadata: { runId: chatRunId, status: 0, hasBody: false, errorCode: 'ui_url_missing' },
         }).catch(() => {});
       }
 
@@ -611,14 +640,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           { leads_count: placesCount, tool: 'SEARCH_PLACES' },
           conversationId
         );
-      } else if (uiBaseUrl) {
-        await logEvt({
-          userId, runId: chatRunId, conversationId,
-          ...(clientRequestId ? { clientRequestId } : {}),
-          actionTaken: 'artefact_post_failed', status: 'failed',
-          taskGenerated: `Artefact POST failed: HTTP ${postHttpStatus || 'network_error'}`,
-          runType: 'plan', metadata: { httpStatus: postHttpStatus },
-        });
       }
 
       res.json({
@@ -635,7 +656,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         artefactPosted,
         artefactId: artefactId || null,
         afrEvents: artefactPosted
-          ? ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_created', 'run_completed']
+          ? ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_post_succeeded', 'artefact_created', 'run_completed']
           : ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_post_failed'],
       });
     } catch (error: any) {

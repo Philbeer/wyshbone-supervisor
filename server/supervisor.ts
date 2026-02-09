@@ -391,14 +391,14 @@ class SupervisorService {
   }): Promise<{ ok: boolean; artefactId?: string; httpStatus?: number }> {
     const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
     if (!uiBaseUrl) {
-      console.error('[CHAT_LEADS] UI_URL not configured — cannot POST artefact to UI. Set UI_URL env var.');
+      console.error(`[ARTEFACT_POST] runId=${params.runId} clientRequestId=${params.clientRequestId || 'none'} UI_URL not configured — cannot POST artefact to UI. Set UI_URL env var.`);
       if (params.userId) {
         logAFREvent({
           userId: params.userId, runId: params.runId, conversationId: params.conversationId,
           ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
           actionTaken: 'artefact_post_failed', status: 'failed',
           taskGenerated: 'Artefact POST failed: UI_URL not configured',
-          runType: 'plan', metadata: { reason: 'ui_url_missing' },
+          runType: 'plan', metadata: { runId: params.runId, status: 0, hasBody: false, errorCode: 'ui_url_missing' },
         }).catch(() => {});
       }
       return { ok: false };
@@ -422,15 +422,50 @@ class SupervisorService {
           createdAt: new Date().toISOString(),
         }),
       });
-      console.log(`[CHAT_LEADS] Posting artefact to UI: runId=${params.runId} status=${resp.status}`);
-      if (!resp.ok) {
+      const rawBody = await resp.text();
+      let json: any = {};
+      let hasBody = false;
+      try { json = JSON.parse(rawBody); hasBody = true; } catch { hasBody = rawBody.length > 0; }
+      const artefactId = json?.artefactId || json?.id || undefined;
+      const hasArtefactId = !!artefactId;
+
+      console.log(`[ARTEFACT_POST] runId=${params.runId} clientRequestId=${params.clientRequestId || 'none'} status=${resp.status} hasArtefactId=${hasArtefactId}${hasArtefactId ? ` artefactId=${artefactId}` : ''}`);
+
+      if (!resp.ok || !hasArtefactId) {
+        if (params.userId) {
+          logAFREvent({
+            userId: params.userId, runId: params.runId, conversationId: params.conversationId,
+            ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
+            actionTaken: 'artefact_post_failed', status: 'failed',
+            taskGenerated: `Artefact POST failed: HTTP ${resp.status}${!hasArtefactId ? ' (no artefactId in response)' : ''}`,
+            runType: 'plan', metadata: { runId: params.runId, status: resp.status, hasBody, errorCode: json?.error || json?.code || null },
+          }).catch(() => {});
+        }
         return { ok: false, httpStatus: resp.status };
       }
-      const json = await resp.json().catch(() => ({}));
-      const artefactId = json?.artefactId || json?.id || undefined;
+
+      if (params.userId) {
+        logAFREvent({
+          userId: params.userId, runId: params.runId, conversationId: params.conversationId,
+          ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
+          actionTaken: 'artefact_post_succeeded', status: 'success',
+          taskGenerated: `Artefact POST succeeded: artefactId=${artefactId}`,
+          runType: 'plan', metadata: { runId: params.runId, artefactId },
+        }).catch(() => {});
+      }
+
       return { ok: true, artefactId, httpStatus: resp.status };
     } catch (e: any) {
-      console.error(`[CHAT_LEADS] POST artefact to UI network error: ${e.message}`);
+      console.error(`[ARTEFACT_POST] runId=${params.runId} clientRequestId=${params.clientRequestId || 'none'} NETWORK_ERROR: ${e.message}`);
+      if (params.userId) {
+        logAFREvent({
+          userId: params.userId, runId: params.runId, conversationId: params.conversationId,
+          ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
+          actionTaken: 'artefact_post_failed', status: 'failed',
+          taskGenerated: `Artefact POST failed: network error`,
+          runType: 'plan', metadata: { runId: params.runId, status: 0, hasBody: false, errorCode: 'network_error' },
+        }).catch(() => {});
+      }
       return { ok: false };
     }
   }
@@ -534,14 +569,6 @@ class SupervisorService {
             { leads_count: 0, tool: 'SEARCH_PLACES' },
             conversationId
           ).catch(() => {});
-        } else {
-          logAFREvent({
-            userId: task.user_id, runId: chatRunId, conversationId,
-            ...(clientRequestId ? { clientRequestId } : {}),
-            actionTaken: 'artefact_post_failed', status: 'failed',
-            taskGenerated: `Artefact POST failed: HTTP ${postResult.httpStatus || 'network_error'}`,
-            runType: 'plan', metadata: { httpStatus: postResult.httpStatus },
-          }).catch(() => {});
         }
 
         return {
@@ -667,14 +694,6 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           { leads_count: createdLeads.length, tool: 'SEARCH_PLACES' },
           conversationId
         ).catch(() => {});
-      } else {
-        logAFREvent({
-          userId: task.user_id, runId: chatRunId, conversationId,
-          ...(clientRequestId ? { clientRequestId } : {}),
-          actionTaken: 'artefact_post_failed', status: 'failed',
-          taskGenerated: `Artefact POST failed: HTTP ${postResult.httpStatus || 'network_error'}`,
-          runType: 'plan', metadata: { httpStatus: postResult.httpStatus },
-        }).catch(() => {});
       }
 
       return {
@@ -718,14 +737,6 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           { leads_count: 0, tool: 'SEARCH_PLACES', error: errMsg },
           conversationId
         ).catch(() => {});
-      } else {
-        logAFREvent({
-          userId: task.user_id, runId: chatRunId, conversationId,
-          ...(clientRequestId ? { clientRequestId } : {}),
-          actionTaken: 'artefact_post_failed', status: 'failed',
-          taskGenerated: `Artefact POST failed: HTTP ${errPostResult.httpStatus || 'network_error'}`,
-          runType: 'plan', metadata: { httpStatus: errPostResult.httpStatus },
-        }).catch(() => {});
       }
 
       return {
