@@ -10,6 +10,7 @@
  * - "monitor-worker" -> real handler (checks monitors for issues, creates alerts)
  * - "monitor-executor" -> real handler (executes scheduled monitors, generates leads)
  * - "deep-research-poll" -> real handler (polls pending deep research runs)
+ * - "deep_research" -> real handler (executes deep research: trigger → poll → artefact → events)
  * - other job types -> stub runner (2 second placeholder)
  */
 
@@ -20,6 +21,7 @@ import { runXeroSync } from './jobs/handlers/xero-sync';
 import { runMonitorWorker, acquireMonitorWorkerLock, releaseMonitorWorkerLock, isMonitorWorkerRunning } from './jobs/handlers/monitor-worker';
 import { runMonitorExecutor, acquireMonitorExecutorLock, releaseMonitorExecutorLock, isMonitorExecutorRunning } from './jobs/handlers/monitor-executor';
 import { runDeepResearchPoll, acquireDeepResearchPollLock, releaseDeepResearchPollLock, isDeepResearchPollRunning } from './jobs/handlers/deep-research-poll';
+import { runDeepResearchExecute } from './jobs/handlers/deep-research-execute';
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -469,6 +471,59 @@ async function runDeepResearchPollJob(job: Job): Promise<void> {
   }
 }
 
+async function runDeepResearchExecuteJob(job: Job): Promise<void> {
+  try {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    job.message = 'Starting deep research execution...';
+    jobStore.set(job.jobId, job);
+
+    await emitJobEvent('job_started', job);
+
+    const result = await runDeepResearchExecute(job, async (progress, message) => {
+      const currentJob = jobStore.get(job.jobId);
+      if (currentJob?.status === 'cancelled') {
+        throw new Error('Job cancelled by user');
+      }
+      await emitProgressEvent(job, progress, message);
+    });
+
+    const currentJob = jobStore.get(job.jobId);
+    if (currentJob?.status === 'cancelled') {
+      return;
+    }
+
+    job.status = result.success ? 'completed' : 'failed';
+    job.endedAt = new Date().toISOString();
+    job.progress = 100;
+    job.message = result.success
+      ? `Deep research completed: artefact posted=${result.artefactPosted}`
+      : `Deep research ${result.status}: ${result.error || 'unknown error'}`;
+    job.resultSummary = {
+      success: result.success,
+      jobType: job.jobType,
+      durationMs: result.durationMs,
+      deepResearchRunId: result.deepResearchRunId,
+      artefactPosted: result.artefactPosted,
+      artefactId: result.artefactId,
+      status: result.status,
+      error: result.error,
+    };
+    jobStore.set(job.jobId, job);
+
+    await emitJobEvent(result.success ? 'job_completed' : 'job_failed', job, { resultSummary: job.resultSummary });
+
+  } catch (error: any) {
+    job.status = 'failed';
+    job.endedAt = new Date().toISOString();
+    job.message = `Failed: ${error.message}`;
+    job.resultSummary = { success: false, error: error.message };
+    jobStore.set(job.jobId, job);
+
+    await emitJobEvent('job_failed', job, { error: error.message });
+  }
+}
+
 async function runJobAsync(job: Job): Promise<void> {
   if (job.jobType === 'nightly-maintenance') {
     return runNightlyMaintenanceJob(job);
@@ -488,6 +543,10 @@ async function runJobAsync(job: Job): Promise<void> {
   
   if (job.jobType === 'deep-research-poll') {
     return runDeepResearchPollJob(job);
+  }
+  
+  if (job.jobType === 'deep_research') {
+    return runDeepResearchExecuteJob(job);
   }
   
   return runStubJob(job);
