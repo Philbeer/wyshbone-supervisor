@@ -302,19 +302,22 @@ ${topic} is a subject that warrants detailed investigation. Key areas to explore
 
 export function createResearchProvider(): DeepResearchProvider {
   const openaiKey = process.env.OPENAI_API_KEY;
-  if (openaiKey) {
-    return new OpenAIResponsesProvider(openaiKey);
-  }
-
   const perplexityKey = process.env.PERPLEXITY_API_KEY;
-  if (perplexityKey) {
-    return new PerplexityResearchProvider(perplexityKey);
-  }
-
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  if (anthropicKey) {
-    return new AnthropicResearchProvider(anthropicKey);
+
+  let provider: DeepResearchProvider;
+
+  if (openaiKey) {
+    provider = new OpenAIResponsesProvider(openaiKey);
+  } else if (perplexityKey) {
+    provider = new PerplexityResearchProvider(perplexityKey);
+  } else if (anthropicKey) {
+    provider = new AnthropicResearchProvider(anthropicKey);
+  } else {
+    provider = new FallbackResearchProvider();
   }
 
-  return new FallbackResearchProvider();
+  console.log(`[DEEP_RESEARCH_PROVIDER] selected=${provider.name} openaiKey=${!!openaiKey} anthropicKey=${!!anthropicKey} perplexityKey=${!!perplexityKey}`);
+
+  return provider;
 }

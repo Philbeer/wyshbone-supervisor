@@ -149,6 +149,8 @@ app.use((req, res, next) => {
 
   assertTowerConfig();
 
+  console.log(`[ENV_CHECK] OPENAI_API_KEY=${!!process.env.OPENAI_API_KEY} ANTHROPIC_API_KEY=${!!process.env.ANTHROPIC_API_KEY} PERPLEXITY_API_KEY=${!!process.env.PERPLEXITY_API_KEY}`);
+
   const server = await registerRoutes(app);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

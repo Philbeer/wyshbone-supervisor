@@ -933,8 +933,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   if (debugEndpointsEnabled) {
     console.log('[DEBUG] Debug endpoints enabled at /api/debug/*');
+
+    app.get("/api/debug/env", (_req, res) => {
+      res.json({
+        openaiKey: !!process.env.OPENAI_API_KEY,
+        anthropicKey: !!process.env.ANTHROPIC_API_KEY,
+        perplexityKey: !!process.env.PERPLEXITY_API_KEY,
+        nodeEnv: process.env.NODE_ENV || 'unknown',
+        buildTs: new Date().toISOString(),
+      });
+    });
     
-    // Debug endpoint - check agent_activities (AFR events)
     app.get("/api/debug/agent-activities", async (req, res) => {
       try {
         const { data, error } = await supabase
