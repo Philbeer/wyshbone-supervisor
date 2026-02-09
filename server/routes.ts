@@ -469,7 +469,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // ========================================
 
   app.post("/api/debug/simulate-chat-task", async (req, res) => {
-    const { logMissionReceived, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } = await import('./supervisor/afr-logger');
+    const { logMissionReceived, logRunCompleted, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } = await import('./supervisor/afr-logger');
+    const { createArtefact: createArt } = await import('./supervisor/artefacts');
     const { randomUUID } = await import('crypto');
 
     const goalText = (req.body?.goal as string) || 'find pet shops kent';
@@ -501,8 +502,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       );
 
       const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-      let placesCount = 0;
-      let placesNames: string[] = [];
+      let normalizedLeads: Array<{ name: string; address: string; phone: string; website: string; place_id: string }> = [];
 
       if (apiKey) {
         try {
@@ -512,34 +512,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
             headers: {
               'Content-Type': 'application/json',
               'X-Goog-Api-Key': apiKey,
-              'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress'
+              'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.internationalPhoneNumber'
             },
-            body: JSON.stringify({ textQuery: `${businessType} in ${city} ${country}`, maxResultCount: 3 })
+            body: JSON.stringify({ textQuery: `${businessType} in ${city} ${country}`, maxResultCount: 5 })
           });
           if (response.ok) {
             const data = await response.json();
             const places = data.places || [];
-            placesCount = places.length;
-            placesNames = places.map((p: any) => p.displayName?.text || 'Unknown');
+            normalizedLeads = places.map((p: any) => ({
+              name: p.displayName?.text || 'Unknown',
+              address: p.formattedAddress || '',
+              phone: p.nationalPhoneNumber || p.internationalPhoneNumber || '',
+              website: p.websiteUri || '',
+              place_id: p.id || '',
+            }));
           }
         } catch (e: any) {
           console.log(`[DEBUG] simulate-chat-task: Google Places call failed — ${e.message}`);
         }
       }
 
-      if (placesCount > 0) {
-        await logToolCallCompleted(
-          userId, chatRunId, 'SEARCH_PLACES',
-          { summary: `Found ${placesCount} places for "${businessType}" in ${city}`, places_count: placesCount, places: placesNames },
-          conversationId
-        );
-      } else {
-        await logToolCallCompleted(
-          userId, chatRunId, 'SEARCH_PLACES',
-          { summary: `No API key or no results for "${businessType}" in ${city}`, places_count: 0 },
-          conversationId
-        );
-      }
+      const placesCount = normalizedLeads.length;
+
+      await logToolCallCompleted(
+        userId, chatRunId, 'SEARCH_PLACES',
+        {
+          summary: placesCount > 0
+            ? `Found ${placesCount} places for "${businessType}" in ${city}`
+            : `No results for "${businessType}" in ${city}`,
+          places_count: placesCount,
+          places: normalizedLeads.map(l => l.name),
+        },
+        conversationId
+      );
+
+      await createArt({
+        runId: chatRunId,
+        type: 'leads',
+        title: `${placesCount} ${businessType} leads in ${city}`,
+        summary: `SEARCH_PLACES returned ${placesCount} results for "${businessType}" in ${city}, ${country}`,
+        payload: { leads: normalizedLeads, query: businessType, location: `${city}, ${country}` },
+        userId,
+        conversationId,
+      });
+
+      await logRunCompleted(
+        userId, chatRunId,
+        `Chat run complete: ${placesCount} ${businessType} leads in ${city}`,
+        { leads_count: placesCount, tool: 'SEARCH_PLACES' },
+        conversationId
+      );
 
       res.json({
         ok: true,
@@ -550,8 +572,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         businessType,
         location: `${city}, ${country}`,
         placesFound: placesCount,
-        placesNames,
-        afrEvents: ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed'],
+        leads: normalizedLeads,
+        afrEvents: ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_created', 'run_completed'],
       });
     } catch (error: any) {
       console.error(`[DEBUG] simulate-chat-task: error — ${error.message}`);
@@ -1886,6 +1908,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.get("/api/afr/artefacts", async (req, res) => {
+    const runId = req.query.run_id as string;
+    if (!runId) {
+      return res.status(400).json({ error: "run_id query parameter is required" });
+    }
+    try {
+      const artefacts = await storage.getArtefactsByRunId(runId);
+      res.json(artefacts);
+    } catch (error: any) {
+      console.error("[AFR ARTEFACTS] Error fetching artefacts:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch artefacts" });
+    }
+  });
+
   app.get("/api/afr/runs", async (req, res) => {
     try {
       const userId = req.query.user_id as string | undefined;
@@ -1959,6 +1995,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               else if (actionTaken === "tool_call_failed") eventType = "tool_call_failed";
               else if (actionTaken === "router_decision") eventType = "router_decision";
               else if (actionTaken === "mission_received") eventType = "mission_received";
+              else if (actionTaken === "run_completed") eventType = "run_completed";
               else if (actionTaken === "artefact_created") eventType = "artefact_created";
 
               const payload = {

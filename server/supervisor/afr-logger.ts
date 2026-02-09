@@ -362,6 +362,25 @@ export async function logToolCallFailed(
   });
 }
 
+export async function logRunCompleted(
+  userId: string,
+  runId: string,
+  summary: string,
+  metadata?: Record<string, unknown>,
+  conversationId?: string,
+): Promise<void> {
+  await logAFREvent({
+    userId,
+    runId,
+    conversationId,
+    actionTaken: 'run_completed',
+    status: 'success',
+    taskGenerated: summary,
+    runType: 'plan',
+    metadata: metadata || {},
+  });
+}
+
 export async function logMissionReceived(
   userId: string,
   runId: string,

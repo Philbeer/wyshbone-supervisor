@@ -4,7 +4,8 @@ import { emailService } from './notifications/email-service';
 import type { SupervisorTask, SupervisorMessage, TaskResult } from './types/supervisor-chat';
 import { randomUUID } from 'crypto';
 import { monitorGoalsOnce, publishGoalMonitorEvents } from './goal-monitoring';
-import { logMissionReceived, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './supervisor/afr-logger';
+import { logMissionReceived, logRunCompleted, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './supervisor/afr-logger';
+import { createArtefact } from './supervisor/artefacts';
 
 interface UserContext {
   userId: string;
@@ -493,6 +494,37 @@ ${leadSummaries}
 ${createdLeads[0].rationale}
 
 You can view detailed profiles and contact info in your [dashboard](/leads).`;
+
+      const normalizedLeads = createdLeads.map(l => {
+        const ld = l.lead as any;
+        return {
+          id: l.id,
+          name: ld.name || 'Unknown',
+          address: ld.address || '',
+          phone: ld.phone || '',
+          website: ld.domain || '',
+          place_id: ld.place_id || '',
+          score: l.score,
+          emailCandidates: ld.emailCandidates || [],
+        };
+      });
+
+      createArtefact({
+        runId: chatRunId,
+        type: 'leads',
+        title: `${createdLeads.length} ${businessType} leads in ${city}`,
+        summary: `Found ${createdLeads.length} ${businessType} prospects in ${city}`,
+        payload: { leads: normalizedLeads, query: businessType, location: `${city}, ${country}` },
+        userId: task.user_id,
+        conversationId,
+      }).catch(e => console.error('[CHAT_LEADS] artefact creation failed:', e));
+
+      logRunCompleted(
+        task.user_id, chatRunId,
+        `Chat run complete: ${createdLeads.length} ${businessType} leads in ${city}`,
+        { leads_count: createdLeads.length, tool: 'SEARCH_PLACES' },
+        conversationId
+      ).catch(() => {});
 
       return {
         response,
