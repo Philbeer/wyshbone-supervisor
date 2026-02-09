@@ -375,20 +375,41 @@ class SupervisorService {
     const requestData = task.request_data;
     const searchQuery = requestData.search_query;
 
-    if (!searchQuery?.business_type) {
+    const chatRunId = `chat_${task.id}`;
+    const conversationId = task.conversation_id;
+
+    let businessType = searchQuery?.business_type as string | undefined;
+    let location = (searchQuery?.location as string) || '';
+
+    if (!businessType && requestData.user_message) {
+      const msg = (requestData.user_message as string).trim();
+      const inMatch = msg.match(/\s+in\s+(.+)$/i);
+      if (inMatch) {
+        location = inMatch[1].trim();
+        businessType = msg.replace(/^find\s+/i, '').replace(/\s+in\s+.+$/i, '').trim() || undefined;
+      } else {
+        businessType = msg.replace(/^find\s+/i, '').trim() || undefined;
+      }
+      console.log(`[CHAT_LEADS] user_message fallback: parsed businessType="${businessType}" location="${location}" from "${msg}"`);
+    }
+
+    if (!businessType) {
+      logRunCompleted(
+        task.user_id, chatRunId,
+        `Chat run skipped: no business type provided`,
+        { leads_count: 0, tool: 'SEARCH_PLACES', reason: 'missing_business_type' },
+        conversationId
+      ).catch(() => {});
+
       return {
         response: "I'd be happy to find leads for you! Could you tell me what type of businesses you're looking for?",
         leadIds: []
       };
     }
 
-    const businessType = searchQuery.business_type;
-    const location = searchQuery.location || 'Local';
+    if (!location) location = 'Local';
     const city = location.split(',')[0].trim();
     const country = location.split(',')[1]?.trim() || 'UK';
-
-    const chatRunId = `chat_${task.id}`;
-    const conversationId = task.conversation_id;
 
     console.log(`🔍 Chat request: ${businessType} in ${city}, ${country}`);
 
@@ -549,12 +570,31 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         leadIds: createdLeads.map(l => l.id)
       };
     } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
       console.error('Error generating leads for chat:', error);
       logToolCallFailed(
         task.user_id, chatRunId, 'SEARCH_PLACES',
-        error instanceof Error ? error.message : String(error),
+        errMsg,
         conversationId
       ).catch(() => {});
+
+      createArtefact({
+        runId: chatRunId,
+        type: 'leads',
+        title: `0 ${businessType} leads in ${city} (error)`,
+        summary: `SEARCH_PLACES failed: ${errMsg}`,
+        payload: { leads: [], query: businessType, location: `${city}, ${country}`, error: errMsg },
+        userId: task.user_id,
+        conversationId,
+      }).catch(e => console.error('[CHAT_LEADS] artefact creation failed:', e));
+
+      logRunCompleted(
+        task.user_id, chatRunId,
+        `Chat run failed: ${errMsg}`,
+        { leads_count: 0, tool: 'SEARCH_PLACES', error: errMsg },
+        conversationId
+      ).catch(() => {});
+
       return {
         response: `I encountered an issue while searching for ${businessType} in ${city}. Let me try again in a moment!`,
         leadIds: []
