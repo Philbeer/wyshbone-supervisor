@@ -77,12 +77,14 @@ This project uses a **dual database** setup. These rules are absolute:
 
 ## Recent Changes
 
-### 2026-02-09: Chat Run Outputs — Artefacts + run_completed
+### 2026-02-09: Chat Run Outputs — Artefacts + run_completed + View Results UI
 - **`logRunCompleted()`**: New AFR logger function emits `run_completed` events with summary + metadata (lead count, tool used).
 - **Chat path (supervisor.ts)**: `generateLeadsForChat()` now creates a `leads` artefact with normalized lead data (name, address, phone, website, place_id, score, emailCandidates) and emits `run_completed` after leads are persisted. Fire-and-forget with `.catch()`.
+- **Zero-results path**: When Google Places returns no results, the function now also creates a leads artefact (empty leads array) and emits `run_completed`, ensuring all paths produce a complete AFR event chain.
 - **simulate-chat-task (routes.ts)**: Updated to request richer Places fields (websiteUri, nationalPhoneNumber, internationalPhoneNumber), create artefacts, and emit `run_completed`. Returns normalized leads array instead of just names.
 - **`GET /api/afr/artefacts?run_id=`**: New query-param endpoint for fetching artefacts by run ID (alongside existing path-param `/api/afr/runs/:runId/artefacts`).
 - **SSE mapping**: `run_completed` mapped in AFR stream; Activity.tsx renders with CheckCircle2 icon in green.
+- **View Results UI (Activity.tsx)**: "View results" buttons appear on `artefact_created` and `run_completed` events, plus in the header. Opens a Dialog that fetches artefacts via `/api/afr/artefacts?run_id=` and renders lead cards (name, address, phone, website, email, score) with error/loading/empty states.
 - **Full event chain**: mission_received → router_decision (SEARCH_PLACES) → tool_call_started → tool_call_completed → artefact_created → run_completed.
 - **Files**: `server/supervisor/afr-logger.ts`, `server/supervisor.ts`, `server/routes.ts`, `client/src/pages/Activity.tsx`
 

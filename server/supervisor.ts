@@ -414,6 +414,24 @@ class SupervisorService {
           { summary: `No results for "${businessType}" in ${city}`, places_count: 0 },
           conversationId
         ).catch(() => {});
+
+        createArtefact({
+          runId: chatRunId,
+          type: 'leads',
+          title: `0 ${businessType} leads in ${city}`,
+          summary: `SEARCH_PLACES returned 0 results for "${businessType}" in ${city}, ${country}`,
+          payload: { leads: [], query: businessType, location: `${city}, ${country}` },
+          userId: task.user_id,
+          conversationId,
+        }).catch(e => console.error('[CHAT_LEADS] artefact creation failed:', e));
+
+        logRunCompleted(
+          task.user_id, chatRunId,
+          `Chat run complete: 0 ${businessType} leads in ${city}`,
+          { leads_count: 0, tool: 'SEARCH_PLACES' },
+          conversationId
+        ).catch(() => {});
+
         return {
           response: `I searched for ${businessType} businesses in ${city}, but didn't find any results. Would you like to try a different location or business type?`,
           leadIds: []

@@ -4,7 +4,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { EmptyState } from "@/components/EmptyState";
-import { Play, Radio, CheckCircle, AlertTriangle, Clock, Loader2, Inbox } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Play, Radio, CheckCircle, AlertTriangle, Clock, Loader2, Inbox, Eye, MapPin, Globe, Phone, Mail } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 
 interface ActivityEvent {
@@ -17,6 +23,32 @@ interface ActivityEvent {
   timestamp: number;
   errorMessage: string | null;
   metadata: Record<string, unknown>;
+}
+
+interface LeadResult {
+  id?: string;
+  name: string;
+  address: string;
+  phone: string;
+  website: string;
+  place_id: string;
+  score?: number;
+  emailCandidates?: string[];
+}
+
+interface ArtefactData {
+  id: string;
+  runId: string;
+  type: string;
+  title: string;
+  summary: string | null;
+  payloadJson: {
+    leads?: LeadResult[];
+    query?: string;
+    location?: string;
+    [key: string]: unknown;
+  } | null;
+  createdAt: string;
 }
 
 function eventIcon(eventType: string, status: string) {
@@ -45,6 +77,10 @@ export default function Activity() {
   const [connected, setConnected] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
   const [demoRunning, setDemoRunning] = useState(false);
+  const [resultsOpen, setResultsOpen] = useState(false);
+  const [artefacts, setArtefacts] = useState<ArtefactData[]>([]);
+  const [artefactsLoading, setArtefactsLoading] = useState(false);
+  const [artefactsError, setArtefactsError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -124,6 +160,33 @@ export default function Activity() {
     }
   };
 
+  const handleViewResults = async (viewRunId: string) => {
+    setArtefactsLoading(true);
+    setArtefactsError(null);
+    setResultsOpen(true);
+    setArtefacts([]);
+    try {
+      const res = await fetch(`/api/afr/artefacts?run_id=${encodeURIComponent(viewRunId)}`);
+      if (!res.ok) {
+        setArtefactsError(`Failed to load results (${res.status})`);
+        return;
+      }
+      const data: ArtefactData[] = await res.json();
+      setArtefacts(data);
+    } catch (err) {
+      console.error("Failed to fetch artefacts:", err);
+      setArtefactsError("Could not connect to the server.");
+    } finally {
+      setArtefactsLoading(false);
+    }
+  };
+
+  const hasArtefactId = (metadata: Record<string, unknown>): boolean =>
+    typeof metadata?.artefactId === "string";
+
+  const leadsArtefact = artefacts.find(a => a.type === "leads");
+  const leads = leadsArtefact?.payloadJson?.leads || [];
+
   return (
     <div className="flex h-screen overflow-hidden">
       <div className="flex-1 flex flex-col overflow-hidden">
@@ -157,9 +220,20 @@ export default function Activity() {
             </div>
           </div>
           {runId && (
-            <p className="text-xs text-muted-foreground mt-2 font-mono" data-testid="text-run-id">
-              Run: {runId}
-            </p>
+            <div className="flex items-center gap-3 mt-2">
+              <p className="text-xs text-muted-foreground font-mono" data-testid="text-run-id">
+                Run: {runId}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleViewResults(runId)}
+                data-testid="button-view-results"
+              >
+                <Eye className="h-3 w-3 mr-1" />
+                View results
+              </Button>
+            </div>
           )}
         </header>
 
@@ -188,6 +262,30 @@ export default function Activity() {
                               {ev.summary}
                             </span>
                             {statusBadge(ev.status)}
+                            {ev.eventType === "artefact_created" && hasArtefactId(ev.metadata) && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="ml-auto"
+                                onClick={() => handleViewResults(ev.runId)}
+                                data-testid={`button-view-artefact-${idx}`}
+                              >
+                                <Eye className="h-3 w-3 mr-1" />
+                                View results
+                              </Button>
+                            )}
+                            {ev.eventType === "run_completed" && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="ml-auto"
+                                onClick={() => handleViewResults(ev.runId)}
+                                data-testid={`button-view-run-results-${idx}`}
+                              >
+                                <Eye className="h-3 w-3 mr-1" />
+                                View results
+                              </Button>
+                            )}
                           </div>
                           <p className="text-xs text-muted-foreground mt-1 font-mono" data-testid={`text-event-action-${idx}`}>
                             {ev.actionTaken}
@@ -216,6 +314,136 @@ export default function Activity() {
           )}
         </div>
       </div>
+
+      <Dialog open={resultsOpen} onOpenChange={setResultsOpen}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Eye className="h-5 w-5" />
+              Run Results
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-auto">
+            {artefactsLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                <span className="ml-2 text-sm text-muted-foreground">Loading results...</span>
+              </div>
+            ) : artefactsError ? (
+              <div className="text-center py-8">
+                <AlertTriangle className="h-6 w-6 text-destructive mx-auto mb-2" />
+                <p className="text-sm text-destructive" data-testid="text-artefacts-error">{artefactsError}</p>
+              </div>
+            ) : artefacts.length === 0 ? (
+              <div className="text-center py-8">
+                <p className="text-sm text-muted-foreground" data-testid="text-no-results">No results yet</p>
+                <p className="text-xs text-muted-foreground mt-1">Artefacts will appear here once the run creates them.</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {leadsArtefact && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div>
+                        <h3 className="text-sm font-medium" data-testid="text-artefact-title">{leadsArtefact.title}</h3>
+                        {leadsArtefact.summary && (
+                          <p className="text-xs text-muted-foreground mt-0.5">{leadsArtefact.summary}</p>
+                        )}
+                      </div>
+                      <Badge variant="secondary" data-testid="badge-leads-count">{leads.length} lead{leads.length !== 1 ? "s" : ""}</Badge>
+                    </div>
+
+                    {leadsArtefact.payloadJson?.query && (
+                      <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                        <span>Query: <span className="font-medium text-foreground">{leadsArtefact.payloadJson.query as string}</span></span>
+                        {leadsArtefact.payloadJson?.location && (
+                          <span>Location: <span className="font-medium text-foreground">{leadsArtefact.payloadJson.location as string}</span></span>
+                        )}
+                      </div>
+                    )}
+
+                    {leads.length > 0 ? (
+                      <div className="space-y-2">
+                        {leads.map((lead, idx) => (
+                          <Card key={lead.place_id || idx}>
+                            <CardContent className="p-4">
+                              <div className="flex items-start justify-between gap-2 flex-wrap">
+                                <h4 className="text-sm font-medium" data-testid={`text-lead-name-${idx}`}>{lead.name}</h4>
+                                {lead.score !== undefined && lead.score !== null && (
+                                  <Badge variant="outline" data-testid={`badge-lead-score-${idx}`}>
+                                    {(lead.score * 100).toFixed(0)}% match
+                                  </Badge>
+                                )}
+                              </div>
+                              <div className="mt-2 space-y-1">
+                                {lead.address && (
+                                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                    <MapPin className="h-3 w-3 shrink-0" />
+                                    <span data-testid={`text-lead-address-${idx}`}>{lead.address}</span>
+                                  </div>
+                                )}
+                                {lead.phone && (
+                                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                    <Phone className="h-3 w-3 shrink-0" />
+                                    <span data-testid={`text-lead-phone-${idx}`}>{lead.phone}</span>
+                                  </div>
+                                )}
+                                {lead.website && (
+                                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                    <Globe className="h-3 w-3 shrink-0" />
+                                    <a
+                                      href={lead.website.startsWith("http") ? lead.website : `https://${lead.website}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="underline hover-elevate"
+                                      data-testid={`link-lead-website-${idx}`}
+                                    >
+                                      {lead.website}
+                                    </a>
+                                  </div>
+                                )}
+                                {lead.emailCandidates && lead.emailCandidates.length > 0 && (
+                                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                    <Mail className="h-3 w-3 shrink-0" />
+                                    <span data-testid={`text-lead-emails-${idx}`}>{lead.emailCandidates.join(", ")}</span>
+                                  </div>
+                                )}
+                              </div>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground py-2">No leads found for this search.</p>
+                    )}
+                  </div>
+                )}
+
+                {artefacts.filter(a => a.type !== "leads").map((art, idx) => (
+                  <Card key={art.id}>
+                    <CardContent className="p-4">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <h4 className="text-sm font-medium" data-testid={`text-artefact-other-${idx}`}>{art.title}</h4>
+                        <Badge variant="outline">{art.type}</Badge>
+                      </div>
+                      {art.summary && (
+                        <p className="text-xs text-muted-foreground mt-1">{art.summary}</p>
+                      )}
+                    </CardContent>
+                  </Card>
+                ))}
+
+                {artefacts[0]?.createdAt && (
+                  <p className="text-xs text-muted-foreground">
+                    Created {new Date(artefacts[0].createdAt).toLocaleString()}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
