@@ -473,6 +473,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const { randomUUID } = await import('crypto');
 
     const goalText = (req.body?.goal as string) || 'find pet shops kent';
+    const simulateType = (req.body?.simulate_type as string) || 'leads';
     const userId = getUserId(req);
     const taskId = randomUUID();
     const conversationId = `sim_conv_${taskId.substring(0, 8)}`;
@@ -489,6 +490,133 @@ export async function registerRoutes(app: Express): Promise<Server> {
         runType: 'plan', metadata: { taskId, errorCode: 'missing_identifiers', missing },
       }).catch(() => {});
       return res.status(400).json({ ok: false, error: `Missing required identifiers: ${missing}`, taskId });
+    }
+
+    if (simulateType === 'deep_research') {
+      const topic = req.body?.topic || goalText;
+      console.log(`[DEBUG] simulate-chat-task(deep_research): topic="${topic}" uiRunId=${chatRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
+
+      try {
+        await logMissionReceived(userId, chatRunId, taskId, 'deep_research', conversationId);
+
+        await logEvt({
+          userId, runId: chatRunId, conversationId,
+          clientRequestId,
+          actionTaken: 'deep_research_started', status: 'pending',
+          taskGenerated: `Deep research started: "${topic}"`,
+          runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', topic },
+        });
+
+        await logToolCallStarted(userId, chatRunId, 'DEEP_RESEARCH', { topic }, conversationId);
+
+        await logToolCallCompleted(
+          userId, chatRunId, 'DEEP_RESEARCH',
+          { summary: `Simulated deep research completed for "${topic}"`, hasResult: true },
+          conversationId
+        );
+
+        const artefactTitle = `Deep research: "${topic}"`;
+        const artefactSummary = `Simulated deep research completed for "${topic}"`;
+        const simulatedReport = `# Research Report: ${topic}\n\nThis is a simulated deep research report for testing purposes.\n\n## Key Findings\n- Finding 1: The market shows strong growth potential.\n- Finding 2: Key competitors include several established players.\n- Finding 3: Opportunities exist in underserved segments.`;
+
+        const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
+        let artefactPosted = false;
+        let artefactId: string | undefined;
+        let postHttpStatus: number = 0;
+
+        if (uiBaseUrl) {
+          try {
+            const postResp = await fetch(`${uiBaseUrl}/api/afr/artefacts`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                runId: chatRunId,
+                clientRequestId,
+                type: 'deep_research_result',
+                payload: {
+                  title: artefactTitle,
+                  summary: artefactSummary,
+                  report: simulatedReport,
+                  sources: [],
+                  status: 'completed',
+                  topic,
+                  tool: 'DEEP_RESEARCH',
+                },
+                createdAt: new Date().toISOString(),
+              }),
+            });
+            const rawBody = await postResp.text();
+            let json: any = {};
+            try { json = JSON.parse(rawBody); } catch {}
+            postHttpStatus = postResp.status;
+            artefactId = json?.artefactId || json?.id || undefined;
+            artefactPosted = postResp.ok && !!artefactId;
+
+            console.log(`[ARTEFACT_POST] runId=${chatRunId} clientRequestId=${clientRequestId} status=${postResp.status} hasArtefactId=${!!artefactId}${artefactId ? ` artefactId=${artefactId}` : ''}`);
+
+            if (artefactPosted) {
+              await logEvt({
+                userId, runId: chatRunId, conversationId, clientRequestId,
+                actionTaken: 'artefact_post_succeeded', status: 'success',
+                taskGenerated: `Artefact POST succeeded: artefactId=${artefactId}`,
+                runType: 'plan', metadata: { runId: chatRunId, artefactId },
+              }).catch(() => {});
+            } else {
+              await logEvt({
+                userId, runId: chatRunId, conversationId, clientRequestId,
+                actionTaken: 'artefact_post_failed', status: 'failed',
+                taskGenerated: `Artefact POST failed: HTTP ${postResp.status}`,
+                runType: 'plan', metadata: { runId: chatRunId, status: postResp.status },
+              }).catch(() => {});
+            }
+          } catch (e: any) {
+            console.error(`[ARTEFACT_POST] runId=${chatRunId} clientRequestId=${clientRequestId} NETWORK_ERROR: ${e.message}`);
+          }
+        }
+
+        console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} status=completed posted=${artefactPosted} artefactId=${artefactId || 'none'} deepResearchRunId=none`);
+
+        if (artefactPosted) {
+          await logEvt({
+            userId, runId: chatRunId, conversationId, clientRequestId,
+            actionTaken: 'artefact_created', status: 'success',
+            taskGenerated: `Artefact created: ${artefactTitle}`,
+            runType: 'plan', metadata: { artefactType: 'deep_research_result', title: artefactTitle, artefactId },
+          });
+
+          await logEvt({
+            userId, runId: chatRunId, conversationId, clientRequestId,
+            actionTaken: 'deep_research_completed', status: 'success',
+            taskGenerated: `Deep research completed: "${topic}"`,
+            runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', artefactId },
+          });
+
+          await logRunCompleted(
+            userId, chatRunId,
+            `Deep research complete: "${topic}"`,
+            { tool: 'DEEP_RESEARCH', topic },
+            conversationId
+          );
+        }
+
+        return res.json({
+          ok: true,
+          chatRunId,
+          taskId,
+          conversationId,
+          clientRequestId,
+          simulateType: 'deep_research',
+          topic,
+          artefactPosted,
+          artefactId: artefactId || null,
+          afrEvents: artefactPosted
+            ? ['mission_received', 'deep_research_started', 'tool_call_started', 'tool_call_completed', 'artefact_post_succeeded', 'artefact_created', 'deep_research_completed', 'run_completed']
+            : ['mission_received', 'deep_research_started', 'tool_call_started', 'tool_call_completed', 'artefact_post_failed'],
+        });
+      } catch (error: any) {
+        console.error(`[DEBUG] simulate-chat-task(deep_research): error — ${error.message}`);
+        return res.status(500).json({ ok: false, error: error.message, chatRunId });
+      }
     }
 
     const locationMatch = goalText.match(/\s+in\s+(.+)$/i);

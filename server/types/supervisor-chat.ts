@@ -21,7 +21,7 @@ export interface SupervisorTask {
   id: string;
   conversation_id: string;
   user_id: string;
-  task_type: 'analyze_conversation' | 'generate_leads' | 'provide_insights' | 'find_prospects';
+  task_type: 'analyze_conversation' | 'generate_leads' | 'provide_insights' | 'find_prospects' | 'deep_research';
   request_data: TaskRequestData;
   status: 'pending' | 'processing' | 'completed' | 'failed';
   result?: TaskResult;
@@ -51,6 +51,10 @@ export interface TaskRequestData {
     business_type?: string;
     location?: string;
     radius_km?: number;
+  };
+  deep_research?: {
+    topic?: string;
+    prompt?: string;
   };
 }
 

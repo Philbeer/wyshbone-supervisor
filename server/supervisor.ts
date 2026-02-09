@@ -338,6 +338,12 @@ class SupervisorService {
         capabilities = ['business_insights'];
         break;
 
+      case 'deep_research':
+        const drResult = await this.executeDeepResearchForChat(task, uiRunId, clientRequestId);
+        response = drResult.response;
+        capabilities = ['deep_research'];
+        break;
+
       default:
         response = "I'm not sure how to help with that request yet. Let me know if you'd like me to find leads or analyze your conversation!";
         capabilities = [];
@@ -388,10 +394,7 @@ class SupervisorService {
     runId: string;
     clientRequestId?: string;
     type: string;
-    title: string;
-    summary: string;
-    leads: Array<Record<string, unknown>>;
-    query: Record<string, unknown>;
+    payload: Record<string, unknown>;
     userId?: string;
     conversationId?: string;
   }): Promise<{ ok: boolean; artefactId?: string; httpStatus?: number }> {
@@ -418,13 +421,7 @@ class SupervisorService {
           runId: params.runId,
           ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
           type: params.type,
-          payload: {
-            title: params.title,
-            summary: params.summary,
-            leads: params.leads,
-            query: params.query,
-            tool: 'SEARCH_PLACES',
-          },
+          payload: params.payload,
           createdAt: new Date().toISOString(),
         }),
       });
@@ -532,10 +529,13 @@ class SupervisorService {
         runId: chatRunId,
         clientRequestId,
         type: 'leads',
-        title: missingTitle,
-        summary: missingSummary,
-        leads: [],
-        query: { businessType: '', location: location || '', country: '' },
+        payload: {
+          title: missingTitle,
+          summary: missingSummary,
+          leads: [],
+          query: { businessType: '', location: location || '', country: '' },
+          tool: 'SEARCH_PLACES',
+        },
         userId: task.user_id,
         conversationId,
       });
@@ -600,10 +600,13 @@ class SupervisorService {
           runId: chatRunId,
           clientRequestId,
           type: 'leads',
-          title: artefactTitle,
-          summary: artefactSummary,
-          leads: [],
-          query: { businessType, location: city, country },
+          payload: {
+            title: artefactTitle,
+            summary: artefactSummary,
+            leads: [],
+            query: { businessType, location: city, country },
+            tool: 'SEARCH_PLACES',
+          },
           userId: task.user_id,
           conversationId,
         });
@@ -727,10 +730,13 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         runId: chatRunId,
         clientRequestId,
         type: 'leads',
-        title: successTitle,
-        summary: successSummary,
-        leads: normalizedLeads,
-        query: { businessType, location: city, country },
+        payload: {
+          title: successTitle,
+          summary: successSummary,
+          leads: normalizedLeads,
+          query: { businessType, location: city, country },
+          tool: 'SEARCH_PLACES',
+        },
         userId: task.user_id,
         conversationId,
       });
@@ -772,10 +778,13 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         runId: chatRunId,
         clientRequestId,
         type: 'leads',
-        title: errTitle,
-        summary: `SEARCH_PLACES failed: ${errMsg}`,
-        leads: [],
-        query: { businessType, location: city, country },
+        payload: {
+          title: errTitle,
+          summary: `SEARCH_PLACES failed: ${errMsg}`,
+          leads: [],
+          query: { businessType, location: city, country },
+          tool: 'SEARCH_PLACES',
+        },
         userId: task.user_id,
         conversationId,
       });
@@ -804,6 +813,197 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         leadIds: []
       };
     }
+  }
+
+  private async executeDeepResearchForChat(
+    task: SupervisorTask,
+    chatRunId: string,
+    clientRequestId: string
+  ): Promise<{ response: string }> {
+    const requestData = task.request_data;
+    const conversationId = task.conversation_id;
+    const topic = requestData.deep_research?.topic || requestData.user_message || '';
+    const prompt = requestData.deep_research?.prompt || topic;
+
+    logAFREvent({
+      userId: task.user_id, runId: chatRunId, conversationId,
+      clientRequestId,
+      actionTaken: 'deep_research_started', status: 'pending',
+      taskGenerated: `Deep research started: "${topic}"`,
+      runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', topic },
+    }).catch(() => {});
+
+    console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} status=started topic="${topic}"`);
+
+    let deepResearchRunId: string | undefined;
+    let researchResult: any = null;
+    let researchError: string | undefined;
+
+    try {
+      logToolCallStarted(
+        task.user_id, chatRunId, 'DEEP_RESEARCH',
+        { topic, prompt },
+        conversationId
+      ).catch(() => {});
+
+      const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
+      const tavilyKey = process.env.TAVILY_API_KEY || process.env.DEEP_RESEARCH_API_KEY;
+
+      if (uiBaseUrl) {
+        const toolResp = await fetch(`${uiBaseUrl}/api/tools/execute`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tool: 'deep_research',
+            params: { topic, prompt },
+            userId: task.user_id,
+            sessionId: `supervisor_dr_${Date.now()}`,
+          }),
+        });
+
+        const toolData = await toolResp.json().catch(() => ({}));
+        deepResearchRunId = toolData?.data?.runId || toolData?.data?.id || toolData?.runId || undefined;
+
+        if (deepResearchRunId) {
+          console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} deepResearchRunId=${deepResearchRunId} — polling for completion`);
+
+          this.bridgeRunToUI(chatRunId, deepResearchRunId, clientRequestId).catch(() => {});
+
+          const POLL_INTERVAL = 5000;
+          const MAX_POLL_TIME = 5 * 60 * 1000;
+          const pollStart = Date.now();
+
+          while (Date.now() - pollStart < MAX_POLL_TIME) {
+            await new Promise(r => setTimeout(r, POLL_INTERVAL));
+
+            const { data: runRow, error: pollErr } = await supabase!
+              .from('deep_research_runs')
+              .select('*')
+              .eq('id', deepResearchRunId)
+              .single();
+
+            if (pollErr) {
+              console.warn(`[DEEP_RESEARCH] poll error for ${deepResearchRunId}: ${pollErr.message}`);
+              continue;
+            }
+
+            if (runRow?.status === 'completed') {
+              researchResult = runRow.result || runRow.data;
+              console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} deepResearchRunId=${deepResearchRunId} completed`);
+              break;
+            } else if (runRow?.status === 'failed' || runRow?.status === 'error') {
+              researchError = runRow.error || 'Deep research failed';
+              console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} deepResearchRunId=${deepResearchRunId} failed: ${researchError}`);
+              break;
+            }
+          }
+
+          if (!researchResult && !researchError) {
+            researchError = `Deep research timed out after ${MAX_POLL_TIME / 1000}s`;
+            console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} deepResearchRunId=${deepResearchRunId} TIMEOUT`);
+          }
+        } else if (toolData?.ok || toolData?.success) {
+          researchResult = toolData?.data || toolData;
+        } else {
+          researchError = toolData?.error || `UI tool returned: ${JSON.stringify(toolData).substring(0, 200)}`;
+        }
+      } else if (tavilyKey) {
+        researchError = 'Direct Tavily execution not implemented — set UI_URL';
+      } else {
+        researchError = 'No UI_URL or TAVILY_API_KEY configured for deep research';
+      }
+    } catch (err: any) {
+      researchError = err.message || 'Deep research execution failed';
+      console.error(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} EXCEPTION: ${researchError}`);
+    }
+
+    if (researchError) {
+      logToolCallFailed(
+        task.user_id, chatRunId, 'DEEP_RESEARCH',
+        researchError,
+        conversationId
+      ).catch(() => {});
+    } else {
+      logToolCallCompleted(
+        task.user_id, chatRunId, 'DEEP_RESEARCH',
+        { summary: `Deep research completed for "${topic}"`, hasResult: !!researchResult },
+        conversationId
+      ).catch(() => {});
+    }
+
+    const report = researchResult
+      ? (typeof researchResult === 'string' ? researchResult : (researchResult.report || researchResult.summary || JSON.stringify(researchResult).substring(0, 2000)))
+      : '';
+    const sources = researchResult?.sources || researchResult?.references || [];
+    const status = researchError ? 'failed' : 'completed';
+    const artefactTitle = researchError
+      ? `Deep research failed: "${topic}"`
+      : `Deep research: "${topic}"`;
+    const artefactSummary = researchError
+      ? `DEEP_RESEARCH failed: ${researchError}`
+      : `Deep research completed for "${topic}"`;
+
+    const postResult = await this.postArtefactToUI({
+      runId: chatRunId,
+      clientRequestId,
+      type: 'deep_research_result',
+      payload: {
+        title: artefactTitle,
+        summary: artefactSummary,
+        report,
+        sources: Array.isArray(sources) ? sources : [],
+        status,
+        topic,
+        tool: 'DEEP_RESEARCH',
+        ...(deepResearchRunId ? { deep_research_run_id: deepResearchRunId } : {}),
+        ...(researchError ? { error: researchError } : {}),
+      },
+      userId: task.user_id,
+      conversationId,
+    });
+
+    console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} status=${status} posted=${postResult.ok} artefactId=${postResult.artefactId || 'none'} deepResearchRunId=${deepResearchRunId || 'none'}`);
+
+    if (postResult.ok) {
+      logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId,
+        clientRequestId,
+        actionTaken: 'artefact_created', status: 'success',
+        taskGenerated: `Artefact created: ${artefactTitle}`,
+        runType: 'plan', metadata: { artefactType: 'deep_research_result', title: artefactTitle, artefactId: postResult.artefactId },
+      }).catch(() => {});
+
+      if (researchError) {
+        logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId,
+          clientRequestId,
+          actionTaken: 'deep_research_failed', status: 'failed',
+          taskGenerated: `Deep research failed: ${researchError}`,
+          runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', error: researchError, deepResearchRunId },
+        }).catch(() => {});
+      } else {
+        logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId,
+          clientRequestId,
+          actionTaken: 'deep_research_completed', status: 'success',
+          taskGenerated: `Deep research completed: "${topic}"`,
+          runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', artefactId: postResult.artefactId, deepResearchRunId },
+        }).catch(() => {});
+
+        logRunCompleted(
+          task.user_id, chatRunId,
+          `Deep research complete: "${topic}"`,
+          { tool: 'DEEP_RESEARCH', topic, deepResearchRunId },
+          conversationId
+        ).catch(() => {});
+      }
+    }
+
+    const responseText = researchError
+      ? `I ran into an issue with the deep research on "${topic}": ${researchError}. Would you like me to try again?`
+      : `Here are the results of my deep research on "${topic}":\n\n${report.substring(0, 1500)}${report.length > 1500 ? '\n\n_(Full report available in your artefacts)_' : ''}`;
+
+    return { response: responseText };
   }
 
   private async analyzeConversation(

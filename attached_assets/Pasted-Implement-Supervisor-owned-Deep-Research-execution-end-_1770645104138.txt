@@ -1,0 +1,45 @@
+Implement Supervisor-owned Deep Research execution end to end, with artefact persistence and AFR events.
+
+Current state:
+- UI runs deep research via startBackgroundResponsesJob and stores results in deep_research_runs.
+- Supervisor currently calls UI /api/tools/execute "deep_research" and receives ActionResult, but does not emit AFR events or post artefacts.
+- We want Supervisor to own the deep research tool like SEARCH_PLACES, and always produce an artefact that Tower can judge.
+
+Requirements:
+1) Inputs and identifiers
+- Require request_data.run_id (canonical UI runId) and request_data.client_request_id (CRID) for deep research tasks.
+- If missing, emit artefact_post_failed with reason "missing_identifiers" and stop.
+
+2) Execution ownership
+- When a deep research task arrives, Supervisor must:
+  a) emit AFR events: deep_research_started (with uiRunId + crid)
+  b) execute deep research itself by calling the existing UI tool endpoint /api/tools/execute (tool="deep_research") OR whatever internal executor exists, but Supervisor must control the lifecycle
+  c) poll for completion if the deep research tool is async (use existing ENABLE_DEEP_RESEARCH_POLLER pattern, but turn it on for this flow, not global if possible)
+  d) on completion or failure, proceed to artefact posting
+
+3) Artefacts
+- On completion, POST to UI: POST /api/afr/artefacts using runId = request_data.run_id (NOT any supervisor internal id).
+- Create an artefact with:
+  type = "deep_research_result"
+  payload includes: title, summary, report (markdown ok), sources (if present), status ("completed"), deep_research_run_id (if there is one), query/topic
+- On failure, still POST deep_research_result with status="failed" and error fields. Always create an artefact, even if empty.
+
+4) AFR events (gated like SEARCH_PLACES)
+- deep_research_started always emitted when job accepted
+- deep_research_completed emitted only after artefact_post_succeeded and artefact_created
+- deep_research_failed emitted after artefact_post_failed OR after posting failed-status artefact successfully (choose one consistent rule, but do not leave runs without a terminal event)
+- Add a structured log line:
+  [DEEP_RESEARCH] uiRunId=... crid=... status=started/completed/failed posted=true/false artefactId=... deepResearchRunId=...
+
+5) Bridge update (optional but recommended)
+- If deep research generates an internal deep_research_run_id, call UI endpoint to store it against agent_runs (if exists). This is only for debugging, canonical is still uiRunId.
+
+Acceptance tests:
+- Trigger a deep research task that previously "delegated".
+- UI endpoint /api/afr/artefacts?runId=<uiRunId> must return deep_research_result.
+- Live Activity must show started and completed (or failed) with consistent events.
+- Tower can judge the deep_research_result artefact.
+
+Deliverables:
+- Full file rewrites where changes are made.
+- Keep UI thin, do not add UI side deep research execution logic.
