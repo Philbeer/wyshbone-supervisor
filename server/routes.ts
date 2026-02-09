@@ -565,7 +565,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
       let artefactPosted = false;
       let artefactId: string | undefined;
-      let postHttpStatus: number | undefined;
+      let postHttpStatus: number | undefined = 0;
 
       if (uiBaseUrl) {
         try {
@@ -635,6 +635,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           runType: 'plan', metadata: { runId: chatRunId, status: 0, hasBody: false, errorCode: 'ui_url_missing' },
         }).catch(() => {});
       }
+
+      console.log(`[LEADS_ARTEFACT] uiRunId=${chatRunId} crid=${clientRequestId} count=${placesCount} posted=${artefactPosted} status=${postHttpStatus ?? 0}`);
 
       if (artefactPosted) {
         await logEvt({

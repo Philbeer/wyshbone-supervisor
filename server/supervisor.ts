@@ -526,6 +526,32 @@ class SupervisorService {
     }
 
     if (!businessType) {
+      const missingTitle = `0 leads (no business type specified)`;
+      const missingSummary = `SEARCH_PLACES skipped: no business_type in request`;
+      const missingPostResult = await this.postArtefactToUI({
+        runId: chatRunId,
+        clientRequestId,
+        type: 'leads',
+        title: missingTitle,
+        summary: missingSummary,
+        leads: [],
+        query: { businessType: '', location: location || '', country: '' },
+        userId: task.user_id,
+        conversationId,
+      });
+
+      console.log(`[LEADS_ARTEFACT] uiRunId=${chatRunId} crid=${clientRequestId} count=0 posted=${missingPostResult.ok} status=${missingPostResult.httpStatus ?? 0}`);
+
+      if (missingPostResult.ok) {
+        logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId,
+          clientRequestId,
+          actionTaken: 'artefact_created', status: 'success',
+          taskGenerated: `Artefact created: ${missingTitle}`,
+          runType: 'plan', metadata: { artefactType: 'leads', title: missingTitle, artefactId: missingPostResult.artefactId },
+        }).catch(() => {});
+      }
+
       logRunCompleted(
         task.user_id, chatRunId,
         `Chat run skipped: no business type provided`,
@@ -581,6 +607,8 @@ class SupervisorService {
           userId: task.user_id,
           conversationId,
         });
+
+        console.log(`[LEADS_ARTEFACT] uiRunId=${chatRunId} crid=${clientRequestId} count=0 posted=${postResult.ok} status=${postResult.httpStatus ?? 0}`);
 
         if (postResult.ok) {
           logAFREvent({
@@ -707,6 +735,8 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         conversationId,
       });
 
+      console.log(`[LEADS_ARTEFACT] uiRunId=${chatRunId} crid=${clientRequestId} count=${normalizedLeads.length} posted=${postResult.ok} status=${postResult.httpStatus ?? 0}`);
+
       if (postResult.ok) {
         logAFREvent({
           userId: task.user_id, runId: chatRunId, conversationId,
@@ -749,6 +779,8 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         userId: task.user_id,
         conversationId,
       });
+
+      console.log(`[LEADS_ARTEFACT] uiRunId=${chatRunId} crid=${clientRequestId} count=0 posted=${errPostResult.ok} status=${errPostResult.httpStatus ?? 0}`);
 
       if (errPostResult.ok) {
         logAFREvent({
