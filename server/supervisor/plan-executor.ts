@@ -35,6 +35,13 @@ import {
 } from '../plan-progress';
 import { createArtefact } from './artefacts';
 import { judgeArtefact } from './tower-artefact-judge';
+import {
+  initRunState,
+  handleTowerVerdict,
+  getRunState,
+  type AgentLoopReaction,
+} from './agent-loop';
+import { executeAction, type ActionResult as LoopActionResult } from './action-executor';
 
 function compactInputs(args: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -338,29 +345,81 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             conversationId,
           });
 
-          const judgeResult = await judgeArtefact({
-            artefact: stepArtefact,
-            runId: planId,
-            goal,
-            userId,
-            conversationId,
-          });
+          const isSearchPlaces = stepType === 'SEARCH_PLACES';
 
-          if (judgeResult.shouldStop) {
-            const haltReason = `Tower judgement: ${judgeResult.judgement.verdict} — ${judgeResult.judgement.reasons[0] || 'artefact rejected'}`;
-            console.log(`[PLAN_EXECUTOR] Halted by artefact judgement after step ${i + 1}: ${haltReason}`);
+          if (isSearchPlaces) {
+            const toolArgs = step.toolArgs || toolMetadata?.toolArgs || {};
+            if (!getRunState(planId)) {
+              initRunState(planId, userId, toolArgs, conversationId);
+            }
 
-            failProgress(planId, `Halted: ${haltReason}`);
-            await safeUpdatePlanStatus(planId, 'halted');
-
-            return {
-              success: false,
-              stepsCompleted,
-              totalSteps: steps.length,
-              error: `Halted by artefact judgement: ${haltReason}`,
-              haltedByJudgement: true,
-              haltReason,
+            const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
+              console.log(`[AGENT_LOOP] Re-running SEARCH_PLACES with adjusted args`);
+              return executeAction({
+                toolName: 'SEARCH_PLACES',
+                toolArgs: args,
+                userId,
+                tracker: toolTracker,
+                runId: planId,
+                conversationId,
+                clientRequestId,
+              });
             };
+
+            const artefactPayload = stepArtefact.payloadJson as Record<string, unknown> || {};
+            const reaction = await handleTowerVerdict(
+              planId,
+              goal,
+              { ...successCriteria },
+              { ...artefactPayload, ...stepOutputs, ...stepMetrics },
+              rerunTool,
+            );
+
+            if (reaction.action === 'stop') {
+              const haltReason = `Agent Loop: STOP — ${reaction.verdict.rationale}`;
+              console.log(`[PLAN_EXECUTOR] Halted by Agent Loop after step ${i + 1}: ${haltReason}`);
+
+              failProgress(planId, `Halted: ${haltReason}`);
+              await safeUpdatePlanStatus(planId, 'halted');
+
+              return {
+                success: false,
+                stepsCompleted,
+                totalSteps: steps.length,
+                error: haltReason,
+                haltedByJudgement: true,
+                haltReason,
+              };
+            }
+
+            if (reaction.action === 'retry' || reaction.action === 'replan') {
+              console.log(`[PLAN_EXECUTOR] Agent Loop reacted: ${reaction.action} (planVersion=${reaction.planVersion})`);
+            }
+          } else {
+            const judgeResult = await judgeArtefact({
+              artefact: stepArtefact,
+              runId: planId,
+              goal,
+              userId,
+              conversationId,
+            });
+
+            if (judgeResult.shouldStop) {
+              const haltReason = `Tower judgement: ${judgeResult.judgement.verdict} — ${judgeResult.judgement.reasons[0] || 'artefact rejected'}`;
+              console.log(`[PLAN_EXECUTOR] Halted by artefact judgement after step ${i + 1}: ${haltReason}`);
+
+              failProgress(planId, `Halted: ${haltReason}`);
+              await safeUpdatePlanStatus(planId, 'halted');
+
+              return {
+                success: false,
+                stepsCompleted,
+                totalSteps: steps.length,
+                error: `Halted by artefact judgement: ${haltReason}`,
+                haltedByJudgement: true,
+                haltReason,
+              };
+            }
           }
         } catch (artefactErr: any) {
           console.error(`[PLAN_EXECUTOR] Step artefact/judgement failed (continuing): ${artefactErr.message}`);
