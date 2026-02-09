@@ -254,23 +254,29 @@ class SupervisorService {
     if (!supabase) return;
 
     const requestData = task.request_data;
-    const chatRunId = requestData.run_id || `chat_${task.id}`;
+    const uiRunId = requestData.run_id;
     const clientRequestId = requestData.client_request_id;
-    
-    if (!requestData.run_id) {
-      console.warn(`[CHAT_LEADS] Task ${task.id}: UI did not provide run_id in request_data — using fallback ${chatRunId}`);
+
+    if (!uiRunId || !clientRequestId) {
+      const missing = [!uiRunId && 'run_id', !clientRequestId && 'client_request_id'].filter(Boolean).join(', ');
+      console.error(`[SUPERVISOR] Task ${task.id}: missing required identifiers (${missing}) in request_data — aborting`);
       logAFREvent({
-        userId: task.user_id, runId: chatRunId, conversationId: task.conversation_id,
-        actionTaken: 'run_id_missing', status: 'pending',
-        taskGenerated: `UI did not provide run_id for task ${task.id} — using fallback ${chatRunId}`,
-        runType: 'plan', metadata: { taskId: task.id, fallbackRunId: chatRunId },
+        userId: task.user_id, runId: uiRunId || 'unknown', conversationId: task.conversation_id,
+        actionTaken: 'artefact_post_failed', status: 'failed',
+        taskGenerated: `Artefact POST aborted: missing identifiers (${missing})`,
+        runType: 'plan', metadata: { taskId: task.id, errorCode: 'missing_identifiers', missing },
       }).catch(() => {});
+      await supabase
+        .from('supervisor_tasks')
+        .update({ status: 'failed', error: `Missing required identifiers: ${missing}` })
+        .eq('id', task.id);
+      return;
     }
 
-    console.log(`💬 Processing chat task ${task.id} (${task.task_type}), runId=${chatRunId}${clientRequestId ? `, clientRequestId=${clientRequestId}` : ''}...`);
+    console.log(`[SUPERVISOR] Processing chat task ${task.id} (${task.task_type}) uiRunId=${uiRunId} clientRequestId=${clientRequestId}`);
 
     logMissionReceived(
-      task.user_id, chatRunId, task.id, task.task_type, task.conversation_id
+      task.user_id, uiRunId, task.id, task.task_type, task.conversation_id
     ).catch(() => {});
 
     // Mark as processing - with concurrency guard
@@ -316,7 +322,7 @@ class SupervisorService {
     switch (task.task_type) {
       case 'generate_leads':
       case 'find_prospects':
-        const result = await this.generateLeadsForChat(task, userContext, conversationContext, chatRunId, clientRequestId);
+        const result = await this.generateLeadsForChat(task, userContext, conversationContext, uiRunId, clientRequestId);
         response = result.response;
         leadIds = result.leadIds;
         capabilities = ['lead_generation', 'email_enrichment'];
@@ -470,12 +476,34 @@ class SupervisorService {
     }
   }
 
+  private async bridgeRunToUI(uiRunId: string, supervisorRunId: string, clientRequestId?: string): Promise<void> {
+    const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
+    if (!uiBaseUrl) {
+      console.error(`[RUN_BRIDGE] UI_URL not configured — cannot bridge run IDs`);
+      return;
+    }
+    try {
+      const resp = await fetch(`${uiBaseUrl}/api/afr/run-bridge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          runId: uiRunId,
+          supervisorRunId,
+          ...(clientRequestId ? { clientRequestId } : {}),
+        }),
+      });
+      console.log(`[RUN_BRIDGE] uiRunId=${uiRunId} supervisorRunId=${supervisorRunId} status=${resp.status}`);
+    } catch (e: any) {
+      console.error(`[RUN_BRIDGE] uiRunId=${uiRunId} supervisorRunId=${supervisorRunId} NETWORK_ERROR: ${e.message}`);
+    }
+  }
+
   private async generateLeadsForChat(
     task: SupervisorTask,
     userContext: UserContext,
     conversationContext: Array<{ role: string; content: string }>,
     chatRunId: string,
-    clientRequestId?: string
+    clientRequestId: string
   ): Promise<{ response: string; leadIds: string[] }> {
     const requestData = task.request_data;
     const searchQuery = requestData.search_query;
@@ -544,7 +572,7 @@ class SupervisorService {
         const artefactSummary = `SEARCH_PLACES returned 0 results for "${businessType}" in ${city}, ${country}`;
         const postResult = await this.postArtefactToUI({
           runId: chatRunId,
-          ...(clientRequestId ? { clientRequestId } : {}),
+          clientRequestId,
           type: 'leads',
           title: artefactTitle,
           summary: artefactSummary,
@@ -557,7 +585,7 @@ class SupervisorService {
         if (postResult.ok) {
           logAFREvent({
             userId: task.user_id, runId: chatRunId, conversationId,
-            ...(clientRequestId ? { clientRequestId } : {}),
+            clientRequestId,
             actionTaken: 'artefact_created', status: 'success',
             taskGenerated: `Artefact created: ${artefactTitle}`,
             runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle, artefactId: postResult.artefactId },
@@ -669,7 +697,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       const successSummary = `Found ${createdLeads.length} ${businessType} prospects in ${city}`;
       const postResult = await this.postArtefactToUI({
         runId: chatRunId,
-        ...(clientRequestId ? { clientRequestId } : {}),
+        clientRequestId,
         type: 'leads',
         title: successTitle,
         summary: successSummary,
@@ -682,7 +710,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       if (postResult.ok) {
         logAFREvent({
           userId: task.user_id, runId: chatRunId, conversationId,
-          ...(clientRequestId ? { clientRequestId } : {}),
+          clientRequestId,
           actionTaken: 'artefact_created', status: 'success',
           taskGenerated: `Artefact created: ${successTitle}`,
           runType: 'plan', metadata: { artefactType: 'leads', title: successTitle, artefactId: postResult.artefactId },
@@ -712,7 +740,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       const errTitle = `0 ${businessType} leads in ${city} (error)`;
       const errPostResult = await this.postArtefactToUI({
         runId: chatRunId,
-        ...(clientRequestId ? { clientRequestId } : {}),
+        clientRequestId,
         type: 'leads',
         title: errTitle,
         summary: `SEARCH_PLACES failed: ${errMsg}`,
@@ -725,7 +753,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       if (errPostResult.ok) {
         logAFREvent({
           userId: task.user_id, runId: chatRunId, conversationId,
-          ...(clientRequestId ? { clientRequestId } : {}),
+          clientRequestId,
           actionTaken: 'artefact_created', status: 'success',
           taskGenerated: `Artefact created: ${errTitle}`,
           runType: 'plan', metadata: { artefactType: 'leads', title: errTitle, artefactId: errPostResult.artefactId },

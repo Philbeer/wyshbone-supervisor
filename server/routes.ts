@@ -476,16 +476,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const userId = getUserId(req);
     const taskId = randomUUID();
     const conversationId = `sim_conv_${taskId.substring(0, 8)}`;
-    const incomingRunId = req.body?.run_id as string | undefined;
+    const chatRunId = req.body?.run_id as string | undefined;
     const clientRequestId = req.body?.client_request_id as string | undefined;
-    const chatRunId = incomingRunId || `chat_${taskId}`;
+
+    if (!chatRunId || !clientRequestId) {
+      const missing = [!chatRunId && 'run_id', !clientRequestId && 'client_request_id'].filter(Boolean).join(', ');
+      console.error(`[DEBUG] simulate-chat-task: missing required identifiers (${missing})`);
+      await logEvt({
+        userId, runId: chatRunId || 'unknown', conversationId,
+        actionTaken: 'artefact_post_failed', status: 'failed',
+        taskGenerated: `Artefact POST aborted: missing identifiers (${missing})`,
+        runType: 'plan', metadata: { taskId, errorCode: 'missing_identifiers', missing },
+      }).catch(() => {});
+      return res.status(400).json({ ok: false, error: `Missing required identifiers: ${missing}`, taskId });
+    }
 
     const locationMatch = goalText.match(/\s+in\s+(.+)$/i);
     const city = locationMatch ? locationMatch[1].trim() : 'Kent';
     const businessType = goalText.replace(/^find\s+/i, '').replace(/\s+in\s+.+$/i, '').trim() || 'pet shops';
     const country = 'UK';
 
-    console.log(`[DEBUG] simulate-chat-task: goal="${goalText}", runId=${chatRunId}, clientRequestId=${clientRequestId || 'none'}, taskId=${taskId}`);
+    console.log(`[DEBUG] simulate-chat-task: goal="${goalText}" uiRunId=${chatRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
 
     try {
       await logMissionReceived(userId, chatRunId, taskId, 'find_prospects', conversationId);
@@ -563,7 +574,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               runId: chatRunId,
-              ...(clientRequestId ? { clientRequestId } : {}),
+              clientRequestId,
               type: 'leads',
               payload: {
                 title: artefactTitle,
@@ -583,14 +594,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           artefactId = json?.artefactId || json?.id || undefined;
           const hasArtefactId = !!artefactId;
 
-          console.log(`[ARTEFACT_POST] runId=${chatRunId} clientRequestId=${clientRequestId || 'none'} status=${postResp.status} hasArtefactId=${hasArtefactId}${hasArtefactId ? ` artefactId=${artefactId}` : ''}`);
+          console.log(`[ARTEFACT_POST] runId=${chatRunId} clientRequestId=${clientRequestId} status=${postResp.status} hasArtefactId=${hasArtefactId}${hasArtefactId ? ` artefactId=${artefactId}` : ''}`);
 
           artefactPosted = postResp.ok && hasArtefactId;
 
           if (artefactPosted) {
             await logEvt({
               userId, runId: chatRunId, conversationId,
-              ...(clientRequestId ? { clientRequestId } : {}),
+              clientRequestId,
               actionTaken: 'artefact_post_succeeded', status: 'success',
               taskGenerated: `Artefact POST succeeded: artefactId=${artefactId}`,
               runType: 'plan', metadata: { runId: chatRunId, artefactId },
@@ -598,27 +609,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
           } else {
             await logEvt({
               userId, runId: chatRunId, conversationId,
-              ...(clientRequestId ? { clientRequestId } : {}),
+              clientRequestId,
               actionTaken: 'artefact_post_failed', status: 'failed',
               taskGenerated: `Artefact POST failed: HTTP ${postResp.status}${!hasArtefactId ? ' (no artefactId in response)' : ''}`,
               runType: 'plan', metadata: { runId: chatRunId, status: postResp.status, hasBody, errorCode: json?.error || json?.code || null },
             }).catch(() => {});
           }
         } catch (e: any) {
-          console.error(`[ARTEFACT_POST] runId=${chatRunId} clientRequestId=${clientRequestId || 'none'} NETWORK_ERROR: ${e.message}`);
+          console.error(`[ARTEFACT_POST] runId=${chatRunId} clientRequestId=${clientRequestId} NETWORK_ERROR: ${e.message}`);
           await logEvt({
             userId, runId: chatRunId, conversationId,
-            ...(clientRequestId ? { clientRequestId } : {}),
+            clientRequestId,
             actionTaken: 'artefact_post_failed', status: 'failed',
             taskGenerated: 'Artefact POST failed: network error',
             runType: 'plan', metadata: { runId: chatRunId, status: 0, hasBody: false, errorCode: 'network_error' },
           }).catch(() => {});
         }
       } else {
-        console.error('[ARTEFACT_POST] UI_URL not set — cannot POST artefact to UI. Set UI_URL env var.');
+        console.error(`[ARTEFACT_POST] runId=${chatRunId} clientRequestId=${clientRequestId} UI_URL not set — cannot POST artefact to UI.`);
         await logEvt({
           userId, runId: chatRunId, conversationId,
-          ...(clientRequestId ? { clientRequestId } : {}),
+          clientRequestId,
           actionTaken: 'artefact_post_failed', status: 'failed',
           taskGenerated: 'Artefact POST failed: UI_URL not configured',
           runType: 'plan', metadata: { runId: chatRunId, status: 0, hasBody: false, errorCode: 'ui_url_missing' },
@@ -628,7 +639,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (artefactPosted) {
         await logEvt({
           userId, runId: chatRunId, conversationId,
-          ...(clientRequestId ? { clientRequestId } : {}),
+          clientRequestId,
           actionTaken: 'artefact_created', status: 'success',
           taskGenerated: `Artefact created: ${artefactTitle}`,
           runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle, artefactId },
@@ -647,7 +658,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         chatRunId,
         taskId,
         conversationId,
-        clientRequestId: clientRequestId || null,
+        clientRequestId,
         goal: goalText,
         businessType,
         location: `${city}, ${country}`,
