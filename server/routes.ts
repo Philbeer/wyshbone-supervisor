@@ -469,22 +469,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // ========================================
 
   app.post("/api/debug/simulate-chat-task", async (req, res) => {
-    const { logMissionReceived, logRunCompleted, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } = await import('./supervisor/afr-logger');
-    const { createArtefact: createArt } = await import('./supervisor/artefacts');
+    const { logAFREvent: logEvt, logMissionReceived, logRunCompleted, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } = await import('./supervisor/afr-logger');
     const { randomUUID } = await import('crypto');
 
     const goalText = (req.body?.goal as string) || 'find pet shops kent';
     const userId = getUserId(req);
     const taskId = randomUUID();
     const conversationId = `sim_conv_${taskId.substring(0, 8)}`;
-    const chatRunId = `chat_${taskId}`;
+    const incomingRunId = req.body?.run_id as string | undefined;
+    const clientRequestId = req.body?.client_request_id as string | undefined;
+    const chatRunId = incomingRunId || `chat_${taskId}`;
 
     const locationMatch = goalText.match(/\s+in\s+(.+)$/i);
     const city = locationMatch ? locationMatch[1].trim() : 'Kent';
     const businessType = goalText.replace(/^find\s+/i, '').replace(/\s+in\s+.+$/i, '').trim() || 'pet shops';
     const country = 'UK';
 
-    console.log(`[DEBUG] simulate-chat-task: goal="${goalText}", runId=${chatRunId}, taskId=${taskId}`);
+    console.log(`[DEBUG] simulate-chat-task: goal="${goalText}", runId=${chatRunId}, clientRequestId=${clientRequestId || 'none'}, taskId=${taskId}`);
 
     try {
       await logMissionReceived(userId, chatRunId, taskId, 'find_prospects', conversationId);
@@ -546,34 +547,69 @@ export async function registerRoutes(app: Express): Promise<Server> {
         conversationId
       );
 
-      await createArt({
-        runId: chatRunId,
-        type: 'leads',
-        title: `${placesCount} ${businessType} leads in ${city}`,
-        summary: `SEARCH_PLACES returned ${placesCount} results for "${businessType}" in ${city}, ${country}`,
-        payload: { leads: normalizedLeads, query: businessType, location: `${city}, ${country}` },
-        userId,
-        conversationId,
-      });
+      const artefactTitle = `${placesCount} ${businessType} leads in ${city}`;
+      const artefactSummary = `SEARCH_PLACES returned ${placesCount} results for "${businessType}" in ${city}, ${country}`;
+      const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
+      let artefactPosted = false;
 
-      await logRunCompleted(
-        userId, chatRunId,
-        `Chat run complete: ${placesCount} ${businessType} leads in ${city}`,
-        { leads_count: placesCount, tool: 'SEARCH_PLACES' },
-        conversationId
-      );
+      if (uiBaseUrl) {
+        try {
+          const postResp = await fetch(`${uiBaseUrl}/api/afr/artefacts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              runId: chatRunId,
+              ...(clientRequestId ? { clientRequestId } : {}),
+              type: 'leads',
+              title: artefactTitle,
+              summary: artefactSummary,
+              payloadJson: { leads: normalizedLeads, query: businessType, location: `${city}, ${country}` },
+            }),
+          });
+          artefactPosted = postResp.ok;
+          if (!artefactPosted) {
+            const body = await postResp.text().catch(() => '');
+            console.error(`[DEBUG] simulate-chat-task: POST artefact to UI failed: ${postResp.status} ${body}`);
+          }
+        } catch (e: any) {
+          console.error(`[DEBUG] simulate-chat-task: POST artefact to UI error: ${e.message}`);
+        }
+      } else {
+        console.warn('[DEBUG] simulate-chat-task: UI_URL not set — skipping artefact POST');
+      }
+
+      if (artefactPosted) {
+        await logEvt({
+          userId, runId: chatRunId, conversationId,
+          ...(clientRequestId ? { clientRequestId } : {}),
+          actionTaken: 'artefact_created', status: 'success',
+          taskGenerated: `Artefact created: ${artefactTitle}`,
+          runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle },
+        });
+
+        await logRunCompleted(
+          userId, chatRunId,
+          `Chat run complete: ${placesCount} ${businessType} leads in ${city}`,
+          { leads_count: placesCount, tool: 'SEARCH_PLACES' },
+          conversationId
+        );
+      }
 
       res.json({
         ok: true,
         chatRunId,
         taskId,
         conversationId,
+        clientRequestId: clientRequestId || null,
         goal: goalText,
         businessType,
         location: `${city}, ${country}`,
         placesFound: placesCount,
         leads: normalizedLeads,
-        afrEvents: ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_created', 'run_completed'],
+        artefactPosted,
+        afrEvents: artefactPosted
+          ? ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_created', 'run_completed']
+          : ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed'],
       });
     } catch (error: any) {
       console.error(`[DEBUG] simulate-chat-task: error — ${error.message}`);

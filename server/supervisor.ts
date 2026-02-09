@@ -4,8 +4,7 @@ import { emailService } from './notifications/email-service';
 import type { SupervisorTask, SupervisorMessage, TaskResult } from './types/supervisor-chat';
 import { randomUUID } from 'crypto';
 import { monitorGoalsOnce, publishGoalMonitorEvents } from './goal-monitoring';
-import { logMissionReceived, logRunCompleted, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './supervisor/afr-logger';
-import { createArtefact } from './supervisor/artefacts';
+import { logAFREvent, logMissionReceived, logRunCompleted, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './supervisor/afr-logger';
 
 interface UserContext {
   userId: string;
@@ -254,9 +253,11 @@ class SupervisorService {
   private async processChatTask(task: SupervisorTask) {
     if (!supabase) return;
 
-    const chatRunId = `chat_${task.id}`;
+    const requestData = task.request_data;
+    const chatRunId = requestData.run_id || `chat_${task.id}`;
+    const clientRequestId = requestData.client_request_id;
     
-    console.log(`💬 Processing chat task ${task.id} (${task.task_type})...`);
+    console.log(`💬 Processing chat task ${task.id} (${task.task_type}), runId=${chatRunId}${clientRequestId ? `, clientRequestId=${clientRequestId}` : ''}...`);
 
     logMissionReceived(
       task.user_id, chatRunId, task.id, task.task_type, task.conversation_id
@@ -305,7 +306,7 @@ class SupervisorService {
     switch (task.task_type) {
       case 'generate_leads':
       case 'find_prospects':
-        const result = await this.generateLeadsForChat(task, userContext, conversationContext);
+        const result = await this.generateLeadsForChat(task, userContext, conversationContext, chatRunId, clientRequestId);
         response = result.response;
         leadIds = result.leadIds;
         capabilities = ['lead_generation', 'email_enrichment'];
@@ -367,15 +368,56 @@ class SupervisorService {
       .eq('id', task.id);
   }
 
+  private async postArtefactToUI(params: {
+    runId: string;
+    clientRequestId?: string;
+    type: string;
+    title: string;
+    summary: string;
+    payloadJson: Record<string, unknown>;
+  }): Promise<boolean> {
+    const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
+    if (!uiBaseUrl) {
+      console.warn('[CHAT_LEADS] UI_URL not configured — cannot POST artefact to UI');
+      return false;
+    }
+    const url = `${uiBaseUrl}/api/afr/artefacts`;
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          runId: params.runId,
+          ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
+          type: params.type,
+          title: params.title,
+          summary: params.summary,
+          payloadJson: params.payloadJson,
+        }),
+      });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        console.error(`[CHAT_LEADS] POST artefact to UI failed: ${resp.status} ${body}`);
+        return false;
+      }
+      console.log(`[CHAT_LEADS] POST artefact to UI succeeded: ${params.title}`);
+      return true;
+    } catch (e: any) {
+      console.error(`[CHAT_LEADS] POST artefact to UI error: ${e.message}`);
+      return false;
+    }
+  }
+
   private async generateLeadsForChat(
     task: SupervisorTask,
     userContext: UserContext,
-    conversationContext: Array<{ role: string; content: string }>
+    conversationContext: Array<{ role: string; content: string }>,
+    chatRunId: string,
+    clientRequestId?: string
   ): Promise<{ response: string; leadIds: string[] }> {
     const requestData = task.request_data;
     const searchQuery = requestData.search_query;
 
-    const chatRunId = `chat_${task.id}`;
     const conversationId = task.conversation_id;
 
     let businessType = searchQuery?.business_type as string | undefined;
@@ -436,22 +478,33 @@ class SupervisorService {
           conversationId
         ).catch(() => {});
 
-        createArtefact({
+        const artefactTitle = `0 ${businessType} leads in ${city}`;
+        const artefactSummary = `SEARCH_PLACES returned 0 results for "${businessType}" in ${city}, ${country}`;
+        const posted = await this.postArtefactToUI({
           runId: chatRunId,
+          ...(clientRequestId ? { clientRequestId } : {}),
           type: 'leads',
-          title: `0 ${businessType} leads in ${city}`,
-          summary: `SEARCH_PLACES returned 0 results for "${businessType}" in ${city}, ${country}`,
-          payload: { leads: [], query: businessType, location: `${city}, ${country}` },
-          userId: task.user_id,
-          conversationId,
-        }).catch(e => console.error('[CHAT_LEADS] artefact creation failed:', e));
+          title: artefactTitle,
+          summary: artefactSummary,
+          payloadJson: { leads: [], query: businessType, location: `${city}, ${country}` },
+        });
 
-        logRunCompleted(
-          task.user_id, chatRunId,
-          `Chat run complete: 0 ${businessType} leads in ${city}`,
-          { leads_count: 0, tool: 'SEARCH_PLACES' },
-          conversationId
-        ).catch(() => {});
+        if (posted) {
+          logAFREvent({
+            userId: task.user_id, runId: chatRunId, conversationId,
+            ...(clientRequestId ? { clientRequestId } : {}),
+            actionTaken: 'artefact_created', status: 'success',
+            taskGenerated: `Artefact created: ${artefactTitle}`,
+            runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle },
+          }).catch(() => {});
+
+          logRunCompleted(
+            task.user_id, chatRunId,
+            `Chat run complete: 0 ${businessType} leads in ${city}`,
+            { leads_count: 0, tool: 'SEARCH_PLACES' },
+            conversationId
+          ).catch(() => {});
+        }
 
         return {
           response: `I searched for ${businessType} businesses in ${city}, but didn't find any results. Would you like to try a different location or business type?`,
@@ -548,22 +601,33 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         };
       });
 
-      createArtefact({
+      const successTitle = `${createdLeads.length} ${businessType} leads in ${city}`;
+      const successSummary = `Found ${createdLeads.length} ${businessType} prospects in ${city}`;
+      const posted = await this.postArtefactToUI({
         runId: chatRunId,
+        ...(clientRequestId ? { clientRequestId } : {}),
         type: 'leads',
-        title: `${createdLeads.length} ${businessType} leads in ${city}`,
-        summary: `Found ${createdLeads.length} ${businessType} prospects in ${city}`,
-        payload: { leads: normalizedLeads, query: businessType, location: `${city}, ${country}` },
-        userId: task.user_id,
-        conversationId,
-      }).catch(e => console.error('[CHAT_LEADS] artefact creation failed:', e));
+        title: successTitle,
+        summary: successSummary,
+        payloadJson: { leads: normalizedLeads, query: businessType, location: `${city}, ${country}` },
+      });
 
-      logRunCompleted(
-        task.user_id, chatRunId,
-        `Chat run complete: ${createdLeads.length} ${businessType} leads in ${city}`,
-        { leads_count: createdLeads.length, tool: 'SEARCH_PLACES' },
-        conversationId
-      ).catch(() => {});
+      if (posted) {
+        logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId,
+          ...(clientRequestId ? { clientRequestId } : {}),
+          actionTaken: 'artefact_created', status: 'success',
+          taskGenerated: `Artefact created: ${successTitle}`,
+          runType: 'plan', metadata: { artefactType: 'leads', title: successTitle },
+        }).catch(() => {});
+
+        logRunCompleted(
+          task.user_id, chatRunId,
+          `Chat run complete: ${createdLeads.length} ${businessType} leads in ${city}`,
+          { leads_count: createdLeads.length, tool: 'SEARCH_PLACES' },
+          conversationId
+        ).catch(() => {});
+      }
 
       return {
         response,
@@ -578,22 +642,32 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         conversationId
       ).catch(() => {});
 
-      createArtefact({
+      const errTitle = `0 ${businessType} leads in ${city} (error)`;
+      const errPosted = await this.postArtefactToUI({
         runId: chatRunId,
+        ...(clientRequestId ? { clientRequestId } : {}),
         type: 'leads',
-        title: `0 ${businessType} leads in ${city} (error)`,
+        title: errTitle,
         summary: `SEARCH_PLACES failed: ${errMsg}`,
-        payload: { leads: [], query: businessType, location: `${city}, ${country}`, error: errMsg },
-        userId: task.user_id,
-        conversationId,
-      }).catch(e => console.error('[CHAT_LEADS] artefact creation failed:', e));
+        payloadJson: { leads: [], query: businessType, location: `${city}, ${country}`, error: errMsg },
+      });
 
-      logRunCompleted(
-        task.user_id, chatRunId,
-        `Chat run failed: ${errMsg}`,
-        { leads_count: 0, tool: 'SEARCH_PLACES', error: errMsg },
-        conversationId
-      ).catch(() => {});
+      if (errPosted) {
+        logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId,
+          ...(clientRequestId ? { clientRequestId } : {}),
+          actionTaken: 'artefact_created', status: 'success',
+          taskGenerated: `Artefact created: ${errTitle}`,
+          runType: 'plan', metadata: { artefactType: 'leads', title: errTitle },
+        }).catch(() => {});
+
+        logRunCompleted(
+          task.user_id, chatRunId,
+          `Chat run failed: ${errMsg}`,
+          { leads_count: 0, tool: 'SEARCH_PLACES', error: errMsg },
+          conversationId
+        ).catch(() => {});
+      }
 
       return {
         response: `I encountered an issue while searching for ${businessType} in ${city}. Let me try again in a moment!`,

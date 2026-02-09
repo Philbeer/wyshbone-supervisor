@@ -51,3 +51,14 @@ The frontend is built with React, TypeScript, Vite, and Wouter for routing. Styl
 - **Tailwind CSS**: Utility-first CSS framework.
 - **Zod**: Runtime schema validation library.
 - **Tower Judgement API**: External service for agentic decision-making and evaluation of plan execution.
+
+## Recent Changes
+
+### 2026-02-09: UI-Provided RunId + Remote Artefact POST
+- **UI-provided identifiers**: `TaskRequestData` now includes optional `run_id` and `client_request_id`. When provided by the UI in `supervisor_tasks.request_data`, Supervisor uses these as the canonical run identifiers instead of generating `chat_${task.id}`.
+- **Remote artefact POST**: After collecting Google Places results, Supervisor POSTs a leads artefact to `UI_URL/api/afr/artefacts` (the Wyshbone UI's artefact endpoint) with `runId`, `clientRequestId`, `type`, `title`, `summary`, `payloadJson` in the request body (camelCase keys).
+- **Gated events**: `artefact_created` and `run_completed` AFR events are ONLY emitted after a successful POST to the UI. If the POST fails, these events are suppressed — ensuring the Activity UI never shows stale or phantom artefact references.
+- **postArtefactToUI helper**: New private method on SupervisorService handles the POST with error logging. Strips trailing slash from UI_URL.
+- **All 3 artefact paths gated**: zero-results, success, and error/catch paths all use `postArtefactToUI` with the same gating pattern.
+- **simulate-chat-task updated**: Accepts optional `run_id` and `client_request_id` in request body, POSTs artefacts to UI instead of local storage, gates `artefact_created`/`run_completed` behind successful POST.
+- **Files**: `server/supervisor.ts`, `server/types/supervisor-chat.ts`, `server/routes.ts`

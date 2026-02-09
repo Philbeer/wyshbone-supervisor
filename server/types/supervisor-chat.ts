@@ -32,6 +32,8 @@ export interface SupervisorTask {
 
 export interface TaskRequestData {
   user_message: string;
+  run_id?: string;
+  client_request_id?: string;
   conversation_context?: Array<{
     role: string;
     content: string;
