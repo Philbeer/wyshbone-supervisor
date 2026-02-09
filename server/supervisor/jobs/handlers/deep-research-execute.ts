@@ -142,7 +142,10 @@ export async function runDeepResearchExecute(
     runType: 'plan', metadata: { tool: 'DEEP_RESEARCH', topic, jobId: job.jobId },
   }).catch(() => {});
 
-  console.log(`[DEEP_RESEARCH] uiRunId=${uiRunId} crid=${clientRequestId || 'none'} userId=${userId} status=started topic="${topic}"`);
+  const provider = createResearchProvider();
+  const providerName = provider.name;
+
+  console.log(`[DEEP_RESEARCH] uiRunId=${uiRunId} crid=${clientRequestId || 'none'} userId=${userId} provider=${providerName} status=started topic="${topic}"`);
 
   await onProgress(5, `Starting deep research: "${topic}"`);
 
@@ -153,14 +156,9 @@ export async function runDeepResearchExecute(
   let artefactSummary = '';
 
   try {
-    logToolCallStarted(userId, uiRunId, 'DEEP_RESEARCH', { topic, prompt }, undefined).catch(() => {});
+    logToolCallStarted(userId, uiRunId, 'DEEP_RESEARCH', { topic, prompt, provider: providerName }, undefined).catch(() => {});
 
-    await onProgress(10, 'Running Perplexity research...');
-
-    const provider = createResearchProvider();
-    if (!provider) {
-      throw new Error('PERPLEXITY_API_KEY not configured — cannot run deep research');
-    }
+    await onProgress(10, `Running research via ${providerName}...`);
 
     const researchResult = await provider.research(topic, prompt);
     reportMarkdown = researchResult.report_markdown;
@@ -172,12 +170,13 @@ export async function runDeepResearchExecute(
 
     logToolCallCompleted(userId, uiRunId, 'DEEP_RESEARCH', {
       summary: `Deep research completed for "${topic}"`,
+      provider: providerName,
       reportChars: reportMarkdown.length,
       sourcesCount: sources.length,
     }, undefined).catch(() => {});
   } catch (err: any) {
     researchError = err.message || 'Deep research execution failed';
-    console.error(`[DEEP_RESEARCH] uiRunId=${uiRunId} crid=${clientRequestId || 'none'} EXCEPTION: ${researchError}`);
+    console.error(`[DEEP_RESEARCH] uiRunId=${uiRunId} crid=${clientRequestId || 'none'} provider=${providerName} EXCEPTION: ${researchError}`);
     logToolCallFailed(userId, uiRunId, 'DEEP_RESEARCH', researchError!, undefined).catch(() => {});
   }
 
@@ -203,6 +202,7 @@ export async function runDeepResearchExecute(
       status,
       topic,
       tool: 'DEEP_RESEARCH',
+      provider: providerName,
       ...(researchError ? { error: researchError } : {}),
     },
     userId,
@@ -211,7 +211,7 @@ export async function runDeepResearchExecute(
   result.artefactPosted = postResult.ok;
   result.artefactId = postResult.artefactId;
 
-  console.log(`[DEEP_RESEARCH] uiRunId=${uiRunId} crid=${clientRequestId || 'none'} userId=${userId} status=${status} reportChars=${reportMarkdown.length} sourcesCount=${sources.length} posted=${postResult.ok} artefactId=${postResult.artefactId || 'none'}`);
+  console.log(`[DEEP_RESEARCH] uiRunId=${uiRunId} crid=${clientRequestId || 'none'} userId=${userId} provider=${providerName} status=${status} reportChars=${reportMarkdown.length} sourcesCount=${sources.length} posted=${postResult.ok} artefactId=${postResult.artefactId || 'none'}`);
 
   if (postResult.ok) {
     logAFREvent({

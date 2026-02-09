@@ -519,24 +519,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         let researchError: string | undefined;
 
         const provider = createResearchProvider();
-        if (!provider) {
+        const providerName = provider.name;
+
+        try {
+          const result = await provider.research(topic, topic);
+          reportMarkdown = result.report_markdown;
+          sources = result.sources;
+          artefactTitle = result.title;
+          artefactSummary = result.summary;
+        } catch (provErr: any) {
           researchStatus = 'failed';
-          researchError = 'PERPLEXITY_API_KEY not configured';
+          researchError = provErr.message || 'Research provider error';
           artefactTitle = `Deep research failed: "${topic}"`;
           artefactSummary = `DEEP_RESEARCH failed: ${researchError}`;
-        } else {
-          try {
-            const result = await provider.research(topic, topic);
-            reportMarkdown = result.report_markdown;
-            sources = result.sources;
-            artefactTitle = result.title;
-            artefactSummary = result.summary;
-          } catch (provErr: any) {
-            researchStatus = 'failed';
-            researchError = provErr.message || 'Research provider error';
-            artefactTitle = `Deep research failed: "${topic}"`;
-            artefactSummary = `DEEP_RESEARCH failed: ${researchError}`;
-          }
         }
 
         if (researchError) {
@@ -544,7 +539,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         } else {
           await logToolCallCompleted(
             userId, chatRunId, 'DEEP_RESEARCH',
-            { summary: `Deep research completed for "${topic}"`, reportChars: reportMarkdown.length, sourcesCount: sources.length },
+            { summary: `Deep research completed for "${topic}"`, provider: providerName, reportChars: reportMarkdown.length, sourcesCount: sources.length },
             conversationId
           );
         }
@@ -570,6 +565,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   status: researchStatus,
                   topic,
                   tool: 'DEEP_RESEARCH',
+                  provider: providerName,
                   ...(researchError ? { error: researchError } : {}),
                 },
                 createdAt: new Date().toISOString(),
@@ -603,7 +599,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
 
-        console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} status=${researchStatus} reportChars=${reportMarkdown.length} sourcesCount=${sources.length} posted=${artefactPosted} artefactId=${artefactId || 'none'}`);
+        console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} provider=${providerName} status=${researchStatus} reportChars=${reportMarkdown.length} sourcesCount=${sources.length} posted=${artefactPosted} artefactId=${artefactId || 'none'}`);
 
         if (artefactPosted) {
           await logEvt({
@@ -645,6 +641,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           clientRequestId,
           simulateType: 'deep_research',
           topic,
+          provider: providerName,
           researchStatus,
           reportChars: reportMarkdown.length,
           sourcesCount: sources.length,

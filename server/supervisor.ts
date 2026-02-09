@@ -841,18 +841,15 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
     let researchError: string | undefined;
     let artefactTitle = '';
     let artefactSummary = '';
+    const provider = createResearchProvider();
+    const providerName = provider.name;
 
     try {
       logToolCallStarted(
         task.user_id, chatRunId, 'DEEP_RESEARCH',
-        { topic, prompt },
+        { topic, prompt, provider: providerName },
         conversationId
       ).catch(() => {});
-
-      const provider = createResearchProvider();
-      if (!provider) {
-        throw new Error('PERPLEXITY_API_KEY not configured — cannot run deep research');
-      }
 
       const result = await provider.research(topic, prompt);
       reportMarkdown = result.report_markdown;
@@ -862,12 +859,12 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
 
       logToolCallCompleted(
         task.user_id, chatRunId, 'DEEP_RESEARCH',
-        { summary: `Deep research completed for "${topic}"`, reportChars: reportMarkdown.length, sourcesCount: sources.length },
+        { summary: `Deep research completed for "${topic}"`, provider: providerName, reportChars: reportMarkdown.length, sourcesCount: sources.length },
         conversationId
       ).catch(() => {});
     } catch (err: any) {
       researchError = err.message || 'Deep research execution failed';
-      console.error(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} EXCEPTION: ${researchError}`);
+      console.error(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} provider=${providerName} EXCEPTION: ${researchError}`);
       logToolCallFailed(
         task.user_id, chatRunId, 'DEEP_RESEARCH',
         researchError!,
@@ -893,13 +890,14 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         status,
         topic,
         tool: 'DEEP_RESEARCH',
+        provider: providerName,
         ...(researchError ? { error: researchError } : {}),
       },
       userId: task.user_id,
       conversationId,
     });
 
-    console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} status=${status} reportChars=${reportMarkdown.length} sourcesCount=${sources.length} posted=${postResult.ok} artefactId=${postResult.artefactId || 'none'}`);
+    console.log(`[DEEP_RESEARCH] uiRunId=${chatRunId} crid=${clientRequestId} provider=${providerName} status=${status} reportChars=${reportMarkdown.length} sourcesCount=${sources.length} posted=${postResult.ok} artefactId=${postResult.artefactId || 'none'}`);
 
     if (postResult.ok) {
       logAFREvent({

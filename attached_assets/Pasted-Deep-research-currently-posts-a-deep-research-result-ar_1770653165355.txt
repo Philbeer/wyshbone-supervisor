@@ -1,0 +1,35 @@
+Deep research currently posts a deep_research_result artefact containing only a stub run object (id/status/topic). We need an actual formatted report output.
+
+Implement minimal deep research output generation in Supervisor, based on the old UI implementation:
+
+Goal:
+- For deep_research tasks, Supervisor must produce a markdown report (even if basic) and post it as deep_research_result so the UI shows real content.
+
+Requirements:
+1) Add a Supervisor deep research executor that:
+   - Creates a deep_research_runs row (or reuses existing table schema if present) with status="running"
+   - Runs one of:
+     a) OpenAI Responses API with tools: [{type:"web_search"}], background:true (preferred)
+     b) If OpenAI key unavailable, fallback to Claude (if Anthropic key set) with a disclaimer
+     c) If neither available, produce a basic markdown report from internal reasoning and mark "no web search available"
+   - When finished, write outputText (markdown) + status="completed" to deep_research_runs
+2) Post to UI artefacts:
+   POST /api/afr/artefacts
+   with:
+   - runId = uiRunId (sourceRunId)
+   - clientRequestId = CRID
+   - type = "deep_research_result"
+   - payload = { title, summary, report_markdown: outputText, sources: [], topic, status:"completed" }
+   (sources can be empty for now, but report_markdown must be non-empty)
+3) Gate events:
+   - deep_research_completed + run_completed only after artefact POST succeeds (artefactId returned)
+   - On error/timeout, still post deep_research_result with status:"failed"/"timeout" and a short error message in report_markdown
+4) Add structured logging:
+   [DEEP_RESEARCH] uiRunId=... crid=... provider=openai|anthropic|fallback status=... reportChars=N posted=true/false artefactId=...
+
+Acceptance test:
+- Run “deep research pubs arundel”.
+- ResultsModal shows a non-empty markdown report under Research Report tab.
+- /api/afr/artefacts?runId=<runId> returns deep_research_result with report_markdown populated.
+
+Deliver full file rewrites where changes are made.
