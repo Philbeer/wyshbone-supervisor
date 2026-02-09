@@ -569,7 +569,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 title: artefactTitle,
                 summary: artefactSummary,
                 leads: normalizedLeads,
-                query: { businessType, location: `${city}, ${country}` },
+                query: { businessType, location: city, country },
                 tool: 'SEARCH_PLACES',
               },
               createdAt: new Date().toISOString(),
@@ -586,7 +586,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.error(`[DEBUG] simulate-chat-task: POST artefact to UI network error: ${e.message}`);
         }
       } else {
-        console.warn('[DEBUG] simulate-chat-task: UI_URL not set — skipping artefact POST');
+        console.error('[DEBUG] simulate-chat-task: UI_URL not set — cannot POST artefact to UI. Set UI_URL env var.');
+        await logEvt({
+          userId, runId: chatRunId, conversationId,
+          ...(clientRequestId ? { clientRequestId } : {}),
+          actionTaken: 'artefact_post_failed', status: 'failed',
+          taskGenerated: 'Artefact POST failed: UI_URL not configured',
+          runType: 'plan', metadata: { reason: 'ui_url_missing' },
+        }).catch(() => {});
       }
 
       if (artefactPosted) {

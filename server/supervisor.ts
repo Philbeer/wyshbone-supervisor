@@ -386,10 +386,21 @@ class SupervisorService {
     summary: string;
     leads: Array<Record<string, unknown>>;
     query: Record<string, unknown>;
+    userId?: string;
+    conversationId?: string;
   }): Promise<{ ok: boolean; artefactId?: string; httpStatus?: number }> {
     const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
     if (!uiBaseUrl) {
-      console.warn('[CHAT_LEADS] UI_URL not configured — cannot POST artefact to UI');
+      console.error('[CHAT_LEADS] UI_URL not configured — cannot POST artefact to UI. Set UI_URL env var.');
+      if (params.userId) {
+        logAFREvent({
+          userId: params.userId, runId: params.runId, conversationId: params.conversationId,
+          ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
+          actionTaken: 'artefact_post_failed', status: 'failed',
+          taskGenerated: 'Artefact POST failed: UI_URL not configured',
+          runType: 'plan', metadata: { reason: 'ui_url_missing' },
+        }).catch(() => {});
+      }
       return { ok: false };
     }
     const url = `${uiBaseUrl}/api/afr/artefacts`;
@@ -503,7 +514,9 @@ class SupervisorService {
           title: artefactTitle,
           summary: artefactSummary,
           leads: [],
-          query: { businessType, location: `${city}, ${country}` },
+          query: { businessType, location: city, country },
+          userId: task.user_id,
+          conversationId,
         });
 
         if (postResult.ok) {
@@ -634,7 +647,9 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         title: successTitle,
         summary: successSummary,
         leads: normalizedLeads,
-        query: { businessType, location: `${city}, ${country}` },
+        query: { businessType, location: city, country },
+        userId: task.user_id,
+        conversationId,
       });
 
       if (postResult.ok) {
@@ -683,7 +698,9 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         title: errTitle,
         summary: `SEARCH_PLACES failed: ${errMsg}`,
         leads: [],
-        query: { businessType, location: `${city}, ${country}`, error: errMsg },
+        query: { businessType, location: city, country },
+        userId: task.user_id,
+        conversationId,
       });
 
       if (errPostResult.ok) {
