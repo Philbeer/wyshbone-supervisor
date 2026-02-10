@@ -499,15 +499,66 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const LEAD_FIND_VERBS = /\b(find|list|get|show|search|look\s*for|discover|locate)\b/i;
     const LEAD_FIND_VENUES = /\b(pubs?|bars?|venues?|breweries|brewery|taverns?|inns?|gastropubs?|freehouse|free\s+house|public\s+house|nightclubs?|clubs?|restaurants?|cafes?|coffee\s+shops?|hotels?|b&bs?|guest\s*houses?)\b/i;
     const LEAD_FIND_LOCATION = /\b(in|near|around|across|within|throughout)\s+[A-Za-z]/i;
+    const DEEP_RESEARCH_KEYWORDS = /\b(research|investigate|analy[sz]e|summari[sz]e|overview|report|sources|articles|history|guide|best[- ]of\s+list)\b/i;
 
     const msgForDetection = goalText || '';
-    const isLeadFind = LEAD_FIND_VERBS.test(msgForDetection) && LEAD_FIND_VENUES.test(msgForDetection) && LEAD_FIND_LOCATION.test(msgForDetection);
+    const hasLeadVerb = LEAD_FIND_VERBS.test(msgForDetection);
+    const hasVenue = LEAD_FIND_VENUES.test(msgForDetection);
+    const hasLocation = LEAD_FIND_LOCATION.test(msgForDetection);
+    const hasResearchKeyword = DEEP_RESEARCH_KEYWORDS.test(msgForDetection);
+    const isLeadFind = hasLeadVerb && hasVenue && hasLocation;
 
-    if (isLeadFind && simulateType === 'deep_research') {
-      console.log(`[LEAD_FIND_GUARD] Overriding simulate_type from deep_research → leads (venue+location detected in "${msgForDetection.substring(0, 80)}")`);
+    const matchedKeywords: string[] = [];
+    if (hasLeadVerb) matchedKeywords.push('lead_verb');
+    if (hasVenue) matchedKeywords.push('venue_type');
+    if (hasLocation) matchedKeywords.push('location');
+    if (hasResearchKeyword) {
+      const researchMatch = msgForDetection.match(DEEP_RESEARCH_KEYWORDS);
+      if (researchMatch) matchedKeywords.push(`research:${researchMatch[0].toLowerCase()}`);
     }
 
-    const effectiveSimulateType = isLeadFind ? 'leads' : simulateType;
+    let routeIntent: string;
+    let routeChosenTool: string;
+    let routeReason: string;
+
+    if (isLeadFind) {
+      routeIntent = 'lead_find';
+      routeChosenTool = 'SEARCH_PLACES';
+      routeReason = 'venue+location detected → SEARCH_PLACES';
+      if (simulateType === 'deep_research') {
+        console.log(`[LEAD_FIND_GUARD] Overriding simulate_type from deep_research → leads (venue+location detected in "${msgForDetection.substring(0, 80)}")`);
+        routeReason += ` (override from deep_research)`;
+      }
+    } else if (simulateType === 'deep_research' && hasResearchKeyword) {
+      routeIntent = 'deep_research';
+      routeChosenTool = 'DEEP_RESEARCH';
+      routeReason = 'explicit research keyword detected → DEEP_RESEARCH';
+    } else if (simulateType === 'deep_research' && !hasResearchKeyword) {
+      routeIntent = 'lead_find';
+      routeChosenTool = 'SEARCH_PLACES';
+      routeReason = 'deep_research requested but no research keywords → defaulting to SEARCH_PLACES';
+      console.log(`[DEEP_RESEARCH_GUARD] Blocking deep_research: no explicit research keywords in "${msgForDetection.substring(0, 80)}" → routing to SEARCH_PLACES`);
+    } else {
+      routeIntent = simulateType || 'leads';
+      routeChosenTool = simulateType === 'deep_research' ? 'DEEP_RESEARCH' : 'SEARCH_PLACES';
+      routeReason = `simulate_type=${simulateType}`;
+    }
+
+    await logEvt({
+      userId, runId: chatRunId, conversationId,
+      clientRequestId,
+      actionTaken: 'router_decision_detail', status: 'success',
+      taskGenerated: `Intent classification: ${routeIntent} → ${routeChosenTool}`,
+      runType: 'plan',
+      metadata: {
+        intent: routeIntent,
+        chosen_tool: routeChosenTool,
+        reason: routeReason,
+        matched_keywords: matchedKeywords,
+      },
+    }).catch(() => {});
+
+    const effectiveSimulateType = (routeChosenTool === 'DEEP_RESEARCH') ? 'deep_research' : 'leads';
 
     if (effectiveSimulateType === 'deep_research') {
       const topic = req.body?.topic || goalText;
@@ -666,9 +717,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           artefactId: artefactId || null,
           afrEvents: artefactPosted
             ? (researchError
-              ? ['mission_received', 'deep_research_started', 'tool_call_started', 'tool_call_failed', 'artefact_post_succeeded', 'artefact_created', 'deep_research_failed']
-              : ['mission_received', 'deep_research_started', 'tool_call_started', 'tool_call_completed', 'artefact_post_succeeded', 'artefact_created', 'deep_research_completed', 'run_completed'])
-            : ['mission_received', 'deep_research_started', 'tool_call_started', researchError ? 'tool_call_failed' : 'tool_call_completed', 'artefact_post_failed'],
+              ? ['mission_received', 'router_decision_detail', 'deep_research_started', 'tool_call_started', 'tool_call_failed', 'artefact_post_succeeded', 'artefact_created', 'deep_research_failed']
+              : ['mission_received', 'router_decision_detail', 'deep_research_started', 'tool_call_started', 'tool_call_completed', 'artefact_post_succeeded', 'artefact_created', 'deep_research_completed', 'run_completed'])
+            : ['mission_received', 'router_decision_detail', 'deep_research_started', 'tool_call_started', researchError ? 'tool_call_failed' : 'tool_call_completed', 'artefact_post_failed'],
         });
       } catch (error: any) {
         console.error(`[DEBUG] simulate-chat-task(deep_research): error — ${error.message}`);
@@ -860,7 +911,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { executeAction: execAction } = await import('./supervisor/action-executor');
 
       let finalVerdict = 'PENDING';
-      const afrEvents: string[] = ['mission_received', 'tool_dispatch_decision', 'router_decision', 'tool_call_started', 'tool_call_completed'];
+      const afrEvents: string[] = ['mission_received', 'router_decision_detail', 'tool_dispatch_decision', 'router_decision', 'tool_call_started', 'tool_call_completed'];
 
       if (artefactPosted) afrEvents.push('artefact_post_succeeded', 'artefact_created');
       else afrEvents.push('artefact_post_failed');

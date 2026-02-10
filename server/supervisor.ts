@@ -331,11 +331,13 @@ class SupervisorService {
     const LEAD_FIND_KEYWORDS = /\b(find|search|look\s*for|get|discover|locate)\b/i;
     const VENUE_KEYWORDS = /\b(pubs?|bars?|breweries|brewery|taverns?|inns?|gastropubs?|freehouse|free\s+house|public\s+house|venues?|nightclubs?|clubs?|restaurants?|cafes?|coffee\s+shops?|hotels?|b&bs?|guest\s*houses?)\b/i;
     const LOCATION_KEYWORDS = /\b(in|near|around|across|within|throughout)\s+[A-Z]/i;
+    const DEEP_RESEARCH_KEYWORDS = /\b(research|investigate|analy[sz]e|summari[sz]e|overview|report|sources|articles|history|guide|best[- ]of\s+list)\b/i;
 
     const rawMsg = requestData.user_message || '';
     const hasLeadIntent = LEAD_FIND_KEYWORDS.test(rawMsg);
     const hasVenueType = VENUE_KEYWORDS.test(rawMsg);
     const hasLocation = LOCATION_KEYWORDS.test(rawMsg);
+    const hasResearchKeyword = DEEP_RESEARCH_KEYWORDS.test(rawMsg);
 
     const locationExtract = rawMsg.match(/\b(?:in|near|around|across|within|throughout)\s+([A-Z][A-Za-z\s,]+)/i);
     const parsedLocation = locationExtract ? locationExtract[1].trim().replace(/[,\s]+$/, '') : null;
@@ -345,9 +347,17 @@ class SupervisorService {
       routeRequestedCount = Math.min(parseInt(routeCountMatch[1], 10), 200);
     }
 
+    const matchedKeywords: string[] = [];
+    if (hasLeadIntent) matchedKeywords.push('lead_verb');
+    if (hasVenueType) matchedKeywords.push('venue_type');
+    if (hasLocation) matchedKeywords.push('location');
+    if (hasResearchKeyword) {
+      const researchMatch = rawMsg.match(DEEP_RESEARCH_KEYWORDS);
+      if (researchMatch) matchedKeywords.push(`research:${researchMatch[0].toLowerCase()}`);
+    }
+
     let chosenTool: string;
     let routeReason: string;
-
     let routeIntent: string;
 
     if (hasLeadIntent && hasVenueType && hasLocation) {
@@ -361,6 +371,17 @@ class SupervisorService {
         routeReason = `lead_find: venue+location detected, task_type=${effectiveTaskType}`;
         console.log(`[ROUTE_DECISION] intent=lead_find tool=SEARCH_PLACES reason="pubs+location" task_type="${effectiveTaskType}" message="${rawMsg.substring(0, 80)}"`);
       }
+    } else if (effectiveTaskType === 'deep_research' && hasResearchKeyword) {
+      chosenTool = 'DEEP_RESEARCH';
+      routeIntent = 'deep_research';
+      routeReason = `deep_research: explicit research keyword detected`;
+      console.log(`[ROUTE_DECISION] intent=deep_research tool=DEEP_RESEARCH reason="explicit_keyword" message="${rawMsg.substring(0, 80)}"`);
+    } else if (effectiveTaskType === 'deep_research' && !hasResearchKeyword) {
+      chosenTool = 'SEARCH_PLACES';
+      routeIntent = 'lead_find';
+      routeReason = `deep_research requested but no research keywords → defaulting to SEARCH_PLACES`;
+      console.log(`[DEEP_RESEARCH_GUARD] Blocking deep_research: no explicit research keywords in "${rawMsg.substring(0, 80)}" → routing to SEARCH_PLACES`);
+      effectiveTaskType = 'generate_leads';
     } else {
       chosenTool = effectiveTaskType;
       routeIntent = effectiveTaskType;
@@ -383,6 +404,21 @@ class SupervisorService {
         has_lead_intent: hasLeadIntent,
         has_venue_type: hasVenueType,
         has_location: hasLocation,
+        matched_keywords: matchedKeywords,
+      },
+    }).catch(() => {});
+
+    logAFREvent({
+      userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
+      clientRequestId,
+      actionTaken: 'router_decision_detail', status: 'success',
+      taskGenerated: `Intent classification: ${routeIntent} → ${chosenTool}`,
+      runType: 'plan',
+      metadata: {
+        intent: routeIntent,
+        chosen_tool: chosenTool,
+        reason: routeReason,
+        matched_keywords: matchedKeywords,
       },
     }).catch(() => {});
 
