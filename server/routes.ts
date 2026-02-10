@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertUserSignalSchema, insertSuggestedLeadSchema } from "./schema";
+import type { Artefact, TowerJudgement, AgentRun } from "./schema";
 import { fromError } from "zod-validation-error";
 import { supabase } from "./supabase";
 import { supervisor } from "./supervisor";
@@ -1580,6 +1581,224 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } catch (error) {
         console.error("Error fetching Supabase debug data:", error);
         res.status(500).json({ error: "Failed to fetch debug data" });
+      }
+    });
+
+    app.get("/api/debug/run-trace", async (req, res) => {
+      try {
+        const crid = req.query.crid as string | undefined;
+        const runId = req.query.runId as string | undefined;
+
+        if (!crid && !runId) {
+          return res.status(400).json({ error: "At least one of crid or runId is required" });
+        }
+
+        const { eq: eqOp, desc: descOp } = await import('drizzle-orm');
+        const { agentRuns: agentRunsTable } = await import('./schema');
+        const { db: dbConn } = await import('./db');
+
+        let matchedRun: AgentRun | undefined;
+        let resolvedRunId = runId;
+
+        if (crid) {
+          const runs = await dbConn
+            .select()
+            .from(agentRunsTable)
+            .where(eqOp(agentRunsTable.clientRequestId, crid))
+            .orderBy(descOp(agentRunsTable.createdAt))
+            .limit(1);
+          if (runs.length > 0) {
+            matchedRun = runs[0];
+            resolvedRunId = resolvedRunId || matchedRun.id;
+          }
+        }
+
+        if (!matchedRun && resolvedRunId) {
+          const runs = await dbConn
+            .select()
+            .from(agentRunsTable)
+            .where(eqOp(agentRunsTable.id, resolvedRunId))
+            .limit(1);
+          if (runs.length > 0) matchedRun = runs[0];
+        }
+
+        let afrEvents: { action_taken: string; status: string; timestamp: number; metadata: any; run_id: string }[] = [];
+        if (supabase) {
+          if (resolvedRunId) {
+            const { data: activities } = await supabase
+              .from('agent_activities')
+              .select('action_taken, status, timestamp, metadata, run_id')
+              .eq('run_id', resolvedRunId)
+              .order('timestamp', { ascending: true })
+              .limit(200);
+            if (activities) afrEvents = activities;
+          }
+
+          if (crid && afrEvents.length === 0) {
+            const { data: cridActivities } = await supabase
+              .from('agent_activities')
+              .select('action_taken, status, timestamp, metadata, run_id')
+              .contains('metadata', { clientRequestId: crid })
+              .order('timestamp', { ascending: true })
+              .limit(200);
+            if (cridActivities && cridActivities.length > 0) {
+              afrEvents = cridActivities;
+              const afrRunId = cridActivities[0].run_id;
+              if (!resolvedRunId && afrRunId) resolvedRunId = afrRunId;
+              if (!matchedRun && afrRunId) {
+                const runs = await dbConn
+                  .select()
+                  .from(agentRunsTable)
+                  .where(eqOp(agentRunsTable.id, afrRunId))
+                  .limit(1);
+                if (runs.length > 0) matchedRun = runs[0];
+              }
+            }
+          }
+        }
+
+        const supervisorReceivedRequest = !!matchedRun;
+
+        let runArtefacts: Artefact[] = [];
+        let towerJudgementRows: TowerJudgement[] = [];
+
+        if (resolvedRunId) {
+          runArtefacts = await storage.getArtefactsByRunId(resolvedRunId);
+          towerJudgementRows = await storage.getTowerJudgementsByRunId(resolvedRunId);
+        }
+
+        const planResultArtefact = runArtefacts.find(a => a.type === 'plan_result');
+        const planPayload = planResultArtefact?.payloadJson as Record<string, unknown> | null;
+
+        const planSummary = planPayload
+          ? {
+              plan_version: (planPayload.plan_version as string) || 'v1',
+              step_count: (planPayload.totalSteps as number) || (planPayload.stepsCompleted as number) || 0,
+              tool_names: (planPayload.tools_used as string[]) || [],
+            }
+          : null;
+
+        const stepsExecuted = runArtefacts
+          .filter(a => a.type === 'step_result')
+          .map(a => {
+            const p = a.payloadJson as Record<string, unknown> | null;
+            return {
+              step_index: p?.step_index ?? null,
+              step_title: p?.step_title ?? a.title,
+              step_type: p?.step_type ?? null,
+              step_status: p?.step_status ?? null,
+              artefact_id: a.id,
+            };
+          });
+
+        const artefactsSummary = runArtefacts.map(a => ({
+          id: a.id,
+          type: a.type,
+          title: a.title,
+          summary: a.summary,
+          created_at: a.createdAt,
+        }));
+
+        const artefactCreatedEvents = afrEvents.filter(e => e.action_taken === 'artefact_created');
+
+        const TOWER_START_ACTIONS = ['judgement_requested', 'tower_call_started'];
+        const TOWER_COMPLETE_ACTIONS = ['judgement_received', 'tower_call_completed', 'tower_evaluation_completed'];
+        const TOWER_VERDICT_ACTIONS = ['tower_evaluation_completed', 'tower_decision_stop', 'tower_decision_change_plan', 'tower_verdict'];
+
+        const towerCallStartedEvents = afrEvents.filter(e => TOWER_START_ACTIONS.includes(e.action_taken));
+        const towerCallCompletedEvents = afrEvents.filter(e => TOWER_COMPLETE_ACTIONS.includes(e.action_taken));
+
+        const towerCallsFromAfr = towerCallStartedEvents.map((startEvt, idx) => {
+          const completedEvt = towerCallCompletedEvents[idx];
+          return {
+            request_payload_summary: startEvt.metadata || {},
+            response_status: completedEvt ? completedEvt.status : 'no_response',
+            verdict: completedEvt?.metadata?.verdict || completedEvt?.metadata?.tower_verdict || null,
+          };
+        });
+
+        const towerCallsFromDb = towerJudgementRows.map(j => ({
+          artefact_id: j.artefactId,
+          verdict: j.verdict,
+          action: j.action,
+          reasons: j.reasons,
+          created_at: j.createdAt,
+        }));
+
+        const towerCalls = {
+          from_afr_events: towerCallsFromAfr,
+          from_db: towerCallsFromDb,
+        };
+
+        const didTowerCallPerArtefact: Record<string, boolean> = {};
+        for (const a of artefactsSummary) {
+          const hasDbJudgement = towerJudgementRows.some(j => j.artefactId === a.id);
+          const hasAfrTowerEvent = afrEvents.some(
+            e => TOWER_START_ACTIONS.includes(e.action_taken) &&
+              (e.metadata?.artefactId === a.id || e.metadata?.artefact_id === a.id)
+          );
+          didTowerCallPerArtefact[a.id] = hasDbJudgement || hasAfrTowerEvent;
+        }
+
+        const relevantAfrActionNames = [
+          'artefact_created',
+          ...TOWER_START_ACTIONS,
+          ...TOWER_COMPLETE_ACTIONS,
+          ...TOWER_VERDICT_ACTIONS,
+        ];
+        const relevantAfrSet = new Set(relevantAfrActionNames);
+
+        const afrEventsEmitted = afrEvents
+          .filter(e => relevantAfrSet.has(e.action_taken))
+          .map(e => ({
+            event_type: e.action_taken,
+            timestamp: e.timestamp,
+            status: e.status,
+          }));
+
+        const hasArtefacts = runArtefacts.length > 0 || artefactCreatedEvents.length > 0;
+        const anyTowerAttempted = towerCallStartedEvents.length > 0 || towerJudgementRows.length > 0;
+        const anyTowerCompleted = towerCallCompletedEvents.length > 0 || towerJudgementRows.length > 0;
+        const anyVerdictPresent = towerCallCompletedEvents.some(
+          e => e.metadata?.verdict || e.metadata?.tower_verdict
+        ) || towerJudgementRows.some(j => !!j.verdict);
+        const verdictEmittedInAfr = afrEvents.some(e => TOWER_VERDICT_ACTIONS.includes(e.action_taken));
+        const afrEmitWorked = afrEvents.length > 0;
+
+        let suspectedBreakpoint: string;
+        if (!anyTowerAttempted && hasArtefacts) {
+          suspectedBreakpoint = 'tower_call_never_attempted';
+        } else if (anyTowerAttempted && !anyTowerCompleted) {
+          suspectedBreakpoint = 'tower_call_failed';
+        } else if (anyTowerCompleted && !anyVerdictPresent) {
+          suspectedBreakpoint = 'tower_return_missing_fields';
+        } else if (anyVerdictPresent && !verdictEmittedInAfr) {
+          suspectedBreakpoint = 'tower_verdict_not_emitted';
+        } else if (supervisorReceivedRequest && !afrEmitWorked) {
+          suspectedBreakpoint = 'afr_emit_failed';
+        } else {
+          suspectedBreakpoint = 'all_good';
+        }
+
+        res.json({
+          run_ref: {
+            resolved_run_id: resolvedRunId || null,
+            crid: crid || null,
+            supervisor_received_request: supervisorReceivedRequest,
+            run_status: matchedRun?.status || null,
+            terminal_state: matchedRun?.terminalState || null,
+          },
+          plan_summary: planSummary,
+          steps_executed: stepsExecuted,
+          artefacts: artefactsSummary,
+          tower_calls: towerCalls,
+          tower_attempted_per_artefact: didTowerCallPerArtefact,
+          afr_events_emitted: afrEventsEmitted,
+          suspected_breakpoint: suspectedBreakpoint,
+        });
+      } catch (error: any) {
+        console.error("[DEBUG] run-trace error:", error);
+        res.status(500).json({ error: error.message || "Failed to generate run trace" });
       }
     });
   } else {
