@@ -30,6 +30,8 @@ The frontend utilizes React, TypeScript, Vite, and Wouter for routing. Styling i
 - Database schema supports users, signals, suggested leads, plan executions, and plans.
 - **ID Normalization (2026-02-10)**: All entry points now generate a `job_*` ID (via `generateJobId()` from `server/supervisor/jobs.ts`) as the canonical `runId`. The UI's original `run_id` is treated as `uiRunId` for external correlation only. `[ID_MAP]` log lines show the mapping at each entry point (`processChatTask`, `simulate-chat-task`, `executePlan`). `bridgeRunToUI()` notifies the UI of the `uiRunId ↔ jobId` mapping. `planId` remains authoritative for plan progress tracking (`updateStepStatus`, `failProgress`, `completeProgress`).
 - Artefacts are posted for lead generation results and deep research reports, with specific types and payloads.
+- **Routing Hard Rule (2026-02-10)**: If a chat message contains pub/bar/venue keywords AND a location, the router forces `SEARCH_PLACES` (Google Places) as the tool, regardless of original `task_type`. A `tool_dispatch_decision` AFR event is emitted with `{ requested_count, parsed_location, chosen_tool, reason }`. `requested_count` is parsed from message and capped at 200.
+- **Tower Hard Gate for SEARCH_PLACES (2026-02-10)**: All SEARCH_PLACES runs (including `simulate-chat-task`) must create a `leads_list` artefact before calling `handleTowerVerdict`. `run_completed` is only emitted if Tower verdict = ACCEPT. Zero-results paths emit `run_stopped` instead of `plan_execution_finished` with `status: success`.
 
 ### System Design Choices
 - An `IStorage` interface provides an abstraction layer for database operations.
@@ -37,6 +39,7 @@ The frontend utilizes React, TypeScript, Vite, and Wouter for routing. Styling i
 - In-memory progress tracking and a Map-based event system ensure isolated and efficient handling of concurrent plan executions.
 - Comprehensive error handling ensures proper status updates for failed plans.
 - Artefact creation always precedes status events to ensure visibility.
+- **Completion gating**: `run_completed` is never emitted without Tower approval for SEARCH_PLACES runs.
 
 ## External Dependencies
 

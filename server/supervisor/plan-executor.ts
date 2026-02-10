@@ -397,7 +397,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               runId,
               goal,
               towerCriteria,
-              { ...leadsListPayload, delivered_count: deliveredCount, target_count: targetCount, leads_count: deliveredCount },
+              { ...leadsListPayload, delivered_count: deliveredCount, target_count: targetCount, leads_count: deliveredCount, artefact_id: leadsListArtefact.id, artefact_type: 'leads_list' },
               rerunTool,
             );
 

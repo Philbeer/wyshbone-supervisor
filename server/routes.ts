@@ -473,7 +473,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const { randomUUID } = await import('crypto');
     const { generateJobId } = await import('./supervisor/jobs');
 
-    const goalText = (req.body?.goal as string) || 'find pet shops kent';
+    const goalText = (req.body?.goal as string) || (req.body?.user_message as string) || 'find pet shops kent';
     const simulateType = (req.body?.simulate_type as string) || 'leads';
     const userId = getUserId(req);
     const taskId = randomUUID();
@@ -669,13 +669,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const countMatch = businessType.match(/^(\d+)\s+/);
     let requestedCount = 20;
     if (countMatch) {
-      requestedCount = parseInt(countMatch[1], 10);
+      requestedCount = Math.min(parseInt(countMatch[1], 10), 200);
       businessType = businessType.replace(/^\d+\s*/, '').trim();
     }
     const country = 'UK';
 
     console.log(`[DEBUG] simulate-chat-task: goal="${goalText}" jobId=${chatRunId} uiRunId=${uiRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
     console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="simulate-chat-task" businessType="${businessType}" location="${city}" count=${requestedCount}`);
+
+    await logEvt({
+      userId, runId: chatRunId, conversationId,
+      clientRequestId,
+      actionTaken: 'tool_dispatch_decision', status: 'success',
+      taskGenerated: `Routing decision: SEARCH_PLACES for "${goalText.substring(0, 60)}"`,
+      runType: 'plan',
+      metadata: {
+        requested_count: requestedCount,
+        parsed_location: city,
+        chosen_tool: 'SEARCH_PLACES',
+        reason: 'simulate-chat-task: venue+location detected',
+      },
+    }).catch(() => {});
 
     try {
       await logMissionReceived(userId, chatRunId, taskId, 'find_prospects', conversationId);
@@ -825,15 +839,116 @@ export async function registerRoutes(app: Express): Promise<Server> {
           taskGenerated: `Artefact created: ${artefactTitle}`,
           runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle, artefactId },
         });
+      }
+
+      const { createArtefact: createLocalArtefact } = await import('./supervisor/artefacts');
+      const { initRunState: initRS, handleTowerVerdict: handleTV, getRunState: getRS } = await import('./supervisor/agent-loop');
+      const { executeAction: execAction } = await import('./supervisor/action-executor');
+
+      let finalVerdict = 'PENDING';
+      const afrEvents: string[] = ['mission_received', 'tool_dispatch_decision', 'router_decision', 'tool_call_started', 'tool_call_completed'];
+
+      if (artefactPosted) afrEvents.push('artefact_post_succeeded', 'artefact_created');
+      else afrEvents.push('artefact_post_failed');
+
+      try {
+        const leadsListArtefact = await createLocalArtefact({
+          runId: chatRunId,
+          type: 'leads_list',
+          title: `Leads list: ${businessType} in ${city}`,
+          summary: `Delivered ${placesCount} of ${requestedCount} requested for "${businessType}" in ${city}`,
+          payload: {
+            delivered_count: placesCount,
+            target_count: requestedCount,
+            success_criteria: { target_count: requestedCount },
+            query: businessType,
+            location: city,
+            country,
+          },
+          userId,
+          conversationId,
+        });
+        afrEvents.push('leads_list');
+
+        console.log(`[AGENT_LOOP] tool=SEARCH_PLACES target=${requestedCount} delivered=${placesCount}`);
+
+        const toolArgs = { query: businessType, location: city, country, maxResults: requestedCount, target_count: requestedCount };
+        if (!getRS(chatRunId)) {
+          initRS(chatRunId, userId, toolArgs, conversationId);
+        }
+
+        const rerunTool = async (args: Record<string, unknown>) => {
+          console.log(`[AGENT_LOOP] Re-running SEARCH_PLACES for simulate-chat with adjusted args`);
+          return execAction({
+            toolName: 'SEARCH_PLACES',
+            toolArgs: args,
+            userId,
+            runId: chatRunId,
+            conversationId,
+            clientRequestId,
+          });
+        };
+
+        const leadsListPayload = (leadsListArtefact.payloadJson as Record<string, unknown>) || {};
+        const towerCriteria = { target_leads: requestedCount };
+        const reaction = await handleTV(
+          chatRunId,
+          `Find ${requestedCount} ${businessType} in ${city}`,
+          towerCriteria,
+          { ...leadsListPayload, delivered_count: placesCount, target_count: requestedCount, leads_count: placesCount, artefact_id: leadsListArtefact.id, artefact_type: 'leads_list' },
+          rerunTool,
+        );
+
+        finalVerdict = reaction.verdict.verdict;
+        afrEvents.push('tower_judgement', 'run_summary');
+
+        if (reaction.action === 'accept') {
+          afrEvents.push('run_completed');
+        } else if (reaction.action === 'stop') {
+          afrEvents.push('run_stopped');
+          console.log(`[DEBUG] simulate-chat-task: Agent Loop STOP — ${reaction.verdict.rationale}`);
+        } else {
+          afrEvents.push(`agent_loop_${reaction.action}`);
+          console.log(`[DEBUG] simulate-chat-task: Agent Loop ${reaction.action} (planVersion=${reaction.planVersion})`);
+        }
+      } catch (agentLoopErr: any) {
+        console.error(`[DEBUG] simulate-chat-task: Agent loop failed — ${agentLoopErr.message}`);
+        finalVerdict = 'AGENT_LOOP_ERROR';
+
+        try {
+          await createLocalArtefact({
+            runId: chatRunId,
+            type: 'run_summary',
+            title: `Run Summary: AGENT_LOOP_ERROR`,
+            summary: `Agent loop failed: ${agentLoopErr.message}. Delivered ${placesCount} of ${requestedCount} requested.`,
+            payload: {
+              verdict: 'AGENT_LOOP_ERROR',
+              delivered: placesCount,
+              requested: requestedCount,
+              query: businessType,
+              location: city,
+              country,
+              error: agentLoopErr.message,
+            },
+            userId,
+            conversationId,
+          });
+          afrEvents.push('run_summary');
+        } catch (summaryErr: any) {
+          console.error(`[DEBUG] simulate-chat-task: Failed to create run_summary after agent loop error: ${summaryErr.message}`);
+        }
 
         await logEvt({
           userId, runId: chatRunId, conversationId,
           clientRequestId,
-          actionTaken: 'plan_execution_finished', status: 'success',
-          taskGenerated: `Simulate chat: ${placesCount} ${businessType} leads in ${city}`,
-          runType: 'plan', metadata: { leads_count: placesCount, tool: 'SEARCH_PLACES' },
-        });
+          actionTaken: 'run_stopped', status: 'failed',
+          taskGenerated: `Simulate chat run STOPPED: agent loop error — ${agentLoopErr.message}`,
+          runType: 'plan', metadata: { leads_count: placesCount, tool: 'SEARCH_PLACES', target_count: requestedCount, error: agentLoopErr.message },
+        }).catch(() => {});
+        afrEvents.push('run_stopped');
       }
+
+      console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=${afrEvents.filter(e => ['leads_list', 'run_summary', 'tower_judgement'].includes(e)).length + (artefactPosted ? 1 : 0)} verdict=${finalVerdict}`);
 
       res.json({
         ok: true,
@@ -848,9 +963,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         leads: normalizedLeads,
         artefactPosted,
         artefactId: artefactId || null,
-        afrEvents: artefactPosted
-          ? ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_post_succeeded', 'artefact_created', 'plan_execution_finished']
-          : ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_post_failed'],
+        towerVerdict: finalVerdict,
+        afrEvents,
       });
     } catch (error: any) {
       console.error(`[DEBUG] simulate-chat-task: error — ${error.message}`);

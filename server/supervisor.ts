@@ -337,16 +337,49 @@ class SupervisorService {
     const hasVenueType = VENUE_KEYWORDS.test(rawMsg);
     const hasLocation = LOCATION_KEYWORDS.test(rawMsg);
 
+    const locationExtract = rawMsg.match(/\b(?:in|near|around|across|within|throughout)\s+([A-Z][A-Za-z\s,]+)/i);
+    const parsedLocation = locationExtract ? locationExtract[1].trim().replace(/[,\s]+$/, '') : null;
+    let routeRequestedCount = 0;
+    const routeCountMatch = rawMsg.match(/\b(\d+)\s+/);
+    if (routeCountMatch) {
+      routeRequestedCount = Math.min(parseInt(routeCountMatch[1], 10), 200);
+    }
+
+    let chosenTool: string;
+    let routeReason: string;
+
     if (hasLeadIntent && hasVenueType && hasLocation) {
+      chosenTool = 'SEARCH_PLACES';
       if (effectiveTaskType !== 'generate_leads' && effectiveTaskType !== 'find_prospects') {
+        routeReason = `venue+location detected, override from ${effectiveTaskType}`;
         console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="pubs+location" override_from="${effectiveTaskType}" message="${rawMsg.substring(0, 80)}"`);
         effectiveTaskType = 'generate_leads';
       } else {
+        routeReason = `venue+location detected, task_type=${effectiveTaskType}`;
         console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="pubs+location" task_type="${effectiveTaskType}" message="${rawMsg.substring(0, 80)}"`);
       }
     } else {
+      chosenTool = effectiveTaskType;
+      routeReason = `task_type routing (hasLeadIntent=${hasLeadIntent} hasVenueType=${hasVenueType} hasLocation=${hasLocation})`;
       console.log(`[ROUTE_DECISION] tool=${effectiveTaskType} reason="task_type" hasLeadIntent=${hasLeadIntent} hasVenueType=${hasVenueType} hasLocation=${hasLocation} message="${rawMsg.substring(0, 80)}"`);
     }
+
+    logAFREvent({
+      userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
+      clientRequestId,
+      actionTaken: 'tool_dispatch_decision', status: 'success',
+      taskGenerated: `Routing decision: ${chosenTool} for "${rawMsg.substring(0, 60)}"`,
+      runType: 'plan',
+      metadata: {
+        requested_count: routeRequestedCount || null,
+        parsed_location: parsedLocation,
+        chosen_tool: chosenTool,
+        reason: routeReason,
+        has_lead_intent: hasLeadIntent,
+        has_venue_type: hasVenueType,
+        has_location: hasLocation,
+      },
+    }).catch(() => {});
 
     let response: string;
     let leadIds: string[] = [];
@@ -578,6 +611,8 @@ class SupervisorService {
       requestedCount = Math.min(Number(searchQuery.count), 200);
     }
 
+    requestedCount = Math.min(requestedCount, 200);
+
     if (!businessType) {
       const missingTitle = `0 leads (no business type specified)`;
       const missingSummary = `SEARCH_PLACES skipped: no business_type in request`;
@@ -708,12 +743,12 @@ class SupervisorService {
         logAFREvent({
           userId: task.user_id, runId: chatRunId, conversationId,
           clientRequestId,
-          actionTaken: 'plan_execution_finished', status: 'success',
-          taskGenerated: `Chat run: 0 ${businessType} leads in ${city}`,
-          runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', target_count: requestedCount },
+          actionTaken: 'run_stopped', status: 'failed',
+          taskGenerated: `Chat run STOPPED: 0 ${businessType} leads in ${city} — SEARCH_PLACES returned zero results`,
+          runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', target_count: requestedCount, reason: 'zero_results' },
         }).catch(() => {});
 
-        console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=2 types=[leads,run_summary] verdict=ZERO_RESULTS`);
+        console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=2 types=[leads,run_summary] verdict=ZERO_RESULTS (no run_completed emitted)`);
 
         return {
           response: `I searched for ${businessType} businesses in ${city}, but didn't find any results. Would you like to try a different location or business type?`,
@@ -888,7 +923,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           chatRunId,
           agentLoopGoal,
           towerCriteria,
-          { ...leadsListPayload, delivered_count: deliveredCount, target_count: requestedCount, leads_count: deliveredCount },
+          { ...leadsListPayload, delivered_count: deliveredCount, target_count: requestedCount, leads_count: deliveredCount, artefact_id: leadsListArtefact.id, artefact_type: 'leads_list' },
           rerunTool,
         );
 

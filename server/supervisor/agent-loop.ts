@@ -132,16 +132,16 @@ export async function callTowerJudgeV1(
 
   const baseUrl = getTowerBaseUrl();
   if (!baseUrl) {
-    console.warn('[AGENT_LOOP] No TOWER_URL configured — defaulting to ACCEPT');
+    console.warn('[AGENT_LOOP] No TOWER_URL configured — defaulting to STOP (hard gate)');
     console.log(`[TOWER_TELEMETRY] tower_call_started runId=${runId} mode=no_url`);
-    console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=ACCEPT mode=no_url`);
+    console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=STOP mode=no_url_hard_gate`);
     return {
-      verdict: 'ACCEPT',
+      verdict: 'STOP',
       delivered: 0,
       requested: 0,
       gaps: ['tower_url_not_configured'],
       confidence: 0,
-      rationale: 'No Tower URL configured, defaulting to ACCEPT',
+      rationale: 'No Tower URL configured — hard gate prevents ACCEPT without Tower',
     };
   }
 
@@ -157,7 +157,15 @@ export async function callTowerJudgeV1(
       'Content-Type': 'application/json',
       ...(apiKey ? { 'X-TOWER-API-KEY': apiKey } : {}),
     },
-    body: JSON.stringify({ goal, success_criteria: successCriteria, artefact: artefactPayload, run_id: runId }),
+    body: JSON.stringify({
+      runId,
+      goal,
+      success_criteria: successCriteria,
+      artefact: artefactPayload,
+      artefactId: (artefactPayload.artefact_id as string) || runId,
+      artefactType: (artefactPayload.artefact_type as string) || 'leads_list',
+      run_id: runId,
+    }),
   });
 
   console.log(`[TOWER_CALL] url=${endpoint} ok=${response.ok} status=${response.status}`);
@@ -168,8 +176,18 @@ export async function callTowerJudgeV1(
     throw new Error(`Tower judge-artefact HTTP ${response.status}: ${body.substring(0, 200)}`);
   }
 
-  const verdict = (await response.json()) as TowerVerdictV1;
-  console.log(`[TOWER_VERDICT] verdict=${verdict.verdict} delivered=${verdict.delivered} requested=${verdict.requested} confidence=${verdict.confidence}`);
+  const raw = await response.json();
+  const verdictMap: Record<string, string> = { pass: 'ACCEPT', fail: 'STOP', retry: 'RETRY', replan: 'CHANGE_PLAN' };
+  const normalizedVerdict = (verdictMap[(raw.verdict || '').toLowerCase()] || (raw.verdict || 'STOP').toUpperCase()) as TowerVerdictV1['verdict'];
+  const verdict: TowerVerdictV1 = {
+    verdict: normalizedVerdict,
+    delivered: raw.delivered ?? raw.delivered_count ?? 0,
+    requested: raw.requested ?? raw.requested_count ?? 0,
+    gaps: raw.gaps ?? [],
+    confidence: raw.confidence ?? 0,
+    rationale: raw.rationale ?? raw.reason ?? `Tower verdict: ${raw.verdict}`,
+  };
+  console.log(`[TOWER_VERDICT] raw=${raw.verdict} normalized=${verdict.verdict} delivered=${verdict.delivered} requested=${verdict.requested} confidence=${verdict.confidence}`);
   console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=${verdict.verdict}`);
   return verdict;
 }
@@ -293,15 +311,15 @@ async function obtainVerdict(
   try {
     return await callTowerJudgeV1(goal, successCriteria, artefactPayload, runId);
   } catch (err: any) {
-    console.error(`[AGENT_LOOP] Tower call failed: ${err.message} — defaulting to ACCEPT`);
-    console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=ACCEPT mode=error_fallback error=${err.message.substring(0, 100)}`);
+    console.error(`[AGENT_LOOP] Tower call failed: ${err.message} — defaulting to STOP (hard gate)`);
+    console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=STOP mode=error_fallback_hard_gate error=${err.message.substring(0, 100)}`);
     return {
-      verdict: 'ACCEPT',
+      verdict: 'STOP',
       delivered: 0,
       requested: 0,
       gaps: ['tower_call_failed'],
       confidence: 0,
-      rationale: `Tower call failed: ${err.message}`,
+      rationale: `Tower call failed (hard gate — no ACCEPT without valid Tower response): ${err.message}`,
     };
   }
 }
