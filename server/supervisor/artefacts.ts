@@ -15,15 +15,20 @@ export interface CreateArtefactParams {
 export async function createArtefact(params: CreateArtefactParams): Promise<Artefact> {
   const { runId, type, title, summary, payload, userId, conversationId } = params;
 
-  const artefact = await storage.createArtefact({
-    runId,
-    type,
-    title,
-    summary: summary || null,
-    payloadJson: payload || null,
-  });
-
-  console.log(`[ARTEFACT] Created artefact ${artefact.id} (type=${type}) for run ${runId}`);
+  let artefact: Artefact;
+  try {
+    artefact = await storage.createArtefact({
+      runId,
+      type,
+      title,
+      summary: summary || null,
+      payloadJson: payload || null,
+    });
+    console.log(`[ARTEFACT_WRITE] run_id=${runId} type=${type} ok=true id=${artefact.id}`);
+  } catch (err: any) {
+    console.error(`[ARTEFACT_WRITE] run_id=${runId} type=${type} ok=false err=${err.message}`);
+    throw err;
+  }
 
   await logAFREvent({
     userId,
