@@ -214,7 +214,7 @@ async function executeSearchPlaces(
   const location = args.location as string || 'UK';
   const country = (args.country as string) || 'GB';
   const maxResults = Number(args.maxResults) || 20;
-  const targetCount = Number(args.target_count || args.maxResults) || 20;
+  const targetCount = Number(args.target_count) || 20;
   
   console.log(`[ACTION_EXECUTOR] SEARCH_PLACES: ${query} in ${location}, ${country} (maxResults=${maxResults}, target=${targetCount})`);
   

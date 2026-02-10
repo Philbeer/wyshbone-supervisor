@@ -109,9 +109,11 @@ export async function callTowerJudgeV1(
 
   if (process.env.TOWER_ARTEFACT_JUDGE_STUB === 'true') {
     const leadsCount = (artefactPayload.leads_count as number) ??
+      (artefactPayload.delivered_count as number) ??
       (Array.isArray(artefactPayload.leads) ? artefactPayload.leads.length : 0) ??
       (artefactPayload.places_count as number) ?? 0;
-    const requested = (successCriteria.target_leads as number) || 5;
+    const requested = (successCriteria.target_leads as number) ||
+      (artefactPayload.target_count as number) || 20;
 
     console.log(`[AGENT_LOOP] Stub mode: auto-ACCEPTing (delivered=${leadsCount}, requested=${requested})`);
     return {
