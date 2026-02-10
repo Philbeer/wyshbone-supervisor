@@ -376,11 +376,13 @@ class SupervisorService {
       chosenTool = 'DEEP_RESEARCH';
       routeIntent = 'deep_research';
       routeReason = `deep_research: explicit research keyword detected`;
+      console.log(`[ROUTER_SIGNATURE] DEEP_RESEARCH_GUARD_V1_ACTIVE entry=processChatTask optInOnly=${deepResearchOptInOnly} allowed=true`);
       console.log(`[ROUTE_DECISION] intent=deep_research tool=DEEP_RESEARCH reason="explicit_keyword" message="${rawMsg.substring(0, 80)}"`);
     } else if (effectiveTaskType === 'deep_research' && deepResearchOptInOnly && !hasResearchKeyword) {
       chosenTool = 'SEARCH_PLACES';
       routeIntent = 'lead_find';
       routeReason = `deep_research_opt_in_only: no research keywords → forcing SEARCH_PLACES`;
+      console.log(`[ROUTER_SIGNATURE] DEEP_RESEARCH_GUARD_V1_ACTIVE entry=processChatTask optInOnly=${deepResearchOptInOnly} allowed=false`);
       console.log(`[DEEP_RESEARCH_GUARD] Blocking deep_research: no explicit research keywords in "${rawMsg.substring(0, 80)}" → routing to SEARCH_PLACES (DEEP_RESEARCH_OPT_IN_ONLY=${deepResearchOptInOnly})`);
       logAFREvent({
         userId: task.user_id, runId: jobId, conversationId: task.conversation_id,

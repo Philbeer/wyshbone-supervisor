@@ -472,6 +472,50 @@ async function runDeepResearchPollJob(job: Job): Promise<void> {
 }
 
 async function runDeepResearchExecuteJob(job: Job): Promise<void> {
+  const DEEP_RESEARCH_KEYWORDS = /\b(research|investigate|analy[sz]e|summari[sz]e|summary|overview|report|sources|articles?|history|guide|best[- ]of\s+list)\b/i;
+  const deepResearchOptInOnly = process.env.DEEP_RESEARCH_OPT_IN_ONLY !== 'false';
+  const userText = job.payload?.topic || job.payload?.prompt || job.payload?.user_message || '';
+
+  console.log(`[ROUTER_SIGNATURE] DEEP_RESEARCH_GUARD_V1_ACTIVE jobId=${job.jobId} optInOnly=${deepResearchOptInOnly} text="${String(userText).substring(0, 80)}"`);
+
+  if (deepResearchOptInOnly && !DEEP_RESEARCH_KEYWORDS.test(String(userText))) {
+    const userId = job.userId || 'system';
+    const runId = job.sourceRunId || job.jobId;
+    console.log(`[DEEP_RESEARCH_GUARD] Blocking deep_research job: no explicit research keywords in "${String(userText).substring(0, 80)}" → redirecting to SEARCH_PLACES (DEEP_RESEARCH_OPT_IN_ONLY=${deepResearchOptInOnly})`);
+
+    logAFREvent({
+      userId, runId,
+      ...(job.clientRequestId ? { clientRequestId: job.clientRequestId } : {}),
+      actionTaken: 'router_override', status: 'success',
+      taskGenerated: `Override: DEEP_RESEARCH → SEARCH_PLACES (opt-in gate, job path)`,
+      runType: 'plan',
+      metadata: {
+        original_tool: 'DEEP_RESEARCH',
+        forced_tool: 'SEARCH_PLACES',
+        reason: 'deep_research_opt_in_only',
+        message: String(userText).substring(0, 200),
+        jobId: job.jobId,
+        entry: 'jobs.ts/runDeepResearchExecuteJob',
+      },
+    }).catch(() => {});
+
+    job.status = 'completed';
+    job.endedAt = new Date().toISOString();
+    job.progress = 100;
+    job.message = `Deep research blocked by opt-in gate — no research keywords detected. Would route to SEARCH_PLACES.`;
+    job.resultSummary = {
+      success: false,
+      jobType: job.jobType,
+      blocked: true,
+      reason: 'deep_research_opt_in_only',
+      forced_tool: 'SEARCH_PLACES',
+      original_text: String(userText).substring(0, 200),
+    };
+    jobStore.set(job.jobId, job);
+    await emitJobEvent('job_completed', job, { resultSummary: job.resultSummary });
+    return;
+  }
+
   try {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
