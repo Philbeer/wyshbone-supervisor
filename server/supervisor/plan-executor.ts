@@ -235,6 +235,9 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   ).catch(() => {});
   
   let stepsCompleted = 0;
+  let isLeadRun = false;
+  let lastLeadsListArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
+  let towerCalledForLeadRun = false;
   const leadsMap = new Map<string, Record<string, unknown>>();
   const leadsFilters: Record<string, string> = {};
   const toolTracker = createRunToolTracker();
@@ -322,14 +325,15 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         
         console.log(`[PLAN_EXECUTOR] Step ${i + 1} completed: ${result.summary}`);
 
-        try {
-          const stepType = step.toolName || toolMetadata?.toolName || 'UNKNOWN';
-          const stepArgs = step.toolArgs || toolMetadata?.toolArgs;
-          const stepInputs = stepArgs ? compactInputs(stepArgs) : {};
-          const stepOutputs = result.data ? compactOutputs(result.data) : {};
-          const stepMetrics = result.data ? extractMetrics(stepType, result.data) : {};
+        const stepType = step.toolName || toolMetadata?.toolName || 'UNKNOWN';
+        const stepArgs = step.toolArgs || toolMetadata?.toolArgs;
+        const stepInputs = stepArgs ? compactInputs(stepArgs) : {};
+        const stepOutputs = result.data ? compactOutputs(result.data) : {};
+        const stepMetrics = result.data ? extractMetrics(stepType, result.data) : {};
 
-          const stepArtefact = await createArtefact({
+        let stepArtefactForJudge: Awaited<ReturnType<typeof createArtefact>> | undefined;
+        try {
+          stepArtefactForJudge = await createArtefact({
             runId: runId,
             type: 'step_result',
             title: `Step result: ${step.label}`,
@@ -347,15 +351,20 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             userId,
             conversationId,
           });
+        } catch (artefactErr: any) {
+          console.error(`[PLAN_EXECUTOR] Step artefact creation failed (continuing): ${artefactErr.message}`);
+        }
 
-          const isSearchPlaces = stepType === 'SEARCH_PLACES';
+        const isSearchPlaces = stepType === 'SEARCH_PLACES';
 
-          if (isSearchPlaces) {
-            const toolArgs = step.toolArgs || toolMetadata?.toolArgs || {};
-            const targetCount = Number(result.data?.target_count || toolArgs.target_count || toolArgs.maxResults) || 20;
-            const deliveredCount = Number(result.data?.delivered_count || result.data?.count) || 0;
+        if (isSearchPlaces) {
+          const toolArgs = step.toolArgs || toolMetadata?.toolArgs || {};
+          const targetCount = Number(result.data?.target_count || toolArgs.target_count || toolArgs.maxResults) || 20;
+          const deliveredCount = Number(result.data?.delivered_count || result.data?.count) || 0;
 
-            const leadsListArtefact = await createArtefact({
+          let leadsListArtefact;
+          try {
+            leadsListArtefact = await createArtefact({
               runId: runId,
               type: 'leads_list',
               title: `Leads list: ${step.label}`,
@@ -373,10 +382,18 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               userId,
               conversationId,
             });
+          } catch (artefactErr: any) {
+            console.error(`[PLAN_EXECUTOR] leads_list artefact creation failed: ${artefactErr.message}`);
+          }
 
-            if (!getRunState(runId)) {
-              initRunState(runId, userId, { ...toolArgs, target_count: targetCount }, conversationId, clientRequestId);
-            }
+          isLeadRun = true;
+
+          if (!getRunState(runId)) {
+            initRunState(runId, userId, { ...toolArgs, target_count: targetCount }, conversationId, clientRequestId);
+          }
+
+          if (leadsListArtefact) {
+            lastLeadsListArtefact = leadsListArtefact;
 
             const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
               console.log(`[AGENT_LOOP] Re-running SEARCH_PLACES with adjusted args`);
@@ -401,6 +418,8 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               rerunTool,
             );
 
+            towerCalledForLeadRun = true;
+
             if (reaction.action === 'stop') {
               const haltReason = `Agent Loop: STOP — ${reaction.verdict.rationale}`;
               console.log(`[PLAN_EXECUTOR] Halted by Agent Loop after step ${i + 1}: ${haltReason}`);
@@ -422,8 +441,12 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               console.log(`[PLAN_EXECUTOR] Agent Loop reacted: ${reaction.action} (planVersion=${reaction.planVersion})`);
             }
           } else {
+            console.warn(`[PLAN_EXECUTOR] SEARCH_PLACES leads_list artefact creation failed — Tower call deferred to safety-net`);
+          }
+        } else if (stepArtefactForJudge) {
+          try {
             const judgeResult = await judgeArtefact({
-              artefact: stepArtefact,
+              artefact: stepArtefactForJudge,
               runId: runId,
               goal,
               userId,
@@ -446,9 +469,9 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
                 haltReason,
               };
             }
+          } catch (judgeErr: any) {
+            console.error(`[PLAN_EXECUTOR] Artefact judgement failed (continuing): ${judgeErr.message}`);
           }
-        } catch (artefactErr: any) {
-          console.error(`[PLAN_EXECUTOR] Step artefact/judgement failed (continuing): ${artefactErr.message}`);
         }
 
         accumulateLeads(step, result.data, leadsMap, leadsFilters);
@@ -524,15 +547,10 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       }
     }
     
-    const summary = `Plan completed successfully - ${stepsCompleted}/${steps.length} steps`;
-    await logPlanCompleted(userId, runId, summary, conversationId, clientRequestId);
-    completeProgress(planId);
-    await safeUpdatePlanStatus(planId, 'completed');
-
     if (leadsMap.size > 0) {
       try {
         const leadsList = buildLeadsList(leadsMap, leadsFilters);
-        await createArtefact({
+        const accumulatedArtefact = await createArtefact({
           runId: runId,
           type: 'leads_list',
           title: `Leads: ${goal}`,
@@ -547,10 +565,65 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           conversationId,
         });
         console.log(`[PLAN_EXECUTOR] leads_list artefact created: ${leadsList.total} leads`);
+        isLeadRun = true;
+        lastLeadsListArtefact = accumulatedArtefact;
       } catch (leadsErr: any) {
         console.error(`[PLAN_EXECUTOR] leads_list artefact creation failed (continuing): ${leadsErr.message}`);
       }
     }
+
+    if (isLeadRun && !towerCalledForLeadRun) {
+      console.warn(`[PLAN_EXECUTOR] SAFETY NET: Lead run detected but Tower was never called. Invoking Tower now.`);
+
+      const safetyPayload: Record<string, unknown> = lastLeadsListArtefact
+        ? (lastLeadsListArtefact.payloadJson as Record<string, unknown> || {})
+        : {};
+      const delivered = Number(safetyPayload.delivered_count || safetyPayload.total || 0);
+      const requested = Number(safetyPayload.target_count || successCriteria.target_leads || 20);
+      const safetyArtefactId = lastLeadsListArtefact?.id || runId;
+
+      if (!getRunState(runId)) {
+        initRunState(runId, userId, { target_count: requested }, conversationId, clientRequestId);
+      }
+
+      const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
+        console.log(`[AGENT_LOOP] Re-running SEARCH_PLACES (safety-net) with adjusted args`);
+        return executeAction({ toolName: 'SEARCH_PLACES', toolArgs: args, userId, tracker: toolTracker, runId, conversationId, clientRequestId });
+      };
+
+      try {
+        const reaction = await handleTowerVerdict(
+          runId,
+          goal,
+          { ...successCriteria, target_leads: requested },
+          { ...safetyPayload, delivered_count: delivered, target_count: requested, leads_count: delivered, artefact_id: safetyArtefactId, artefact_type: 'leads_list' },
+          rerunTool,
+        );
+
+        if (reaction.action === 'stop') {
+          const haltReason = `Safety-net Tower: STOP — ${reaction.verdict.rationale}`;
+          console.log(`[PLAN_EXECUTOR] ${haltReason}`);
+          failProgress(planId, `Halted: ${haltReason}`);
+          await safeUpdatePlanStatus(planId, 'halted');
+
+          return {
+            success: false,
+            stepsCompleted,
+            totalSteps: steps.length,
+            error: haltReason,
+            haltedByJudgement: true,
+            haltReason,
+          };
+        }
+      } catch (safetyErr: any) {
+        console.error(`[PLAN_EXECUTOR] Safety-net Tower call failed: ${safetyErr.message}`);
+      }
+    }
+
+    const summary = `Plan completed successfully - ${stepsCompleted}/${steps.length} steps`;
+    await logPlanCompleted(userId, runId, summary, conversationId, clientRequestId);
+    completeProgress(planId);
+    await safeUpdatePlanStatus(planId, 'completed');
 
     try {
       const stepSummaries = steps.map((s, i) => ({

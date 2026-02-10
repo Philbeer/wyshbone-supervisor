@@ -13,6 +13,7 @@
 
 import { logAFREvent } from './afr-logger';
 import { createArtefact } from './artefacts';
+import { storage } from '../storage';
 import type { ActionResult } from './action-executor';
 
 export interface TowerVerdictV1 {
@@ -283,7 +284,7 @@ async function postRunSummary(
   }
 }
 
-async function postTowerJudgementArtefact(runId: string, state: RunState, verdict: TowerVerdictV1): Promise<void> {
+async function postTowerJudgementArtefact(runId: string, state: RunState, verdict: TowerVerdictV1, artefactId?: string): Promise<void> {
   try {
     await createArtefact({
       runId,
@@ -304,6 +305,33 @@ async function postTowerJudgementArtefact(runId: string, state: RunState, verdic
     });
   } catch (err: any) {
     console.error(`[AGENT_LOOP] Failed to create tower_judgement artefact: ${err.message}`);
+  }
+}
+
+async function persistTowerJudgementToDb(
+  runId: string,
+  artefactId: string,
+  verdict: TowerVerdictV1,
+  state: RunState,
+): Promise<void> {
+  const actionMap: Record<string, string> = { ACCEPT: 'continue', RETRY: 'retry', CHANGE_PLAN: 'change_plan', STOP: 'stop' };
+  try {
+    await storage.createTowerJudgement({
+      runId,
+      artefactId,
+      verdict: verdict.verdict,
+      action: actionMap[verdict.verdict] || 'stop',
+      reasonsJson: verdict.gaps.length > 0 ? verdict.gaps : [verdict.rationale],
+      metricsJson: {
+        delivered: verdict.delivered,
+        requested: verdict.requested,
+        confidence: verdict.confidence,
+        plan_version: state.planVersion,
+      },
+    });
+    console.log(`[TOWER_DB] Persisted judgement: runId=${runId} artefactId=${artefactId} verdict=${verdict.verdict}`);
+  } catch (err: any) {
+    console.error(`[TOWER_DB] Failed to persist judgement: ${err.message}`);
   }
 }
 
@@ -503,10 +531,19 @@ export async function handleTowerVerdict(
     throw new Error(`No RunState for runId=${runId}`);
   }
 
+  const artefactId = (artefactPayload.artefact_id as string) || runId;
+  const requested = artefactPayload.target_count ?? artefactPayload.requested ?? successCriteria.target_leads ?? 0;
+  const delivered = artefactPayload.delivered_count ?? artefactPayload.leads_count ?? 0;
+  console.log(`[TOWER_CALL] run_id=${runId} url=${process.env.TOWER_BASE_URL || process.env.TOWER_URL || 'NOT_SET'}/api/tower/judge-artefact requested=${requested} delivered=${delivered}`);
+
   const verdict = await obtainVerdict(runId, goal, successCriteria, artefactPayload, state);
   state.lastVerdict = verdict;
+
+  console.log(`[TOWER_VERDICT] run_id=${runId} verdict=${verdict.verdict} confidence=${verdict.confidence} delivered=${verdict.delivered} requested=${verdict.requested} gaps=${verdict.gaps.length}`);
+
   await logVerdictReceived(state, runId, verdict);
-  await postTowerJudgementArtefact(runId, state, verdict);
+  await postTowerJudgementArtefact(runId, state, verdict, artefactId);
+  await persistTowerJudgementToDb(runId, artefactId, verdict, state);
 
   switch (verdict.verdict) {
     case 'ACCEPT': {
@@ -543,10 +580,13 @@ export async function handleTowerVerdict(
       }
 
       const retryPayload = await createRerunLeadsListArtefact(state, retryResult, 'retry');
+      console.log(`[TOWER_CALL] run_id=${runId} url=${process.env.TOWER_BASE_URL || process.env.TOWER_URL || 'NOT_SET'}/api/tower/judge-artefact requested=${retryPayload.target_count} delivered=${retryPayload.delivered_count} (retry)`);
       const retryVerdict = await obtainVerdict(runId, goal, successCriteria, retryPayload, state);
+      console.log(`[TOWER_VERDICT] run_id=${runId} verdict=${retryVerdict.verdict} confidence=${retryVerdict.confidence} delivered=${retryVerdict.delivered} requested=${retryVerdict.requested} gaps=${retryVerdict.gaps.length} (retry)`);
       state.lastVerdict = retryVerdict;
       await logVerdictReceived(state, runId, retryVerdict);
-      await postTowerJudgementArtefact(runId, state, retryVerdict);
+      await postTowerJudgementArtefact(runId, state, retryVerdict, artefactId);
+      await persistTowerJudgementToDb(runId, artefactId, retryVerdict, state);
 
       const retryDelivered = typeof retryVerdict.delivered === 'number' ? retryVerdict.delivered : 0;
       const retryRequested = typeof retryVerdict.requested === 'number' ? retryVerdict.requested : 1;
@@ -627,10 +667,13 @@ export async function handleTowerVerdict(
       }
 
       const replanPayload = await createRerunLeadsListArtefact(state, replanResult, 'replan');
+      console.log(`[TOWER_CALL] run_id=${runId} url=${process.env.TOWER_BASE_URL || process.env.TOWER_URL || 'NOT_SET'}/api/tower/judge-artefact requested=${replanPayload.target_count} delivered=${replanPayload.delivered_count} (replan)`);
       const replanVerdict = await obtainVerdict(runId, goal, successCriteria, replanPayload, state);
+      console.log(`[TOWER_VERDICT] run_id=${runId} verdict=${replanVerdict.verdict} confidence=${replanVerdict.confidence} delivered=${replanVerdict.delivered} requested=${replanVerdict.requested} gaps=${replanVerdict.gaps.length} (replan)`);
       state.lastVerdict = replanVerdict;
       await logVerdictReceived(state, runId, replanVerdict);
-      await postTowerJudgementArtefact(runId, state, replanVerdict);
+      await postTowerJudgementArtefact(runId, state, replanVerdict, artefactId);
+      await persistTowerJudgementToDb(runId, artefactId, replanVerdict, state);
 
       if (replanVerdict.verdict === 'ACCEPT') {
         state.status = 'accepted';
