@@ -579,6 +579,8 @@ class SupervisorService {
         runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', reason: 'missing_business_type' },
       }).catch(() => {});
 
+      console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=${missingPostResult.ok ? 1 : 0} types=[leads] verdict=SKIPPED reason=missing_business_type`);
+
       return {
         response: "I'd be happy to find leads for you! Could you tell me what type of businesses you're looking for?",
         leadIds: []
@@ -641,15 +643,39 @@ class SupervisorService {
             taskGenerated: `Artefact created: ${artefactTitle}`,
             runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle, artefactId: postResult.artefactId },
           }).catch(() => {});
-
-          logAFREvent({
-            userId: task.user_id, runId: chatRunId, conversationId,
-            clientRequestId,
-            actionTaken: 'plan_execution_finished', status: 'success',
-            taskGenerated: `Chat run: 0 ${businessType} leads in ${city}`,
-            runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', target_count: requestedCount },
-          }).catch(() => {});
         }
+
+        try {
+          await createArtefact({
+            runId: chatRunId,
+            type: 'run_summary',
+            title: `Run Summary: ZERO_RESULTS`,
+            summary: `Delivered 0 of ${requestedCount} requested — no results from Google Places`,
+            payload: {
+              verdict: 'ZERO_RESULTS',
+              delivered: 0,
+              requested: requestedCount,
+              query: businessType,
+              location: city,
+              country,
+              reason: 'google_places_returned_zero',
+            },
+            userId: task.user_id,
+            conversationId,
+          });
+        } catch (summaryErr: any) {
+          console.error(`[CHAT_LEADS] Failed to create run_summary for zero results: ${summaryErr.message}`);
+        }
+
+        logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId,
+          clientRequestId,
+          actionTaken: 'plan_execution_finished', status: 'success',
+          taskGenerated: `Chat run: 0 ${businessType} leads in ${city}`,
+          runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', target_count: requestedCount },
+        }).catch(() => {});
+
+        console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=2 types=[leads,run_summary] verdict=ZERO_RESULTS`);
 
         return {
           response: `I searched for ${businessType} businesses in ${city}, but didn't find any results. Would you like to try a different location or business type?`,
@@ -777,6 +803,9 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       const deliveredCount = createdLeads.length;
       const agentLoopGoal = `Find ${requestedCount} ${businessType} in ${city}`;
 
+      let artefactTypesWritten = ['leads'];
+      let finalVerdict = 'PENDING';
+
       try {
         const leadsListArtefact = await createArtefact({
           runId: chatRunId,
@@ -794,6 +823,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           userId: task.user_id,
           conversationId,
         });
+        artefactTypesWritten.push('leads_list');
 
         console.log(`[AGENT_LOOP] tool=SEARCH_PLACES target=${requestedCount} delivered=${deliveredCount}`);
 
@@ -824,19 +854,49 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           rerunTool,
         );
 
+        finalVerdict = reaction.verdict.verdict;
+        artefactTypesWritten.push('tower_judgement', 'run_summary');
+
         if (reaction.action === 'stop') {
           console.log(`[CHAT_LEADS] Agent Loop: STOP — ${reaction.verdict.rationale}`);
         }
       } catch (agentLoopErr: any) {
         console.error(`[CHAT_LEADS] Agent loop failed (continuing): ${agentLoopErr.message}`);
+        finalVerdict = 'AGENT_LOOP_ERROR';
+
+        try {
+          await createArtefact({
+            runId: chatRunId,
+            type: 'run_summary',
+            title: `Run Summary: AGENT_LOOP_ERROR`,
+            summary: `Agent loop failed: ${agentLoopErr.message}. Delivered ${deliveredCount} of ${requestedCount} requested.`,
+            payload: {
+              verdict: 'AGENT_LOOP_ERROR',
+              delivered: deliveredCount,
+              requested: requestedCount,
+              query: businessType,
+              location: city,
+              country,
+              error: agentLoopErr.message,
+            },
+            userId: task.user_id,
+            conversationId,
+          });
+          artefactTypesWritten.push('run_summary');
+        } catch (summaryErr: any) {
+          console.error(`[CHAT_LEADS] Failed to create run_summary after agent loop error: ${summaryErr.message}`);
+        }
+
         logAFREvent({
           userId: task.user_id, runId: chatRunId, conversationId,
           clientRequestId,
-          actionTaken: 'plan_execution_finished', status: 'success',
+          actionTaken: 'plan_execution_finished', status: 'failed',
           taskGenerated: `Chat run: ${deliveredCount} ${businessType} leads in ${city} (agent loop failed)`,
           runType: 'plan', metadata: { leads_count: deliveredCount, tool: 'SEARCH_PLACES', target_count: requestedCount, error: agentLoopErr.message },
         }).catch(() => {});
       }
+
+      console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=${artefactTypesWritten.length} types=[${artefactTypesWritten.join(',')}] verdict=${finalVerdict}`);
 
       return {
         response,
@@ -877,15 +937,39 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           taskGenerated: `Artefact created: ${errTitle}`,
           runType: 'plan', metadata: { artefactType: 'leads', title: errTitle, artefactId: errPostResult.artefactId },
         }).catch(() => {});
-
-        logAFREvent({
-          userId: task.user_id, runId: chatRunId, conversationId,
-          clientRequestId,
-          actionTaken: 'plan_execution_finished', status: 'failed',
-          taskGenerated: `Chat run failed: ${errMsg}`,
-          runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', error: errMsg },
-        }).catch(() => {});
       }
+
+      try {
+        await createArtefact({
+          runId: chatRunId,
+          type: 'run_summary',
+          title: `Run Summary: ERROR`,
+          summary: `SEARCH_PLACES failed: ${errMsg}. Delivered 0 of ${requestedCount} requested.`,
+          payload: {
+            verdict: 'ERROR',
+            delivered: 0,
+            requested: requestedCount,
+            query: businessType,
+            location: city,
+            country,
+            error: errMsg,
+          },
+          userId: task.user_id,
+          conversationId,
+        });
+      } catch (summaryErr: any) {
+        console.error(`[CHAT_LEADS] Failed to create run_summary for error: ${summaryErr.message}`);
+      }
+
+      console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=${errPostResult.ok ? 2 : 1} types=[leads,run_summary] verdict=ERROR`);
+
+      logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId,
+        clientRequestId,
+        actionTaken: 'plan_execution_finished', status: 'failed',
+        taskGenerated: `Chat run failed: ${errMsg}`,
+        runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', error: errMsg },
+      }).catch(() => {});
 
       return {
         response: `I encountered an issue while searching for ${businessType} in ${city}. Let me try again in a moment!`,
