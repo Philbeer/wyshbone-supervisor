@@ -496,7 +496,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const chatRunId = generateJobId();
     console.log(`[ID_MAP] jobId=${chatRunId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${taskId} entry=simulate-chat-task`);
 
-    if (simulateType === 'deep_research') {
+    const LEAD_FIND_VERBS = /\b(find|list|get|show|search|look\s*for|discover|locate)\b/i;
+    const LEAD_FIND_VENUES = /\b(pubs?|bars?|venues?|breweries|brewery|taverns?|inns?|gastropubs?|freehouse|free\s+house|public\s+house|nightclubs?|clubs?|restaurants?|cafes?|coffee\s+shops?|hotels?|b&bs?|guest\s*houses?)\b/i;
+    const LEAD_FIND_LOCATION = /\b(in|near|around|across|within|throughout)\s+[A-Za-z]/i;
+
+    const msgForDetection = goalText || '';
+    const isLeadFind = LEAD_FIND_VERBS.test(msgForDetection) && LEAD_FIND_VENUES.test(msgForDetection) && LEAD_FIND_LOCATION.test(msgForDetection);
+
+    if (isLeadFind && simulateType === 'deep_research') {
+      console.log(`[LEAD_FIND_GUARD] Overriding simulate_type from deep_research → leads (venue+location detected in "${msgForDetection.substring(0, 80)}")`);
+    }
+
+    const effectiveSimulateType = isLeadFind ? 'leads' : simulateType;
+
+    if (effectiveSimulateType === 'deep_research') {
       const topic = req.body?.topic || goalText;
       console.log(`[DEBUG] simulate-chat-task(deep_research): topic="${topic}" jobId=${chatRunId} uiRunId=${uiRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
 
@@ -675,7 +688,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const country = 'UK';
 
     console.log(`[DEBUG] simulate-chat-task: goal="${goalText}" jobId=${chatRunId} uiRunId=${uiRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
-    console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="simulate-chat-task" businessType="${businessType}" location="${city}" count=${requestedCount}`);
+    console.log(`[ROUTE_DECISION] intent=lead_find tool=SEARCH_PLACES reason="simulate-chat-task" businessType="${businessType}" location="${city}" count=${requestedCount}`);
 
     await logEvt({
       userId, runId: chatRunId, conversationId,
@@ -684,6 +697,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       taskGenerated: `Routing decision: SEARCH_PLACES for "${goalText.substring(0, 60)}"`,
       runType: 'plan',
       metadata: {
+        intent: 'lead_find',
         requested_count: requestedCount,
         parsed_location: city,
         chosen_tool: 'SEARCH_PLACES',
@@ -696,7 +710,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       await logRouterDecision(
         userId, chatRunId, 'SEARCH_PLACES',
-        `Chat lead generation: searching "${businessType}" in ${city} via Google Places`,
+        `lead_find: searching "${businessType}" in ${city} via Google Places (target=${requestedCount})`,
         conversationId
       );
 

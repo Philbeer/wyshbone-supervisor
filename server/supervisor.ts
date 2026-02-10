@@ -348,20 +348,24 @@ class SupervisorService {
     let chosenTool: string;
     let routeReason: string;
 
+    let routeIntent: string;
+
     if (hasLeadIntent && hasVenueType && hasLocation) {
       chosenTool = 'SEARCH_PLACES';
+      routeIntent = 'lead_find';
       if (effectiveTaskType !== 'generate_leads' && effectiveTaskType !== 'find_prospects') {
-        routeReason = `venue+location detected, override from ${effectiveTaskType}`;
-        console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="pubs+location" override_from="${effectiveTaskType}" message="${rawMsg.substring(0, 80)}"`);
+        routeReason = `lead_find: venue+location detected, override from ${effectiveTaskType}`;
+        console.log(`[ROUTE_DECISION] intent=lead_find tool=SEARCH_PLACES reason="pubs+location" override_from="${effectiveTaskType}" message="${rawMsg.substring(0, 80)}"`);
         effectiveTaskType = 'generate_leads';
       } else {
-        routeReason = `venue+location detected, task_type=${effectiveTaskType}`;
-        console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="pubs+location" task_type="${effectiveTaskType}" message="${rawMsg.substring(0, 80)}"`);
+        routeReason = `lead_find: venue+location detected, task_type=${effectiveTaskType}`;
+        console.log(`[ROUTE_DECISION] intent=lead_find tool=SEARCH_PLACES reason="pubs+location" task_type="${effectiveTaskType}" message="${rawMsg.substring(0, 80)}"`);
       }
     } else {
       chosenTool = effectiveTaskType;
+      routeIntent = effectiveTaskType;
       routeReason = `task_type routing (hasLeadIntent=${hasLeadIntent} hasVenueType=${hasVenueType} hasLocation=${hasLocation})`;
-      console.log(`[ROUTE_DECISION] tool=${effectiveTaskType} reason="task_type" hasLeadIntent=${hasLeadIntent} hasVenueType=${hasVenueType} hasLocation=${hasLocation} message="${rawMsg.substring(0, 80)}"`);
+      console.log(`[ROUTE_DECISION] intent=${routeIntent} tool=${effectiveTaskType} reason="task_type" hasLeadIntent=${hasLeadIntent} hasVenueType=${hasVenueType} hasLocation=${hasLocation} message="${rawMsg.substring(0, 80)}"`);
     }
 
     logAFREvent({
@@ -371,6 +375,7 @@ class SupervisorService {
       taskGenerated: `Routing decision: ${chosenTool} for "${rawMsg.substring(0, 60)}"`,
       runType: 'plan',
       metadata: {
+        intent: routeIntent,
         requested_count: routeRequestedCount || null,
         parsed_location: parsedLocation,
         chosen_tool: chosenTool,
