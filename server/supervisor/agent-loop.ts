@@ -307,12 +307,56 @@ async function obtainVerdict(
   goal: string,
   successCriteria: Record<string, unknown>,
   artefactPayload: Record<string, unknown>,
+  state?: RunState,
 ): Promise<TowerVerdictV1> {
+  const userId = state?.userId || 'unknown';
+  const conversationId = state?.conversationId;
+
+  await logAFREvent({
+    userId,
+    runId,
+    conversationId,
+    actionTaken: 'tower_call_started',
+    status: 'pending',
+    taskGenerated: `Calling Tower judge for run ${runId}`,
+    runType: 'plan',
+    metadata: { goal, run_id: runId },
+  });
+
+  const startMs = Date.now();
+
   try {
-    return await callTowerJudgeV1(goal, successCriteria, artefactPayload, runId);
+    const verdict = await callTowerJudgeV1(goal, successCriteria, artefactPayload, runId);
+    const durationMs = Date.now() - startMs;
+
+    await logAFREvent({
+      userId,
+      runId,
+      conversationId,
+      actionTaken: 'tower_call_completed',
+      status: 'success',
+      taskGenerated: `Tower responded in ${durationMs}ms — verdict: ${verdict.verdict}`,
+      runType: 'plan',
+      metadata: { run_id: runId, duration_ms: durationMs, verdict: verdict.verdict, http_ok: true },
+    });
+
+    return verdict;
   } catch (err: any) {
+    const durationMs = Date.now() - startMs;
     console.error(`[AGENT_LOOP] Tower call failed: ${err.message} — defaulting to STOP (hard gate)`);
     console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=STOP mode=error_fallback_hard_gate error=${err.message.substring(0, 100)}`);
+
+    await logAFREvent({
+      userId,
+      runId,
+      conversationId,
+      actionTaken: 'tower_call_completed',
+      status: 'failed',
+      taskGenerated: `Tower call failed after ${durationMs}ms — defaulting to STOP`,
+      runType: 'plan',
+      metadata: { run_id: runId, duration_ms: durationMs, error: err.message, http_ok: false },
+    });
+
     return {
       verdict: 'STOP',
       delivered: 0,
@@ -331,7 +375,7 @@ async function logVerdictReceived(state: RunState, runId: string, verdict: Tower
     userId: state.userId,
     runId,
     conversationId: state.conversationId,
-    actionTaken: 'tower_judgement_received',
+    actionTaken: 'tower_verdict',
     status: 'success',
     taskGenerated: `Tower v1 verdict: ${verdict.verdict} (confidence=${verdict.confidence}, delivered=${verdict.delivered}, requested=${verdict.requested})`,
     runType: 'plan',
@@ -343,6 +387,7 @@ async function logVerdictReceived(state: RunState, runId: string, verdict: Tower
       confidence: verdict.confidence,
       rationale: verdict.rationale,
       plan_version: state.planVersion,
+      run_id: runId,
     },
   });
 }
@@ -434,7 +479,7 @@ export async function handleTowerVerdict(
     throw new Error(`No RunState for runId=${runId}`);
   }
 
-  const verdict = await obtainVerdict(runId, goal, successCriteria, artefactPayload);
+  const verdict = await obtainVerdict(runId, goal, successCriteria, artefactPayload, state);
   state.lastVerdict = verdict;
   await logVerdictReceived(state, runId, verdict);
   await postTowerJudgementArtefact(runId, state, verdict);
@@ -474,7 +519,7 @@ export async function handleTowerVerdict(
       }
 
       const retryPayload = await createRerunLeadsListArtefact(state, retryResult, 'retry');
-      const retryVerdict = await obtainVerdict(runId, goal, successCriteria, retryPayload);
+      const retryVerdict = await obtainVerdict(runId, goal, successCriteria, retryPayload, state);
       state.lastVerdict = retryVerdict;
       await logVerdictReceived(state, runId, retryVerdict);
       await postTowerJudgementArtefact(runId, state, retryVerdict);
@@ -558,7 +603,7 @@ export async function handleTowerVerdict(
       }
 
       const replanPayload = await createRerunLeadsListArtefact(state, replanResult, 'replan');
-      const replanVerdict = await obtainVerdict(runId, goal, successCriteria, replanPayload);
+      const replanVerdict = await obtainVerdict(runId, goal, successCriteria, replanPayload, state);
       state.lastVerdict = replanVerdict;
       await logVerdictReceived(state, runId, replanVerdict);
       await postTowerJudgementArtefact(runId, state, replanVerdict);

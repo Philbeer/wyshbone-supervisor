@@ -41,6 +41,7 @@ The frontend utilizes React, TypeScript, Vite, and Wouter for routing. Styling i
 - Comprehensive error handling ensures proper status updates for failed plans.
 - Artefact creation always precedes status events to ensure visibility.
 - **Completion gating (2026-02-10)**: `run_completed` is never emitted without Tower approval for SEARCH_PLACES runs. All SEARCH_PLACES paths — including zero-results — route through `handleTowerVerdict` in `agent-loop.ts`. Tower verdict mapping: ACCEPT→`run_completed`, RETRY→rerun same plan, CHANGE_PLAN→generate plan v2, STOP→`run_stopped`. Error/fallback paths emit `run_stopped` (never `plan_execution_finished`) for SEARCH_PLACES runs.
+- **Tower AFR Provability (2026-02-10)**: Every SEARCH_PLACES Tower call emits three AFR events in sequence: `tower_call_started` (before HTTP call, status=pending), `tower_call_completed` (after HTTP response, status=success/failed with `duration_ms`), and `tower_verdict` (parsed verdict with full metadata: verdict, delivered, requested, gaps, confidence, rationale, plan_version, run_id). A `tower_judgement` artefact (type=`tower_judgement`) is always created with verdict, delivered, requested, gaps, confidence, rationale, and plan_version. All events and artefacts use the same canonical `runId` (the `job_*` ID) for UI query consistency. Error/fallback Tower calls also emit `tower_call_completed` with `status=failed` and `http_ok=false`.
 
 ## External Dependencies
 

@@ -1009,7 +1009,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         );
 
         finalVerdict = reaction.verdict.verdict;
-        artefactTypesWritten.push('tower_judgement', 'run_summary');
+        artefactTypesWritten.push('tower_call_started', 'tower_call_completed', 'tower_verdict', 'tower_judgement', 'run_summary');
 
         if (reaction.action === 'stop') {
           console.log(`[CHAT_LEADS] Agent Loop: STOP — ${reaction.verdict.rationale}`);

@@ -996,7 +996,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         );
 
         finalVerdict = reaction.verdict.verdict;
-        afrEvents.push('tower_judgement', 'run_summary');
+        afrEvents.push('tower_call_started', 'tower_call_completed', 'tower_verdict', 'tower_judgement', 'run_summary');
 
         if (reaction.action === 'accept') {
           afrEvents.push('run_completed');
