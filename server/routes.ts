@@ -815,12 +815,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle, artefactId },
         });
 
-        await logRunCompleted(
-          userId, chatRunId,
-          `Chat run complete: ${placesCount} ${businessType} leads in ${city}`,
-          { leads_count: placesCount, tool: 'SEARCH_PLACES' },
-          conversationId
-        );
+        await logEvt({
+          userId, runId: chatRunId, conversationId,
+          clientRequestId,
+          actionTaken: 'plan_execution_finished', status: 'success',
+          taskGenerated: `Simulate chat: ${placesCount} ${businessType} leads in ${city}`,
+          runType: 'plan', metadata: { leads_count: placesCount, tool: 'SEARCH_PLACES' },
+        });
       }
 
       res.json({
@@ -837,7 +838,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         artefactPosted,
         artefactId: artefactId || null,
         afrEvents: artefactPosted
-          ? ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_post_succeeded', 'artefact_created', 'run_completed']
+          ? ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_post_succeeded', 'artefact_created', 'plan_execution_finished']
           : ['mission_received', 'router_decision', 'tool_call_started', 'tool_call_completed', 'artefact_post_failed'],
       });
     } catch (error: any) {

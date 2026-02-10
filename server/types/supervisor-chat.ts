@@ -51,6 +51,7 @@ export interface TaskRequestData {
     business_type?: string;
     location?: string;
     radius_km?: number;
+    count?: number;
   };
   deep_research?: {
     topic?: string;

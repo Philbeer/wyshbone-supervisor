@@ -14,7 +14,7 @@ interface AFRLogParams {
   conversationId?: string;
   clientRequestId?: string;
   actionTaken: string;
-  status: 'pending' | 'success' | 'failed';
+  status: 'pending' | 'success' | 'failed' | 'skipped';
   taskGenerated: string;
   runType: 'plan' | 'tool';
   metadata?: Record<string, unknown>;

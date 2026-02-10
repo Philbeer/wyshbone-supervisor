@@ -142,6 +142,8 @@ export async function callTowerJudgeV1(
   const endpoint = `${baseUrl}/api/tower/judge-artefact`;
   const apiKey = process.env.TOWER_API_KEY || process.env.EXPORT_KEY || '';
 
+  console.log(`[TOWER_CALL] url=${endpoint} runId=${runId}`);
+
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -151,12 +153,16 @@ export async function callTowerJudgeV1(
     body: JSON.stringify({ goal, success_criteria: successCriteria, artefact: artefactPayload, run_id: runId }),
   });
 
+  console.log(`[TOWER_CALL] url=${endpoint} ok=${response.ok} status=${response.status}`);
+
   if (!response.ok) {
     const body = await response.text().catch(() => '');
     throw new Error(`Tower judge-artefact HTTP ${response.status}: ${body.substring(0, 200)}`);
   }
 
-  return (await response.json()) as TowerVerdictV1;
+  const verdict = (await response.json()) as TowerVerdictV1;
+  console.log(`[TOWER_VERDICT] verdict=${verdict.verdict} delivered=${verdict.delivered} requested=${verdict.requested} confidence=${verdict.confidence}`);
+  return verdict;
 }
 
 interface PlanAdjustment {
@@ -234,6 +240,30 @@ async function postRunSummary(
     });
   } catch (err: any) {
     console.error(`[AGENT_LOOP] Failed to create run_summary artefact: ${err.message}`);
+  }
+}
+
+async function postTowerJudgementArtefact(runId: string, state: RunState, verdict: TowerVerdictV1): Promise<void> {
+  try {
+    await createArtefact({
+      runId,
+      type: 'tower_judgement',
+      title: `Tower Judgement: ${verdict.verdict}`,
+      summary: `Verdict: ${verdict.verdict} | Delivered: ${verdict.delivered} | Requested: ${verdict.requested} | Confidence: ${verdict.confidence}%`,
+      payload: {
+        verdict: verdict.verdict,
+        delivered: verdict.delivered,
+        requested: verdict.requested,
+        gaps: verdict.gaps,
+        confidence: verdict.confidence,
+        rationale: verdict.rationale,
+        plan_version: state.planVersion,
+      },
+      userId: state.userId,
+      conversationId: state.conversationId,
+    });
+  } catch (err: any) {
+    console.error(`[AGENT_LOOP] Failed to create tower_judgement artefact: ${err.message}`);
   }
 }
 
@@ -379,6 +409,7 @@ export async function handleTowerVerdict(
   const verdict = await obtainVerdict(runId, goal, successCriteria, artefactPayload);
   state.lastVerdict = verdict;
   await logVerdictReceived(state, runId, verdict);
+  await postTowerJudgementArtefact(runId, state, verdict);
 
   switch (verdict.verdict) {
     case 'ACCEPT': {
@@ -418,6 +449,7 @@ export async function handleTowerVerdict(
       const retryVerdict = await obtainVerdict(runId, goal, successCriteria, retryPayload);
       state.lastVerdict = retryVerdict;
       await logVerdictReceived(state, runId, retryVerdict);
+      await postTowerJudgementArtefact(runId, state, retryVerdict);
 
       const retryDelivered = typeof retryVerdict.delivered === 'number' ? retryVerdict.delivered : 0;
       const retryRequested = typeof retryVerdict.requested === 'number' ? retryVerdict.requested : 1;
@@ -501,6 +533,7 @@ export async function handleTowerVerdict(
       const replanVerdict = await obtainVerdict(runId, goal, successCriteria, replanPayload);
       state.lastVerdict = replanVerdict;
       await logVerdictReceived(state, runId, replanVerdict);
+      await postTowerJudgementArtefact(runId, state, replanVerdict);
 
       if (replanVerdict.verdict === 'ACCEPT') {
         state.status = 'accepted';

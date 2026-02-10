@@ -6,6 +6,9 @@ import { randomUUID } from 'crypto';
 import { monitorGoalsOnce, publishGoalMonitorEvents } from './goal-monitoring';
 import { logAFREvent, logMissionReceived, logRunCompleted, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './supervisor/afr-logger';
 import { createResearchProvider } from './supervisor/research-provider';
+import { createArtefact } from './supervisor/artefacts';
+import { initRunState, handleTowerVerdict, getRunState } from './supervisor/agent-loop';
+import { executeAction, type ActionResult as LoopActionResult } from './supervisor/action-executor';
 
 interface UserContext {
   userId: string;
@@ -511,6 +514,8 @@ class SupervisorService {
     let businessType = searchQuery?.business_type as string | undefined;
     let location = (searchQuery?.location as string) || '';
 
+    let requestedCount = 20;
+
     if (!businessType && requestData.user_message) {
       const msg = (requestData.user_message as string).trim();
       const inMatch = msg.match(/\s+in\s+(.+)$/i);
@@ -520,7 +525,20 @@ class SupervisorService {
       } else {
         businessType = msg.replace(/^find\s+/i, '').trim() || undefined;
       }
-      console.log(`[CHAT_LEADS] user_message fallback: parsed businessType="${businessType}" location="${location}" from "${msg}"`);
+
+      if (businessType) {
+        const numMatch = businessType.match(/^(\d+)\s+/);
+        if (numMatch) {
+          requestedCount = Math.min(parseInt(numMatch[1], 10), 200);
+          businessType = businessType.replace(/^\d+\s*/, '').trim() || undefined;
+        }
+      }
+
+      console.log(`[CHAT_LEADS] user_message fallback: parsed businessType="${businessType}" location="${location}" requestedCount=${requestedCount} from "${msg}"`);
+    }
+
+    if (searchQuery?.count) {
+      requestedCount = Math.min(Number(searchQuery.count), 200);
     }
 
     if (!businessType) {
@@ -553,12 +571,13 @@ class SupervisorService {
         }).catch(() => {});
       }
 
-      logRunCompleted(
-        task.user_id, chatRunId,
-        `Chat run skipped: no business type provided`,
-        { leads_count: 0, tool: 'SEARCH_PLACES', reason: 'missing_business_type' },
-        conversationId
-      ).catch(() => {});
+      logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId,
+        clientRequestId,
+        actionTaken: 'plan_execution_finished', status: 'skipped',
+        taskGenerated: `Chat run skipped: no business type provided`,
+        runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', reason: 'missing_business_type' },
+      }).catch(() => {});
 
       return {
         response: "I'd be happy to find leads for you! Could you tell me what type of businesses you're looking for?",
@@ -586,7 +605,7 @@ class SupervisorService {
       ).catch(() => {});
 
       // Search for businesses
-      const businesses = await this.searchGooglePlaces(businessType, city, country);
+      const businesses = await this.searchGooglePlaces(businessType, city, country, requestedCount);
 
       if (!businesses || businesses.length === 0) {
         logToolCallCompleted(
@@ -623,12 +642,13 @@ class SupervisorService {
             runType: 'plan', metadata: { artefactType: 'leads', title: artefactTitle, artefactId: postResult.artefactId },
           }).catch(() => {});
 
-          logRunCompleted(
-            task.user_id, chatRunId,
-            `Chat run complete: 0 ${businessType} leads in ${city}`,
-            { leads_count: 0, tool: 'SEARCH_PLACES' },
-            conversationId
-          ).catch(() => {});
+          logAFREvent({
+            userId: task.user_id, runId: chatRunId, conversationId,
+            clientRequestId,
+            actionTaken: 'plan_execution_finished', status: 'success',
+            taskGenerated: `Chat run: 0 ${businessType} leads in ${city}`,
+            runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', target_count: requestedCount },
+          }).catch(() => {});
         }
 
         return {
@@ -752,13 +772,70 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           taskGenerated: `Artefact created: ${successTitle}`,
           runType: 'plan', metadata: { artefactType: 'leads', title: successTitle, artefactId: postResult.artefactId },
         }).catch(() => {});
+      }
 
-        logRunCompleted(
-          task.user_id, chatRunId,
-          `Chat run complete: ${createdLeads.length} ${businessType} leads in ${city}`,
-          { leads_count: createdLeads.length, tool: 'SEARCH_PLACES' },
-          conversationId
-        ).catch(() => {});
+      const deliveredCount = createdLeads.length;
+      const agentLoopGoal = `Find ${requestedCount} ${businessType} in ${city}`;
+
+      try {
+        const leadsListArtefact = await createArtefact({
+          runId: chatRunId,
+          type: 'leads_list',
+          title: `Leads list: ${businessType} in ${city}`,
+          summary: `Delivered ${deliveredCount} of ${requestedCount} requested for "${businessType}" in ${city}`,
+          payload: {
+            delivered_count: deliveredCount,
+            target_count: requestedCount,
+            success_criteria: { target_count: requestedCount },
+            query: businessType,
+            location: city,
+            country,
+          },
+          userId: task.user_id,
+          conversationId,
+        });
+
+        console.log(`[AGENT_LOOP] tool=SEARCH_PLACES target=${requestedCount} delivered=${deliveredCount}`);
+
+        const toolArgs = { query: businessType, location: city, country, maxResults: requestedCount, target_count: requestedCount };
+        if (!getRunState(chatRunId)) {
+          initRunState(chatRunId, task.user_id, toolArgs, conversationId);
+        }
+
+        const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
+          console.log(`[AGENT_LOOP] Re-running SEARCH_PLACES for chat with adjusted args`);
+          return executeAction({
+            toolName: 'SEARCH_PLACES',
+            toolArgs: args,
+            userId: task.user_id,
+            runId: chatRunId,
+            conversationId,
+            clientRequestId,
+          });
+        };
+
+        const leadsListPayload = (leadsListArtefact.payloadJson as Record<string, unknown>) || {};
+        const towerCriteria = { target_leads: requestedCount };
+        const reaction = await handleTowerVerdict(
+          chatRunId,
+          agentLoopGoal,
+          towerCriteria,
+          { ...leadsListPayload, delivered_count: deliveredCount, target_count: requestedCount, leads_count: deliveredCount },
+          rerunTool,
+        );
+
+        if (reaction.action === 'stop') {
+          console.log(`[CHAT_LEADS] Agent Loop: STOP — ${reaction.verdict.rationale}`);
+        }
+      } catch (agentLoopErr: any) {
+        console.error(`[CHAT_LEADS] Agent loop failed (continuing): ${agentLoopErr.message}`);
+        logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId,
+          clientRequestId,
+          actionTaken: 'plan_execution_finished', status: 'success',
+          taskGenerated: `Chat run: ${deliveredCount} ${businessType} leads in ${city} (agent loop failed)`,
+          runType: 'plan', metadata: { leads_count: deliveredCount, tool: 'SEARCH_PLACES', target_count: requestedCount, error: agentLoopErr.message },
+        }).catch(() => {});
       }
 
       return {
@@ -801,12 +878,13 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           runType: 'plan', metadata: { artefactType: 'leads', title: errTitle, artefactId: errPostResult.artefactId },
         }).catch(() => {});
 
-        logRunCompleted(
-          task.user_id, chatRunId,
-          `Chat run failed: ${errMsg}`,
-          { leads_count: 0, tool: 'SEARCH_PLACES', error: errMsg },
-          conversationId
-        ).catch(() => {});
+        logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId,
+          clientRequestId,
+          actionTaken: 'plan_execution_finished', status: 'failed',
+          taskGenerated: `Chat run failed: ${errMsg}`,
+          runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', error: errMsg },
+        }).catch(() => {});
       }
 
       return {
@@ -1321,13 +1399,12 @@ Would you like me to find leads based on any of these insights?`;
     return context;
   }
 
-  private async searchGooglePlaces(industry: string, city: string, country: string): Promise<any[]> {
+  private async searchGooglePlaces(industry: string, city: string, country: string, maxResults: number = 20): Promise<any[]> {
     const apiKey = process.env.GOOGLE_PLACES_API_KEY;
     if (!apiKey) {
       throw new Error('GOOGLE_PLACES_API_KEY not configured');
     }
 
-    // Map industry to search query
     const queryMap: Record<string, string> = {
       'brewery': 'brewery',
       'distillery': 'distillery',
@@ -1340,7 +1417,7 @@ Would you like me to find leads based on any of these insights?`;
     const url = 'https://places.googleapis.com/v1/places:searchText';
     const requestBody = {
       textQuery: `${query} in ${city} ${country}`,
-      maxResultCount: 3
+      maxResultCount: Math.min(maxResults, 20)
     };
 
     const response = await fetch(url, {
