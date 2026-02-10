@@ -9,6 +9,7 @@ import { createResearchProvider } from './supervisor/research-provider';
 import { createArtefact } from './supervisor/artefacts';
 import { initRunState, handleTowerVerdict, getRunState } from './supervisor/agent-loop';
 import { executeAction, type ActionResult as LoopActionResult } from './supervisor/action-executor';
+import { generateJobId } from './supervisor/jobs';
 
 interface UserContext {
   userId: string;
@@ -277,10 +278,16 @@ class SupervisorService {
       return;
     }
 
-    console.log(`[SUPERVISOR] Processing chat task ${task.id} (${task.task_type}) uiRunId=${uiRunId} clientRequestId=${clientRequestId}`);
+    const jobId = generateJobId();
+    console.log(`[ID_MAP] jobId=${jobId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${task.id} entry=processChatTask`);
+    console.log(`[SUPERVISOR] Processing chat task ${task.id} (${task.task_type}) jobId=${jobId} uiRunId=${uiRunId} clientRequestId=${clientRequestId}`);
+
+    this.bridgeRunToUI(uiRunId, jobId, clientRequestId).catch((e: any) =>
+      console.error(`[RUN_BRIDGE] bridgeRunToUI failed: ${e.message}`)
+    );
 
     logMissionReceived(
-      task.user_id, uiRunId, task.id, task.task_type, task.conversation_id
+      task.user_id, jobId, task.id, task.task_type, task.conversation_id
     ).catch(() => {});
 
     // Mark as processing - with concurrency guard
@@ -348,7 +355,7 @@ class SupervisorService {
     switch (effectiveTaskType) {
       case 'generate_leads':
       case 'find_prospects':
-        const result = await this.generateLeadsForChat(task, userContext, conversationContext, uiRunId, clientRequestId);
+        const result = await this.generateLeadsForChat(task, userContext, conversationContext, jobId, clientRequestId);
         response = result.response;
         leadIds = result.leadIds;
         capabilities = ['lead_generation', 'email_enrichment'];
@@ -365,7 +372,7 @@ class SupervisorService {
         break;
 
       case 'deep_research':
-        const drResult = await this.executeDeepResearchForChat(task, uiRunId, clientRequestId);
+        const drResult = await this.executeDeepResearchForChat(task, jobId, clientRequestId);
         response = drResult.response;
         capabilities = ['deep_research'];
         break;
@@ -373,7 +380,7 @@ class SupervisorService {
       default:
         if (hasLeadIntent && hasVenueType && hasLocation) {
           console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="lead_intent+venue+location_fallback" override_from="${effectiveTaskType}"`);
-          const fallbackResult = await this.generateLeadsForChat(task, userContext, conversationContext, uiRunId, clientRequestId);
+          const fallbackResult = await this.generateLeadsForChat(task, userContext, conversationContext, jobId, clientRequestId);
           response = fallbackResult.response;
           leadIds = fallbackResult.leadIds;
           capabilities = ['lead_generation', 'email_enrichment'];

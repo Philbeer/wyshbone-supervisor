@@ -471,20 +471,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/debug/simulate-chat-task", async (req, res) => {
     const { logAFREvent: logEvt, logMissionReceived, logRunCompleted, logRouterDecision, logToolCallStarted, logToolCallCompleted, logToolCallFailed } = await import('./supervisor/afr-logger');
     const { randomUUID } = await import('crypto');
+    const { generateJobId } = await import('./supervisor/jobs');
 
     const goalText = (req.body?.goal as string) || 'find pet shops kent';
     const simulateType = (req.body?.simulate_type as string) || 'leads';
     const userId = getUserId(req);
     const taskId = randomUUID();
     const conversationId = `sim_conv_${taskId.substring(0, 8)}`;
-    const chatRunId = req.body?.run_id as string | undefined;
+    const uiRunId = req.body?.run_id as string | undefined;
     const clientRequestId = req.body?.client_request_id as string | undefined;
 
-    if (!chatRunId || !clientRequestId) {
-      const missing = [!chatRunId && 'run_id', !clientRequestId && 'client_request_id'].filter(Boolean).join(', ');
+    if (!uiRunId || !clientRequestId) {
+      const missing = [!uiRunId && 'run_id', !clientRequestId && 'client_request_id'].filter(Boolean).join(', ');
       console.error(`[DEBUG] simulate-chat-task: missing required identifiers (${missing})`);
       await logEvt({
-        userId, runId: chatRunId || 'unknown', conversationId,
+        userId, runId: uiRunId || 'unknown', conversationId,
         actionTaken: 'artefact_post_failed', status: 'failed',
         taskGenerated: `Artefact POST aborted: missing identifiers (${missing})`,
         runType: 'plan', metadata: { taskId, errorCode: 'missing_identifiers', missing },
@@ -492,9 +493,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(400).json({ ok: false, error: `Missing required identifiers: ${missing}`, taskId });
     }
 
+    const chatRunId = generateJobId();
+    console.log(`[ID_MAP] jobId=${chatRunId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${taskId} entry=simulate-chat-task`);
+
     if (simulateType === 'deep_research') {
       const topic = req.body?.topic || goalText;
-      console.log(`[DEBUG] simulate-chat-task(deep_research): topic="${topic}" uiRunId=${chatRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
+      console.log(`[DEBUG] simulate-chat-task(deep_research): topic="${topic}" jobId=${chatRunId} uiRunId=${uiRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
 
       try {
         const { createResearchProvider } = await import('./supervisor/research-provider');
@@ -670,7 +674,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
     const country = 'UK';
 
-    console.log(`[DEBUG] simulate-chat-task: goal="${goalText}" uiRunId=${chatRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
+    console.log(`[DEBUG] simulate-chat-task: goal="${goalText}" jobId=${chatRunId} uiRunId=${uiRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
     console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="simulate-chat-task" businessType="${businessType}" location="${city}" count=${requestedCount}`);
 
     try {

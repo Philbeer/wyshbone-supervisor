@@ -35,6 +35,7 @@ import {
 } from '../plan-progress';
 import { createArtefact } from './artefacts';
 import { judgeArtefact } from './tower-artefact-judge';
+import { generateJobId } from './jobs';
 import {
   initRunState,
   handleTowerVerdict,
@@ -214,19 +215,21 @@ async function safeUpdatePlanStatus(planId: string, status: string): Promise<voi
 
 export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   const { planId, userId, conversationId, clientRequestId, goal, steps, skipJudgement, toolMetadata } = plan;
+  const runId = plan.jobId || generateJobId();
   
-  console.log(`[PLAN_EXECUTOR] Starting execution of plan ${planId}`);
+  console.log(`[ID_MAP] jobId=${runId} planId=${planId} crid=${clientRequestId || 'none'} entry=executePlan`);
+  console.log(`[PLAN_EXECUTOR] Starting execution of plan ${planId} (runId=${runId})`);
   console.log(`[PLAN_EXECUTOR] Goal: ${goal}`);
   console.log(`[PLAN_EXECUTOR] Steps: ${steps.length}`);
   if (clientRequestId) console.log(`[PLAN_EXECUTOR] clientRequestId: ${clientRequestId}`);
   if (skipJudgement) console.log(`[PLAN_EXECUTOR] Tower judgement: SKIPPED (skipJudgement=true)`);
   
-  await logPlanStarted(userId, planId, goal, conversationId, clientRequestId);
+  await logPlanStarted(userId, runId, goal, conversationId, clientRequestId);
   await safeUpdatePlanStatus(planId, 'executing');
 
   const primaryTool = steps[0]?.toolName || steps[0]?.type || 'SEARCH_PLACES';
   logRouterDecision(
-    userId, planId, primaryTool,
+    userId, runId, primaryTool,
     `Supervisor executing ${steps.length}-step plan via ${primaryTool}`,
     conversationId, clientRequestId,
   ).catch(() => {});
@@ -246,15 +249,15 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       
       console.log(`[PLAN_EXECUTOR] Step ${i + 1}/${steps.length}: ${step.label}`);
       
-      await logStepStarted(userId, planId, step.id, step.label, conversationId, clientRequestId);
+      await logStepStarted(userId, runId, step.id, step.label, conversationId, clientRequestId);
       updateStepStatus(planId, step.id, 'running');
       
       try {
-        const result = await executeStep(step, toolMetadata, userId, toolTracker, planId, conversationId, clientRequestId);
+        const result = await executeStep(step, toolMetadata, userId, toolTracker, runId, conversationId, clientRequestId);
         
         if (!result.success) {
           console.error(`[PLAN_EXECUTOR] Step ${step.id} failed:`, result.error);
-          await logStepFailed(userId, planId, step.id, step.label, result.error || 'Unknown error', conversationId, clientRequestId);
+          await logStepFailed(userId, runId, step.id, step.label, result.error || 'Unknown error', conversationId, clientRequestId);
           updateStepStatus(planId, step.id, 'failed', result.error);
 
           try {
@@ -262,7 +265,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             const stepArgs = step.toolArgs || toolMetadata?.toolArgs;
             const stepInputs = stepArgs ? compactInputs(stepArgs) : {};
             await createArtefact({
-              runId: planId,
+              runId: runId,
               type: 'step_result',
               title: `Step result: ${step.label}`,
               summary: `Failed: ${result.error || 'Unknown error'}`,
@@ -289,7 +292,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             costUnits: 0.25,
           });
 
-          await logPlanFailed(userId, planId, result.error || 'Step execution failed', conversationId, clientRequestId);
+          await logPlanFailed(userId, runId, result.error || 'Step execution failed', conversationId, clientRequestId);
           failProgress(planId, result.error);
           await safeUpdatePlanStatus(planId, 'failed');
           
@@ -313,7 +316,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           validLeads: leadsFound,
         });
 
-        await logStepCompleted(userId, planId, step.id, step.label, result.summary, conversationId, clientRequestId);
+        await logStepCompleted(userId, runId, step.id, step.label, result.summary, conversationId, clientRequestId);
         updateStepStatus(planId, step.id, 'completed', result.summary);
         stepsCompleted++;
         
@@ -327,7 +330,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           const stepMetrics = result.data ? extractMetrics(stepType, result.data) : {};
 
           const stepArtefact = await createArtefact({
-            runId: planId,
+            runId: runId,
             type: 'step_result',
             title: `Step result: ${step.label}`,
             summary: result.summary || `Step ${step.id} completed successfully`,
@@ -353,7 +356,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             const deliveredCount = Number(result.data?.delivered_count || result.data?.count) || 0;
 
             const leadsListArtefact = await createArtefact({
-              runId: planId,
+              runId: runId,
               type: 'leads_list',
               title: `Leads list: ${step.label}`,
               summary: `Delivered ${deliveredCount} of ${targetCount} requested for "${toolArgs.query || ''}" in ${toolArgs.location || ''}`,
@@ -371,8 +374,8 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               conversationId,
             });
 
-            if (!getRunState(planId)) {
-              initRunState(planId, userId, { ...toolArgs, target_count: targetCount }, conversationId);
+            if (!getRunState(runId)) {
+              initRunState(runId, userId, { ...toolArgs, target_count: targetCount }, conversationId);
             }
 
             const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
@@ -382,7 +385,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
                 toolArgs: args,
                 userId,
                 tracker: toolTracker,
-                runId: planId,
+                runId: runId,
                 conversationId,
                 clientRequestId,
               });
@@ -391,7 +394,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             const leadsListPayload = leadsListArtefact.payloadJson as Record<string, unknown> || {};
             const towerCriteria = { ...successCriteria, target_leads: targetCount };
             const reaction = await handleTowerVerdict(
-              planId,
+              runId,
               goal,
               towerCriteria,
               { ...leadsListPayload, delivered_count: deliveredCount, target_count: targetCount, leads_count: deliveredCount },
@@ -421,7 +424,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           } else {
             const judgeResult = await judgeArtefact({
               artefact: stepArtefact,
-              runId: planId,
+              runId: runId,
               goal,
               userId,
               conversationId,
@@ -452,7 +455,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
 
         try {
           await logToolsUpdate(
-            userId, planId,
+            userId, runId,
             [...toolTracker.tools_used],
             [...toolTracker.tools_rejected],
             [...toolTracker.replans],
@@ -473,9 +476,9 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           costUnits: 0.25,
         });
         
-        await logStepFailed(userId, planId, step.id, step.label, errorMessage, conversationId, clientRequestId);
+        await logStepFailed(userId, runId, step.id, step.label, errorMessage, conversationId, clientRequestId);
         updateStepStatus(planId, step.id, 'failed', errorMessage);
-        await logPlanFailed(userId, planId, errorMessage, conversationId, clientRequestId);
+        await logPlanFailed(userId, runId, errorMessage, conversationId, clientRequestId);
         failProgress(planId, errorMessage);
         await safeUpdatePlanStatus(planId, 'failed');
         
@@ -491,7 +494,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       if (!skipJudgement) {
         const snapshot = buildSnapshot(runSummary, successCriteria.stall_window_steps);
         const judgement = await requestJudgement(
-          planId,
+          runId,
           userId,
           missionType,
           successCriteria,
@@ -522,7 +525,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     }
     
     const summary = `Plan completed successfully - ${stepsCompleted}/${steps.length} steps`;
-    await logPlanCompleted(userId, planId, summary, conversationId, clientRequestId);
+    await logPlanCompleted(userId, runId, summary, conversationId, clientRequestId);
     completeProgress(planId);
     await safeUpdatePlanStatus(planId, 'completed');
 
@@ -530,7 +533,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       try {
         const leadsList = buildLeadsList(leadsMap, leadsFilters);
         await createArtefact({
-          runId: planId,
+          runId: runId,
           type: 'leads_list',
           title: `Leads: ${goal}`,
           summary: `${leadsList.total} leads collected${leadsList.capped ? ` (capped to ${LEADS_LIST_CAP})` : ''}`,
@@ -561,7 +564,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       const artefactSummary = `${stepsCompleted}/${steps.length} steps completed.`;
 
       await createArtefact({
-        runId: planId,
+        runId: runId,
         type: 'plan_result',
         title: artefactTitle,
         summary: artefactSummary,
@@ -599,7 +602,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     const errorMessage = error.message || 'Plan execution failed unexpectedly';
     console.error(`[PLAN_EXECUTOR] Plan execution error:`, errorMessage);
     
-    await logPlanFailed(userId, planId, errorMessage, conversationId, clientRequestId);
+    await logPlanFailed(userId, runId, errorMessage, conversationId, clientRequestId);
     failProgress(planId, errorMessage);
     await safeUpdatePlanStatus(planId, 'failed');
     

@@ -15,6 +15,7 @@ export interface PlanStep {
 
 export interface Plan {
   planId: string;
+  jobId?: string;
   userId: string;
   conversationId?: string;
   clientRequestId?: string;
