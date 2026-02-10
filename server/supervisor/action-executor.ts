@@ -213,16 +213,23 @@ async function executeSearchPlaces(
   const query = args.query as string || 'businesses';
   const location = args.location as string || 'UK';
   const country = (args.country as string) || 'GB';
+  const maxResults = Number(args.maxResults) || 20;
+  const targetCount = Number(args.target_count || args.maxResults) || 20;
   
-  console.log(`[ACTION_EXECUTOR] SEARCH_PLACES: ${query} in ${location}, ${country}`);
+  console.log(`[ACTION_EXECUTOR] SEARCH_PLACES: ${query} in ${location}, ${country} (maxResults=${maxResults}, target=${targetCount})`);
   
-  const result = await searchPlaces(query, location, country, 20);
+  const result = await searchPlaces(query, location, country, maxResults);
   
   if (result.success) {
     return {
       success: true,
-      summary: `Found ${result.places.length} places for "${query}" in ${location}, ${country}`,
-      data: { places: result.places, count: result.places.length }
+      summary: `Found ${result.places.length} places for "${query}" in ${location}, ${country} (target: ${targetCount})`,
+      data: {
+        places: result.places,
+        count: result.places.length,
+        delivered_count: result.places.length,
+        target_count: targetCount,
+      }
     };
   } else {
     return {

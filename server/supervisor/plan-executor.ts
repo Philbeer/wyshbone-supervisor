@@ -349,8 +349,30 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
 
           if (isSearchPlaces) {
             const toolArgs = step.toolArgs || toolMetadata?.toolArgs || {};
+            const targetCount = Number(result.data?.target_count || toolArgs.target_count || toolArgs.maxResults) || 20;
+            const deliveredCount = Number(result.data?.delivered_count || result.data?.count) || 0;
+
+            const leadsListArtefact = await createArtefact({
+              runId: planId,
+              type: 'leads_list',
+              title: `Leads list: ${step.label}`,
+              summary: `Delivered ${deliveredCount} of ${targetCount} requested for "${toolArgs.query || ''}" in ${toolArgs.location || ''}`,
+              payload: {
+                ...stepOutputs,
+                ...stepMetrics,
+                delivered_count: deliveredCount,
+                target_count: targetCount,
+                success_criteria: { target_count: targetCount },
+                query: toolArgs.query,
+                location: toolArgs.location,
+                country: toolArgs.country,
+              },
+              userId,
+              conversationId,
+            });
+
             if (!getRunState(planId)) {
-              initRunState(planId, userId, toolArgs, conversationId);
+              initRunState(planId, userId, { ...toolArgs, target_count: targetCount }, conversationId);
             }
 
             const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
@@ -366,12 +388,13 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               });
             };
 
-            const artefactPayload = stepArtefact.payloadJson as Record<string, unknown> || {};
+            const leadsListPayload = leadsListArtefact.payloadJson as Record<string, unknown> || {};
+            const towerCriteria = { ...successCriteria, target_leads: targetCount };
             const reaction = await handleTowerVerdict(
               planId,
               goal,
-              { ...successCriteria },
-              { ...artefactPayload, ...stepOutputs, ...stepMetrics },
+              towerCriteria,
+              { ...leadsListPayload, delivered_count: deliveredCount, target_count: targetCount, leads_count: deliveredCount },
               rerunTool,
             );
 

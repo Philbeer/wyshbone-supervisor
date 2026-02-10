@@ -157,41 +157,52 @@ export async function callTowerJudgeV1(
   return (await response.json()) as TowerVerdictV1;
 }
 
+interface PlanAdjustment {
+  strategy: string;
+  description: string;
+  args: Record<string, unknown>;
+}
+
 function buildAdjustedArgs(
   original: Record<string, unknown>,
   verdict: TowerVerdictV1,
-): Record<string, unknown> {
+  planVersion: number,
+): PlanAdjustment {
   const adjusted = { ...original };
   const gaps = verdict.gaps || [];
   const delivered = typeof verdict.delivered === 'number' ? verdict.delivered : 0;
   const requested = typeof verdict.requested === 'number' ? verdict.requested : 0;
+  const currentLocation = String(adjusted.location || '');
+  const currentQuery = String(adjusted.query || '');
 
-  if (gaps.includes('duplicate_rate_high') || gaps.includes('too_many_duplicates')) {
-    const currentQuery = String(adjusted.query || '');
-    if (!currentQuery.includes('unique')) {
-      adjusted.query = `${currentQuery} unique`;
+  adjusted.maxResults = Math.min(60, Math.max(Number(adjusted.maxResults || 20), 40));
+
+  if (delivered < requested && currentLocation) {
+    const alreadyExpanded = currentLocation.includes('within');
+    if (!alreadyExpanded) {
+      adjusted.location = `${currentLocation} within 10km`;
+      const desc = `Expanded search radius: "${currentLocation}" → "${adjusted.location}" (within 10km)`;
+      console.log(`[AGENT_LOOP] CHANGE_PLAN: ${desc}`);
+      return { strategy: 'expand_radius_10km', description: desc, args: adjusted };
+    } else if (currentLocation.includes('10km') && planVersion <= 2) {
+      adjusted.location = currentLocation.replace('within 10km', 'within 25km');
+      const desc = `Expanded search radius: "${currentLocation}" → "${adjusted.location}" (within 25km)`;
+      console.log(`[AGENT_LOOP] CHANGE_PLAN: ${desc}`);
+      return { strategy: 'expand_radius_25km', description: desc, args: adjusted };
     }
-    adjusted.maxResults = Math.max(Number(adjusted.maxResults || 20) - 5, 5);
-    console.log(`[AGENT_LOOP] CHANGE_PLAN: tightened filters — query="${adjusted.query}" maxResults=${adjusted.maxResults}`);
-    return adjusted;
   }
 
-  if (delivered < requested) {
-    const currentMaxResults = Number(adjusted.maxResults || 20);
-    adjusted.maxResults = Math.min(currentMaxResults + 20, 60);
-    const currentQuery = String(adjusted.query || '');
-    const currentLocation = String(adjusted.location || '');
-    if (currentLocation && !currentLocation.includes('nearby')) {
-      adjusted.location = `${currentLocation} and nearby areas`;
-    }
-    console.log(`[AGENT_LOOP] CHANGE_PLAN: broadened — maxResults=${adjusted.maxResults}, location="${adjusted.location}"`);
-    return adjusted;
+  if (delivered < requested && currentQuery) {
+    const broadenedQuery = currentQuery.includes(' OR ') ? currentQuery : `${currentQuery} OR bar`;
+    adjusted.query = broadenedQuery;
+    const desc = `Broadened query: "${currentQuery}" → "${broadenedQuery}"`;
+    console.log(`[AGENT_LOOP] CHANGE_PLAN: ${desc}`);
+    return { strategy: 'broaden_query', description: desc, args: adjusted };
   }
 
-  const currentMaxResults = Number(adjusted.maxResults || 20);
-  adjusted.maxResults = Math.min(currentMaxResults + 10, 60);
-  console.log(`[AGENT_LOOP] CHANGE_PLAN: default broadening — maxResults=${adjusted.maxResults}`);
-  return adjusted;
+  const desc = `Default: increased maxResults to ${adjusted.maxResults}`;
+  console.log(`[AGENT_LOOP] CHANGE_PLAN: ${desc}`);
+  return { strategy: 'increase_max_results', description: desc, args: adjusted };
 }
 
 async function postRunSummary(
@@ -232,25 +243,17 @@ export interface AgentLoopReaction {
   runState: RunState;
 }
 
-export async function handleTowerVerdict(
+async function obtainVerdict(
   runId: string,
   goal: string,
   successCriteria: Record<string, unknown>,
   artefactPayload: Record<string, unknown>,
-  rerunTool: (args: Record<string, unknown>) => Promise<ActionResult>,
-): Promise<AgentLoopReaction> {
-  let state = runStates.get(runId);
-  if (!state) {
-    console.error(`[AGENT_LOOP] No RunState for runId=${runId} — cannot react`);
-    throw new Error(`No RunState for runId=${runId}`);
-  }
-
-  let verdict: TowerVerdictV1;
+): Promise<TowerVerdictV1> {
   try {
-    verdict = await callTowerJudgeV1(goal, successCriteria, artefactPayload, runId);
+    return await callTowerJudgeV1(goal, successCriteria, artefactPayload, runId);
   } catch (err: any) {
     console.error(`[AGENT_LOOP] Tower call failed: ${err.message} — defaulting to ACCEPT`);
-    verdict = {
+    return {
       verdict: 'ACCEPT',
       delivered: 0,
       requested: 0,
@@ -259,10 +262,10 @@ export async function handleTowerVerdict(
       rationale: `Tower call failed: ${err.message}`,
     };
   }
+}
 
-  state.lastVerdict = verdict;
-
-  console.log(`[TOWER_JUDGEMENT] runId=${runId} verdict=${verdict.verdict} confidence=${verdict.confidence} gapsCount=${verdict.gaps.length}`);
+async function logVerdictReceived(state: RunState, runId: string, verdict: TowerVerdictV1): Promise<void> {
+  console.log(`[TOWER_JUDGEMENT] runId=${runId} verdict=${verdict.verdict} delivered=${verdict.delivered} requested=${verdict.requested} confidence=${verdict.confidence} gapsCount=${verdict.gaps.length}`);
 
   await logAFREvent({
     userId: state.userId,
@@ -270,7 +273,7 @@ export async function handleTowerVerdict(
     conversationId: state.conversationId,
     actionTaken: 'tower_judgement_received',
     status: 'success',
-    taskGenerated: `Tower v1 verdict: ${verdict.verdict} (confidence=${verdict.confidence}, gaps=${verdict.gaps.length})`,
+    taskGenerated: `Tower v1 verdict: ${verdict.verdict} (confidence=${verdict.confidence}, delivered=${verdict.delivered}, requested=${verdict.requested})`,
     runType: 'plan',
     metadata: {
       verdict: verdict.verdict,
@@ -282,31 +285,106 @@ export async function handleTowerVerdict(
       plan_version: state.planVersion,
     },
   });
+}
+
+function emitFinalLog(state: RunState, verdict: TowerVerdictV1, stopped: boolean): void {
+  const target = typeof verdict.requested === 'number' ? verdict.requested : Number(state.lastToolArgs.target_count || 0);
+  const delivered = typeof verdict.delivered === 'number' ? verdict.delivered : 0;
+  console.log(`[AGENT_LOOP] runId=${state.runId} target=${target} delivered=${delivered} verdict=${verdict.verdict} planVersion=${state.planVersion} retries=${state.retryCount} stopped=${stopped}`);
+}
+
+async function emitRunCompleted(state: RunState, runId: string, verdict: TowerVerdictV1): Promise<void> {
+  await logAFREvent({
+    userId: state.userId,
+    runId,
+    conversationId: state.conversationId,
+    actionTaken: 'run_completed',
+    status: 'success',
+    taskGenerated: `Run accepted by Tower: delivered=${verdict.delivered}, requested=${verdict.requested}, confidence=${verdict.confidence}%`,
+    runType: 'plan',
+    metadata: {
+      verdict: verdict.verdict,
+      delivered: verdict.delivered,
+      requested: verdict.requested,
+      confidence: verdict.confidence,
+      plan_version: state.planVersion,
+    },
+  });
+}
+
+async function emitRunStopped(state: RunState, runId: string, reason: string, metadata: Record<string, unknown>): Promise<void> {
+  await logAFREvent({
+    userId: state.userId,
+    runId,
+    conversationId: state.conversationId,
+    actionTaken: 'run_stopped',
+    status: 'failed',
+    taskGenerated: `Run stopped: ${reason}`,
+    runType: 'plan',
+    metadata,
+  });
+}
+
+async function createRerunLeadsListArtefact(
+  state: RunState,
+  rerunResult: ActionResult,
+  label: string,
+): Promise<Record<string, unknown>> {
+  const deliveredCount = rerunResult.data?.delivered_count ?? rerunResult.data?.count ?? 0;
+  const targetCount = rerunResult.data?.target_count ?? Number(state.lastToolArgs.target_count) ?? 0;
+  const payload: Record<string, unknown> = {
+    delivered_count: deliveredCount,
+    target_count: targetCount,
+    leads_count: deliveredCount,
+    places_count: Array.isArray(rerunResult.data?.places) ? rerunResult.data!.places.length : 0,
+    success_criteria: { target_count: targetCount },
+    query: state.lastToolArgs.query,
+    location: state.lastToolArgs.location,
+    country: state.lastToolArgs.country,
+    plan_version: state.planVersion,
+  };
+
+  try {
+    await createArtefact({
+      runId: state.runId,
+      type: 'leads_list',
+      title: `Leads list (${label}): SEARCH_PLACES v${state.planVersion}`,
+      summary: `Delivered ${deliveredCount} of ${targetCount} requested (${label})`,
+      payload,
+      userId: state.userId,
+      conversationId: state.conversationId,
+    });
+  } catch (err: any) {
+    console.error(`[AGENT_LOOP] Failed to create leads_list artefact after ${label}: ${err.message}`);
+  }
+
+  return payload;
+}
+
+export async function handleTowerVerdict(
+  runId: string,
+  goal: string,
+  successCriteria: Record<string, unknown>,
+  artefactPayload: Record<string, unknown>,
+  rerunTool: (args: Record<string, unknown>) => Promise<ActionResult>,
+): Promise<AgentLoopReaction> {
+  const state = runStates.get(runId);
+  if (!state) {
+    console.error(`[AGENT_LOOP] No RunState for runId=${runId} — cannot react`);
+    throw new Error(`No RunState for runId=${runId}`);
+  }
+
+  const verdict = await obtainVerdict(runId, goal, successCriteria, artefactPayload);
+  state.lastVerdict = verdict;
+  await logVerdictReceived(state, runId, verdict);
 
   switch (verdict.verdict) {
     case 'ACCEPT': {
       state.status = 'accepted';
       console.log(`[AGENT_REACT] action=accept runId=${runId} planVersion=${state.planVersion}`);
-
-      await logAFREvent({
-        userId: state.userId,
-        runId,
-        conversationId: state.conversationId,
-        actionTaken: 'run_completed',
-        status: 'success',
-        taskGenerated: `Run accepted by Tower: delivered=${verdict.delivered}, requested=${verdict.requested}, confidence=${verdict.confidence}%`,
-        runType: 'plan',
-        metadata: {
-          verdict: verdict.verdict,
-          delivered: verdict.delivered,
-          requested: verdict.requested,
-          confidence: verdict.confidence,
-          plan_version: state.planVersion,
-        },
-      });
-
+      await emitRunCompleted(state, runId, verdict);
       await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
-
+      emitFinalLog(state, verdict, false);
       return { action: 'accept', verdict, planVersion: state.planVersion, runState: state };
     }
 
@@ -314,19 +392,9 @@ export async function handleTowerVerdict(
       if (state.retryCount >= MAX_RETRIES) {
         console.log(`[AGENT_REACT] action=stop runId=${runId} planVersion=${state.planVersion} reason=max_retries_exceeded`);
         state.status = 'stopped';
-
-        await logAFREvent({
-          userId: state.userId,
-          runId,
-          conversationId: state.conversationId,
-          actionTaken: 'run_stopped',
-          status: 'failed',
-          taskGenerated: `Run stopped: max retries (${MAX_RETRIES}) exceeded`,
-          runType: 'plan',
-          metadata: { reason: 'max_retries_exceeded', retryCount: state.retryCount },
-        });
-
+        await emitRunStopped(state, runId, `max retries (${MAX_RETRIES}) exceeded`, { reason: 'max_retries_exceeded', retryCount: state.retryCount });
         await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+        emitFinalLog(state, verdict, true);
         return { action: 'stop', verdict, planVersion: state.planVersion, runState: state };
       }
 
@@ -337,49 +405,77 @@ export async function handleTowerVerdict(
       const retryResult = await rerunTool(state.lastToolArgs);
       if (!retryResult.success) {
         console.error(`[AGENT_LOOP] Retry failed: ${retryResult.error}`);
+        state.status = 'stopped';
+        await emitRunStopped(state, runId, `retry execution failed: ${retryResult.error}`, { reason: 'retry_failed' });
+        await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+        emitFinalLog(state, verdict, true);
+        return { action: 'stop', verdict, planVersion: state.planVersion, runState: state };
       }
 
-      await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+      const retryPayload = await createRerunLeadsListArtefact(state, retryResult, 'retry');
+      const retryVerdict = await obtainVerdict(runId, goal, successCriteria, retryPayload);
+      state.lastVerdict = retryVerdict;
+      await logVerdictReceived(state, runId, retryVerdict);
 
-      return { action: 'retry', verdict, planVersion: state.planVersion, runState: state };
+      const retryDelivered = typeof retryVerdict.delivered === 'number' ? retryVerdict.delivered : 0;
+      const retryRequested = typeof retryVerdict.requested === 'number' ? retryVerdict.requested : 1;
+
+      if (retryVerdict.verdict === 'ACCEPT') {
+        state.status = 'accepted';
+        console.log(`[AGENT_REACT] action=accept runId=${runId} planVersion=${state.planVersion} (after retry)`);
+        await emitRunCompleted(state, runId, retryVerdict);
+        await postRunSummary(runId, state.userId, retryVerdict, state.planVersion, state.conversationId);
+        emitFinalLog(state, retryVerdict, false);
+        return { action: 'accept', verdict: retryVerdict, planVersion: state.planVersion, runState: state };
+      }
+
+      if (retryVerdict.verdict === 'RETRY' || retryDelivered < retryRequested * 0.5) {
+        state.status = 'stopped';
+        const reason = retryDelivered < retryRequested * 0.5
+          ? `delivered (${retryDelivered}) < 50% of target (${retryRequested}) after retry`
+          : 'still RETRY after retry — stopping';
+        console.log(`[AGENT_REACT] action=stop runId=${runId} reason="${reason}"`);
+        await emitRunStopped(state, runId, reason, { reason: 'retry_insufficient', delivered: retryDelivered, requested: retryRequested });
+        await postRunSummary(runId, state.userId, retryVerdict, state.planVersion, state.conversationId);
+        emitFinalLog(state, retryVerdict, true);
+        return { action: 'stop', verdict: retryVerdict, planVersion: state.planVersion, runState: state };
+      }
+
+      state.status = 'accepted';
+      await emitRunCompleted(state, runId, retryVerdict);
+      await postRunSummary(runId, state.userId, retryVerdict, state.planVersion, state.conversationId);
+      emitFinalLog(state, retryVerdict, false);
+      return { action: 'accept', verdict: retryVerdict, planVersion: state.planVersion, runState: state };
     }
 
     case 'CHANGE_PLAN': {
       if (state.planVersion >= MAX_PLAN_VERSION) {
         console.log(`[AGENT_REACT] action=stop runId=${runId} planVersion=${state.planVersion} reason=max_plan_version_reached`);
         state.status = 'stopped';
-
-        await logAFREvent({
-          userId: state.userId,
-          runId,
-          conversationId: state.conversationId,
-          actionTaken: 'run_stopped',
-          status: 'failed',
-          taskGenerated: `Run stopped: max plan version (${MAX_PLAN_VERSION}) reached`,
-          runType: 'plan',
-          metadata: { reason: 'max_plan_version_reached', planVersion: state.planVersion },
-        });
-
+        await emitRunStopped(state, runId, `max plan version (${MAX_PLAN_VERSION}) reached`, { reason: 'max_plan_version_reached', planVersion: state.planVersion });
         await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+        emitFinalLog(state, verdict, true);
         return { action: 'stop', verdict, planVersion: state.planVersion, runState: state };
       }
 
       state.planVersion += 1;
       state.status = 'replanning';
-      const adjustedArgs = buildAdjustedArgs(state.lastToolArgs, verdict);
-      state.lastToolArgs = adjustedArgs;
+      const adjustment = buildAdjustedArgs(state.lastToolArgs, verdict, state.planVersion);
+      state.lastToolArgs = adjustment.args;
 
-      console.log(`[AGENT_REACT] action=replan runId=${runId} planVersion=${state.planVersion}`);
+      console.log(`[AGENT_REACT] action=replan runId=${runId} planVersion=${state.planVersion} strategy=${adjustment.strategy}`);
 
       try {
         await createArtefact({
           runId,
           type: 'plan_update',
           title: `Plan Update v${state.planVersion}`,
-          summary: `Adjusted parameters after CHANGE_PLAN verdict: ${verdict.rationale}`,
+          summary: adjustment.description,
           payload: {
             plan_version: state.planVersion,
-            adjustments: adjustedArgs,
+            strategy: adjustment.strategy,
+            description: adjustment.description,
+            adjusted_args: adjustment.args,
             original_verdict: verdict,
           },
           userId: state.userId,
@@ -389,36 +485,56 @@ export async function handleTowerVerdict(
         console.error(`[AGENT_LOOP] Failed to create plan_update artefact: ${err.message}`);
       }
 
-      const replanResult = await rerunTool(adjustedArgs);
+      const replanResult = await rerunTool(adjustment.args);
       if (!replanResult.success) {
         console.error(`[AGENT_LOOP] Replan execution failed: ${replanResult.error}`);
+        state.status = 'stopped';
+        await emitRunStopped(state, runId, `replan execution failed: ${replanResult.error}`, { reason: 'replan_failed' });
+        await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+        emitFinalLog(state, verdict, true);
+        return { action: 'stop', verdict, planVersion: state.planVersion, runState: state };
       }
 
-      await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+      const replanPayload = await createRerunLeadsListArtefact(state, replanResult, 'replan');
+      const replanVerdict = await obtainVerdict(runId, goal, successCriteria, replanPayload);
+      state.lastVerdict = replanVerdict;
+      await logVerdictReceived(state, runId, replanVerdict);
 
-      return { action: 'replan', verdict, adjustedArgs, planVersion: state.planVersion, runState: state };
+      if (replanVerdict.verdict === 'ACCEPT') {
+        state.status = 'accepted';
+        console.log(`[AGENT_REACT] action=accept runId=${runId} planVersion=${state.planVersion} (after replan)`);
+        await emitRunCompleted(state, runId, replanVerdict);
+        await postRunSummary(runId, state.userId, replanVerdict, state.planVersion, state.conversationId);
+        emitFinalLog(state, replanVerdict, false);
+        return { action: 'accept', verdict: replanVerdict, adjustedArgs: adjustment.args, planVersion: state.planVersion, runState: state };
+      }
+
+      state.status = 'stopped';
+      const stopReason = replanVerdict.verdict === 'CHANGE_PLAN'
+        ? 'still CHANGE_PLAN after replan — stopping'
+        : `${replanVerdict.verdict} after replan — stopping`;
+      console.log(`[AGENT_REACT] action=stop runId=${runId} reason="${stopReason}"`);
+      await emitRunStopped(state, runId, stopReason, {
+        reason: 'replan_insufficient',
+        delivered: replanVerdict.delivered,
+        requested: replanVerdict.requested,
+        final_verdict: replanVerdict.verdict,
+      });
+      await postRunSummary(runId, state.userId, replanVerdict, state.planVersion, state.conversationId);
+      emitFinalLog(state, replanVerdict, true);
+      return { action: 'stop', verdict: replanVerdict, adjustedArgs: adjustment.args, planVersion: state.planVersion, runState: state };
     }
 
     case 'STOP': {
       state.status = 'stopped';
       console.log(`[AGENT_REACT] action=stop runId=${runId} planVersion=${state.planVersion}`);
-
-      await logAFREvent({
-        userId: state.userId,
-        runId,
-        conversationId: state.conversationId,
-        actionTaken: 'run_stopped',
-        status: 'failed',
-        taskGenerated: `Run stopped by Tower: ${verdict.rationale}`,
-        runType: 'plan',
-        metadata: {
-          verdict: verdict.verdict,
-          rationale: verdict.rationale,
-          gaps: verdict.gaps,
-        },
+      await emitRunStopped(state, runId, `Tower verdict: ${verdict.rationale}`, {
+        verdict: verdict.verdict,
+        rationale: verdict.rationale,
+        gaps: verdict.gaps,
       });
-
       await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+      emitFinalLog(state, verdict, true);
       return { action: 'stop', verdict, planVersion: state.planVersion, runState: state };
     }
 
@@ -426,6 +542,7 @@ export async function handleTowerVerdict(
       console.error(`[AGENT_LOOP] Unknown verdict: ${(verdict as any).verdict} — treating as ACCEPT`);
       state.status = 'accepted';
       await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+      emitFinalLog(state, verdict, false);
       return { action: 'accept', verdict, planVersion: state.planVersion, runState: state };
     }
   }
