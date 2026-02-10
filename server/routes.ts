@@ -661,10 +661,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     const locationMatch = goalText.match(/\s+in\s+(.+)$/i);
     const city = locationMatch ? locationMatch[1].trim() : 'Kent';
-    const businessType = goalText.replace(/^find\s+/i, '').replace(/\s+in\s+.+$/i, '').trim() || 'pet shops';
+    let businessType = goalText.replace(/^find\s+/i, '').replace(/\s+in\s+.+$/i, '').trim() || 'pet shops';
+    const countMatch = businessType.match(/^(\d+)\s+/);
+    let requestedCount = 20;
+    if (countMatch) {
+      requestedCount = parseInt(countMatch[1], 10);
+      businessType = businessType.replace(/^\d+\s*/, '').trim();
+    }
     const country = 'UK';
 
     console.log(`[DEBUG] simulate-chat-task: goal="${goalText}" uiRunId=${chatRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
+    console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="simulate-chat-task" businessType="${businessType}" location="${city}" count=${requestedCount}`);
 
     try {
       await logMissionReceived(userId, chatRunId, taskId, 'find_prospects', conversationId);
@@ -694,7 +701,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               'X-Goog-Api-Key': apiKey,
               'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.internationalPhoneNumber'
             },
-            body: JSON.stringify({ textQuery: `${businessType} in ${city} ${country}`, maxResultCount: 5 })
+            body: JSON.stringify({ textQuery: `${businessType} in ${city} ${country}`, maxResultCount: Math.min(requestedCount, 20) })
           });
           if (response.ok) {
             const data = await response.json();

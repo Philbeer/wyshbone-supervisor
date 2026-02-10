@@ -318,12 +318,34 @@ class SupervisorService {
       created_at: m.created_at
     })) || [];
 
-    // Generate response based on task type
+    const userMessage = (requestData.user_message || '').toLowerCase().trim();
+    let effectiveTaskType = task.task_type;
+
+    const LEAD_FIND_KEYWORDS = /\b(find|search|look\s*for|get|discover|locate)\b/i;
+    const VENUE_KEYWORDS = /\b(pubs?|bars?|breweries|brewery|taverns?|inns?|gastropubs?|freehouse|free\s+house|public\s+house|venues?|nightclubs?|clubs?|restaurants?|cafes?|coffee\s+shops?|hotels?|b&bs?|guest\s*houses?)\b/i;
+    const LOCATION_KEYWORDS = /\b(in|near|around|across|within|throughout)\s+[A-Z]/i;
+
+    const rawMsg = requestData.user_message || '';
+    const hasLeadIntent = LEAD_FIND_KEYWORDS.test(rawMsg);
+    const hasVenueType = VENUE_KEYWORDS.test(rawMsg);
+    const hasLocation = LOCATION_KEYWORDS.test(rawMsg);
+
+    if (hasLeadIntent && hasVenueType && hasLocation) {
+      if (effectiveTaskType !== 'generate_leads' && effectiveTaskType !== 'find_prospects') {
+        console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="pubs+location" override_from="${effectiveTaskType}" message="${rawMsg.substring(0, 80)}"`);
+        effectiveTaskType = 'generate_leads';
+      } else {
+        console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="pubs+location" task_type="${effectiveTaskType}" message="${rawMsg.substring(0, 80)}"`);
+      }
+    } else {
+      console.log(`[ROUTE_DECISION] tool=${effectiveTaskType} reason="task_type" hasLeadIntent=${hasLeadIntent} hasVenueType=${hasVenueType} hasLocation=${hasLocation} message="${rawMsg.substring(0, 80)}"`);
+    }
+
     let response: string;
     let leadIds: string[] = [];
     let capabilities: string[] = [];
 
-    switch (task.task_type) {
+    switch (effectiveTaskType) {
       case 'generate_leads':
       case 'find_prospects':
         const result = await this.generateLeadsForChat(task, userContext, conversationContext, uiRunId, clientRequestId);
@@ -349,8 +371,16 @@ class SupervisorService {
         break;
 
       default:
-        response = "I'm not sure how to help with that request yet. Let me know if you'd like me to find leads or analyze your conversation!";
-        capabilities = [];
+        if (hasLeadIntent && hasVenueType && hasLocation) {
+          console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="lead_intent+venue+location_fallback" override_from="${effectiveTaskType}"`);
+          const fallbackResult = await this.generateLeadsForChat(task, userContext, conversationContext, uiRunId, clientRequestId);
+          response = fallbackResult.response;
+          leadIds = fallbackResult.leadIds;
+          capabilities = ['lead_generation', 'email_enrichment'];
+        } else {
+          response = "I'm not sure how to help with that request yet. Let me know if you'd like me to find leads or analyze your conversation!";
+          capabilities = [];
+        }
     }
 
     // Write response to messages table as Supervisor message
@@ -592,6 +622,7 @@ class SupervisorService {
     const country = location.split(',')[1]?.trim() || 'UK';
 
     console.log(`🔍 Chat request: ${businessType} in ${city}, ${country}`);
+    console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="generateLeadsForChat" businessType="${businessType}" location="${city}" count=${requestedCount}`);
 
     logRouterDecision(
       task.user_id, chatRunId, 'SEARCH_PLACES',
