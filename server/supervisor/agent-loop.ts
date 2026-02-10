@@ -28,6 +28,7 @@ export interface RunState {
   runId: string;
   userId: string;
   conversationId?: string;
+  clientRequestId?: string;
   planVersion: number;
   retryCount: number;
   lastToolArgs: Record<string, unknown>;
@@ -54,11 +55,13 @@ export function initRunState(
   userId: string,
   toolArgs: Record<string, unknown>,
   conversationId?: string,
+  clientRequestId?: string,
 ): RunState {
   const state: RunState = {
     runId,
     userId,
     conversationId,
+    clientRequestId,
     planVersion: 1,
     retryCount: 0,
     lastToolArgs: { ...toolArgs },
@@ -66,7 +69,7 @@ export function initRunState(
     createdAt: Date.now(),
   };
   runStates.set(runId, state);
-  console.log(`[AGENT_LOOP] RunState initialized: runId=${runId} planVersion=1`);
+  console.log(`[AGENT_LOOP] RunState initialized: runId=${runId} planVersion=1 crid=${clientRequestId || 'none'}`);
   return state;
 }
 
@@ -147,26 +150,36 @@ export async function callTowerJudgeV1(
 
   const endpoint = `${baseUrl}/api/tower/judge-artefact`;
   const apiKey = process.env.TOWER_API_KEY || process.env.EXPORT_KEY || '';
+  const TOWER_TIMEOUT_MS = 30_000;
 
   console.log(`[TOWER_CALL] url=${endpoint} runId=${runId}`);
   console.log(`[TOWER_TELEMETRY] tower_call_started runId=${runId}`);
 
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(apiKey ? { 'X-TOWER-API-KEY': apiKey } : {}),
-    },
-    body: JSON.stringify({
-      runId,
-      goal,
-      success_criteria: successCriteria,
-      artefact: artefactPayload,
-      artefactId: (artefactPayload.artefact_id as string) || runId,
-      artefactType: (artefactPayload.artefact_type as string) || 'leads_list',
-      run_id: runId,
-    }),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TOWER_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { 'X-TOWER-API-KEY': apiKey } : {}),
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        runId,
+        goal,
+        success_criteria: successCriteria,
+        artefact: artefactPayload,
+        artefactId: (artefactPayload.artefact_id as string) || runId,
+        artefactType: (artefactPayload.artefact_type as string) || 'leads_list',
+        run_id: runId,
+      }),
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   console.log(`[TOWER_CALL] url=${endpoint} ok=${response.ok} status=${response.status}`);
 
@@ -311,11 +324,13 @@ async function obtainVerdict(
 ): Promise<TowerVerdictV1> {
   const userId = state?.userId || 'unknown';
   const conversationId = state?.conversationId;
+  const clientRequestId = state?.clientRequestId;
 
   await logAFREvent({
     userId,
     runId,
     conversationId,
+    clientRequestId,
     actionTaken: 'tower_call_started',
     status: 'pending',
     taskGenerated: `Calling Tower judge for run ${runId}`,
@@ -333,6 +348,7 @@ async function obtainVerdict(
       userId,
       runId,
       conversationId,
+      clientRequestId,
       actionTaken: 'tower_call_completed',
       status: 'success',
       taskGenerated: `Tower responded in ${durationMs}ms — verdict: ${verdict.verdict}`,
@@ -343,27 +359,32 @@ async function obtainVerdict(
     return verdict;
   } catch (err: any) {
     const durationMs = Date.now() - startMs;
-    console.error(`[AGENT_LOOP] Tower call failed: ${err.message} — defaulting to STOP (hard gate)`);
-    console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=STOP mode=error_fallback_hard_gate error=${err.message.substring(0, 100)}`);
+    const isTimeout = err.name === 'AbortError';
+    const errorLabel = isTimeout ? 'Tower call timed out (30s)' : err.message;
+    console.error(`[AGENT_LOOP] Tower call failed: ${errorLabel} — defaulting to STOP (hard gate)`);
+    console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=STOP mode=error_fallback_hard_gate error=${errorLabel.substring(0, 100)}`);
 
     await logAFREvent({
       userId,
       runId,
       conversationId,
+      clientRequestId,
       actionTaken: 'tower_call_completed',
       status: 'failed',
       taskGenerated: `Tower call failed after ${durationMs}ms — defaulting to STOP`,
       runType: 'plan',
-      metadata: { run_id: runId, duration_ms: durationMs, error: err.message, http_ok: false },
+      metadata: { run_id: runId, duration_ms: durationMs, error: errorLabel, http_ok: false, timed_out: isTimeout },
     });
 
     return {
       verdict: 'STOP',
       delivered: 0,
       requested: 0,
-      gaps: ['tower_call_failed'],
+      gaps: [isTimeout ? 'tower_call_timed_out' : 'tower_call_failed'],
       confidence: 0,
-      rationale: `Tower call failed (hard gate — no ACCEPT without valid Tower response): ${err.message}`,
+      rationale: isTimeout
+        ? `Tower unavailable (timed out after 30s) — hard gate prevents ACCEPT without Tower`
+        : `Tower call failed (hard gate — no ACCEPT without valid Tower response): ${err.message}`,
     };
   }
 }
@@ -375,6 +396,7 @@ async function logVerdictReceived(state: RunState, runId: string, verdict: Tower
     userId: state.userId,
     runId,
     conversationId: state.conversationId,
+    clientRequestId: state.clientRequestId,
     actionTaken: 'tower_verdict',
     status: 'success',
     taskGenerated: `Tower v1 verdict: ${verdict.verdict} (confidence=${verdict.confidence}, delivered=${verdict.delivered}, requested=${verdict.requested})`,
@@ -403,6 +425,7 @@ async function emitRunCompleted(state: RunState, runId: string, verdict: TowerVe
     userId: state.userId,
     runId,
     conversationId: state.conversationId,
+    clientRequestId: state.clientRequestId,
     actionTaken: 'run_completed',
     status: 'success',
     taskGenerated: `Run accepted by Tower: delivered=${verdict.delivered}, requested=${verdict.requested}, confidence=${verdict.confidence}%`,
@@ -422,6 +445,7 @@ async function emitRunStopped(state: RunState, runId: string, reason: string, me
     userId: state.userId,
     runId,
     conversationId: state.conversationId,
+    clientRequestId: state.clientRequestId,
     actionTaken: 'run_stopped',
     status: 'failed',
     taskGenerated: `Run stopped: ${reason}`,

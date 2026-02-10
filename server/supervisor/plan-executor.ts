@@ -375,7 +375,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             });
 
             if (!getRunState(runId)) {
-              initRunState(runId, userId, { ...toolArgs, target_count: targetCount }, conversationId);
+              initRunState(runId, userId, { ...toolArgs, target_count: targetCount }, conversationId, clientRequestId);
             }
 
             const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {

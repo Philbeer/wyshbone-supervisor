@@ -970,7 +970,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         const toolArgs = { query: businessType, location: city, country, maxResults: requestedCount, target_count: requestedCount };
         if (!getRS(chatRunId)) {
-          initRS(chatRunId, userId, toolArgs, conversationId);
+          initRS(chatRunId, userId, toolArgs, conversationId, clientRequestId);
         }
 
         const rerunTool = async (args: Record<string, unknown>) => {

@@ -796,7 +796,7 @@ class SupervisorService {
 
         const zeroToolArgs = { query: businessType, location: city, country, maxResults: requestedCount, target_count: requestedCount };
         if (!getRunState(chatRunId)) {
-          initRunState(chatRunId, task.user_id, zeroToolArgs, conversationId);
+          initRunState(chatRunId, task.user_id, zeroToolArgs, conversationId, clientRequestId);
         }
 
         const zeroRerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
@@ -983,7 +983,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
 
         const toolArgs = { query: businessType, location: city, country, maxResults: requestedCount, target_count: requestedCount };
         if (!getRunState(chatRunId)) {
-          initRunState(chatRunId, task.user_id, toolArgs, conversationId);
+          initRunState(chatRunId, task.user_id, toolArgs, conversationId, clientRequestId);
         }
 
         const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
