@@ -723,37 +723,61 @@ class SupervisorService {
           }).catch(() => {});
         }
 
-        try {
-          await createArtefact({
-            runId: chatRunId,
-            type: 'run_summary',
-            title: `Run Summary: ZERO_RESULTS`,
-            summary: `Delivered 0 of ${requestedCount} requested — no results from Google Places`,
-            payload: {
-              verdict: 'ZERO_RESULTS',
-              delivered: 0,
-              requested: requestedCount,
-              query: businessType,
-              location: city,
-              country,
-              reason: 'google_places_returned_zero',
-            },
-            userId: task.user_id,
-            conversationId,
-          });
-        } catch (summaryErr: any) {
-          console.error(`[CHAT_LEADS] Failed to create run_summary for zero results: ${summaryErr.message}`);
+        const zeroLeadsListArtefact = await createArtefact({
+          runId: chatRunId,
+          type: 'leads_list',
+          title: `Leads list: ${businessType} in ${city}`,
+          summary: `Delivered 0 of ${requestedCount} requested for "${businessType}" in ${city} (zero results)`,
+          payload: {
+            delivered_count: 0,
+            target_count: requestedCount,
+            success_criteria: { target_count: requestedCount },
+            query: businessType,
+            location: city,
+            country,
+          },
+          userId: task.user_id,
+          conversationId,
+        });
+
+        console.log(`[AGENT_LOOP] tool=SEARCH_PLACES target=${requestedCount} delivered=0 (zero_results → Tower)`);
+
+        const zeroToolArgs = { query: businessType, location: city, country, maxResults: requestedCount, target_count: requestedCount };
+        if (!getRunState(chatRunId)) {
+          initRunState(chatRunId, task.user_id, zeroToolArgs, conversationId);
         }
 
-        logAFREvent({
-          userId: task.user_id, runId: chatRunId, conversationId,
-          clientRequestId,
-          actionTaken: 'run_stopped', status: 'failed',
-          taskGenerated: `Chat run STOPPED: 0 ${businessType} leads in ${city} — SEARCH_PLACES returned zero results`,
-          runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', target_count: requestedCount, reason: 'zero_results' },
-        }).catch(() => {});
+        const zeroRerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
+          console.log(`[AGENT_LOOP] Re-running SEARCH_PLACES for zero-results chat with adjusted args`);
+          return executeAction({
+            toolName: 'SEARCH_PLACES',
+            toolArgs: args,
+            userId: task.user_id,
+            runId: chatRunId,
+            conversationId,
+            clientRequestId,
+          });
+        };
 
-        console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=2 types=[leads,run_summary] verdict=ZERO_RESULTS (no run_completed emitted)`);
+        const zeroPayload = (zeroLeadsListArtefact.payloadJson as Record<string, unknown>) || {};
+        const zeroReaction = await handleTowerVerdict(
+          chatRunId,
+          `Find ${requestedCount} ${businessType} in ${city}`,
+          { target_leads: requestedCount },
+          { ...zeroPayload, delivered_count: 0, target_count: requestedCount, leads_count: 0, artefact_id: zeroLeadsListArtefact.id, artefact_type: 'leads_list' },
+          zeroRerunTool,
+        );
+
+        const zeroVerdict = zeroReaction.verdict.verdict;
+        if (zeroReaction.action === 'stop') {
+          console.log(`[CHAT_LEADS] Agent Loop: STOP (zero results) — ${zeroReaction.verdict.rationale}`);
+        } else if (zeroReaction.action === 'accept') {
+          console.log(`[CHAT_LEADS] Agent Loop: ACCEPT (zero results → Tower approved)`);
+        } else {
+          console.log(`[CHAT_LEADS] Agent Loop: ${zeroReaction.action} (zero results, planVersion=${zeroReaction.planVersion})`);
+        }
+
+        console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=3+ types=[leads,leads_list,tower_judgement,run_summary] verdict=${zeroVerdict}`);
 
         return {
           response: `I searched for ${businessType} businesses in ${city}, but didn't find any results. Would you like to try a different location or business type?`,
@@ -968,8 +992,8 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         logAFREvent({
           userId: task.user_id, runId: chatRunId, conversationId,
           clientRequestId,
-          actionTaken: 'plan_execution_finished', status: 'failed',
-          taskGenerated: `Chat run: ${deliveredCount} ${businessType} leads in ${city} (agent loop failed)`,
+          actionTaken: 'run_stopped', status: 'failed',
+          taskGenerated: `Chat run STOPPED: agent loop error — ${agentLoopErr.message}`,
           runType: 'plan', metadata: { leads_count: deliveredCount, tool: 'SEARCH_PLACES', target_count: requestedCount, error: agentLoopErr.message },
         }).catch(() => {});
       }
@@ -1044,8 +1068,8 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId,
         clientRequestId,
-        actionTaken: 'plan_execution_finished', status: 'failed',
-        taskGenerated: `Chat run failed: ${errMsg}`,
+        actionTaken: 'run_stopped', status: 'failed',
+        taskGenerated: `Chat run STOPPED: SEARCH_PLACES error — ${errMsg}`,
         runType: 'plan', metadata: { leads_count: 0, tool: 'SEARCH_PLACES', error: errMsg },
       }).catch(() => {});
 
