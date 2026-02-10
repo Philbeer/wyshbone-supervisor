@@ -55,6 +55,20 @@ The frontend is built with React, TypeScript, Vite, and Wouter for routing. Styl
 
 ## Recent Changes
 
+### 2026-02-10: Agent Loop v1 Phase 1 — Activated for Production SEARCH_PLACES
+- **Activated**: Agent Loop v1 now runs on all real SEARCH_PLACES executions (no longer debug-only). Non-SEARCH_PLACES tools still use original `judgeArtefact` flow.
+- **leads_list artefact**: Every SEARCH_PLACES execution creates a `leads_list` artefact with `target_count` and `delivered_count` before calling Tower. `target_count` defaults to 20 if not explicitly set.
+- **Google Places pagination**: `searchPlaces()` now follows `next_page_token` to fetch up to 60 results (3 pages x 20). Respects `maxResults` cap.
+- **Tower verdicts**: After leads_list artefact is posted, Tower is called for a v1 verdict (ACCEPT/RETRY/CHANGE_PLAN/STOP).
+- **RETRY**: Reruns SEARCH_PLACES once with same args, creates new leads_list artefact, re-judges. Stops if still RETRY or delivered < 50% target. Max 1 retry.
+- **CHANGE_PLAN**: Concrete adjustments — expand location radius ("within 10km" → "within 25km") or broaden query with OR operators. Creates `plan_update` artefact, reruns once, creates new leads_list artefact, re-judges. Stops if still CHANGE_PLAN. Max plan version 2.
+- **ACCEPT**: Emits `run_completed` event.
+- **STOP**: Emits `run_stopped` event with rationale.
+- **AFR event ordering**: `tower_judgement_received` always emitted before `run_completed`/`run_stopped`.
+- **Structured log**: `[AGENT_LOOP] runId=<...> target=<N> delivered=<N> verdict=<V> planVersion=<N> retries=<N> stopped=<bool>` — one summary per agent loop execution.
+- **RunState**: In-memory per runId with retry count, plan version, and tool args tracking. Debug endpoint at `/api/debug/agent-loop-states`.
+- **Files**: `server/supervisor/agent-loop.ts`, `server/supervisor/plan-executor.ts`, `server/supervisor/action-executor.ts`, `server/supervisor/google-places.ts`
+
 ### 2026-02-09: Canonical UI RunId + Required Identifiers + Run Bridge
 - **Required identifiers**: `request_data.run_id` (UI canonical runId) and `request_data.client_request_id` are REQUIRED. If either is missing, Supervisor emits `artefact_post_failed` with `errorCode: 'missing_identifiers'`, marks the task as failed, and aborts. No fallback IDs are generated.
 - **Canonical UI runId**: All artefact POSTs use `request_data.run_id` as the `runId` field. Supervisor internal IDs (e.g. deep research run IDs) are kept in metadata only, never used as the artefact runId.
