@@ -50,3 +50,4 @@ expertMode = true
 [userenv.shared]
 TOWER_ARTEFACT_JUDGE_STUB = "false"
 WYSHBONE_DB_READY = "false"
+DEEP_RESEARCH_OPT_IN_ONLY = "true"

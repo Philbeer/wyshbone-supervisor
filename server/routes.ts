@@ -499,7 +499,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const LEAD_FIND_VERBS = /\b(find|list|get|show|search|look\s*for|discover|locate)\b/i;
     const LEAD_FIND_VENUES = /\b(pubs?|bars?|venues?|breweries|brewery|taverns?|inns?|gastropubs?|freehouse|free\s+house|public\s+house|nightclubs?|clubs?|restaurants?|cafes?|coffee\s+shops?|hotels?|b&bs?|guest\s*houses?)\b/i;
     const LEAD_FIND_LOCATION = /\b(in|near|around|across|within|throughout)\s+[A-Za-z]/i;
-    const DEEP_RESEARCH_KEYWORDS = /\b(research|investigate|analy[sz]e|summari[sz]e|overview|report|sources|articles|history|guide|best[- ]of\s+list)\b/i;
+    const DEEP_RESEARCH_KEYWORDS = /\b(research|investigate|analy[sz]e|summari[sz]e|summary|overview|report|sources|articles?|history|guide|best[- ]of\s+list)\b/i;
+    const deepResearchOptInOnly = process.env.DEEP_RESEARCH_OPT_IN_ONLY !== 'false';
 
     const msgForDetection = goalText || '';
     const hasLeadVerb = LEAD_FIND_VERBS.test(msgForDetection);
@@ -521,6 +522,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     let routeChosenTool: string;
     let routeReason: string;
 
+    let routerOverrideFired = false;
+
     if (isLeadFind) {
       routeIntent = 'lead_find';
       routeChosenTool = 'SEARCH_PLACES';
@@ -528,16 +531,44 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (simulateType === 'deep_research') {
         console.log(`[LEAD_FIND_GUARD] Overriding simulate_type from deep_research → leads (venue+location detected in "${msgForDetection.substring(0, 80)}")`);
         routeReason += ` (override from deep_research)`;
+        routerOverrideFired = true;
+        await logEvt({
+          userId, runId: chatRunId, conversationId,
+          clientRequestId,
+          actionTaken: 'router_override', status: 'success',
+          taskGenerated: `Override: DEEP_RESEARCH → SEARCH_PLACES (lead_find priority)`,
+          runType: 'plan',
+          metadata: {
+            original_tool: 'DEEP_RESEARCH',
+            forced_tool: 'SEARCH_PLACES',
+            reason: 'lead_find_priority',
+            message: msgForDetection.substring(0, 200),
+          },
+        }).catch(() => {});
       }
-    } else if (simulateType === 'deep_research' && hasResearchKeyword) {
+    } else if (simulateType === 'deep_research' && (!deepResearchOptInOnly || hasResearchKeyword)) {
       routeIntent = 'deep_research';
       routeChosenTool = 'DEEP_RESEARCH';
       routeReason = 'explicit research keyword detected → DEEP_RESEARCH';
-    } else if (simulateType === 'deep_research' && !hasResearchKeyword) {
+    } else if (simulateType === 'deep_research' && deepResearchOptInOnly && !hasResearchKeyword) {
       routeIntent = 'lead_find';
       routeChosenTool = 'SEARCH_PLACES';
-      routeReason = 'deep_research requested but no research keywords → defaulting to SEARCH_PLACES';
-      console.log(`[DEEP_RESEARCH_GUARD] Blocking deep_research: no explicit research keywords in "${msgForDetection.substring(0, 80)}" → routing to SEARCH_PLACES`);
+      routeReason = 'deep_research_opt_in_only: no research keywords → forcing SEARCH_PLACES';
+      console.log(`[DEEP_RESEARCH_GUARD] Blocking deep_research: no explicit research keywords in "${msgForDetection.substring(0, 80)}" → routing to SEARCH_PLACES (DEEP_RESEARCH_OPT_IN_ONLY=${deepResearchOptInOnly})`);
+      routerOverrideFired = true;
+      await logEvt({
+        userId, runId: chatRunId, conversationId,
+        clientRequestId,
+        actionTaken: 'router_override', status: 'success',
+        taskGenerated: `Override: DEEP_RESEARCH → SEARCH_PLACES (opt-in gate)`,
+        runType: 'plan',
+        metadata: {
+          original_tool: 'DEEP_RESEARCH',
+          forced_tool: 'SEARCH_PLACES',
+          reason: 'deep_research_opt_in_only',
+          message: msgForDetection.substring(0, 200),
+        },
+      }).catch(() => {});
     } else {
       routeIntent = simulateType || 'leads';
       routeChosenTool = simulateType === 'deep_research' ? 'DEEP_RESEARCH' : 'SEARCH_PLACES';
@@ -911,7 +942,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { executeAction: execAction } = await import('./supervisor/action-executor');
 
       let finalVerdict = 'PENDING';
-      const afrEvents: string[] = ['mission_received', 'router_decision_detail', 'tool_dispatch_decision', 'router_decision', 'tool_call_started', 'tool_call_completed'];
+      const afrEvents: string[] = ['mission_received', ...(routerOverrideFired ? ['router_override'] : []), 'router_decision_detail', 'tool_dispatch_decision', 'router_decision', 'tool_call_started', 'tool_call_completed'];
 
       if (artefactPosted) afrEvents.push('artefact_post_succeeded', 'artefact_created');
       else afrEvents.push('artefact_post_failed');

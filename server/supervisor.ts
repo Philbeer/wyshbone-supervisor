@@ -331,7 +331,8 @@ class SupervisorService {
     const LEAD_FIND_KEYWORDS = /\b(find|search|look\s*for|get|discover|locate)\b/i;
     const VENUE_KEYWORDS = /\b(pubs?|bars?|breweries|brewery|taverns?|inns?|gastropubs?|freehouse|free\s+house|public\s+house|venues?|nightclubs?|clubs?|restaurants?|cafes?|coffee\s+shops?|hotels?|b&bs?|guest\s*houses?)\b/i;
     const LOCATION_KEYWORDS = /\b(in|near|around|across|within|throughout)\s+[A-Z]/i;
-    const DEEP_RESEARCH_KEYWORDS = /\b(research|investigate|analy[sz]e|summari[sz]e|overview|report|sources|articles|history|guide|best[- ]of\s+list)\b/i;
+    const DEEP_RESEARCH_KEYWORDS = /\b(research|investigate|analy[sz]e|summari[sz]e|summary|overview|report|sources|articles?|history|guide|best[- ]of\s+list)\b/i;
+    const deepResearchOptInOnly = process.env.DEEP_RESEARCH_OPT_IN_ONLY !== 'false';
 
     const rawMsg = requestData.user_message || '';
     const hasLeadIntent = LEAD_FIND_KEYWORDS.test(rawMsg);
@@ -371,16 +372,29 @@ class SupervisorService {
         routeReason = `lead_find: venue+location detected, task_type=${effectiveTaskType}`;
         console.log(`[ROUTE_DECISION] intent=lead_find tool=SEARCH_PLACES reason="pubs+location" task_type="${effectiveTaskType}" message="${rawMsg.substring(0, 80)}"`);
       }
-    } else if (effectiveTaskType === 'deep_research' && hasResearchKeyword) {
+    } else if (effectiveTaskType === 'deep_research' && (!deepResearchOptInOnly || hasResearchKeyword)) {
       chosenTool = 'DEEP_RESEARCH';
       routeIntent = 'deep_research';
       routeReason = `deep_research: explicit research keyword detected`;
       console.log(`[ROUTE_DECISION] intent=deep_research tool=DEEP_RESEARCH reason="explicit_keyword" message="${rawMsg.substring(0, 80)}"`);
-    } else if (effectiveTaskType === 'deep_research' && !hasResearchKeyword) {
+    } else if (effectiveTaskType === 'deep_research' && deepResearchOptInOnly && !hasResearchKeyword) {
       chosenTool = 'SEARCH_PLACES';
       routeIntent = 'lead_find';
-      routeReason = `deep_research requested but no research keywords → defaulting to SEARCH_PLACES`;
-      console.log(`[DEEP_RESEARCH_GUARD] Blocking deep_research: no explicit research keywords in "${rawMsg.substring(0, 80)}" → routing to SEARCH_PLACES`);
+      routeReason = `deep_research_opt_in_only: no research keywords → forcing SEARCH_PLACES`;
+      console.log(`[DEEP_RESEARCH_GUARD] Blocking deep_research: no explicit research keywords in "${rawMsg.substring(0, 80)}" → routing to SEARCH_PLACES (DEEP_RESEARCH_OPT_IN_ONLY=${deepResearchOptInOnly})`);
+      logAFREvent({
+        userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
+        clientRequestId,
+        actionTaken: 'router_override', status: 'success',
+        taskGenerated: `Override: DEEP_RESEARCH → SEARCH_PLACES (opt-in gate)`,
+        runType: 'plan',
+        metadata: {
+          original_tool: 'DEEP_RESEARCH',
+          forced_tool: 'SEARCH_PLACES',
+          reason: 'deep_research_opt_in_only',
+          message: rawMsg.substring(0, 200),
+        },
+      }).catch(() => {});
       effectiveTaskType = 'generate_leads';
     } else {
       chosenTool = effectiveTaskType;
