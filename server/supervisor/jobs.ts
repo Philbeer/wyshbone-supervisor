@@ -552,8 +552,12 @@ async function runJobAsync(job: Job): Promise<void> {
   return runStubJob(job);
 }
 
+export function generateJobId(): string {
+  return `job_${randomUUID().replace(/-/g, '').substring(0, 12)}`;
+}
+
 export async function startJob(request: StartJobRequest): Promise<string> {
-  const jobId = `job_${randomUUID().replace(/-/g, '').substring(0, 12)}`;
+  const jobId = generateJobId();
   const now = new Date().toISOString();
   
   const job: Job = {
