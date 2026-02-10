@@ -472,50 +472,6 @@ async function runDeepResearchPollJob(job: Job): Promise<void> {
 }
 
 async function runDeepResearchExecuteJob(job: Job): Promise<void> {
-  const DEEP_RESEARCH_KEYWORDS = /\b(research|investigate|analy[sz]e|summari[sz]e|summary|overview|report|sources|articles?|history|guide|best[- ]of\s+list)\b/i;
-  const deepResearchOptInOnly = process.env.DEEP_RESEARCH_OPT_IN_ONLY !== 'false';
-  const userText = job.payload?.topic || job.payload?.prompt || job.payload?.user_message || '';
-
-  console.log(`[ROUTER_SIGNATURE] DEEP_RESEARCH_GUARD_V1_ACTIVE jobId=${job.jobId} optInOnly=${deepResearchOptInOnly} text="${String(userText).substring(0, 80)}"`);
-
-  if (deepResearchOptInOnly && !DEEP_RESEARCH_KEYWORDS.test(String(userText))) {
-    const userId = job.userId || 'system';
-    const runId = job.sourceRunId || job.jobId;
-    console.log(`[DEEP_RESEARCH_GUARD] Blocking deep_research job: no explicit research keywords in "${String(userText).substring(0, 80)}" → redirecting to SEARCH_PLACES (DEEP_RESEARCH_OPT_IN_ONLY=${deepResearchOptInOnly})`);
-
-    logAFREvent({
-      userId, runId,
-      ...(job.clientRequestId ? { clientRequestId: job.clientRequestId } : {}),
-      actionTaken: 'router_override', status: 'success',
-      taskGenerated: `Override: DEEP_RESEARCH → SEARCH_PLACES (opt-in gate, job path)`,
-      runType: 'plan',
-      metadata: {
-        original_tool: 'DEEP_RESEARCH',
-        forced_tool: 'SEARCH_PLACES',
-        reason: 'deep_research_opt_in_only',
-        message: String(userText).substring(0, 200),
-        jobId: job.jobId,
-        entry: 'jobs.ts/runDeepResearchExecuteJob',
-      },
-    }).catch(() => {});
-
-    job.status = 'completed';
-    job.endedAt = new Date().toISOString();
-    job.progress = 100;
-    job.message = `Deep research blocked by opt-in gate — no research keywords detected. Would route to SEARCH_PLACES.`;
-    job.resultSummary = {
-      success: false,
-      jobType: job.jobType,
-      blocked: true,
-      reason: 'deep_research_opt_in_only',
-      forced_tool: 'SEARCH_PLACES',
-      original_text: String(userText).substring(0, 200),
-    };
-    jobStore.set(job.jobId, job);
-    await emitJobEvent('job_completed', job, { resultSummary: job.resultSummary });
-    return;
-  }
-
   try {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
@@ -603,10 +559,69 @@ export function generateJobId(): string {
 export async function startJob(request: StartJobRequest): Promise<string> {
   const jobId = generateJobId();
   const now = new Date().toISOString();
+
+  let effectiveJobType = request.jobType;
+
+  if (request.jobType === 'deep_research') {
+    const DEEP_RESEARCH_KEYWORDS = /\b(research|investigate|analy[sz]e|summari[sz]e|summary|overview|report|sources|articles?|history|guide|best[- ]of\s+list)\b/i;
+    const deepResearchOptInOnly = process.env.DEEP_RESEARCH_OPT_IN_ONLY !== 'false';
+    const userText = String(request.payload?.topic || request.payload?.prompt || request.payload?.user_message || '');
+
+    console.log(`[ROUTER_SIGNATURE] DEEP_RESEARCH_GUARD_V1_ACTIVE entry=startJob jobId=${jobId} optInOnly=${deepResearchOptInOnly} text="${userText.substring(0, 80)}"`);
+
+    if (deepResearchOptInOnly && !DEEP_RESEARCH_KEYWORDS.test(userText)) {
+      const userId = request.userId || 'system';
+      const runId = request.sourceRunId || jobId;
+      console.log(`[DEEP_RESEARCH_GUARD] Router blocking deep_research at startJob: no research keywords in "${userText.substring(0, 80)}" → job will not be dispatched as deep_research (DEEP_RESEARCH_OPT_IN_ONLY=${deepResearchOptInOnly})`);
+
+      logAFREvent({
+        userId, runId,
+        ...(request.clientRequestId ? { clientRequestId: request.clientRequestId } : {}),
+        actionTaken: 'router_override', status: 'success',
+        taskGenerated: `Override: DEEP_RESEARCH → blocked at startJob (opt-in gate)`,
+        runType: 'plan',
+        metadata: {
+          original_tool: 'DEEP_RESEARCH',
+          forced_tool: 'SEARCH_PLACES',
+          reason: 'deep_research_opt_in_only',
+          message: userText.substring(0, 200),
+          jobId,
+          entry: 'jobs.ts/startJob',
+        },
+      }).catch(() => {});
+
+      const job: Job = {
+        jobId,
+        jobType: request.jobType,
+        status: 'completed',
+        payload: request.payload,
+        requestedBy: request.requestedBy,
+        sourceRunId: request.sourceRunId,
+        userId: request.userId,
+        clientRequestId: request.clientRequestId,
+        progress: 100,
+        message: `Deep research blocked by opt-in gate — no research keywords detected. Would route to SEARCH_PLACES.`,
+        createdAt: now,
+        endedAt: now,
+        resultSummary: {
+          success: false,
+          jobType: request.jobType,
+          blocked: true,
+          reason: 'deep_research_opt_in_only',
+          forced_tool: 'SEARCH_PLACES',
+          original_text: userText.substring(0, 200),
+        },
+      };
+      jobStore.set(jobId, job);
+      await emitJobEvent('job_queued', job);
+      await emitJobEvent('job_completed', job, { resultSummary: job.resultSummary });
+      return jobId;
+    }
+  }
   
   const job: Job = {
     jobId,
-    jobType: request.jobType,
+    jobType: effectiveJobType,
     status: 'queued',
     payload: request.payload,
     requestedBy: request.requestedBy,
@@ -614,7 +629,7 @@ export async function startJob(request: StartJobRequest): Promise<string> {
     userId: request.userId,
     clientRequestId: request.clientRequestId,
     progress: 0,
-    message: `Job ${request.jobType} queued`,
+    message: `Job ${effectiveJobType} queued`,
     createdAt: now
   };
   
