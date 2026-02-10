@@ -39,7 +39,7 @@ The frontend utilizes React, TypeScript, Vite, and Wouter for routing. Styling i
 - In-memory progress tracking and a Map-based event system ensure isolated and efficient handling of concurrent plan executions.
 - Comprehensive error handling ensures proper status updates for failed plans.
 - Artefact creation always precedes status events to ensure visibility.
-- **Completion gating**: `run_completed` is never emitted without Tower approval for SEARCH_PLACES runs.
+- **Completion gating (2026-02-10)**: `run_completed` is never emitted without Tower approval for SEARCH_PLACES runs. All SEARCH_PLACES paths — including zero-results — route through `handleTowerVerdict` in `agent-loop.ts`. Tower verdict mapping: ACCEPT→`run_completed`, RETRY→rerun same plan, CHANGE_PLAN→generate plan v2, STOP→`run_stopped`. Error/fallback paths emit `run_stopped` (never `plan_execution_finished`) for SEARCH_PLACES runs.
 
 ## External Dependencies
 
