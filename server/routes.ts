@@ -1801,6 +1801,288 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(500).json({ error: error.message || "Failed to generate run trace" });
       }
     });
+    app.post("/api/proof/tower-loop", async (req, res) => {
+      const { randomUUID } = await import('crypto');
+      const { createArtefact } = await import('./supervisor/artefacts');
+      const { judgeArtefact } = await import('./supervisor/tower-artefact-judge');
+      const {
+        logAFREvent,
+        logPlanStarted,
+        logStepStarted,
+        logStepCompleted,
+        logPlanCompleted,
+        logPlanFailed,
+        logTowerEvaluationCompleted,
+        logTowerDecisionStop,
+        logTowerDecisionChangePlan,
+        logRunCompleted,
+      } = await import('./supervisor/afr-logger');
+
+      const userId = (req.body.user_id as string) || '8f9079b3ddf739fb0217373c92292e91';
+      const crid = `proof_${Date.now()}_${randomUUID().substring(0, 8)}`;
+      const runId = crid;
+      const goal = 'Proof Tower Loop';
+      const startTs = Date.now();
+      let planVersion = 1;
+      let status: 'completed' | 'stopped' | 'failed' = 'failed';
+
+      const eventLog: { ts: number; event: string; detail: string }[] = [];
+      function track(event: string, detail: string) {
+        eventLog.push({ ts: Date.now(), event, detail });
+        console.log(`[PROOF_TOWER_LOOP] [${event}] ${detail}`);
+      }
+
+      try {
+        track('run_started', `crid=${crid}`);
+        await logPlanStarted(userId, runId, goal);
+
+        track('step_1_started', 'GENERATE_DUMMY_ARTEFACT');
+        await logStepStarted(userId, runId, 'step_1', 'Generate dummy output');
+
+        const dummyLeads = [
+          { name: 'The Red Lion', city: 'London', phone: '+44 20 7000 0001' },
+          { name: 'The Crown & Anchor', city: 'London', phone: '+44 20 7000 0002' },
+          { name: 'The White Hart', city: 'London', phone: '+44 20 7000 0003' },
+          { name: 'The Kings Arms', city: 'London', phone: '+44 20 7000 0004' },
+          { name: 'The George Inn', city: 'London', phone: '+44 20 7000 0005' },
+        ];
+
+        const stepArtefact = await createArtefact({
+          runId,
+          type: 'step_result',
+          title: 'Step result: Generate dummy output',
+          summary: 'Generated 5 dummy leads for Proof Tower Loop',
+          payload: {
+            goal,
+            step_index: 1,
+            step_title: 'Generate dummy output',
+            step_type: 'GENERATE_DUMMY_ARTEFACT',
+            step_status: 'pass',
+            outputs_summary: 'Generated 5 dummy leads',
+            outputs_raw: dummyLeads,
+            delivered_count: 5,
+            target_count: 5,
+          },
+          userId,
+        });
+
+        track('step_1_artefact_created', `id=${stepArtefact.id}`);
+        await logStepCompleted(userId, runId, 'step_1', 'Generate dummy output', 'Generated 5 dummy leads');
+
+        track('tower_call_started', `artefact_id=${stepArtefact.id} url=${process.env.TOWER_BASE_URL || process.env.TOWER_URL || 'NOT_SET'}`);
+        await logAFREvent({
+          userId,
+          runId,
+          actionTaken: 'tower_call_started',
+          status: 'pending',
+          taskGenerated: `Tower judgement requested for artefact ${stepArtefact.id}`,
+          runType: 'plan',
+          metadata: { artefactId: stepArtefact.id, tower_url: process.env.TOWER_BASE_URL || process.env.TOWER_URL || 'NOT_SET' },
+        });
+
+        let judgeResult;
+        try {
+          judgeResult = await judgeArtefact({
+            artefact: stepArtefact,
+            runId,
+            goal,
+            userId,
+            successCriteria: { target_count: 5, delivered_count: 5 },
+          });
+        } catch (towerErr: any) {
+          const errMsg = towerErr.message || 'Tower call threw an exception';
+          track('tower_error', errMsg);
+
+          await logAFREvent({
+            userId,
+            runId,
+            actionTaken: 'tower_error',
+            status: 'failed',
+            taskGenerated: `Tower call FAILED: ${errMsg}`,
+            runType: 'plan',
+            metadata: { error: errMsg, artefactId: stepArtefact.id },
+          });
+
+          await logPlanFailed(userId, runId, `Tower unreachable: ${errMsg}`);
+
+          status = 'failed';
+          return res.status(502).json({
+            crid,
+            run_id: runId,
+            status,
+            error: errMsg,
+            events: eventLog.sort((a, b) => a.ts - b.ts),
+          });
+        }
+
+        const { judgement, shouldStop, stubbed } = judgeResult;
+        const verdictStr = judgement.verdict;
+        const actionStr = judgement.action;
+        const rationale = judgement.reasons[0] || verdictStr;
+
+        if (verdictStr === 'error') {
+          const errMsg = `Tower unreachable or invalid: ${rationale}`;
+          track('tower_error', errMsg);
+
+          await logAFREvent({
+            userId,
+            runId,
+            actionTaken: 'tower_error',
+            status: 'failed',
+            taskGenerated: `Tower FAILED: ${errMsg}`,
+            runType: 'plan',
+            metadata: { error: errMsg, artefactId: stepArtefact.id, verdict: verdictStr },
+          });
+
+          await logPlanFailed(userId, runId, errMsg);
+
+          status = 'failed';
+          return res.status(502).json({
+            crid,
+            run_id: runId,
+            status,
+            error: errMsg,
+            events: eventLog.sort((a, b) => a.ts - b.ts),
+          });
+        }
+
+        track('tower_call_completed', `verdict=${verdictStr} action=${actionStr} stubbed=${stubbed}`);
+        await logAFREvent({
+          userId,
+          runId,
+          actionTaken: 'tower_call_completed',
+          status: 'success',
+          taskGenerated: `Tower responded: verdict=${verdictStr} action=${actionStr}`,
+          runType: 'plan',
+          metadata: { verdict: verdictStr, action: actionStr, stubbed, reasons: judgement.reasons, metrics: judgement.metrics },
+        });
+
+        track('tower_verdict', `verdict=${verdictStr} action=${actionStr} rationale="${rationale}" confidence=${judgement.metrics?.confidence || 'N/A'} requested=5 delivered=5 gaps=${judgement.reasons.length}`);
+        await logTowerEvaluationCompleted(
+          userId, runId, verdictStr, rationale,
+          { requested: 5, delivered: 5, confidence: judgement.metrics?.confidence || null, stubbed, ...judgement.metrics },
+        );
+
+        if (shouldStop) {
+          track('run_stopped', `Tower verdict=${verdictStr}: ${rationale}`);
+          await logTowerDecisionStop(userId, runId, rationale, { verdict: verdictStr, action: actionStr, ...judgement.metrics });
+
+          await logAFREvent({
+            userId,
+            runId,
+            actionTaken: 'run_stopped',
+            status: 'failed',
+            taskGenerated: `Run stopped by Tower: ${verdictStr} — ${rationale}`,
+            runType: 'plan',
+            metadata: { verdict: verdictStr, action: actionStr, rationale },
+          });
+
+          await logPlanFailed(userId, runId, `Tower STOP: ${rationale}`);
+          status = 'stopped';
+
+          return res.json({
+            crid,
+            run_id: runId,
+            status,
+            tower_verdict: { verdict: verdictStr, action: actionStr, reasons: judgement.reasons, metrics: judgement.metrics, stubbed },
+            events: eventLog.sort((a, b) => a.ts - b.ts),
+            duration_ms: Date.now() - startTs,
+          });
+        }
+
+        if (actionStr === 'change_plan') {
+          planVersion = 2;
+          track('plan_updated', `plan_version=v${planVersion} (Tower requested CHANGE_PLAN)`);
+          await logTowerDecisionChangePlan(userId, runId, rationale, { verdict: verdictStr, action: actionStr, plan_version: planVersion, ...judgement.metrics });
+
+          await logAFREvent({
+            userId,
+            runId,
+            actionTaken: 'plan_updated',
+            status: 'success',
+            taskGenerated: `Plan updated to v${planVersion} per Tower CHANGE_PLAN`,
+            runType: 'plan',
+            metadata: { plan_version: planVersion, reason: rationale },
+          });
+        }
+
+        track('step_2_started', 'FINALISE');
+        await logStepStarted(userId, runId, 'step_2', 'Finalise');
+
+        const finaliseArtefact = await createArtefact({
+          runId,
+          type: 'plan_result',
+          title: `Proof Tower Loop Result (v${planVersion})`,
+          summary: `Tower verdict: ${verdictStr}/${actionStr}. Plan version: v${planVersion}. Steps: 2/2 completed.`,
+          payload: {
+            goal,
+            stepsCompleted: 2,
+            totalSteps: 2,
+            plan_version: planVersion,
+            tower_verdict: verdictStr,
+            tower_action: actionStr,
+            tower_rationale: rationale,
+            tower_reasons: judgement.reasons,
+            tower_metrics: judgement.metrics,
+            tower_stubbed: stubbed,
+            replan_happened: planVersion > 1,
+          },
+          userId,
+        });
+
+        track('step_2_artefact_created', `id=${finaliseArtefact.id}`);
+        await logStepCompleted(userId, runId, 'step_2', 'Finalise', `Proof loop complete. Verdict: ${verdictStr}`);
+
+        await logPlanCompleted(userId, runId, `Proof Tower Loop completed — verdict=${verdictStr} plan_v=${planVersion}`);
+        await logRunCompleted(userId, runId, `Proof Tower Loop: ${verdictStr} (v${planVersion})`, {
+          tower_verdict: verdictStr,
+          tower_action: actionStr,
+          plan_version: planVersion,
+          stubbed,
+        });
+
+        track('run_completed', `verdict=${verdictStr} plan_v=${planVersion}`);
+        status = 'completed';
+
+        res.json({
+          crid,
+          run_id: runId,
+          status,
+          tower_verdict: { verdict: verdictStr, action: actionStr, reasons: judgement.reasons, metrics: judgement.metrics, stubbed },
+          plan_version: planVersion,
+          events: eventLog.sort((a, b) => a.ts - b.ts),
+          duration_ms: Date.now() - startTs,
+        });
+      } catch (err: any) {
+        const errMsg = err.message || 'Proof tower-loop threw unexpectedly';
+        track('fatal_error', errMsg);
+        console.error(`[PROOF_TOWER_LOOP] Fatal: ${errMsg}`, err.stack);
+
+        try {
+          await logAFREvent({
+            userId,
+            runId,
+            actionTaken: 'tower_error',
+            status: 'failed',
+            taskGenerated: `Proof tower-loop FATAL: ${errMsg}`,
+            runType: 'plan',
+            metadata: { error: errMsg },
+          });
+          await logPlanFailed(userId, runId, `Fatal: ${errMsg}`);
+        } catch (_) {}
+
+        res.status(500).json({
+          crid,
+          run_id: runId,
+          status: 'failed',
+          error: errMsg,
+          events: eventLog.sort((a, b) => a.ts - b.ts),
+        });
+      }
+    });
+
+    console.log('[DEBUG] Registered: POST /api/proof/tower-loop');
+
   } else {
     console.log('[DEBUG] Debug endpoints disabled (ENABLE_DEBUG_ENDPOINTS !== "true" or NODE_ENV === "production")');
   }

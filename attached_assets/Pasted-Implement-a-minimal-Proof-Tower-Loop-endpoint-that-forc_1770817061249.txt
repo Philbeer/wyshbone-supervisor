@@ -1,0 +1,48 @@
+Implement a minimal “Proof: Tower Loop” endpoint that forces the full agent loop and emits everything to AFR.
+
+Create: POST /api/proof/tower-loop
+
+Behaviour:
+- Creates a new run (crid) and emits AFR events in correct order with timestamps.
+- Executes a deterministic 2-step plan with NO external APIs (no Google Places) so it cannot fail due to 403 etc.
+
+Plan definition:
+Step 1: GENERATE_DUMMY_ARTEFACT
+  - Create a step_result artefact with payload_json containing:
+    goal: "Proof Tower Loop"
+    step_index: 1
+    step_title: "Generate dummy output"
+    outputs_summary: "Generated 5 dummy leads"
+    outputs_raw: include a small array of 5 dummy lead objects (name, city, phone placeholder)
+
+Immediately after creating the step_result artefact:
+- Call Tower to judge this artefact (same path used for real runs).
+- MUST:
+  - emit tower_call_started
+  - emit tower_call_completed
+  - emit tower_verdict (with verdict, rationale, confidence, requested, delivered, gaps if present)
+  - persist the verdict into the tower_judgements DB table (not only as an artefact)
+
+Step 2 depends on verdict:
+- If verdict == STOP: emit run_stopped and return.
+- If verdict == CHANGE_PLAN: emit plan_updated with plan_version increment (v2), then run Step 2.
+- Otherwise (ACCEPT/RETRY/CONTINUE): run Step 2.
+
+Step 2: FINALISE
+- Create a plan_result artefact summarising what happened, including the Tower verdict and whether a replan happened.
+- Emit run_completed only at the very end.
+
+Hard rules:
+- This endpoint must FAIL LOUDLY if Tower is not reachable or returns invalid data.
+  - Do not swallow errors.
+  - Emit an afr event tower_error with error summary.
+  - Mark run as failed/stopped, not “completed (no verdict)”.
+
+Return payload:
+{ crid, run_id, status }
+
+Also add a small helper to ensure all events are timestamp-sorted and emitted in order.
+
+Deliverable:
+One endpoint that produces an undeniable Tower verdict in AFR and in tower_judgements table every time.
+Write full files you change.
