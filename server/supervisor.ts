@@ -863,6 +863,23 @@ class SupervisorService {
         metadata: { artefactId: leadsListArtefact.id, verdict: 'error', error: errMsg, towerJudgementArtefactId: errorJudgementArtefact.id },
       });
 
+      await this.postArtefactToUI({
+        runId: chatRunId,
+        clientRequestId,
+        type: 'tower_judgement',
+        payload: {
+          verdict: 'error',
+          action: 'stop',
+          reasons: [errMsg],
+          metrics: {},
+          delivered: leads.length,
+          requested: requestedCount,
+          error: errMsg,
+        },
+        userId: task.user_id,
+        conversationId,
+      }).catch(() => {});
+
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'run_stopped', status: 'failed',
@@ -946,6 +963,26 @@ class SupervisorService {
 
       await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict, action, leads_count: leads.length, halted: false } });
     }
+
+    // 12b. Post tower_judgement artefact to UI for automatic display
+    await this.postArtefactToUI({
+      runId: chatRunId,
+      clientRequestId,
+      type: 'tower_judgement',
+      payload: {
+        verdict,
+        action,
+        reasons: towerResult.judgement.reasons,
+        metrics: towerResult.judgement.metrics,
+        delivered: leads.length,
+        requested: requestedCount,
+        artefact_id: leadsListArtefact.id,
+        used_stub: usedStub,
+        stubbed: towerResult.stubbed,
+      },
+      userId: task.user_id,
+      conversationId,
+    }).catch(() => {});
 
     // 13. Also post artefact to UI for visibility
     await this.postArtefactToUI({
@@ -1384,6 +1421,23 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
             });
             artefactTypesWritten.push('tower_judgement');
 
+            await this.postArtefactToUI({
+              runId: chatRunId,
+              clientRequestId,
+              type: 'tower_judgement',
+              payload: {
+                verdict: 'error',
+                action: 'stop',
+                reasons: [errMsg],
+                metrics: {},
+                delivered: deliveredCount,
+                requested: requestedCount,
+                error: errMsg,
+              },
+              userId: task.user_id,
+              conversationId,
+            }).catch(() => {});
+
             await logAFREvent({
               userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
               actionTaken: 'tower_verdict', status: 'failed',
@@ -1428,6 +1482,24 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           });
           artefactTypesWritten.push('tower_judgement');
           console.log(`[CHAT_LEADS] [tower_judgement_artefact] id=${towerJudgementArtefact.id}`);
+
+          await this.postArtefactToUI({
+            runId: chatRunId,
+            clientRequestId,
+            type: 'tower_judgement',
+            payload: {
+              verdict,
+              action,
+              reasons: towerResult.judgement.reasons,
+              metrics: towerResult.judgement.metrics,
+              delivered: deliveredCount,
+              requested: requestedCount,
+              artefact_id: leadsListArtefact.id,
+              stubbed: towerResult.stubbed,
+            },
+            userId: task.user_id,
+            conversationId,
+          }).catch(() => {});
 
           await logAFREvent({
             userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
