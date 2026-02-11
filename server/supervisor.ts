@@ -501,7 +501,8 @@ class SupervisorService {
       }
     }
 
-    // Write response to messages table as Supervisor message
+    await this.ensureTowerJudgement(jobId, clientRequestId, task.user_id, task.conversation_id);
+
     const messageId = randomUUID();
     const { data: newMessage, error: messageError } = await supabase
       .from('messages')
@@ -527,7 +528,6 @@ class SupervisorService {
 
     console.log(`✅ Supervisor response posted to conversation ${task.conversation_id}`);
 
-    // Mark task as completed
     await supabase
       .from('supervisor_tasks')
       .update({
@@ -537,9 +537,154 @@ class SupervisorService {
           lead_ids: leadIds,
           capabilities_used: capabilities
         }
-        // processed_at omitted - uses database DEFAULT
       })
       .eq('id', task.id);
+  }
+
+  private async ensureTowerJudgement(
+    runId: string,
+    clientRequestId: string,
+    userId: string,
+    conversationId: string,
+  ): Promise<void> {
+    try {
+      const artefacts = await storage.getArtefactsByRunId(runId);
+      const hasTowerJudgement = artefacts.some(a => a.type === 'tower_judgement');
+
+      if (hasTowerJudgement) {
+        console.log(`[TOWER_SAFETY] runId=${runId} tower_judgement already exists — skipping safety net`);
+        return;
+      }
+
+      const leadsListArtefact = artefacts
+        .filter(a => a.type === 'leads_list')
+        .sort((a, b) => {
+          const ta = typeof a.createdAt === 'number' ? a.createdAt : new Date(String(a.createdAt)).getTime();
+          const tb = typeof b.createdAt === 'number' ? b.createdAt : new Date(String(b.createdAt)).getTime();
+          return tb - ta;
+        })[0];
+
+      if (!leadsListArtefact) {
+        console.log(`[TOWER_SAFETY] runId=${runId} no leads_list artefact found — nothing to judge`);
+        return;
+      }
+
+      console.log(`[TOWER_SAFETY] runId=${runId} NO tower_judgement found — triggering safety net judgement on leads_list=${leadsListArtefact.id}`);
+
+      const payload = (leadsListArtefact.payloadJson as Record<string, unknown>) || {};
+      const delivered = payload.delivered_count ?? 0;
+      const requested = payload.target_count ?? 0;
+      const query = payload.query ?? 'unknown';
+      const location = payload.location ?? 'unknown';
+      const goal = `Find ${requested} ${query} in ${location}`;
+
+      await logAFREvent({
+        userId, runId, conversationId, clientRequestId,
+        actionTaken: 'tower_call_started', status: 'pending',
+        taskGenerated: `[Safety net] Calling Tower to judge leads_list artefact ${leadsListArtefact.id}`,
+        runType: 'plan',
+        metadata: { artefactId: leadsListArtefact.id, goal, safety_net: true },
+      });
+
+      let towerResult;
+      try {
+        towerResult = await judgeArtefact({
+          artefact: leadsListArtefact,
+          runId,
+          goal,
+          userId,
+          conversationId,
+          successCriteria: { target_leads: requested },
+        });
+      } catch (towerErr: any) {
+        const errMsg = towerErr.message || 'Tower call failed';
+        console.error(`[TOWER_SAFETY] Tower call failed: ${errMsg}`);
+
+        const errorArtefact = await createArtefact({
+          runId,
+          type: 'tower_judgement',
+          title: `Tower Judgement: error`,
+          summary: `[Safety net] Tower unreachable/failed: ${errMsg}`,
+          payload: { verdict: 'error', action: 'stop', reasons: [errMsg], metrics: {}, delivered, requested, error: errMsg, safety_net: true },
+          userId,
+          conversationId,
+        });
+
+        await this.postArtefactToUI({
+          runId, clientRequestId,
+          type: 'tower_judgement',
+          payload: { verdict: 'error', action: 'stop', reasons: [errMsg], metrics: {}, delivered, requested, error: errMsg, safety_net: true },
+          userId, conversationId,
+        }).catch(() => {});
+
+        await logAFREvent({
+          userId, runId, conversationId, clientRequestId,
+          actionTaken: 'tower_verdict', status: 'failed',
+          taskGenerated: `[Safety net] Tower error: ${errMsg}`,
+          runType: 'plan',
+          metadata: { artefactId: leadsListArtefact.id, verdict: 'error', error: errMsg, towerJudgementArtefactId: errorArtefact.id, safety_net: true },
+        });
+
+        return;
+      }
+
+      const verdict = towerResult.judgement.verdict;
+      const action = towerResult.judgement.action;
+      console.log(`[TOWER_SAFETY] verdict=${verdict} action=${action} stubbed=${towerResult.stubbed}`);
+
+      const towerJudgementArtefact = await createArtefact({
+        runId,
+        type: 'tower_judgement',
+        title: `Tower Judgement: ${verdict}`,
+        summary: `[Safety net] Verdict: ${verdict} | Action: ${action} | Delivered: ${delivered} of ${requested}`,
+        payload: {
+          verdict, action,
+          reasons: towerResult.judgement.reasons,
+          metrics: towerResult.judgement.metrics,
+          delivered, requested,
+          artefact_id: leadsListArtefact.id,
+          stubbed: towerResult.stubbed,
+          safety_net: true,
+        },
+        userId,
+        conversationId,
+      });
+
+      await this.postArtefactToUI({
+        runId, clientRequestId,
+        type: 'tower_judgement',
+        payload: {
+          verdict, action,
+          reasons: towerResult.judgement.reasons,
+          metrics: towerResult.judgement.metrics,
+          delivered, requested,
+          artefact_id: leadsListArtefact.id,
+          stubbed: towerResult.stubbed,
+          safety_net: true,
+        },
+        userId, conversationId,
+      }).catch(() => {});
+
+      await logAFREvent({
+        userId, runId, conversationId, clientRequestId,
+        actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success',
+        taskGenerated: `[Safety net] Tower verdict: ${verdict} — action: ${action}`,
+        runType: 'plan',
+        metadata: {
+          verdict, action,
+          artefactId: leadsListArtefact.id,
+          towerJudgementArtefactId: towerJudgementArtefact.id,
+          delivered, requested,
+          reasons: towerResult.judgement.reasons,
+          stubbed: towerResult.stubbed,
+          safety_net: true,
+        },
+      });
+
+      console.log(`[TOWER_SAFETY] runId=${runId} safety net complete — tower_judgement=${towerJudgementArtefact.id} verdict=${verdict}`);
+    } catch (err: any) {
+      console.error(`[TOWER_SAFETY] runId=${runId} safety net failed (non-fatal): ${err.message}`);
+    }
   }
 
   private async postArtefactToUI(params: {
@@ -1362,8 +1507,6 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       let artefactTypesWritten = ['leads'];
       let finalVerdict = 'PENDING';
 
-      const useTowerLoopForNormalChat = process.env.TOWER_LOOP_CHAT_MODE === 'true';
-
       try {
         const leadsListArtefact = await createArtefact({
           runId: chatRunId,
@@ -1384,9 +1527,9 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         });
         artefactTypesWritten.push('leads_list');
 
-        console.log(`[AGENT_LOOP] tool=SEARCH_PLACES target=${requestedCount} delivered=${deliveredCount} tower_loop_chat=${useTowerLoopForNormalChat}`);
+        console.log(`[AGENT_LOOP] tool=SEARCH_PLACES target=${requestedCount} delivered=${deliveredCount}`);
 
-        if (useTowerLoopForNormalChat) {
+        {
           await logAFREvent({
             userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
             actionTaken: 'tower_call_started', status: 'pending',
@@ -1534,40 +1677,6 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
               runType: 'plan', metadata: { verdict, action, leads_count: deliveredCount },
             });
             console.log(`[CHAT_LEADS] [run_completed] verdict=${verdict} leads=${deliveredCount}`);
-          }
-        } else {
-          const toolArgs = { query: businessType, location: city, country, maxResults: requestedCount, target_count: requestedCount };
-          if (!getRunState(chatRunId)) {
-            initRunState(chatRunId, task.user_id, toolArgs, conversationId, clientRequestId);
-          }
-
-          const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
-            console.log(`[AGENT_LOOP] Re-running SEARCH_PLACES for chat with adjusted args`);
-            return executeAction({
-              toolName: 'SEARCH_PLACES',
-              toolArgs: args,
-              userId: task.user_id,
-              runId: chatRunId,
-              conversationId,
-              clientRequestId,
-            });
-          };
-
-          const leadsListPayload = (leadsListArtefact.payloadJson as Record<string, unknown>) || {};
-          const towerCriteria = { target_leads: requestedCount };
-          const reaction = await handleTowerVerdict(
-            chatRunId,
-            agentLoopGoal,
-            towerCriteria,
-            { ...leadsListPayload, delivered_count: deliveredCount, target_count: requestedCount, leads_count: deliveredCount, artefact_id: leadsListArtefact.id, artefact_type: 'leads_list' },
-            rerunTool,
-          );
-
-          finalVerdict = reaction.verdict.verdict;
-          artefactTypesWritten.push('tower_call_started', 'tower_call_completed', 'tower_verdict', 'tower_judgement', 'run_summary');
-
-          if (reaction.action === 'stop') {
-            console.log(`[CHAT_LEADS] Agent Loop: STOP — ${reaction.verdict.rationale}`);
           }
         }
       } catch (agentLoopErr: any) {
