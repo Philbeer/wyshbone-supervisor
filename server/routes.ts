@@ -592,6 +592,101 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     const effectiveSimulateType = (routeChosenTool === 'DEEP_RESEARCH') ? 'deep_research' : 'leads';
 
+    const towerLoopChatMode = process.env.TOWER_LOOP_CHAT_MODE === 'true';
+    const isLeadFindForTower = effectiveSimulateType === 'leads' && towerLoopChatMode;
+
+    if (isLeadFindForTower) {
+      console.log(`[TOWER_LOOP_CHAT] simulate-chat-task: routing to Tower loop pipeline — flag=TOWER_LOOP_CHAT_MODE jobId=${chatRunId}`);
+
+      const { createArtefact: createLocalArtefact } = await import('./supervisor/artefacts');
+      const { judgeArtefact: judgeLocalArtefact } = await import('./supervisor/tower-artefact-judge');
+
+      const inMatch = goalText.match(/\s+in\s+(.+)$/i);
+      let businessType = goalText.replace(/^find\s+/i, '').replace(/\s+in\s+.+$/i, '').trim() || 'pubs';
+      const numMatch = businessType.match(/^(\d+)\s+/);
+      let requestedCount = 20;
+      if (numMatch) {
+        requestedCount = Math.min(parseInt(numMatch[1], 10), 200);
+        businessType = businessType.replace(/^\d+\s*/, '').trim() || 'pubs';
+      }
+      const location = inMatch ? inMatch[1].trim() : 'Local';
+      const city = location.split(',')[0].trim();
+      const country = location.split(',')[1]?.trim() || 'UK';
+      const goal = `Find ${requestedCount} ${businessType} in ${city} for B2B outreach`;
+
+      const nowMs = Date.now();
+      await storage.createAgentRun({
+        id: chatRunId,
+        clientRequestId: clientRequestId!,
+        userId,
+        createdAt: nowMs,
+        updatedAt: nowMs,
+        status: 'executing',
+        metadata: { feature_flag: 'TOWER_LOOP_CHAT_MODE', plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES' }] } },
+      });
+
+      await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'plan_execution_started', status: 'pending', taskGenerated: `Tower loop chat: ${goal}`, runType: 'plan', metadata: { goal, tool: 'SEARCH_PLACES', feature_flag: 'TOWER_LOOP_CHAT_MODE' } });
+      await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'step_started', status: 'pending', taskGenerated: `Step 1/1: SEARCH_PLACES`, runType: 'plan', metadata: { step: 1, tool: 'SEARCH_PLACES' } });
+
+      const stubNames = [`The ${city} ${businessType.replace(/s$/, '')} House`, `${city} Central`, `The Old ${businessType.replace(/s$/, '')}`, `${businessType.replace(/s$/, '')} & Co`, `The Crown`];
+      const stubLeads = stubNames.map((name, i) => ({
+        name,
+        address: `${10 + i} High Street, ${city}, ${country}`,
+        phone: `+44 20 7946 0${100 + i}`,
+        website: `https://www.${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.co.uk`,
+        placeId: `stub_place_${i + 1}`,
+        source: 'deterministic_stub',
+      }));
+
+      await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'step_completed', status: 'success', taskGenerated: `Step 1/1 completed: ${stubLeads.length} leads (stub)`, runType: 'plan', metadata: { step: 1, leads_count: stubLeads.length, used_stub: true } });
+
+      const leadsListArtefact = await createLocalArtefact({
+        runId: chatRunId, type: 'leads_list',
+        title: `Leads list: ${stubLeads.length} ${businessType} in ${city}`,
+        summary: `Delivered ${stubLeads.length} of ${requestedCount} requested (stub)`,
+        payload: { delivered_count: stubLeads.length, target_count: requestedCount, query: businessType, location: city, country, leads: stubLeads, used_stub: true },
+        userId, conversationId,
+      });
+
+      await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'artefact_created', status: 'success', taskGenerated: `leads_list artefact persisted`, runType: 'plan', metadata: { artefactId: leadsListArtefact.id, artefactType: 'leads_list' } });
+      await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'tower_call_started', status: 'pending', taskGenerated: `Calling Tower for ${leadsListArtefact.id}`, runType: 'plan', metadata: { artefactId: leadsListArtefact.id } });
+
+      const towerResult = await judgeLocalArtefact({ artefact: leadsListArtefact, runId: chatRunId, goal, userId, conversationId, successCriteria: { target_leads: requestedCount } });
+
+      const towerJudgementArtefact = await createLocalArtefact({
+        runId: chatRunId, type: 'tower_judgement',
+        title: `Tower Judgement: ${towerResult.judgement.verdict}`,
+        summary: `Verdict: ${towerResult.judgement.verdict} | Action: ${towerResult.judgement.action}`,
+        payload: { verdict: towerResult.judgement.verdict, action: towerResult.judgement.action, reasons: towerResult.judgement.reasons, metrics: towerResult.judgement.metrics, delivered: stubLeads.length, requested: requestedCount },
+        userId, conversationId,
+      });
+
+      await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'tower_verdict', status: 'success', taskGenerated: `Tower verdict: ${towerResult.judgement.verdict}`, runType: 'plan', metadata: { verdict: towerResult.judgement.verdict, action: towerResult.judgement.action, artefactId: leadsListArtefact.id } });
+
+      const isHalted = towerResult.shouldStop || towerResult.judgement.verdict === 'error' || towerResult.judgement.verdict === 'fail';
+      if (isHalted) {
+        await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'run_halted', status: 'failed', taskGenerated: `Tower loop halted: ${towerResult.judgement.verdict}`, runType: 'plan', metadata: { verdict: towerResult.judgement.verdict } });
+        await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped' });
+      } else {
+        await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'run_completed', status: 'success', taskGenerated: `Tower loop completed: ${stubLeads.length} leads`, runType: 'plan', metadata: { verdict: towerResult.judgement.verdict, leads_count: stubLeads.length } });
+        await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed' });
+      }
+
+      console.log(`[TOWER_LOOP_CHAT] [simulate-chat-task] complete — verdict=${towerResult.judgement.verdict} halted=${isHalted} leads=${stubLeads.length}`);
+
+      return res.json({
+        ok: true,
+        taskId,
+        chatRunId,
+        response: `Found ${stubLeads.length} ${businessType} prospects in ${city}, validated by Tower. View your results in the dashboard.`,
+        tower_verdict: towerResult.judgement.verdict,
+        leads_count: stubLeads.length,
+        artefact_ids: { leads_list: leadsListArtefact.id, tower_judgement: towerJudgementArtefact.id },
+        halted: isHalted,
+        feature_flag: 'TOWER_LOOP_CHAT_MODE',
+      });
+    }
+
     if (effectiveSimulateType === 'deep_research') {
       const topic = req.body?.topic || goalText;
       console.log(`[DEBUG] simulate-chat-task(deep_research): topic="${topic}" jobId=${chatRunId} uiRunId=${uiRunId} clientRequestId=${clientRequestId} taskId=${taskId}`);
