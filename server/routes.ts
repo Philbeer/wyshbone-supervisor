@@ -494,7 +494,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(400).json({ ok: false, error: `Missing required identifiers: ${missing}`, taskId });
     }
 
-    const chatRunId = generateJobId();
+    const chatRunId = uiRunId;
     console.log(`[ID_MAP] jobId=${chatRunId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${taskId} entry=simulate-chat-task`);
 
     const LEAD_FIND_VERBS = /\b(find|list|get|show|search|look\s*for|discover|locate)\b/i;
