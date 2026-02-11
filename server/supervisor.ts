@@ -85,11 +85,12 @@ class SupervisorService {
         return;
       }
 
-      // Process signals, chat tasks, and goal monitoring in parallel
+      // Process signals, chat tasks, goal monitoring, and tower judgement backfill in parallel
       await Promise.all([
         this.processNewSignals(),
         this.processSupervisorTasks(),
-        this.monitorGoals()
+        this.monitorGoals(),
+        this.backfillTowerJudgements(),
       ]);
     } catch (error) {
       console.error('Error in supervisor poll:', error);
@@ -684,6 +685,142 @@ class SupervisorService {
       console.log(`[TOWER_SAFETY] runId=${runId} safety net complete — tower_judgement=${towerJudgementArtefact.id} verdict=${verdict}`);
     } catch (err: any) {
       console.error(`[TOWER_SAFETY] runId=${runId} safety net failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  private async backfillTowerJudgements(): Promise<void> {
+    if (!supabase) return;
+
+    try {
+      const cutoffMs = Date.now() - 5 * 60 * 1000;
+
+      const { data: recentRuns, error: runsErr } = await supabase
+        .from('agent_runs')
+        .select('id, user_id, client_request_id, metadata, created_at')
+        .eq('status', 'completed')
+        .gte('created_at', cutoffMs)
+        .limit(20);
+
+      if (runsErr || !recentRuns || recentRuns.length === 0) return;
+
+      for (const run of recentRuns) {
+        try {
+          const { data: artefacts, error: artErr } = await supabase
+            .from('artefacts')
+            .select('id, run_id, type, title, summary, payload_json, created_at')
+            .eq('run_id', run.id);
+
+          if (artErr || !artefacts) continue;
+
+          const hasLeadsList = artefacts.some(a => a.type === 'leads_list');
+          const hasTowerJudgement = artefacts.some(a => a.type === 'tower_judgement');
+
+          if (!hasLeadsList || hasTowerJudgement) continue;
+
+          const leadsListArt = artefacts.find(a => a.type === 'leads_list')!;
+          const payload = leadsListArt.payload_json || {};
+
+          let leadsCount = 0;
+          let query = 'businesses';
+          let location = 'unknown';
+
+          if (Array.isArray(payload)) {
+            leadsCount = payload.length;
+          } else if (typeof payload === 'object') {
+            leadsCount = payload.delivered_count ?? payload.leads?.length ?? Object.keys(payload).filter(k => /^\d+$/.test(k)).length;
+            query = payload.query || 'businesses';
+            location = payload.location || 'unknown';
+          }
+
+          if (typeof leadsListArt.title === 'string') {
+            const titleMatch = leadsListArt.title.match(/(\d+)\s+(.+?)\s+(?:in|businesses?\s+in)\s+(.+)/i);
+            if (titleMatch) {
+              leadsCount = leadsCount || parseInt(titleMatch[1], 10);
+              query = query === 'businesses' ? titleMatch[2] : query;
+              location = location === 'unknown' ? titleMatch[3] : location;
+            }
+          }
+
+          const userMessage = run.metadata?.userMessagePreview || `Find ${query} in ${location}`;
+          const goal = `Find ${query} in ${location} for B2B outreach`;
+
+          console.log(`[TOWER_BACKFILL] runId=${run.id} found leads_list but no tower_judgement — triggering backfill (${leadsCount} leads)`);
+
+          const artefactForJudge = {
+            id: leadsListArt.id,
+            runId: run.id,
+            type: 'leads_list' as const,
+            title: leadsListArt.title || '',
+            summary: leadsListArt.summary || null,
+            payloadJson: payload,
+            createdAt: typeof leadsListArt.created_at === 'string' ? new Date(leadsListArt.created_at).getTime() : leadsListArt.created_at,
+          };
+
+          let towerResult;
+          try {
+            towerResult = await judgeArtefact({
+              artefact: artefactForJudge,
+              runId: run.id,
+              goal,
+              userId: run.user_id,
+              successCriteria: { target_leads: leadsCount },
+            });
+          } catch (towerErr: any) {
+            console.error(`[TOWER_BACKFILL] runId=${run.id} Tower call failed: ${towerErr.message}`);
+            const { error: insertErr } = await supabase.from('artefacts').insert({
+              id: randomUUID(),
+              run_id: run.id,
+              type: 'tower_judgement',
+              title: 'Tower Judgement: error',
+              summary: `Tower unreachable: ${towerErr.message}`,
+              payload_json: { verdict: 'error', action: 'stop', reasons: [towerErr.message], metrics: {}, delivered: leadsCount, error: towerErr.message, backfill: true },
+            });
+            if (insertErr) console.error(`[TOWER_BACKFILL] runId=${run.id} failed to insert error artefact: ${insertErr.message}`);
+            continue;
+          }
+
+          const verdict = towerResult.judgement.verdict;
+          const action = towerResult.judgement.action;
+
+          const { error: insertErr } = await supabase.from('artefacts').insert({
+            id: randomUUID(),
+            run_id: run.id,
+            type: 'tower_judgement',
+            title: `Tower Judgement: ${verdict}`,
+            summary: `Verdict: ${verdict} | Action: ${action} | Leads: ${leadsCount}`,
+            payload_json: {
+              verdict,
+              action,
+              reasons: towerResult.judgement.reasons,
+              metrics: towerResult.judgement.metrics,
+              delivered: leadsCount,
+              artefact_id: leadsListArt.id,
+              stubbed: towerResult.stubbed,
+              backfill: true,
+            },
+          });
+
+          if (insertErr) {
+            console.error(`[TOWER_BACKFILL] runId=${run.id} failed to insert tower_judgement: ${insertErr.message}`);
+            continue;
+          }
+
+          console.log(`[TOWER_BACKFILL] runId=${run.id} tower_judgement created — verdict=${verdict} action=${action}`);
+
+          await logAFREvent({
+            userId: run.user_id, runId: run.id,
+            clientRequestId: run.client_request_id,
+            actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success',
+            taskGenerated: `[Backfill] Tower verdict: ${verdict} — action: ${action}`,
+            runType: 'plan',
+            metadata: { verdict, action, leadsCount, artefactId: leadsListArt.id, stubbed: towerResult.stubbed, backfill: true },
+          }).catch(() => {});
+        } catch (runErr: any) {
+          console.error(`[TOWER_BACKFILL] runId=${run.id} failed (non-fatal): ${runErr.message}`);
+        }
+      }
+    } catch (err: any) {
+      console.error(`[TOWER_BACKFILL] Poller error (non-fatal): ${err.message}`);
     }
   }
 
