@@ -279,7 +279,7 @@ class SupervisorService {
       return;
     }
 
-    const jobId = generateJobId();
+    const jobId = uiRunId;
     console.log(`[ID_MAP] jobId=${jobId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${task.id} entry=processChatTask`);
     console.log(`[SUPERVISOR] Processing chat task ${task.id} (${task.task_type}) jobId=${jobId} uiRunId=${uiRunId} clientRequestId=${clientRequestId}`);
 
