@@ -670,6 +670,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
         await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'run_stopped', status: 'failed', taskGenerated: `Tower error — run stopped`, runType: 'plan', metadata: { verdict: 'error', error: errMsg } });
         await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped' });
 
+        const errUiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
+        if (errUiBaseUrl) {
+          try {
+            const errPostResp = await fetch(`${errUiBaseUrl}/api/afr/artefacts`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                runId: chatRunId, clientRequestId,
+                type: 'tower_judgement',
+                payload: { title: errorJudgementArtefact.title, summary: errorJudgementArtefact.summary, verdict: 'error', action: 'stop', reasons: [errMsg], error: errMsg, delivered: stubLeads.length, requested: requestedCount, artefact_id: errorJudgementArtefact.id },
+                createdAt: new Date().toISOString(),
+              }),
+            });
+            console.log(`[ARTEFACT_POST] runId=${chatRunId} type=tower_judgement(error) status=${errPostResp.status}`);
+          } catch (e: any) {
+            console.error(`[ARTEFACT_POST] runId=${chatRunId} type=tower_judgement(error) NETWORK_ERROR: ${e.message}`);
+          }
+        }
+
         return res.json({
           ok: true, taskId, chatRunId,
           response: `Found ${stubLeads.length} ${businessType} prospects in ${city}, but Tower validation was unavailable. View your results in the dashboard.`,
@@ -688,6 +707,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
 
       await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success', taskGenerated: `Tower verdict: ${towerResult.judgement.verdict}`, runType: 'plan', metadata: { verdict: towerResult.judgement.verdict, action: towerResult.judgement.action, artefactId: leadsListArtefact.id } });
+
+      const towerUiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
+      if (towerUiBaseUrl) {
+        try {
+          const towerPostResp = await fetch(`${towerUiBaseUrl}/api/afr/artefacts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              runId: chatRunId,
+              clientRequestId,
+              type: 'tower_judgement',
+              payload: {
+                title: towerJudgementArtefact.title,
+                summary: towerJudgementArtefact.summary,
+                verdict: towerResult.judgement.verdict,
+                action: towerResult.judgement.action,
+                reasons: towerResult.judgement.reasons,
+                metrics: towerResult.judgement.metrics,
+                delivered: stubLeads.length,
+                requested: requestedCount,
+                artefact_id: towerJudgementArtefact.id,
+              },
+              createdAt: new Date().toISOString(),
+            }),
+          });
+          console.log(`[ARTEFACT_POST] runId=${chatRunId} type=tower_judgement status=${towerPostResp.status}`);
+        } catch (e: any) {
+          console.error(`[ARTEFACT_POST] runId=${chatRunId} type=tower_judgement NETWORK_ERROR: ${e.message}`);
+        }
+      }
 
       const isHalted = towerResult.shouldStop || towerResult.judgement.verdict === 'error' || towerResult.judgement.verdict === 'fail';
       if (isHalted) {
@@ -1119,6 +1168,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         finalVerdict = reaction.verdict.verdict;
         afrEvents.push('tower_call_started', 'tower_call_completed', 'tower_verdict', 'tower_judgement', 'run_summary');
+
+        const stdUiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
+        if (stdUiBaseUrl) {
+          try {
+            const stdTowerPostResp = await fetch(`${stdUiBaseUrl}/api/afr/artefacts`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                runId: chatRunId,
+                clientRequestId,
+                type: 'tower_judgement',
+                payload: {
+                  title: `Tower Judgement: ${reaction.verdict.verdict}`,
+                  summary: `Verdict: ${reaction.verdict.verdict} | Action: ${reaction.action}`,
+                  verdict: reaction.verdict.verdict,
+                  action: reaction.action,
+                  delivered: placesCount,
+                  requested: requestedCount,
+                  rationale: reaction.verdict.rationale,
+                  confidence: reaction.verdict.confidence,
+                },
+                createdAt: new Date().toISOString(),
+              }),
+            });
+            console.log(`[ARTEFACT_POST] runId=${chatRunId} type=tower_judgement status=${stdTowerPostResp.status}`);
+          } catch (e: any) {
+            console.error(`[ARTEFACT_POST] runId=${chatRunId} type=tower_judgement NETWORK_ERROR: ${e.message}`);
+          }
+        }
 
         if (reaction.action === 'accept') {
           afrEvents.push('run_completed');
