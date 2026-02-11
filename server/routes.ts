@@ -2180,192 +2180,128 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     app.post('/api/proof/tower-loop-v2', async (req, res) => {
       const { randomUUID } = await import('crypto');
-      const {
-        logAFREvent,
-        logPlanStarted,
-        logPlanCompleted,
-        logPlanFailed,
-        logRunCompleted,
-      } = await import('./supervisor/afr-logger');
+      const { logAFREvent } = await import('./supervisor/afr-logger');
       const { createArtefact } = await import('./supervisor/artefacts');
       const { judgeArtefact } = await import('./supervisor/tower-artefact-judge');
+      const { executeAction, createRunToolTracker } = await import('./supervisor/action-executor');
 
       const userId = (req.body.user_id as string) || '8f9079b3ddf739fb0217373c92292e91';
       const crid = `proofv2_${Date.now()}_${randomUUID().substring(0, 8)}`;
       const runId = crid;
-      const goal = 'Find 5 pubs in central London for B2B outreach';
+      const goal = 'Find 12 pubs in central London for B2B outreach';
+      const targetCount = 12;
       const startTs = Date.now();
 
       function log(stage: string, detail: string) {
         console.log(`[PROOF_V2] [${stage}] ${detail}`);
       }
 
-      try {
-        log('agent_run_create', `runId=${runId} userId=${userId}`);
-        const now = Date.now();
-        await storage.createAgentRun({
-          id: runId,
-          clientRequestId: crid,
-          userId,
-          status: 'executing',
-          createdAt: now,
-          updatedAt: now,
-          uiReady: 1,
-          metadata: { source: 'proof-v2', goal },
-        });
+      log('start', `runId=${runId} userId=${userId} goal="${goal}"`);
 
-        log('plan_execution_started', `goal="${goal}"`);
-        await logPlanStarted(userId, runId, goal);
-        await logAFREvent({
-          userId,
-          runId,
-          actionTaken: 'plan_execution_started',
-          status: 'pending',
-          taskGenerated: `Plan started: ${goal}`,
-          runType: 'plan',
-          metadata: { goal, plan_version: 1 },
-        });
+      const now = Date.now();
+      await storage.createAgentRun({
+        id: runId,
+        clientRequestId: crid,
+        userId,
+        status: 'executing',
+        createdAt: now,
+        updatedAt: now,
+        uiReady: 1,
+        metadata: { source: 'proof-v2', goal, pipeline: 'executeAction', tool: 'SEARCH_PLACES_PROOF' },
+      });
 
-        log('artefact_create', 'Writing step_result artefact to DB');
-        const stepArtefact = await createArtefact({
-          runId,
-          type: 'step_result',
-          title: 'SEARCH_PLACES: Pubs in Central London',
-          summary: 'Found 5 pub venues in central London with contact details',
-          payload: {
-            goal,
-            step_index: 1,
-            step_title: 'Search pubs in central London',
-            step_type: 'SEARCH_PLACES',
-            step_status: 'pass',
-            outputs_summary: '5 pubs located and enriched',
-            outputs_raw: [
-              { name: 'The Red Lion', address: '48 Parliament St, London SW1A 2NH', phone: '+44 20 7930 5826', category: 'pub' },
-              { name: 'The Lamb and Flag', address: '33 Rose St, London WC2E 9EB', phone: '+44 20 7497 9504', category: 'pub' },
-              { name: 'Ye Olde Cheshire Cheese', address: '145 Fleet St, London EC4A 2BU', phone: '+44 20 7353 6170', category: 'pub' },
-              { name: 'The Churchill Arms', address: '119 Kensington Church St, London W8 7LN', phone: '+44 20 7727 4242', category: 'pub' },
-              { name: 'The Prospect of Whitby', address: '57 Wapping Wall, London E1W 3SH', phone: '+44 20 7481 1095', category: 'pub' },
-            ],
-            delivered_count: 5,
-            target_count: 5,
-          },
-          userId,
-        });
-        const artefactId = stepArtefact.id;
-        log('artefact_created', `artefactId=${artefactId}`);
+      await logAFREvent({ userId, runId, actionTaken: 'plan_execution_started', status: 'pending', taskGenerated: `Plan started: ${goal}`, runType: 'plan', metadata: { goal, plan_version: 1, tool: 'SEARCH_PLACES_PROOF' } });
+      log('plan_execution_started', `goal="${goal}"`);
 
-        await logAFREvent({
-          userId,
-          runId,
-          actionTaken: 'artefact_created',
-          status: 'success',
-          taskGenerated: `Artefact written: ${artefactId}`,
-          runType: 'plan',
-          metadata: { artefactId, artefactType: 'step_result', title: stepArtefact.title },
-        });
+      await logAFREvent({ userId, runId, actionTaken: 'step_started', status: 'pending', taskGenerated: 'Step 1/1: SEARCH_PLACES_PROOF', runType: 'plan', metadata: { step: 1, tool: 'SEARCH_PLACES_PROOF' } });
+      log('step_started', 'Step 1/1: SEARCH_PLACES_PROOF');
 
-        log('tower_call_started', `artefactId=${artefactId}`);
-        await logAFREvent({
-          userId,
-          runId,
-          actionTaken: 'tower_call_started',
-          status: 'pending',
-          taskGenerated: `Tower judgement requested for artefact ${artefactId}`,
-          runType: 'plan',
-          metadata: { artefactId, tower_url: process.env.TOWER_BASE_URL || process.env.TOWER_URL || 'NOT_SET' },
-        });
+      const tracker = createRunToolTracker();
+      const actionResult = await executeAction({
+        toolName: 'SEARCH_PLACES_PROOF',
+        toolArgs: { query: 'pubs', location: 'London', country: 'GB', target_count: targetCount },
+        userId,
+        tracker,
+        runId,
+        clientRequestId: crid,
+      });
 
-        let judgeResult;
-        try {
-          judgeResult = await judgeArtefact({
-            artefact: stepArtefact,
-            runId,
-            goal,
-            userId,
-            successCriteria: { target_count: 5, delivered_count: 5 },
-          });
-        } catch (towerErr: any) {
-          const errMsg = towerErr.message || 'Tower call threw an exception';
-          log('tower_error', errMsg);
-          await logPlanFailed(userId, runId, `Tower unreachable: ${errMsg}`);
-          await storage.updateAgentRun(runId, { status: 'failed', terminalState: 'tower_error', error: errMsg, endedAt: new Date() });
-          return res.status(502).json({ crid, runId, artefactId, judgementId: null, verdict: 'error', error: errMsg });
-        }
-
-        const { judgement, shouldStop, stubbed } = judgeResult;
-        const verdictStr = judgement.verdict;
-        const rationale = judgement.reasons[0] || verdictStr;
-
-        if (verdictStr === 'error') {
-          log('tower_error', `verdict=error rationale="${rationale}"`);
-          await logPlanFailed(userId, runId, `Tower error: ${rationale}`);
-          await storage.updateAgentRun(runId, { status: 'failed', terminalState: 'tower_error', error: rationale, endedAt: new Date() });
-          return res.status(502).json({ crid, runId, artefactId, judgementId: null, verdict: 'error', error: rationale });
-        }
-
-        const judgements = await storage.getTowerJudgementsByRunId(runId);
-        const judgementRow = judgements[0];
-        const judgementId = judgementRow?.id || null;
-        log('tower_judgement_persisted', `judgementId=${judgementId} verdict=${verdictStr}`);
-
-        log('tower_verdict', `verdict=${verdictStr} rationale="${rationale}" artefactId=${artefactId}`);
-        await logAFREvent({
-          userId,
-          runId,
-          actionTaken: 'tower_verdict',
-          status: shouldStop ? 'failed' : 'success',
-          taskGenerated: `Tower verdict: ${verdictStr} — ${rationale}`,
-          runType: 'plan',
-          metadata: { artefactId, verdict: verdictStr, rationale, reasons: judgement.reasons, metrics: judgement.metrics, stubbed },
-        });
-
-        if (shouldStop) {
-          log('run_stopped', `Tower STOP: ${rationale}`);
-          await logAFREvent({
-            userId,
-            runId,
-            actionTaken: 'run_stopped',
-            status: 'failed',
-            taskGenerated: `Run stopped by Tower: ${verdictStr} — ${rationale}`,
-            runType: 'plan',
-            metadata: { artefactId, verdict: verdictStr, rationale },
-          });
-          await logPlanFailed(userId, runId, `Tower STOP: ${rationale}`);
-          await storage.updateAgentRun(runId, { status: 'completed', terminalState: 'stopped', endedAt: new Date() });
-
-          log('complete', `status=stopped verdict=${verdictStr} duration=${Date.now() - startTs}ms`);
-          return res.json({ crid, runId, artefactId, judgementId, verdict: verdictStr });
-        }
-
-        log('run_completed', `verdict=${verdictStr}`);
-        await logPlanCompleted(userId, runId, `Proof V2 completed — verdict=${verdictStr}`);
-        await logRunCompleted(userId, runId, `Proof V2: ${verdictStr}`, { verdict: verdictStr, artefactId, judgementId });
-        await logAFREvent({
-          userId,
-          runId,
-          actionTaken: 'run_completed',
-          status: 'success',
-          taskGenerated: `Run completed: verdict=${verdictStr}`,
-          runType: 'plan',
-          metadata: { artefactId, judgementId, verdict: verdictStr },
-        });
-        await storage.updateAgentRun(runId, { status: 'completed', terminalState: 'completed', endedAt: new Date() });
-
-        log('complete', `status=completed verdict=${verdictStr} duration=${Date.now() - startTs}ms`);
-        res.json({ crid, runId, artefactId, judgementId, verdict: verdictStr });
-
-      } catch (err: any) {
-        const errMsg = err.message || 'Proof V2 threw unexpectedly';
-        log('fatal', errMsg);
-        console.error(`[PROOF_V2] Fatal:`, err.stack);
-
-        try {
-          await logPlanFailed(userId, runId, `Fatal: ${errMsg}`);
-          await storage.updateAgentRun(runId, { status: 'failed', terminalState: 'fatal_error', error: errMsg, endedAt: new Date() });
-        } catch (_) {}
-
-        res.status(500).json({ crid, runId, artefactId: null, judgementId: null, verdict: 'error', error: errMsg });
+      if (!actionResult.success) {
+        log('step_failed', `executeAction failed: ${actionResult.error}`);
+        await logAFREvent({ userId, runId, actionTaken: 'step_completed', status: 'failed', taskGenerated: `Step 1/1 failed: ${actionResult.error}`, runType: 'plan', metadata: { step: 1, error: actionResult.error } });
+        await storage.updateAgentRun(runId, { status: 'failed', terminalState: 'failed', error: actionResult.error, endedAt: new Date() });
+        return res.status(500).json({ crid, runId, artefactId: null, judgementId: null, verdict: 'error', error: actionResult.error });
       }
+
+      const places = (actionResult.data?.places as any[]) || [];
+      const deliveredCount = places.length;
+      log('step_completed', `executeAction returned ${deliveredCount} places via SEARCH_PLACES_PROOF`);
+
+      await logAFREvent({ userId, runId, actionTaken: 'step_completed', status: 'success', taskGenerated: `Step 1/1 completed: ${deliveredCount} leads (proof stub)`, runType: 'plan', metadata: { step: 1, leads_count: deliveredCount, tool: 'SEARCH_PLACES_PROOF' } });
+
+      const leadsArtefact = await createArtefact({
+        runId,
+        type: 'leads_list',
+        title: `Leads list: ${deliveredCount} pubs in London`,
+        summary: `Delivered ${deliveredCount} of ${targetCount} requested (SEARCH_PLACES_PROOF)`,
+        payload: { delivered_count: deliveredCount, target_count: targetCount, query: 'pubs', location: 'London', country: 'GB', leads: places, source: 'SEARCH_PLACES_PROOF' },
+        userId,
+      });
+      const artefactId = leadsArtefact.id;
+      log('artefact_created', `leads_list artefactId=${artefactId}`);
+
+      await logAFREvent({ userId, runId, actionTaken: 'artefact_created', status: 'success', taskGenerated: `leads_list artefact persisted`, runType: 'plan', metadata: { artefactId, artefactType: 'leads_list' } });
+      await logAFREvent({ userId, runId, actionTaken: 'tower_call_started', status: 'pending', taskGenerated: `Calling Tower for ${artefactId}`, runType: 'plan', metadata: { artefactId } });
+      log('tower_call_started', `artefactId=${artefactId}`);
+
+      let judgeResult;
+      try {
+        judgeResult = await judgeArtefact({
+          artefact: leadsArtefact,
+          runId,
+          goal,
+          userId,
+          successCriteria: { target_leads: targetCount },
+        });
+      } catch (towerErr: any) {
+        const errMsg = towerErr.message || 'Tower call threw an exception';
+        log('tower_error', errMsg);
+        await storage.updateAgentRun(runId, { status: 'failed', terminalState: 'tower_error', error: errMsg, endedAt: new Date() });
+        return res.status(502).json({ crid, runId, artefactId, judgementId: null, verdict: 'error', error: errMsg });
+      }
+
+      const { judgement, shouldStop, stubbed } = judgeResult;
+      const verdictStr = judgement.verdict;
+      const rationale = judgement.reasons[0] || verdictStr;
+
+      const judgementArtefact = await createArtefact({
+        runId,
+        type: 'tower_judgement',
+        title: `Tower Judgement: ${verdictStr}`,
+        summary: `Verdict: ${verdictStr} | Action: ${judgement.action}`,
+        payload: { verdict: verdictStr, action: judgement.action, reasons: judgement.reasons, metrics: judgement.metrics, delivered: deliveredCount, requested: targetCount, stubbed },
+        userId,
+      });
+      const judgementId = judgementArtefact.id;
+      log('tower_judgement_artefact', `judgementId=${judgementId} verdict=${verdictStr}`);
+
+      await logAFREvent({ userId, runId, actionTaken: 'tower_verdict', status: shouldStop ? 'failed' : 'success', taskGenerated: `Tower verdict: ${verdictStr} — ${rationale}`, runType: 'plan', metadata: { artefactId, verdict: verdictStr, rationale, reasons: judgement.reasons, metrics: judgement.metrics, stubbed } });
+
+      if (shouldStop || verdictStr === 'error' || verdictStr === 'fail') {
+        log('run_stopped', `Tower ${verdictStr}: ${rationale}`);
+        await logAFREvent({ userId, runId, actionTaken: 'run_stopped', status: 'failed', taskGenerated: `Run stopped by Tower: ${verdictStr}`, runType: 'plan', metadata: { artefactId, verdict: verdictStr, rationale } });
+        await storage.updateAgentRun(runId, { status: 'completed', terminalState: 'stopped', endedAt: new Date() });
+
+        log('complete', `status=stopped verdict=${verdictStr} duration=${Date.now() - startTs}ms`);
+        return res.json({ crid, runId, artefactId, judgementId, verdict: verdictStr, leads_count: deliveredCount, pipeline: 'executeAction' });
+      }
+
+      log('run_completed', `verdict=${verdictStr} leads=${deliveredCount}`);
+      await logAFREvent({ userId, runId, actionTaken: 'run_completed', status: 'success', taskGenerated: `Run completed: verdict=${verdictStr}`, runType: 'plan', metadata: { artefactId, judgementId, verdict: verdictStr, leads_count: deliveredCount } });
+      await storage.updateAgentRun(runId, { status: 'completed', terminalState: 'completed', endedAt: new Date() });
+
+      log('complete', `status=completed verdict=${verdictStr} duration=${Date.now() - startTs}ms`);
+      res.json({ crid, runId, artefactId, judgementId, verdict: verdictStr, leads_count: deliveredCount, pipeline: 'executeAction' });
     });
 
     console.log('[DEBUG] Registered: POST /api/proof/tower-loop-v2');
