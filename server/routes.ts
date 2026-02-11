@@ -3351,6 +3351,123 @@ export async function registerRoutes(app: Express): Promise<Server> {
     poll();
   });
 
+  // ─── REQUEST JUDGEMENT (manual Tower validation for existing runs) ───
+  app.post('/api/supervisor/request-judgement', async (req, res) => {
+    const { logAFREvent: logEvt } = await import('./supervisor/afr-logger');
+    const { judgeArtefact } = await import('./supervisor/tower-artefact-judge');
+
+    const runId = (req.body.runId || req.body.run_id || '') as string;
+    const crid = (req.body.crid || req.body.clientRequestId || '') as string;
+    const userId = getUserId(req);
+    const conversationId = (req.body.conversationId || req.body.conversation_id || '') as string;
+    const goal = (req.body.goal || 'Manual judgement request') as string;
+
+    console.log(`[REQUEST_JUDGEMENT] hit — runId=${runId} crid=${crid} userId=${userId}`);
+
+    if (!runId) {
+      console.log('[REQUEST_JUDGEMENT] rejected: missing runId');
+      return res.status(400).json({ ok: false, error: 'runId is required' });
+    }
+
+    try {
+      const artefacts = await storage.getArtefactsByRunId(runId);
+      const leadsArtefact = artefacts
+        .filter((a: Artefact) => a.type === 'leads_list')
+        .sort((a: Artefact, b: Artefact) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+
+      if (!leadsArtefact) {
+        console.log(`[REQUEST_JUDGEMENT] no leads_list artefact found for runId=${runId} (found ${artefacts.length} total artefacts)`);
+        return res.status(404).json({ ok: false, error: 'No leads_list artefact found for this run' });
+      }
+
+      console.log(`[REQUEST_JUDGEMENT] found leads_list artefact id=${leadsArtefact.id} for runId=${runId}`);
+
+      await logEvt({
+        userId, runId, conversationId, clientRequestId: crid || undefined,
+        actionTaken: 'tower_call_started', status: 'pending',
+        taskGenerated: `Manual Tower judgement requested for artefact ${leadsArtefact.id}`,
+        runType: 'plan',
+        metadata: { artefactId: leadsArtefact.id, source: 'request_judgement', crid },
+      });
+      console.log(`[REQUEST_JUDGEMENT] emitted tower_call_started AFR — runId=${runId}`);
+
+      let towerResult;
+      try {
+        towerResult = await judgeArtefact({
+          artefact: leadsArtefact,
+          runId,
+          goal,
+          userId,
+          conversationId: conversationId || undefined,
+          successCriteria: { min_leads: 1 },
+        });
+      } catch (towerErr: any) {
+        const errMsg = towerErr.message || 'Tower call failed';
+        console.error(`[REQUEST_JUDGEMENT] Tower call threw: ${errMsg}`);
+
+        await logEvt({
+          userId, runId, conversationId, clientRequestId: crid || undefined,
+          actionTaken: 'tower_verdict', status: 'failed',
+          taskGenerated: `Tower error: ${errMsg}`,
+          runType: 'plan',
+          metadata: { artefactId: leadsArtefact.id, verdict: 'error', error: errMsg, source: 'request_judgement' },
+        });
+
+        let errorArtefactId: string | null = null;
+        try {
+          const { createArtefact } = await import('./supervisor/artefacts');
+          const errorArt = await createArtefact({
+            runId, type: 'tower_judgement', userId, conversationId: conversationId || undefined,
+            title: 'Tower Verdict: ERROR',
+            summary: errMsg,
+            payload: { verdict: 'error', error: errMsg, source: 'request_judgement', artefactId: leadsArtefact.id },
+          });
+          errorArtefactId = errorArt.id;
+        } catch (artErr: any) {
+          console.error(`[REQUEST_JUDGEMENT] failed to persist error artefact: ${artErr.message}`);
+        }
+
+        return res.json({ ok: false, error: errMsg, tower_judgement_artefact_id: errorArtefactId });
+      }
+
+      console.log(`[REQUEST_JUDGEMENT] Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} stubbed=${towerResult.stubbed}`);
+
+      await logEvt({
+        userId, runId, conversationId, clientRequestId: crid || undefined,
+        actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success',
+        taskGenerated: `Tower verdict: ${towerResult.judgement.verdict}`,
+        runType: 'plan',
+        metadata: {
+          artefactId: leadsArtefact.id,
+          verdict: towerResult.judgement.verdict,
+          action: towerResult.judgement.action,
+          stubbed: towerResult.stubbed,
+          source: 'request_judgement',
+        },
+      });
+      console.log(`[REQUEST_JUDGEMENT] emitted tower_verdict AFR — runId=${runId} verdict=${towerResult.judgement.verdict}`);
+
+      const judgementArtefacts = (await storage.getArtefactsByRunId(runId))
+        .filter((a: Artefact) => a.type === 'tower_judgement')
+        .sort((a: Artefact, b: Artefact) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      const judgementArtefactId = judgementArtefacts[0]?.id || null;
+
+      console.log(`[REQUEST_JUDGEMENT] complete — runId=${runId} tower_judgement_artefact_id=${judgementArtefactId}`);
+
+      return res.json({
+        ok: true,
+        tower_judgement_artefact_id: judgementArtefactId,
+        verdict: towerResult.judgement.verdict,
+        action: towerResult.judgement.action,
+        stubbed: towerResult.stubbed,
+      });
+    } catch (err: any) {
+      console.error(`[REQUEST_JUDGEMENT] unexpected error: ${err.message}`);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+  console.log('[DEBUG] Registered: POST /api/supervisor/request-judgement');
+
   const httpServer = createServer(app);
   return httpServer;
 }

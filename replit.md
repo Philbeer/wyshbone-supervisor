@@ -49,6 +49,7 @@ The frontend uses React, TypeScript, Vite, and Wouter for routing. Styling is ma
 - Proof V2 Real Pipeline: The `POST /api/proof/tower-loop-v2` endpoint now uses the real `executeAction` pipeline with a `SEARCH_PLACES_PROOF` tool that returns deterministic fake leads, bypassing Google API calls for testing purposes.
 - Tower Judgement in Normal Chat Runs: When `TOWER_LOOP_CHAT_MODE` is enabled, the `generateLeadsForChat` flow calls `judgeArtefact` immediately after `leads_list` persistence, handling Tower verdicts and errors.
 - Plan Executor Tower Integration: The plan executor now uses `judgeArtefact` for `SEARCH_PLACES` steps, aligning with the Tower client used by `simulate-chat-task` and Proof V2, ensuring `tower_judgement` artefacts and AFR events are consistently generated.
+- Manual Request Judgement: `POST /api/supervisor/request-judgement` accepts `{ runId, crid?, conversationId?, goal?, userId? }`, locates the latest `leads_list` artefact for that run, emits `tower_call_started` AFR, calls `judgeArtefact`, persists `tower_judgement` artefact, emits `tower_verdict` AFR, and returns `{ ok, tower_judgement_artefact_id, verdict, action, stubbed }`. Handles Tower errors by persisting error artefacts and emitting error verdict AFR events.
 
 ## External Dependencies
 
