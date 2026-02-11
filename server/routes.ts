@@ -651,7 +651,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'artefact_created', status: 'success', taskGenerated: `leads_list artefact persisted`, runType: 'plan', metadata: { artefactId: leadsListArtefact.id, artefactType: 'leads_list' } });
       await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'tower_call_started', status: 'pending', taskGenerated: `Calling Tower for ${leadsListArtefact.id}`, runType: 'plan', metadata: { artefactId: leadsListArtefact.id } });
 
-      const towerResult = await judgeLocalArtefact({ artefact: leadsListArtefact, runId: chatRunId, goal, userId, conversationId, successCriteria: { target_leads: requestedCount } });
+      let towerResult;
+      try {
+        towerResult = await judgeLocalArtefact({ artefact: leadsListArtefact, runId: chatRunId, goal, userId, conversationId, successCriteria: { target_leads: requestedCount } });
+      } catch (towerErr: any) {
+        const errMsg = towerErr.message || 'Tower call threw an exception';
+        console.error(`[TOWER_LOOP_CHAT] [simulate-chat-task] Tower call failed: ${errMsg}`);
+
+        const errorJudgementArtefact = await createLocalArtefact({
+          runId: chatRunId, type: 'tower_judgement',
+          title: `Tower Judgement: error`,
+          summary: `Tower unreachable/failed: ${errMsg}`,
+          payload: { verdict: 'error', action: 'stop', reasons: [errMsg], metrics: {}, delivered: stubLeads.length, requested: requestedCount, error: errMsg },
+          userId, conversationId,
+        });
+
+        await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'tower_verdict', status: 'failed', taskGenerated: `Tower error: ${errMsg}`, runType: 'plan', metadata: { artefactId: leadsListArtefact.id, verdict: 'error', error: errMsg } });
+        await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'run_stopped', status: 'failed', taskGenerated: `Tower error — run stopped`, runType: 'plan', metadata: { verdict: 'error', error: errMsg } });
+        await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped' });
+
+        return res.json({
+          ok: true, taskId, chatRunId,
+          response: `Found ${stubLeads.length} ${businessType} prospects in ${city}, but Tower validation was unavailable. View your results in the dashboard.`,
+          tower_verdict: 'error', leads_count: stubLeads.length,
+          artefact_ids: { leads_list: leadsListArtefact.id, tower_judgement: errorJudgementArtefact.id },
+          halted: true, feature_flag: 'TOWER_LOOP_CHAT_MODE',
+        });
+      }
 
       const towerJudgementArtefact = await createLocalArtefact({
         runId: chatRunId, type: 'tower_judgement',
@@ -661,11 +687,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         userId, conversationId,
       });
 
-      await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'tower_verdict', status: 'success', taskGenerated: `Tower verdict: ${towerResult.judgement.verdict}`, runType: 'plan', metadata: { verdict: towerResult.judgement.verdict, action: towerResult.judgement.action, artefactId: leadsListArtefact.id } });
+      await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success', taskGenerated: `Tower verdict: ${towerResult.judgement.verdict}`, runType: 'plan', metadata: { verdict: towerResult.judgement.verdict, action: towerResult.judgement.action, artefactId: leadsListArtefact.id } });
 
       const isHalted = towerResult.shouldStop || towerResult.judgement.verdict === 'error' || towerResult.judgement.verdict === 'fail';
       if (isHalted) {
-        await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'run_halted', status: 'failed', taskGenerated: `Tower loop halted: ${towerResult.judgement.verdict}`, runType: 'plan', metadata: { verdict: towerResult.judgement.verdict } });
+        await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'run_stopped', status: 'failed', taskGenerated: `Tower loop stopped: ${towerResult.judgement.verdict}`, runType: 'plan', metadata: { verdict: towerResult.judgement.verdict } });
         await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped' });
       } else {
         await logEvt({ userId, runId: chatRunId, conversationId, clientRequestId, actionTaken: 'run_completed', status: 'success', taskGenerated: `Tower loop completed: ${stubLeads.length} leads`, runType: 'plan', metadata: { verdict: towerResult.judgement.verdict, leads_count: stubLeads.length } });

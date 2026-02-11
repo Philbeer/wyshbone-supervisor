@@ -831,14 +831,52 @@ class SupervisorService {
     console.log(`[TOWER_LOOP_CHAT] [tower_call_started] artefactId=${leadsListArtefact.id}`);
 
     // 9. Call Tower via judgeArtefact (persists tower_judgements row + emits tower_judgement AFR)
-    const towerResult = await judgeArtefact({
-      artefact: leadsListArtefact,
-      runId: chatRunId,
-      goal,
-      userId: task.user_id,
-      conversationId,
-      successCriteria: { target_leads: requestedCount },
-    });
+    let towerResult;
+    try {
+      towerResult = await judgeArtefact({
+        artefact: leadsListArtefact,
+        runId: chatRunId,
+        goal,
+        userId: task.user_id,
+        conversationId,
+        successCriteria: { target_leads: requestedCount },
+      });
+    } catch (towerErr: any) {
+      const errMsg = towerErr.message || 'Tower call threw an exception';
+      console.error(`[TOWER_LOOP_CHAT] Tower call failed: ${errMsg}`);
+
+      const errorJudgementArtefact = await createArtefact({
+        runId: chatRunId,
+        type: 'tower_judgement',
+        title: `Tower Judgement: error`,
+        summary: `Tower unreachable/failed: ${errMsg}`,
+        payload: { verdict: 'error', action: 'stop', reasons: [errMsg], metrics: {}, delivered: leads.length, requested: requestedCount, error: errMsg },
+        userId: task.user_id,
+        conversationId,
+      });
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'tower_verdict', status: 'failed',
+        taskGenerated: `Tower error: ${errMsg}`,
+        runType: 'plan',
+        metadata: { artefactId: leadsListArtefact.id, verdict: 'error', error: errMsg, towerJudgementArtefactId: errorJudgementArtefact.id },
+      });
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'run_stopped', status: 'failed',
+        taskGenerated: `Tower error — run stopped`,
+        runType: 'plan', metadata: { verdict: 'error', error: errMsg, leads_count: leads.length },
+      });
+
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: 'error', error: errMsg, leads_count: leads.length } });
+
+      const errorResponse = `I found ${leads.length} ${businessType!} prospects in ${city}, but Tower validation was unavailable. You can still view the results in your [dashboard](/leads).`;
+      console.log(`[TOWER_LOOP_CHAT] [complete] leads=${leads.length} verdict=error (Tower unavailable)`);
+      return { response: errorResponse, leadIds: createdLeadIds };
+    }
+
     const verdict = towerResult.judgement.verdict;
     const action = towerResult.judgement.action;
     console.log(`[TOWER_LOOP_CHAT] [tower_judgement] verdict=${verdict} action=${action} stubbed=${towerResult.stubbed}`);
@@ -867,7 +905,7 @@ class SupervisorService {
     // 11. AFR: tower_verdict
     await logAFREvent({
       userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-      actionTaken: 'tower_verdict', status: 'success',
+      actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success',
       taskGenerated: `Tower verdict: ${verdict} — action: ${action}`,
       runType: 'plan',
       metadata: {
@@ -1287,6 +1325,8 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       let artefactTypesWritten = ['leads'];
       let finalVerdict = 'PENDING';
 
+      const useTowerLoopForNormalChat = process.env.TOWER_LOOP_CHAT_MODE === 'true';
+
       try {
         const leadsListArtefact = await createArtefact({
           runId: chatRunId,
@@ -1300,46 +1340,163 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
             query: businessType,
             location: city,
             country,
+            leads: normalizedLeads,
           },
           userId: task.user_id,
           conversationId,
         });
         artefactTypesWritten.push('leads_list');
 
-        console.log(`[AGENT_LOOP] tool=SEARCH_PLACES target=${requestedCount} delivered=${deliveredCount}`);
+        console.log(`[AGENT_LOOP] tool=SEARCH_PLACES target=${requestedCount} delivered=${deliveredCount} tower_loop_chat=${useTowerLoopForNormalChat}`);
 
-        const toolArgs = { query: businessType, location: city, country, maxResults: requestedCount, target_count: requestedCount };
-        if (!getRunState(chatRunId)) {
-          initRunState(chatRunId, task.user_id, toolArgs, conversationId, clientRequestId);
-        }
-
-        const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
-          console.log(`[AGENT_LOOP] Re-running SEARCH_PLACES for chat with adjusted args`);
-          return executeAction({
-            toolName: 'SEARCH_PLACES',
-            toolArgs: args,
-            userId: task.user_id,
-            runId: chatRunId,
-            conversationId,
-            clientRequestId,
+        if (useTowerLoopForNormalChat) {
+          await logAFREvent({
+            userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+            actionTaken: 'tower_call_started', status: 'pending',
+            taskGenerated: `Calling Tower to judge leads_list artefact ${leadsListArtefact.id}`,
+            runType: 'plan',
+            metadata: { artefactId: leadsListArtefact.id, goal: agentLoopGoal },
           });
-        };
+          console.log(`[CHAT_LEADS] [tower_call_started] artefactId=${leadsListArtefact.id}`);
 
-        const leadsListPayload = (leadsListArtefact.payloadJson as Record<string, unknown>) || {};
-        const towerCriteria = { target_leads: requestedCount };
-        const reaction = await handleTowerVerdict(
-          chatRunId,
-          agentLoopGoal,
-          towerCriteria,
-          { ...leadsListPayload, delivered_count: deliveredCount, target_count: requestedCount, leads_count: deliveredCount, artefact_id: leadsListArtefact.id, artefact_type: 'leads_list' },
-          rerunTool,
-        );
+          let towerResult;
+          try {
+            towerResult = await judgeArtefact({
+              artefact: leadsListArtefact,
+              runId: chatRunId,
+              goal: agentLoopGoal,
+              userId: task.user_id,
+              conversationId,
+              successCriteria: { target_leads: requestedCount },
+            });
+          } catch (towerErr: any) {
+            const errMsg = towerErr.message || 'Tower call threw an exception';
+            console.error(`[CHAT_LEADS] Tower call failed: ${errMsg}`);
 
-        finalVerdict = reaction.verdict.verdict;
-        artefactTypesWritten.push('tower_call_started', 'tower_call_completed', 'tower_verdict', 'tower_judgement', 'run_summary');
+            const errorJudgementArtefact = await createArtefact({
+              runId: chatRunId,
+              type: 'tower_judgement',
+              title: `Tower Judgement: error`,
+              summary: `Tower unreachable/failed: ${errMsg}`,
+              payload: { verdict: 'error', action: 'stop', reasons: [errMsg], metrics: {}, delivered: deliveredCount, requested: requestedCount, error: errMsg },
+              userId: task.user_id,
+              conversationId,
+            });
+            artefactTypesWritten.push('tower_judgement');
 
-        if (reaction.action === 'stop') {
-          console.log(`[CHAT_LEADS] Agent Loop: STOP — ${reaction.verdict.rationale}`);
+            await logAFREvent({
+              userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+              actionTaken: 'tower_verdict', status: 'failed',
+              taskGenerated: `Tower error: ${errMsg}`,
+              runType: 'plan',
+              metadata: { artefactId: leadsListArtefact.id, verdict: 'error', error: errMsg, towerJudgementArtefactId: errorJudgementArtefact.id },
+            });
+
+            await logAFREvent({
+              userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+              actionTaken: 'run_stopped', status: 'failed',
+              taskGenerated: `Chat run stopped: Tower error — ${errMsg}`,
+              runType: 'plan', metadata: { leads_count: deliveredCount, error: errMsg },
+            });
+
+            finalVerdict = 'error';
+            console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=${artefactTypesWritten.length} types=[${artefactTypesWritten.join(',')}] verdict=${finalVerdict}`);
+            return { response, leadIds: createdLeads.map(l => l.id) };
+          }
+
+          const verdict = towerResult.judgement.verdict;
+          const action = towerResult.judgement.action;
+          console.log(`[CHAT_LEADS] [tower_judgement] verdict=${verdict} action=${action} stubbed=${towerResult.stubbed}`);
+
+          const towerJudgementArtefact = await createArtefact({
+            runId: chatRunId,
+            type: 'tower_judgement',
+            title: `Tower Judgement: ${verdict}`,
+            summary: `Verdict: ${verdict} | Action: ${action} | Delivered: ${deliveredCount} of ${requestedCount}`,
+            payload: {
+              verdict,
+              action,
+              reasons: towerResult.judgement.reasons,
+              metrics: towerResult.judgement.metrics,
+              delivered: deliveredCount,
+              requested: requestedCount,
+              artefact_id: leadsListArtefact.id,
+              stubbed: towerResult.stubbed,
+            },
+            userId: task.user_id,
+            conversationId,
+          });
+          artefactTypesWritten.push('tower_judgement');
+          console.log(`[CHAT_LEADS] [tower_judgement_artefact] id=${towerJudgementArtefact.id}`);
+
+          await logAFREvent({
+            userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+            actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success',
+            taskGenerated: `Tower verdict: ${verdict} — action: ${action}`,
+            runType: 'plan',
+            metadata: {
+              verdict, action,
+              artefactId: leadsListArtefact.id,
+              towerJudgementArtefactId: towerJudgementArtefact.id,
+              delivered: deliveredCount, requested: requestedCount,
+              reasons: towerResult.judgement.reasons, stubbed: towerResult.stubbed,
+            },
+          });
+
+          finalVerdict = verdict;
+
+          const isHalted = towerResult.shouldStop || verdict === 'error' || verdict === 'fail';
+          if (isHalted) {
+            await logAFREvent({
+              userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+              actionTaken: 'run_stopped', status: 'failed',
+              taskGenerated: `Chat run stopped: Tower ${verdict}`,
+              runType: 'plan', metadata: { verdict, action, leads_count: deliveredCount },
+            });
+            console.log(`[CHAT_LEADS] [run_stopped] verdict=${verdict}`);
+          } else {
+            await logAFREvent({
+              userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+              actionTaken: 'run_completed', status: 'success',
+              taskGenerated: `Chat run completed: ${deliveredCount} leads, verdict=${verdict}`,
+              runType: 'plan', metadata: { verdict, action, leads_count: deliveredCount },
+            });
+            console.log(`[CHAT_LEADS] [run_completed] verdict=${verdict} leads=${deliveredCount}`);
+          }
+        } else {
+          const toolArgs = { query: businessType, location: city, country, maxResults: requestedCount, target_count: requestedCount };
+          if (!getRunState(chatRunId)) {
+            initRunState(chatRunId, task.user_id, toolArgs, conversationId, clientRequestId);
+          }
+
+          const rerunTool = async (args: Record<string, unknown>): Promise<LoopActionResult> => {
+            console.log(`[AGENT_LOOP] Re-running SEARCH_PLACES for chat with adjusted args`);
+            return executeAction({
+              toolName: 'SEARCH_PLACES',
+              toolArgs: args,
+              userId: task.user_id,
+              runId: chatRunId,
+              conversationId,
+              clientRequestId,
+            });
+          };
+
+          const leadsListPayload = (leadsListArtefact.payloadJson as Record<string, unknown>) || {};
+          const towerCriteria = { target_leads: requestedCount };
+          const reaction = await handleTowerVerdict(
+            chatRunId,
+            agentLoopGoal,
+            towerCriteria,
+            { ...leadsListPayload, delivered_count: deliveredCount, target_count: requestedCount, leads_count: deliveredCount, artefact_id: leadsListArtefact.id, artefact_type: 'leads_list' },
+            rerunTool,
+          );
+
+          finalVerdict = reaction.verdict.verdict;
+          artefactTypesWritten.push('tower_call_started', 'tower_call_completed', 'tower_verdict', 'tower_judgement', 'run_summary');
+
+          if (reaction.action === 'stop') {
+            console.log(`[CHAT_LEADS] Agent Loop: STOP — ${reaction.verdict.rationale}`);
+          }
         }
       } catch (agentLoopErr: any) {
         console.error(`[CHAT_LEADS] Agent loop failed (continuing): ${agentLoopErr.message}`);
