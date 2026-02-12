@@ -10,6 +10,7 @@ import { createArtefact } from './supervisor/artefacts';
 import { initRunState, handleTowerVerdict, getRunState } from './supervisor/agent-loop';
 import { executeAction, type ActionResult as LoopActionResult } from './supervisor/action-executor';
 import { generateJobId } from './supervisor/jobs';
+import { isStepArtefactsEnabled, redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-executor';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
 
 interface UserContext {
@@ -1015,6 +1016,8 @@ class SupervisorService {
     let leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string; source: string }> = [];
     let usedStub = false;
     const createdLeadIds: string[] = [];
+    const towerLoopStepStartedAt = Date.now();
+    let towerLoopStepError: string | undefined;
 
     try {
       const businesses = await this.searchGooglePlaces(businessType, city, country, requestedCount);
@@ -1037,6 +1040,7 @@ class SupervisorService {
       }
     } catch (placesErr: any) {
       console.warn(`[TOWER_LOOP_CHAT] Google Places failed (${placesErr.message}) — falling back to stub leads`);
+      towerLoopStepError = placesErr.message;
       leads = this.generateStubLeads(businessType, city, country);
       usedStub = true;
     }
@@ -1074,6 +1078,48 @@ class SupervisorService {
       metadata: { step: 1, tool: 'SEARCH_PLACES', leads_count: leads.length, used_stub: usedStub },
     });
     console.log(`[TOWER_LOOP_CHAT] [step_completed] leads=${leads.length} stub=${usedStub}`);
+
+    // 5b. step_result artefact (tower loop chat)
+    if (isStepArtefactsEnabled()) {
+      const towerLoopStepFinishedAt = Date.now();
+      const towerLoopStepStatus = towerLoopStepError ? 'fail' : 'success';
+      const towerLoopStepSummary = towerLoopStepError
+        ? `fail – Google Places error: ${towerLoopStepError} (stub fallback used, ${leads.length} leads)`
+        : `success – ${leads.length} leads found for "${businessType}" in ${city}`;
+      const safeLeads = leads.map(l => ({ name: l.name, address: l.address, placeId: l.placeId, source: l.source }));
+      try {
+        await createArtefact({
+          runId: chatRunId,
+          type: 'step_result',
+          title: `Step result: SEARCH_PLACES – ${businessType} in ${city}`,
+          summary: towerLoopStepSummary,
+          payload: {
+            run_id: chatRunId,
+            client_request_id: clientRequestId,
+            goal,
+            plan_version: 1,
+            step_id: 'chat_tower_loop_search_places',
+            step_title: `SEARCH_PLACES – ${businessType} in ${city}`,
+            step_type: 'SEARCH_PLACES',
+            step_index: 0,
+            step_status: towerLoopStepStatus,
+            inputs_summary: compactInputs({ query: businessType, location: city, country, maxResults: requestedCount }),
+            outputs_summary: { leads_count: leads.length, used_stub: usedStub, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}) },
+            ...safeOutputsRaw({ leads: safeLeads } as Record<string, unknown>),
+            timings: {
+              started_at: new Date(towerLoopStepStartedAt).toISOString(),
+              finished_at: new Date(towerLoopStepFinishedAt).toISOString(),
+              duration_ms: towerLoopStepFinishedAt - towerLoopStepStartedAt,
+            },
+          },
+          userId: task.user_id,
+          conversationId,
+        });
+        console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_tower_loop_search_places status=${towerLoopStepStatus}`);
+      } catch (stepArtErr: any) {
+        console.warn(`[STEP_ARTEFACT] Failed to create step_result for tower_loop_chat (non-fatal): ${stepArtErr.message}`);
+      }
+    }
 
     // 6. Create leads_list artefact (persisted to DB)
     const leadsListPayload = {
@@ -1399,6 +1445,41 @@ class SupervisorService {
 
       console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=${missingPostResult.ok ? 1 : 0} types=[leads] verdict=SKIPPED reason=missing_business_type`);
 
+      if (isStepArtefactsEnabled()) {
+        const missingFinishedAt = Date.now();
+        try {
+          await createArtefact({
+            runId: chatRunId,
+            type: 'step_result',
+            title: `Step result: SEARCH_PLACES – skipped (no business type)`,
+            summary: `fail – no business type specified, SEARCH_PLACES skipped`,
+            payload: {
+              run_id: chatRunId,
+              client_request_id: clientRequestId,
+              goal: 'Find leads (business type unknown)',
+              plan_version: 1,
+              step_id: 'chat_generate_leads_search_places',
+              step_title: 'SEARCH_PLACES – skipped (no business type)',
+              step_type: 'SEARCH_PLACES',
+              step_index: 0,
+              step_status: 'fail',
+              inputs_summary: compactInputs({ query: '', location: location || '', country: '' }),
+              outputs_summary: { leads_count: 0, reason: 'missing_business_type' },
+              timings: {
+                started_at: new Date(missingFinishedAt).toISOString(),
+                finished_at: new Date(missingFinishedAt).toISOString(),
+                duration_ms: 0,
+              },
+            },
+            userId: task.user_id,
+            conversationId,
+          });
+          console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_generate_leads_search_places status=fail reason=missing_business_type`);
+        } catch (stepArtErr: any) {
+          console.warn(`[STEP_ARTEFACT] Failed to create step_result for missing_business_type (non-fatal): ${stepArtErr.message}`);
+        }
+      }
+
       return {
         response: "I'd be happy to find leads for you! Could you tell me what type of businesses you're looking for?",
         leadIds: []
@@ -1418,6 +1499,9 @@ class SupervisorService {
       conversationId
     ).catch(() => {});
 
+    const genLeadsStepStartedAt = Date.now();
+    const genLeadsGoal = `Find ${requestedCount} ${businessType} in ${city}`;
+
     try {
       logToolCallStarted(
         task.user_id, chatRunId, 'SEARCH_PLACES',
@@ -1434,6 +1518,42 @@ class SupervisorService {
           { summary: `No results for "${businessType}" in ${city}`, places_count: 0 },
           conversationId
         ).catch(() => {});
+
+        // step_result: zero results
+        if (isStepArtefactsEnabled()) {
+          const zeroStepFinished = Date.now();
+          try {
+            await createArtefact({
+              runId: chatRunId,
+              type: 'step_result',
+              title: `Step result: SEARCH_PLACES – 0 results for ${businessType} in ${city}`,
+              summary: `fail – SEARCH_PLACES returned 0 results for "${businessType}" in ${city}`,
+              payload: {
+                run_id: chatRunId,
+                client_request_id: clientRequestId,
+                goal: genLeadsGoal,
+                plan_version: 1,
+                step_id: 'chat_generate_leads_search_places',
+                step_title: `SEARCH_PLACES – ${businessType} in ${city}`,
+                step_type: 'SEARCH_PLACES',
+                step_index: 0,
+                step_status: 'fail',
+                inputs_summary: compactInputs({ query: businessType, location: city, country, maxResults: requestedCount }),
+                outputs_summary: { leads_count: 0, reason: 'zero_results' },
+                timings: {
+                  started_at: new Date(genLeadsStepStartedAt).toISOString(),
+                  finished_at: new Date(zeroStepFinished).toISOString(),
+                  duration_ms: zeroStepFinished - genLeadsStepStartedAt,
+                },
+              },
+              userId: task.user_id,
+              conversationId,
+            });
+            console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_generate_leads_search_places status=fail reason=zero_results`);
+          } catch (stepArtErr: any) {
+            console.warn(`[STEP_ARTEFACT] Failed to create step_result for zero_results (non-fatal): ${stepArtErr.message}`);
+          }
+        }
 
         const artefactTitle = `0 ${businessType} leads in ${city}`;
         const artefactSummary = `SEARCH_PLACES returned 0 results for "${businessType}" in ${city}, ${country}`;
@@ -1531,6 +1651,43 @@ class SupervisorService {
         { summary: `Found ${businesses.length} places for "${businessType}" in ${city}`, places_count: businesses.length },
         conversationId
       ).catch(() => {});
+
+      // step_result: success
+      if (isStepArtefactsEnabled()) {
+        const successStepFinished = Date.now();
+        try {
+          await createArtefact({
+            runId: chatRunId,
+            type: 'step_result',
+            title: `Step result: SEARCH_PLACES – ${businesses.length} results for ${businessType} in ${city}`,
+            summary: `success – found ${businesses.length} places for "${businessType}" in ${city}`,
+            payload: {
+              run_id: chatRunId,
+              client_request_id: clientRequestId,
+              goal: genLeadsGoal,
+              plan_version: 1,
+              step_id: 'chat_generate_leads_search_places',
+              step_title: `SEARCH_PLACES – ${businessType} in ${city}`,
+              step_type: 'SEARCH_PLACES',
+              step_index: 0,
+              step_status: 'success',
+              inputs_summary: compactInputs({ query: businessType, location: city, country, maxResults: requestedCount }),
+              outputs_summary: { places_count: businesses.length, leads_to_create: Math.min(businesses.length, 3) },
+              ...safeOutputsRaw({ places: businesses.map((b: any) => ({ name: b.displayName?.text, address: b.formattedAddress, placeId: b.id })) } as Record<string, unknown>),
+              timings: {
+                started_at: new Date(genLeadsStepStartedAt).toISOString(),
+                finished_at: new Date(successStepFinished).toISOString(),
+                duration_ms: successStepFinished - genLeadsStepStartedAt,
+              },
+            },
+            userId: task.user_id,
+            conversationId,
+          });
+          console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_generate_leads_search_places status=success places=${businesses.length}`);
+        } catch (stepArtErr: any) {
+          console.warn(`[STEP_ARTEFACT] Failed to create step_result for success (non-fatal): ${stepArtErr.message}`);
+        }
+      }
 
       // Generate leads for top 3 businesses
       const leadsToCreate = businesses.slice(0, 3);
@@ -1872,6 +2029,42 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         conversationId
       ).catch(() => {});
 
+      // step_result: outer catch (exception)
+      if (isStepArtefactsEnabled()) {
+        const errStepFinished = Date.now();
+        try {
+          await createArtefact({
+            runId: chatRunId,
+            type: 'step_result',
+            title: `Step result: SEARCH_PLACES – error for ${businessType} in ${city}`,
+            summary: `fail – ${errMsg}`,
+            payload: {
+              run_id: chatRunId,
+              client_request_id: clientRequestId,
+              goal: genLeadsGoal,
+              plan_version: 1,
+              step_id: 'chat_generate_leads_search_places',
+              step_title: `SEARCH_PLACES – ${businessType} in ${city}`,
+              step_type: 'SEARCH_PLACES',
+              step_index: 0,
+              step_status: 'fail',
+              inputs_summary: compactInputs({ query: businessType, location: city, country, maxResults: requestedCount }),
+              outputs_summary: { leads_count: 0, error: errMsg },
+              timings: {
+                started_at: new Date(genLeadsStepStartedAt).toISOString(),
+                finished_at: new Date(errStepFinished).toISOString(),
+                duration_ms: errStepFinished - genLeadsStepStartedAt,
+              },
+            },
+            userId: task.user_id,
+            conversationId,
+          });
+          console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_generate_leads_search_places status=fail reason=exception`);
+        } catch (stepArtErr: any) {
+          console.warn(`[STEP_ARTEFACT] Failed to create step_result for exception (non-fatal): ${stepArtErr.message}`);
+        }
+      }
+
       const errTitle = `0 ${businessType} leads in ${city} (error)`;
       const errPostResult = await this.postArtefactToUI({
         runId: chatRunId,
@@ -1966,6 +2159,7 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
     let artefactSummary = '';
     const provider = createResearchProvider();
     const providerName = provider.name;
+    const deepResearchStepStartedAt = Date.now();
 
     try {
       logToolCallStarted(
@@ -1993,6 +2187,53 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         researchError!,
         conversationId
       ).catch(() => {});
+    }
+
+    // step_result artefact for deep research
+    if (isStepArtefactsEnabled()) {
+      const drStepFinished = Date.now();
+      const drStepStatus = researchError ? 'fail' : 'success';
+      const drStepSummary = researchError
+        ? `fail – ${researchError}`
+        : `success – deep research completed for "${topic}" (${reportMarkdown.length} chars, ${sources.length} sources)`;
+      try {
+        await createArtefact({
+          runId: chatRunId,
+          type: 'step_result',
+          title: `Step result: DEEP_RESEARCH – ${topic.substring(0, 60)}`,
+          summary: drStepSummary,
+          payload: {
+            run_id: chatRunId,
+            client_request_id: clientRequestId,
+            goal: `Deep research: ${topic}`,
+            plan_version: 1,
+            step_id: 'chat_deep_research',
+            step_title: `DEEP_RESEARCH – ${topic.substring(0, 80)}`,
+            step_type: 'DEEP_RESEARCH',
+            step_index: 0,
+            step_status: drStepStatus,
+            inputs_summary: compactInputs({ topic, prompt, provider: providerName }),
+            outputs_summary: researchError
+              ? { error: researchError }
+              : { report_chars: reportMarkdown.length, sources_count: sources.length, provider: providerName },
+            ...safeOutputsRaw(
+              researchError
+                ? { error: researchError } as Record<string, unknown>
+                : { report_markdown: reportMarkdown, sources } as unknown as Record<string, unknown>
+            ),
+            timings: {
+              started_at: new Date(deepResearchStepStartedAt).toISOString(),
+              finished_at: new Date(drStepFinished).toISOString(),
+              duration_ms: drStepFinished - deepResearchStepStartedAt,
+            },
+          },
+          userId: task.user_id,
+          conversationId,
+        });
+        console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_deep_research status=${drStepStatus}`);
+      } catch (stepArtErr: any) {
+        console.warn(`[STEP_ARTEFACT] Failed to create step_result for deep_research (non-fatal): ${stepArtErr.message}`);
+      }
     }
 
     const status = researchError ? 'failed' : 'completed';
