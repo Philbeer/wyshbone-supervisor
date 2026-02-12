@@ -85,13 +85,18 @@ class SupervisorService {
         return;
       }
 
-      // Process signals, chat tasks, goal monitoring, and tower judgement backfill in parallel
-      await Promise.all([
+      const towerDuringRun = process.env.ENABLE_TOWER_DURING_RUN === 'true';
+      const tasks: Promise<void>[] = [
         this.processNewSignals(),
         this.processSupervisorTasks(),
         this.monitorGoals(),
-        this.backfillTowerJudgements(),
-      ]);
+      ];
+      if (!towerDuringRun) {
+        tasks.push(this.backfillTowerJudgements());
+      } else {
+        console.log('[SUPERVISOR] ENABLE_TOWER_DURING_RUN=true — backfill poller disabled (Tower judgement is synchronous)');
+      }
+      await Promise.all(tasks);
     } catch (error) {
       console.error('Error in supervisor poll:', error);
     }

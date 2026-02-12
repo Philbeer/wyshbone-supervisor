@@ -1,10 +1,16 @@
 /**
  * Plan Executor - Core execution loop for Supervisor
- * 
- * Iterates steps sequentially, logs AFR events, and calls action executor.
- * Per-step Tower judgement: after each step completes, calls Tower to judge
- * the step_result artefact. Reacts inline: CONTINUE / RETRY / CHANGE_PLAN / STOP.
- * Bounded retries: max_retries_per_step (default 2) and max_plan_versions (default 2).
+ *
+ * When ENABLE_TOWER_DURING_RUN=true:
+ *   Synchronous, sequence-true Tower judgement after every step.
+ *   No backfill, no polling, no "after run" lookup.
+ *   Strict sequence per step: STEP_RESULT_WRITTEN -> TOWER_CALLED -> TOWER_JUDGEMENT_WRITTEN -> REACTION_TAKEN
+ *   Tower failures are fatal — run is marked failed with an error artefact (no pretend verdicts).
+ *
+ * When ENABLE_TOWER_DURING_RUN=false (default):
+ *   Legacy behaviour — judgement is skipped inline; backfill poller handles it.
+ *
+ * Bounded retries: MAX_RETRIES_PER_STEP (2) and MAX_PLAN_VERSIONS (2).
  */
 
 import type { Plan } from './types/plan';
@@ -38,6 +44,14 @@ import { generateJobId } from './jobs';
 
 const MAX_RETRIES_PER_STEP = 2;
 const MAX_PLAN_VERSIONS = 2;
+
+export function isTowerDuringRunEnabled(): boolean {
+  return process.env.ENABLE_TOWER_DURING_RUN === 'true';
+}
+
+function ts(): string {
+  return new Date().toISOString();
+}
 
 function compactInputs(args: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -255,7 +269,7 @@ interface StepJudgementResult {
   stubbed: boolean;
 }
 
-async function judgeStepResult(
+async function judgeStepResultSync(
   stepArtefact: Awaited<ReturnType<typeof createArtefact>>,
   runId: string,
   goal: string,
@@ -266,6 +280,10 @@ async function judgeStepResult(
   stepLabel: string,
   successCriteria?: Record<string, unknown>,
 ): Promise<StepJudgementResult> {
+  const towerDuringRun = isTowerDuringRunEnabled();
+
+  console.log(`[TOWER_SEQ] ${ts()} TOWER_CALLED runId=${runId} step=${stepIndex + 1} artefactId=${stepArtefact.id} type=${stepArtefact.type}`);
+
   await logAFREvent({
     userId, runId, conversationId, clientRequestId,
     actionTaken: 'tower_call_started', status: 'pending',
@@ -273,8 +291,6 @@ async function judgeStepResult(
     runType: 'plan',
     metadata: { artefactId: stepArtefact.id, goal, step_index: stepIndex, step_label: stepLabel, artefact_type: stepArtefact.type },
   }).catch(() => {});
-
-  console.log(`[PLAN_EXECUTOR] [tower_call_started] artefactId=${stepArtefact.id} step=${stepIndex + 1} type=${stepArtefact.type}`);
 
   let towerResult;
   try {
@@ -288,7 +304,36 @@ async function judgeStepResult(
     });
   } catch (towerErr: any) {
     const errMsg = towerErr.message || 'Tower call threw an exception';
-    console.error(`[PLAN_EXECUTOR] Tower call failed for step ${stepIndex + 1}: ${errMsg}`);
+    console.error(`[TOWER_SEQ] ${ts()} TOWER_CALL_FAILED runId=${runId} step=${stepIndex + 1} error=${errMsg}`);
+
+    if (towerDuringRun) {
+      const errorArtefact = await createArtefact({
+        runId,
+        type: 'tower_judgement',
+        title: `Tower Judgement: error (step ${stepIndex + 1})`,
+        summary: `Tower unreachable/failed: ${errMsg}`,
+        payload: {
+          verdict: 'error', action: 'stop',
+          reasons: [errMsg], metrics: {},
+          step_index: stepIndex, step_label: stepLabel,
+          judged_artefact_id: stepArtefact.id,
+          error: errMsg,
+        },
+        userId, conversationId,
+      });
+
+      console.log(`[TOWER_SEQ] ${ts()} TOWER_JUDGEMENT_WRITTEN runId=${runId} step=${stepIndex + 1} verdict=error artefactId=${errorArtefact.id}`);
+
+      await logAFREvent({
+        userId, runId, conversationId, clientRequestId,
+        actionTaken: 'tower_verdict', status: 'failed',
+        taskGenerated: `Tower error at step ${stepIndex + 1}: ${errMsg}`,
+        runType: 'plan',
+        metadata: { artefactId: stepArtefact.id, verdict: 'error', error: errMsg, step_index: stepIndex },
+      }).catch(() => {});
+
+      return { reaction: 'stop', verdict: 'error', action: 'stop', reasons: [errMsg], shouldStop: true, stubbed: false };
+    }
 
     await createArtefact({
       runId,
@@ -319,9 +364,8 @@ async function judgeStepResult(
   const verdict = towerResult.judgement.verdict;
   const action = towerResult.judgement.action;
   const reasons = towerResult.judgement.reasons || [];
-  console.log(`[PLAN_EXECUTOR] [tower_judgement] step=${stepIndex + 1} verdict=${verdict} action=${action} stubbed=${towerResult.stubbed}`);
 
-  await createArtefact({
+  const judgementArtefact = await createArtefact({
     runId,
     type: 'tower_judgement',
     title: `Tower Judgement: ${verdict} (step ${stepIndex + 1})`,
@@ -338,6 +382,8 @@ async function judgeStepResult(
     userId, conversationId,
   });
 
+  console.log(`[TOWER_SEQ] ${ts()} TOWER_JUDGEMENT_WRITTEN runId=${runId} step=${stepIndex + 1} verdict=${verdict} action=${action} artefactId=${judgementArtefact.id} stubbed=${towerResult.stubbed}`);
+
   await logAFREvent({
     userId, runId, conversationId, clientRequestId,
     actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success',
@@ -346,6 +392,7 @@ async function judgeStepResult(
     metadata: {
       verdict, action, reasons,
       artefactId: stepArtefact.id,
+      judgementArtefactId: judgementArtefact.id,
       step_index: stepIndex, step_label: stepLabel,
       stubbed: towerResult.stubbed,
     },
@@ -363,7 +410,7 @@ async function judgeStepResult(
     verdict,
     action,
     reasons,
-    artefactId: stepArtefact.id,
+    artefactId: judgementArtefact.id,
     shouldStop: towerResult.shouldStop,
     stubbed: towerResult.stubbed,
   };
@@ -372,14 +419,16 @@ async function judgeStepResult(
 export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   const { planId, userId, conversationId, clientRequestId, goal, steps, skipJudgement, toolMetadata } = plan;
   const runId = plan.jobId || generateJobId();
-  
+  const towerDuringRun = isTowerDuringRunEnabled();
+
   console.log(`[ID_MAP] jobId=${runId} planId=${planId} crid=${clientRequestId || 'none'} entry=executePlan`);
   console.log(`[PLAN_EXECUTOR] Starting execution of plan ${planId} (runId=${runId})`);
   console.log(`[PLAN_EXECUTOR] Goal: ${goal}`);
   console.log(`[PLAN_EXECUTOR] Steps: ${steps.length}`);
+  console.log(`[PLAN_EXECUTOR] ENABLE_TOWER_DURING_RUN: ${towerDuringRun}`);
   if (clientRequestId) console.log(`[PLAN_EXECUTOR] clientRequestId: ${clientRequestId}`);
   if (skipJudgement) console.log(`[PLAN_EXECUTOR] Tower judgement: SKIPPED (skipJudgement=true)`);
-  
+
   await logPlanStarted(userId, runId, goal, conversationId, clientRequestId);
   await safeUpdatePlanStatus(planId, 'executing');
 
@@ -389,7 +438,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     `Supervisor executing ${steps.length}-step plan via ${primaryTool}`,
     conversationId, clientRequestId,
   ).catch(() => {});
-  
+
   let stepsCompleted = 0;
   let isLeadRun = false;
   let lastLeadsListArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
@@ -401,7 +450,9 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   const successCriteria: TowerSuccessCriteria = { ...LEADGEN_SUCCESS_DEFAULTS };
   const runSummary = createRunSummary();
   let currentPlanVersion = 1;
-  
+
+  const shouldJudge = !skipJudgement;
+
   try {
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
@@ -492,7 +543,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
 
         updateRunSummary(runSummary, { success: true, leadsFound, costUnits: 0.25, validLeads: leadsFound });
 
-        console.log(`[PLAN_EXECUTOR] Step ${i + 1} execution succeeded: ${result.summary} — awaiting Tower verdict`);
+        console.log(`[PLAN_EXECUTOR] Step ${i + 1} execution succeeded: ${result.summary}`);
 
         const stepInputs = compactInputs(currentStepArgs);
         const stepOutputs = result.data ? compactOutputs(result.data) : {};
@@ -515,6 +566,8 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             userId, conversationId,
           });
 
+          console.log(`[TOWER_SEQ] ${ts()} STEP_RESULT_WRITTEN runId=${runId} step=${i + 1} artefactId=${stepArtefact.id} type=step_result`);
+
           await logAFREvent({
             userId, runId, conversationId, clientRequestId,
             actionTaken: 'artefact_created', status: 'success',
@@ -523,7 +576,17 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             metadata: { artefactId: stepArtefact.id, artefact_type: 'step_result', step_index: i },
           }).catch(() => {});
         } catch (artefactErr: any) {
-          console.error(`[PLAN_EXECUTOR] Step artefact creation failed (continuing): ${artefactErr.message}`);
+          console.error(`[PLAN_EXECUTOR] Step artefact creation failed: ${artefactErr.message}`);
+          if (towerDuringRun) {
+            const errMsg = `step_result artefact write failed: ${artefactErr.message}`;
+            await createArtefact({
+              runId, type: 'error', title: `Error: artefact write failed (step ${i + 1})`,
+              summary: errMsg, payload: { step_index: i, error: errMsg }, userId, conversationId,
+            }).catch(() => {});
+            failProgress(planId, errMsg);
+            await safeUpdatePlanStatus(planId, 'failed');
+            return { success: false, stepsCompleted, totalSteps: steps.length, error: errMsg };
+          }
         }
 
         let artefactToJudge = stepArtefact;
@@ -548,6 +611,8 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               userId, conversationId,
             });
 
+            console.log(`[TOWER_SEQ] ${ts()} STEP_RESULT_WRITTEN runId=${runId} step=${i + 1} artefactId=${leadsListArtefact.id} type=leads_list`);
+
             await logAFREvent({
               userId, runId, conversationId, clientRequestId,
               actionTaken: 'artefact_created', status: 'success',
@@ -561,12 +626,22 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             artefactToJudge = leadsListArtefact;
           } catch (artefactErr: any) {
             console.error(`[PLAN_EXECUTOR] leads_list artefact creation failed: ${artefactErr.message}`);
+            if (towerDuringRun) {
+              const errMsg = `leads_list artefact write failed: ${artefactErr.message}`;
+              await createArtefact({
+                runId, type: 'error', title: `Error: leads_list write failed (step ${i + 1})`,
+                summary: errMsg, payload: { step_index: i, error: errMsg }, userId, conversationId,
+              }).catch(() => {});
+              failProgress(planId, errMsg);
+              await safeUpdatePlanStatus(planId, 'failed');
+              return { success: false, stepsCompleted, totalSteps: steps.length, error: errMsg };
+            }
           }
         }
 
         accumulateLeads({ toolName: stepType, toolArgs: currentStepArgs }, result.data, leadsMap, leadsFilters);
 
-        if (skipJudgement || !artefactToJudge) {
+        if (!shouldJudge || !artefactToJudge) {
           await logStepCompleted(userId, runId, step.id, step.label, result.summary, conversationId, clientRequestId);
           updateStepStatus(planId, step.id, 'completed', result.summary);
           stepsCompleted++;
@@ -579,12 +654,14 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           ? { ...successCriteria, target_leads: Number(currentStepArgs.target_count || currentStepArgs.maxResults) || 20 }
           : undefined;
 
-        const judgement = await judgeStepResult(
+        const judgement = await judgeStepResultSync(
           artefactToJudge, runId, goal, userId, conversationId, clientRequestId,
           i, step.label, towerSuccessCriteria,
         );
 
         if (isSearchPlaces) towerCalledForLeadRun = true;
+
+        console.log(`[TOWER_SEQ] ${ts()} REACTION_TAKEN runId=${runId} step=${i + 1} reaction=${judgement.reaction} verdict=${judgement.verdict}`);
 
         switch (judgement.reaction) {
           case 'continue': {
@@ -617,6 +694,17 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               }).catch(() => {});
 
               const haltReason = `Max retries (${MAX_RETRIES_PER_STEP}) exceeded at step ${i + 1}: ${step.label}`;
+
+              if (towerDuringRun) {
+                await createArtefact({
+                  runId, type: 'run_stopped',
+                  title: `Run stopped: max retries exceeded`,
+                  summary: haltReason,
+                  payload: { reason: haltReason, step_index: i, retry_count: stepRetryCount, plan_version: currentPlanVersion },
+                  userId, conversationId,
+                }).catch((err: any) => console.error(`[PLAN_EXECUTOR] run_stopped artefact failed: ${err.message}`));
+              }
+
               failProgress(planId, `Halted: ${haltReason}`);
               await safeUpdatePlanStatus(planId, 'halted');
               return { success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason };
@@ -648,6 +736,17 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               }).catch(() => {});
 
               const haltReason = `Max plan versions (${MAX_PLAN_VERSIONS}) exceeded at step ${i + 1}: ${step.label}`;
+
+              if (towerDuringRun) {
+                await createArtefact({
+                  runId, type: 'run_stopped',
+                  title: `Run stopped: max plan versions exceeded`,
+                  summary: haltReason,
+                  payload: { reason: haltReason, step_index: i, plan_version: currentPlanVersion },
+                  userId, conversationId,
+                }).catch((err: any) => console.error(`[PLAN_EXECUTOR] run_stopped artefact failed: ${err.message}`));
+              }
+
               failProgress(planId, `Halted: ${haltReason}`);
               await safeUpdatePlanStatus(planId, 'halted');
               return { success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason };
@@ -705,6 +804,24 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               metadata: { reaction: 'stop', step_index: i, verdict: judgement.verdict, reasons: judgement.reasons },
             }).catch(() => {});
 
+            if (towerDuringRun) {
+              await createArtefact({
+                runId, type: 'run_stopped',
+                title: `Run stopped: Tower STOP verdict`,
+                summary: haltReason,
+                payload: {
+                  reason: haltReason, step_index: i,
+                  verdict: judgement.verdict, reasons: judgement.reasons,
+                  plan_version: currentPlanVersion,
+                },
+                userId, conversationId,
+              }).catch((err: any) => console.error(`[PLAN_EXECUTOR] run_stopped artefact failed: ${err.message}`));
+
+              failProgress(planId, `Halted: ${haltReason}`);
+              await safeUpdatePlanStatus(planId, towerDuringRun ? 'failed' : 'halted');
+              return { success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason };
+            }
+
             failProgress(planId, `Halted: ${haltReason}`);
             await safeUpdatePlanStatus(planId, 'halted');
             return { success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason };
@@ -725,7 +842,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         }
       }
     }
-    
+
     if (leadsMap.size > 0) {
       try {
         const leadsList = buildLeadsList(leadsMap, leadsFilters);
@@ -750,7 +867,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       }
     }
 
-    if (isLeadRun && !towerCalledForLeadRun && lastLeadsListArtefact) {
+    if (!towerDuringRun && isLeadRun && !towerCalledForLeadRun && lastLeadsListArtefact) {
       console.warn(`[PLAN_EXECUTOR] SAFETY NET: Lead run detected but Tower was never called. Invoking Tower now.`);
 
       const safetyPayload: Record<string, unknown> = lastLeadsListArtefact.payloadJson as Record<string, unknown> || {};
@@ -874,26 +991,26 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     } catch (artefactError: any) {
       console.error(`[PLAN_EXECUTOR] Failed to create artefact for plan ${planId}:`, artefactError.message);
     }
-    
+
     console.log(`[PLAN_EXECUTOR] ${summary}`);
-    
+
     return { success: true, stepsCompleted, totalSteps: steps.length };
-    
+
   } catch (error: any) {
     const errorMessage = error.message || 'Plan execution failed unexpectedly';
     console.error(`[PLAN_EXECUTOR] Plan execution error:`, errorMessage);
-    
+
     await logPlanFailed(userId, runId, errorMessage, conversationId, clientRequestId);
     failProgress(planId, errorMessage);
     await safeUpdatePlanStatus(planId, 'failed');
-    
+
     return { success: false, stepsCompleted, totalSteps: steps.length, error: errorMessage };
   }
 }
 
 export function startPlanExecutionAsync(plan: Plan): void {
   console.log(`[PLAN_EXECUTOR] Starting async execution for plan ${plan.planId}`);
-  
+
   executePlan(plan).then(result => {
     if (result.haltedByJudgement) {
       console.log(`[PLAN_EXECUTOR] Plan ${plan.planId} halted by Tower judgement: ${result.haltReason}`);
