@@ -10,7 +10,7 @@ import { createArtefact } from './supervisor/artefacts';
 import { initRunState, handleTowerVerdict, getRunState } from './supervisor/agent-loop';
 import { executeAction, type ActionResult as LoopActionResult } from './supervisor/action-executor';
 import { generateJobId } from './supervisor/jobs';
-import { isStepArtefactsEnabled, redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-executor';
+import { redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-executor';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
 
 interface UserContext {
@@ -1079,16 +1079,17 @@ class SupervisorService {
     });
     console.log(`[TOWER_LOOP_CHAT] [step_completed] leads=${leads.length} stub=${usedStub}`);
 
-    // 5b. step_result artefact (tower loop chat)
-    if (isStepArtefactsEnabled()) {
+    // 5b. step_result artefact (tower loop chat) — unconditional
+    {
       const towerLoopStepFinishedAt = Date.now();
       const towerLoopStepStatus = towerLoopStepError ? 'fail' : 'success';
       const towerLoopStepSummary = towerLoopStepError
         ? `fail – Google Places error: ${towerLoopStepError} (stub fallback used, ${leads.length} leads)`
         : `success – ${leads.length} leads found for "${businessType}" in ${city}`;
       const safeLeads = leads.map(l => ({ name: l.name, address: l.address, placeId: l.placeId, source: l.source }));
+      let towerLoopStepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
       try {
-        await createArtefact({
+        towerLoopStepArtefact = await createArtefact({
           runId: chatRunId,
           type: 'step_result',
           title: `Step result: SEARCH_PLACES – ${businessType} in ${city}`,
@@ -1118,6 +1119,32 @@ class SupervisorService {
         console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_tower_loop_search_places status=${towerLoopStepStatus}`);
       } catch (stepArtErr: any) {
         console.warn(`[STEP_ARTEFACT] Failed to create step_result for tower_loop_chat (non-fatal): ${stepArtErr.message}`);
+      }
+
+      // Step-level judgement (observation only)
+      if (towerLoopStepArtefact) {
+        try {
+          const obsResult = await judgeArtefact({
+            artefact: towerLoopStepArtefact,
+            runId: chatRunId, goal, userId: task.user_id, conversationId,
+          });
+          await createArtefact({
+            runId: chatRunId,
+            type: 'tower_judgement',
+            title: `Tower Judgement: ${obsResult.judgement.verdict} (tower loop chat)`,
+            summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | SEARCH_PLACES`,
+            payload: {
+              verdict: obsResult.judgement.verdict, action: obsResult.judgement.action,
+              reasons: obsResult.judgement.reasons, metrics: obsResult.judgement.metrics,
+              step_index: 0, step_label: `SEARCH_PLACES – ${businessType} in ${city}`,
+              judged_artefact_id: towerLoopStepArtefact.id, stubbed: obsResult.stubbed, observation_only: true,
+            },
+            userId: task.user_id, conversationId,
+          });
+          console.log(`[STEP_OBSERVATION] step=tower_loop_chat verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+        } catch (obsErr: any) {
+          console.warn(`[STEP_OBSERVATION] Tower observation failed for tower loop chat (continuing): ${obsErr.message}`);
+        }
       }
     }
 
@@ -1445,10 +1472,12 @@ class SupervisorService {
 
       console.log(`[ARTEFACT_COUNT] runId=${chatRunId} artefacts_written=${missingPostResult.ok ? 1 : 0} types=[leads] verdict=SKIPPED reason=missing_business_type`);
 
-      if (isStepArtefactsEnabled()) {
+      // step_result: missing business type — unconditional
+      {
         const missingFinishedAt = Date.now();
+        let missingStepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
         try {
-          await createArtefact({
+          missingStepArtefact = await createArtefact({
             runId: chatRunId,
             type: 'step_result',
             title: `Step result: SEARCH_PLACES – skipped (no business type)`,
@@ -1477,6 +1506,32 @@ class SupervisorService {
           console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_generate_leads_search_places status=fail reason=missing_business_type`);
         } catch (stepArtErr: any) {
           console.warn(`[STEP_ARTEFACT] Failed to create step_result for missing_business_type (non-fatal): ${stepArtErr.message}`);
+        }
+
+        // Step-level judgement (observation only)
+        if (missingStepArtefact) {
+          try {
+            const obsResult = await judgeArtefact({
+              artefact: missingStepArtefact,
+              runId: chatRunId, goal: 'Find leads (business type unknown)', userId: task.user_id, conversationId,
+            });
+            await createArtefact({
+              runId: chatRunId,
+              type: 'tower_judgement',
+              title: `Tower Judgement: ${obsResult.judgement.verdict} (missing business type)`,
+              summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | SEARCH_PLACES`,
+              payload: {
+                verdict: obsResult.judgement.verdict, action: obsResult.judgement.action,
+                reasons: obsResult.judgement.reasons, metrics: obsResult.judgement.metrics,
+                step_index: 0, step_label: 'SEARCH_PLACES – skipped (no business type)',
+                judged_artefact_id: missingStepArtefact.id, stubbed: obsResult.stubbed, observation_only: true,
+              },
+              userId: task.user_id, conversationId,
+            });
+            console.log(`[STEP_OBSERVATION] step=chat_missing_biz_type verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+          } catch (obsErr: any) {
+            console.warn(`[STEP_OBSERVATION] Tower observation failed for missing business type (continuing): ${obsErr.message}`);
+          }
         }
       }
 
@@ -1519,11 +1574,12 @@ class SupervisorService {
           conversationId
         ).catch(() => {});
 
-        // step_result: zero results
-        if (isStepArtefactsEnabled()) {
+        // step_result: zero results — unconditional
+        {
           const zeroStepFinished = Date.now();
+          let zeroStepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
           try {
-            await createArtefact({
+            zeroStepArtefact = await createArtefact({
               runId: chatRunId,
               type: 'step_result',
               title: `Step result: SEARCH_PLACES – 0 results for ${businessType} in ${city}`,
@@ -1552,6 +1608,32 @@ class SupervisorService {
             console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_generate_leads_search_places status=fail reason=zero_results`);
           } catch (stepArtErr: any) {
             console.warn(`[STEP_ARTEFACT] Failed to create step_result for zero_results (non-fatal): ${stepArtErr.message}`);
+          }
+
+          // Step-level judgement (observation only)
+          if (zeroStepArtefact) {
+            try {
+              const obsResult = await judgeArtefact({
+                artefact: zeroStepArtefact,
+                runId: chatRunId, goal: genLeadsGoal, userId: task.user_id, conversationId,
+              });
+              await createArtefact({
+                runId: chatRunId,
+                type: 'tower_judgement',
+                title: `Tower Judgement: ${obsResult.judgement.verdict} (chat zero results)`,
+                summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | SEARCH_PLACES`,
+                payload: {
+                  verdict: obsResult.judgement.verdict, action: obsResult.judgement.action,
+                  reasons: obsResult.judgement.reasons, metrics: obsResult.judgement.metrics,
+                  step_index: 0, step_label: `SEARCH_PLACES – ${businessType} in ${city}`,
+                  judged_artefact_id: zeroStepArtefact.id, stubbed: obsResult.stubbed, observation_only: true,
+                },
+                userId: task.user_id, conversationId,
+              });
+              console.log(`[STEP_OBSERVATION] step=chat_zero_results verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+            } catch (obsErr: any) {
+              console.warn(`[STEP_OBSERVATION] Tower observation failed for chat zero results (continuing): ${obsErr.message}`);
+            }
           }
         }
 
@@ -1652,11 +1734,12 @@ class SupervisorService {
         conversationId
       ).catch(() => {});
 
-      // step_result: success
-      if (isStepArtefactsEnabled()) {
+      // step_result: success — unconditional
+      {
         const successStepFinished = Date.now();
+        let successStepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
         try {
-          await createArtefact({
+          successStepArtefact = await createArtefact({
             runId: chatRunId,
             type: 'step_result',
             title: `Step result: SEARCH_PLACES – ${businesses.length} results for ${businessType} in ${city}`,
@@ -1686,6 +1769,32 @@ class SupervisorService {
           console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_generate_leads_search_places status=success places=${businesses.length}`);
         } catch (stepArtErr: any) {
           console.warn(`[STEP_ARTEFACT] Failed to create step_result for success (non-fatal): ${stepArtErr.message}`);
+        }
+
+        // Step-level judgement (observation only)
+        if (successStepArtefact) {
+          try {
+            const obsResult = await judgeArtefact({
+              artefact: successStepArtefact,
+              runId: chatRunId, goal: genLeadsGoal, userId: task.user_id, conversationId,
+            });
+            await createArtefact({
+              runId: chatRunId,
+              type: 'tower_judgement',
+              title: `Tower Judgement: ${obsResult.judgement.verdict} (chat success)`,
+              summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | SEARCH_PLACES`,
+              payload: {
+                verdict: obsResult.judgement.verdict, action: obsResult.judgement.action,
+                reasons: obsResult.judgement.reasons, metrics: obsResult.judgement.metrics,
+                step_index: 0, step_label: `SEARCH_PLACES – ${businessType} in ${city}`,
+                judged_artefact_id: successStepArtefact.id, stubbed: obsResult.stubbed, observation_only: true,
+              },
+              userId: task.user_id, conversationId,
+            });
+            console.log(`[STEP_OBSERVATION] step=chat_success verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+          } catch (obsErr: any) {
+            console.warn(`[STEP_OBSERVATION] Tower observation failed for chat success (continuing): ${obsErr.message}`);
+          }
         }
       }
 
@@ -2029,11 +2138,12 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         conversationId
       ).catch(() => {});
 
-      // step_result: outer catch (exception)
-      if (isStepArtefactsEnabled()) {
+      // step_result: outer catch (exception) — unconditional
+      {
         const errStepFinished = Date.now();
+        let exceptionStepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
         try {
-          await createArtefact({
+          exceptionStepArtefact = await createArtefact({
             runId: chatRunId,
             type: 'step_result',
             title: `Step result: SEARCH_PLACES – error for ${businessType} in ${city}`,
@@ -2062,6 +2172,32 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
           console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_generate_leads_search_places status=fail reason=exception`);
         } catch (stepArtErr: any) {
           console.warn(`[STEP_ARTEFACT] Failed to create step_result for exception (non-fatal): ${stepArtErr.message}`);
+        }
+
+        // Step-level judgement (observation only)
+        if (exceptionStepArtefact) {
+          try {
+            const obsResult = await judgeArtefact({
+              artefact: exceptionStepArtefact,
+              runId: chatRunId, goal: genLeadsGoal, userId: task.user_id, conversationId,
+            });
+            await createArtefact({
+              runId: chatRunId,
+              type: 'tower_judgement',
+              title: `Tower Judgement: ${obsResult.judgement.verdict} (chat exception)`,
+              summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | SEARCH_PLACES`,
+              payload: {
+                verdict: obsResult.judgement.verdict, action: obsResult.judgement.action,
+                reasons: obsResult.judgement.reasons, metrics: obsResult.judgement.metrics,
+                step_index: 0, step_label: `SEARCH_PLACES – ${businessType} in ${city}`,
+                judged_artefact_id: exceptionStepArtefact.id, stubbed: obsResult.stubbed, observation_only: true,
+              },
+              userId: task.user_id, conversationId,
+            });
+            console.log(`[STEP_OBSERVATION] step=chat_exception verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+          } catch (obsErr: any) {
+            console.warn(`[STEP_OBSERVATION] Tower observation failed for chat exception (continuing): ${obsErr.message}`);
+          }
         }
       }
 
@@ -2189,15 +2325,16 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
       ).catch(() => {});
     }
 
-    // step_result artefact for deep research
-    if (isStepArtefactsEnabled()) {
+    // step_result artefact for deep research (unconditional)
+    {
       const drStepFinished = Date.now();
       const drStepStatus = researchError ? 'fail' : 'success';
       const drStepSummary = researchError
         ? `fail – ${researchError}`
         : `success – deep research completed for "${topic}" (${reportMarkdown.length} chars, ${sources.length} sources)`;
+      let drStepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
       try {
-        await createArtefact({
+        drStepArtefact = await createArtefact({
           runId: chatRunId,
           type: 'step_result',
           title: `Step result: DEEP_RESEARCH – ${topic.substring(0, 60)}`,
@@ -2233,6 +2370,32 @@ You can view detailed profiles and contact info in your [dashboard](/leads).`;
         console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_deep_research status=${drStepStatus}`);
       } catch (stepArtErr: any) {
         console.warn(`[STEP_ARTEFACT] Failed to create step_result for deep_research (non-fatal): ${stepArtErr.message}`);
+      }
+
+      // Step-level judgement (observation only)
+      if (drStepArtefact) {
+        try {
+          const obsResult = await judgeArtefact({
+            artefact: drStepArtefact,
+            runId: chatRunId, goal: `Deep research: ${topic}`, userId: task.user_id, conversationId,
+          });
+          await createArtefact({
+            runId: chatRunId,
+            type: 'tower_judgement',
+            title: `Tower Judgement: ${obsResult.judgement.verdict} (deep research)`,
+            summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | DEEP_RESEARCH`,
+            payload: {
+              verdict: obsResult.judgement.verdict, action: obsResult.judgement.action,
+              reasons: obsResult.judgement.reasons, metrics: obsResult.judgement.metrics,
+              step_index: 0, step_label: `DEEP_RESEARCH – ${topic.substring(0, 60)}`,
+              judged_artefact_id: drStepArtefact.id, stubbed: obsResult.stubbed, observation_only: true,
+            },
+            userId: task.user_id, conversationId,
+          });
+          console.log(`[STEP_OBSERVATION] step=deep_research verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+        } catch (obsErr: any) {
+          console.warn(`[STEP_OBSERVATION] Tower observation failed for deep_research (continuing): ${obsErr.message}`);
+        }
       }
     }
 

@@ -1,0 +1,57 @@
+We have a concrete mismatch.
+
+Run id: aad1a6e3-c96f-43a2-89be-eb1b4ab5d206
+
+In Supabase artefacts table for this run_id we only see:
+
+chat_response
+
+leads_list
+
+plan_result
+
+tower_judgement
+
+There is NO step_result row.
+
+We just changed server/supervisor/plan-executor.ts to write step_result unconditionally after tool calls and then write an observation_only tower_judgement.
+
+I need you to investigate why step_result is not present for this run. Do NOT add new features or refactor. This is debugging + proof.
+
+Do these checks and report back with exact evidence:
+
+Confirm which execution path handled this run_id:
+
+Did it go through server/supervisor/plan-executor.ts at all?
+
+Or through server/supervisor.ts chat functions?
+
+Or through server/plan-executor.ts legacy path?
+Point me to the exact function name that executed the Google Places call for this run.
+
+In the code, locate the exact createArtefact call that should write type="step_result" for the tool call.
+
+Print the exact object being passed (type, runId/run_id, title).
+
+Confirm whether the type string is exactly "step_result".
+
+Check runtime logs for this run for the new [STEP_OBSERVATION] log lines or any "writing step_result" logs.
+
+If no log lines exist, we are not running the updated code or not hitting that path.
+
+If logs show the createArtefact call ran, check whether createArtefact returned an error.
+
+If errors are swallowed, temporarily add ONE log line to print the insert error result (do not change behaviour) and rerun once.
+
+Verify database write actually failed or wrote to a different run_id:
+Run this SQL in Supabase and paste results:
+a) select created_at, type, title, run_id from artefacts where type='step_result' order by created_at desc limit 10;
+b) select created_at, type, title, run_id from artefacts where type='step_result' and payload_json::text like '%aad1a6e3-c96f-43a2-89be-eb1b4ab5d206%' order by created_at asc;
+
+Outcome I want:
+
+Either: “step_result insert never happened because path X bypasses it” (and where to add it)
+
+Or: “insert happened but failed because of error Y” (and the minimal fix)
+
+No narration. Just the evidence + conclusion.
