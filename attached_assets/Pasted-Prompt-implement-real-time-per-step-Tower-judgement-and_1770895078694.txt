@@ -1,0 +1,105 @@
+Prompt: implement real-time per-step Tower judgement and reaction
+
+You are in the Wyshbone Supervisor repo. Implement the proper production-grade Tower-driven agent loop:
+
+Goal
+
+During plan execution, after EACH step completes:
+
+create a step_result artefact
+
+call Tower immediately to judge that step_result
+
+persist a tower_judgement artefact for that step (with step metadata)
+
+react BEFORE continuing (RETRY / CHANGE_PLAN / STOP / CONTINUE)
+
+emit AFR events for each stage so the UI shows Tower badges per step in order
+
+Constraints
+
+This must be the primary execution path.
+
+“Backfill” remains only as a safety net when a judgement is missing after completion.
+
+Bounded retries: max_retries_per_step (default 2) and max_plan_versions (default 2).
+
+Implementation steps
+
+Identify the actual plan execution loop (the function that iterates steps).
+
+It might be executePlan, executeStep, or similar in server/supervisor/agent-loop.ts or leadgen-executor in Supervisor.
+
+Report the exact file/function where step iteration happens and implement there.
+
+Create step_result artefact
+At the end of each step (not each tool call):
+
+type: "step_result"
+
+payload includes: goal, run_id, client_request_id, step_id, step_title, step_index, step_status, inputs_summary, outputs_summary, outputs_raw(optional), timestamps
+
+Call Tower on step_result
+Immediately after creating step_result:
+
+call judgeArtefact() (tower-artefact-judge.ts)
+
+send: { goal, success_criteria, artefact: step_result }
+
+receive verdict with action: CONTINUE / RETRY / CHANGE_PLAN / STOP
+
+Persist tower judgement for that step
+Create a tower_judgement artefact with:
+
+step_id, step_index
+
+verdict + action + reasons + confidence + metrics
+
+and a pointer to the judged artefact id
+
+React inline
+
+CONTINUE: proceed to next step
+
+RETRY: retry the same step (increment attempt count, bounded)
+
+CHANGE_PLAN: create a plan_update artefact (plan_v2), replace remaining steps and continue
+
+STOP: stop run, emit stop reason artefact and AFR event
+
+Emit AFR events
+Emit at minimum:
+
+step_started
+
+step_completed
+
+artefact_created(step_result)
+
+tower_call_started
+
+tower_verdict
+
+artefact_created(tower_judgement)
+
+supervisor_reaction_taken (continue/retry/change_plan/stop)
+
+Remove reliance on backfill for normal runs
+
+Ensure real-time step judgements happen for chat delegated runs and normal plan runs.
+
+Backfill should only run if a run reaches terminal state and there is no tower_judgement at all.
+
+Acceptance criteria
+
+When running a multi-step plan, the UI shows Tower badge per step in order (not only one “backfill” at end).
+
+If Tower says RETRY or CHANGE_PLAN, Supervisor actually does it and AFR shows it.
+
+Runs do not require manual judgement requests.
+
+Backfill rarely triggers (only on abnormal missing judgement).
+
+Deliver:
+
+Rewrite full files changed.
