@@ -68,7 +68,7 @@ function redactValue(key: string, value: unknown): unknown {
   return value;
 }
 
-function redactRecord(obj: Record<string, unknown>): Record<string, unknown> {
+export function redactRecord(obj: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) {
     result[k] = redactValue(k, v);
@@ -76,7 +76,7 @@ function redactRecord(obj: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
-function safeOutputsRaw(data: Record<string, unknown> | undefined): { outputs_raw?: Record<string, unknown>; outputs_raw_omitted?: boolean } {
+export function safeOutputsRaw(data: Record<string, unknown> | undefined): { outputs_raw?: Record<string, unknown>; outputs_raw_omitted?: boolean } {
   if (!data) return {};
   const redacted = redactRecord(data);
   const serialized = JSON.stringify(redacted);
@@ -86,7 +86,7 @@ function safeOutputsRaw(data: Record<string, unknown> | undefined): { outputs_ra
   return { outputs_raw_omitted: true };
 }
 
-function compactInputs(args: Record<string, unknown>): Record<string, unknown> {
+export function compactInputs(args: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(args)) {
     if (v !== undefined && v !== null && v !== '') {
