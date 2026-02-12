@@ -1,0 +1,113 @@
+In the wyshbone-supervisor repo, ADD real per-step artefacts written to Supabase. This is strictly additive.
+
+Absolute rule (do not break baseline)
+
+Do NOT remove, gate, disable, or “move” any existing judgement code paths.
+
+Do NOT change anything about manual judgement. Manual “Request judgement” must keep working exactly as it does now.
+
+Do NOT suppress any existing end-of-run judgement behaviour that currently exists in the baseline.
+
+This work is ONLY: add new step_result artefacts on top of what already exists.
+
+Goal
+
+After every completed plan step (success or fail), write an artefact row in Supabase with type "step_result".
+
+Use the existing createArtefact() helper so it persists and emits artefact_created AFR activity.
+
+UI must be able to show these by simply fetching artefacts. No UI work here.
+
+Scope rules
+
+Artefacts are created per STEP, not per tool call.
+
+Exactly one step_result artefact per step attempt.
+
+Must include run_id and client_request_id so we can filter/display.
+
+Implementation requirements
+
+Locate the main executePlan / executeStep loop.
+
+At the boundary “a step is complete” (after all actions for the step finish and status is known), call createArtefact(...).
+
+Artefact fields
+
+type: "step_result"
+
+title: "Step result: <step_index+1>/<total_steps> - <step_title>"
+
+summary: 1 to 2 lines, include success/fail + tiny output summary
+
+payload_json MUST include:
+
+run_id
+
+client_request_id (crid)
+
+goal
+
+plan_version (if available, else 1)
+
+step_id
+
+step_title
+
+step_index
+
+step_status: "success" | "fail"
+
+inputs_summary (redacted)
+
+outputs_summary (small)
+
+outputs_raw (optional, only if small; see size rules)
+
+timings: started_at, finished_at, duration_ms
+
+Redaction and size limits (non negotiable)
+
+Never store secrets: auth headers, api keys, cookies, tokens.
+
+Default to outputs_summary only.
+
+outputs_raw only if JSON.stringify(outputs_raw).length <= 50_000 chars, else omit and set outputs_raw_omitted: true.
+
+Cap long strings in summaries (eg 2k chars).
+
+Feature flag
+
+Add ENABLE_STEP_ARTEFACTS=true support (default true).
+
+If disabled, skip writing step_result artefacts.
+
+IMPORTANT: this flag must NOT affect judgement/manual judgement or any other existing behaviour.
+
+Error handling
+
+Artefact write must never crash the run.
+
+If createArtefact fails, log a warning and continue.
+
+Deliverables
+
+Minimal edits.
+
+If you modify any file, output the FULL FILE so I can copy paste.
+
+Do NOT implement Tower inline judgement in this change. Step artefacts only.
+
+Do NOT touch existing judgement code. Additive only.
+
+Verification checklist
+
+Run a mission.
+
+Confirm multiple step_result rows exist in Supabase artefacts table for that run_id/crid.
+
+Confirm artefact_created AFR activities appear for those step_result artefacts.
+
+Confirm manual judgement still works exactly as before.
+
+Confirm any existing end-of-run judgement behaviour still occurs (unchanged).
