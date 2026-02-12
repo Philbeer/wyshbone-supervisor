@@ -72,3 +72,6 @@ The frontend uses React, TypeScript, Vite, and Wouter for routing. Styling is ma
 - **OpenAI API**: For deep research via Responses API.
 - **Perplexity API**: For deep research with `llama-3.1-sonar-large-128k-online`.
 - **Anthropic API**: For deep research with Claude models.
+
+## Recent Changes
+- **2026-02-12**: Added per-step `step_result` artefacts written to Supabase after every completed plan step (success or fail). Both the supervisor plan executor (`server/supervisor/plan-executor.ts`) and the legacy plan executor (`server/plan-executor.ts`) now create these artefacts. Payloads include `run_id`, `client_request_id`, `goal`, `plan_version`, `step_id`, `step_title`, `step_index`, `step_status`, `inputs_summary` (redacted), `outputs_summary`, `outputs_raw` (size-gated at 50k chars), and `timings` (started_at, finished_at, duration_ms). Feature flag: `ENABLE_STEP_ARTEFACTS` (default: `true`). This flag does NOT affect judgement or any existing behaviour. Secret keys are redacted from inputs/outputs.
