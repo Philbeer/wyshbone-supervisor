@@ -192,7 +192,7 @@ export async function executeLeadGenerationPlan(planId: string): Promise<void> {
         updateStepStatus(planId, step.id, "completed", summary);
         console.log(`PLAN_EXEC_STEP_COMPLETED: Step ${i + 1}/${plan.steps.length} - ${summary}`);
         
-        if (isStepArtefactsEnabled()) {
+        {
           const stepFinished = new Date();
           try {
             const stepInput = convertStepToActionInput(step, userId);
@@ -243,7 +243,7 @@ export async function executeLeadGenerationPlan(planId: string): Promise<void> {
         console.error(`PLAN_EXEC_STEP_FAILED: Step ${i + 1} failed:`, errorMsg);
         updateStepStatus(planId, step.id, "failed", errorMsg);
         
-        if (isStepArtefactsEnabled()) {
+        {
           try {
             const stepInput = convertStepToActionInput(step, userId);
             await createArtefact({

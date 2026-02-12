@@ -1020,6 +1020,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
         conversationId
       );
 
+      // step_result artefact (unconditional)
+      {
+        const { createArtefact: createStepArtefact } = await import('./supervisor/artefacts');
+        const { judgeArtefact: judgeStepArtefact } = await import('./supervisor/tower-artefact-judge');
+        const simStepStatus = placesCount > 0 ? 'success' : 'fail';
+        const simStepSummary = placesCount > 0
+          ? `success – found ${placesCount} places for "${businessType}" in ${city}`
+          : `fail – 0 results for "${businessType}" in ${city}`;
+        let simStepArtefact: Awaited<ReturnType<typeof createStepArtefact>> | undefined;
+        try {
+          simStepArtefact = await createStepArtefact({
+            runId: chatRunId,
+            type: 'step_result',
+            title: `Step result: SEARCH_PLACES – ${businessType} in ${city}`,
+            summary: simStepSummary,
+            payload: {
+              run_id: chatRunId,
+              client_request_id: clientRequestId,
+              goal: goalText,
+              plan_version: 1,
+              step_id: 'sim_chat_search_places',
+              step_title: `SEARCH_PLACES – ${businessType} in ${city}`,
+              step_type: 'SEARCH_PLACES',
+              step_index: 0,
+              step_status: simStepStatus,
+              inputs_summary: { query: businessType, location: city, country, maxResults: requestedCount },
+              outputs_summary: { places_count: placesCount },
+            },
+            userId,
+            conversationId,
+          });
+          console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=sim_chat_search_places status=${simStepStatus} places=${placesCount}`);
+        } catch (stepErr: any) {
+          console.warn(`[STEP_ARTEFACT] Failed to create step_result for simulate-chat-task (non-fatal): ${stepErr.message}`);
+        }
+
+        if (simStepArtefact) {
+          try {
+            const obsResult = await judgeStepArtefact({
+              artefact: simStepArtefact,
+              runId: chatRunId, goal: goalText, userId, conversationId,
+            });
+            await createStepArtefact({
+              runId: chatRunId,
+              type: 'tower_judgement',
+              title: `Tower Judgement: ${obsResult.judgement.verdict} (sim chat)`,
+              summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | SEARCH_PLACES`,
+              payload: {
+                verdict: obsResult.judgement.verdict, action: obsResult.judgement.action,
+                reasons: obsResult.judgement.reasons, metrics: obsResult.judgement.metrics,
+                step_index: 0, step_label: `SEARCH_PLACES – ${businessType} in ${city}`,
+                judged_artefact_id: simStepArtefact.id, stubbed: obsResult.stubbed, observation_only: true,
+              },
+              userId, conversationId,
+            });
+            console.log(`[STEP_OBSERVATION] step=sim_chat verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+          } catch (obsErr: any) {
+            console.warn(`[STEP_OBSERVATION] Tower observation failed for simulate-chat-task (continuing): ${obsErr.message}`);
+          }
+        }
+      }
+
       const artefactTitle = `${placesCount} ${businessType} leads in ${city}`;
       const artefactSummary = `SEARCH_PLACES returned ${placesCount} results for "${businessType}" in ${city}, ${country}`;
       const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');

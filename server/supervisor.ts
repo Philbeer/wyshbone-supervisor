@@ -720,6 +720,7 @@ class SupervisorService {
 
           const hasLeadsList = artefacts.some(a => a.type === 'leads_list');
           const hasTowerJudgement = artefacts.some(a => a.type === 'tower_judgement');
+          const hasStepResult = artefacts.some(a => a.type === 'step_result');
 
           if (!hasLeadsList || hasTowerJudgement) continue;
 
@@ -749,6 +750,85 @@ class SupervisorService {
 
           const userMessage = run.metadata?.userMessagePreview || `Find ${query} in ${location}`;
           const goal = `Find ${query} in ${location} for B2B outreach`;
+
+          // Backfill step_result if missing (for runs created by external UI backend)
+          if (!hasStepResult) {
+            try {
+              const stepResultId = randomUUID();
+              const stepStatus = leadsCount > 0 ? 'success' : 'fail';
+              const stepSummary = leadsCount > 0
+                ? `success – found ${leadsCount} ${query} in ${location}`
+                : `fail – 0 results for ${query} in ${location}`;
+              const { error: stepInsertErr } = await supabase.from('artefacts').insert({
+                id: stepResultId,
+                run_id: run.id,
+                type: 'step_result',
+                title: `Step result: SEARCH_PLACES – ${query} in ${location}`,
+                summary: stepSummary,
+                payload_json: {
+                  run_id: run.id,
+                  client_request_id: run.client_request_id || null,
+                  goal,
+                  plan_version: 1,
+                  step_id: 'backfill_search_places',
+                  step_title: `SEARCH_PLACES – ${query} in ${location}`,
+                  step_type: 'SEARCH_PLACES',
+                  step_index: 0,
+                  step_status: stepStatus,
+                  inputs_summary: { query, location },
+                  outputs_summary: { leads_count: leadsCount },
+                  backfill: true,
+                },
+              });
+
+              if (stepInsertErr) {
+                console.warn(`[TOWER_BACKFILL] runId=${run.id} failed to insert step_result: ${stepInsertErr.message}`);
+              } else {
+                console.log(`[TOWER_BACKFILL] runId=${run.id} step_result backfilled — status=${stepStatus} leads=${leadsCount}`);
+
+                // Observation Tower judgement on the backfilled step_result
+                try {
+                  const stepArtefactForJudge = {
+                    id: stepResultId,
+                    runId: run.id,
+                    type: 'step_result' as const,
+                    title: `Step result: SEARCH_PLACES – ${query} in ${location}`,
+                    summary: stepSummary,
+                    payloadJson: { run_id: run.id, goal, step_type: 'SEARCH_PLACES', step_status: stepStatus, leads_count: leadsCount },
+                    createdAt: new Date(),
+                  };
+                  const obsResult = await judgeArtefact({
+                    artefact: stepArtefactForJudge,
+                    runId: run.id, goal, userId: run.user_id,
+                  });
+                  const obsId = randomUUID();
+                  const { error: obsInsertErr } = await supabase.from('artefacts').insert({
+                    id: obsId,
+                    run_id: run.id,
+                    type: 'tower_judgement',
+                    title: `Tower Judgement: ${obsResult.judgement.verdict} (step observation)`,
+                    summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | SEARCH_PLACES`,
+                    payload_json: {
+                      verdict: obsResult.judgement.verdict, action: obsResult.judgement.action,
+                      reasons: obsResult.judgement.reasons, metrics: obsResult.judgement.metrics,
+                      step_index: 0, step_label: `SEARCH_PLACES – ${query} in ${location}`,
+                      judged_artefact_id: stepResultId, stubbed: obsResult.stubbed,
+                      observation_only: true, backfill: true,
+                    },
+                  });
+                  if (obsInsertErr) {
+                    console.warn(`[TOWER_BACKFILL] runId=${run.id} failed to insert observation tower_judgement: ${obsInsertErr.message}`);
+                  } else {
+                    console.log(`[STEP_OBSERVATION] [backfill] runId=${run.id} verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only)`);
+                  }
+                } catch (obsErr: any) {
+                  console.warn(`[STEP_OBSERVATION] [backfill] runId=${run.id} Tower observation failed (continuing): ${obsErr.message}`);
+                }
+              }
+            } catch (stepErr: any) {
+              console.warn(`[TOWER_BACKFILL] runId=${run.id} step_result backfill failed (non-fatal): ${stepErr.message}`);
+            }
+          }
 
           console.log(`[TOWER_BACKFILL] runId=${run.id} found leads_list but no tower_judgement — triggering backfill (${leadsCount} leads)`);
 
