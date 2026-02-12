@@ -49,15 +49,48 @@ export function isTowerDuringRunEnabled(): boolean {
   return process.env.ENABLE_TOWER_DURING_RUN === 'true';
 }
 
+export function isStepArtefactsEnabled(): boolean {
+  const val = process.env.ENABLE_STEP_ARTEFACTS;
+  return val === undefined || val === '' || val === 'true';
+}
+
 function ts(): string {
   return new Date().toISOString();
+}
+
+const SECRET_KEYS_RE = /^(auth|authorization|cookie|token|secret|api[_-]?key|password|credential|session|bearer)/i;
+const SUMMARY_CAP = 2000;
+const OUTPUTS_RAW_CAP = 50_000;
+
+function redactValue(key: string, value: unknown): unknown {
+  if (SECRET_KEYS_RE.test(key)) return '[REDACTED]';
+  if (typeof value === 'string' && value.length > SUMMARY_CAP) return value.substring(0, SUMMARY_CAP) + '…[truncated]';
+  return value;
+}
+
+function redactRecord(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    result[k] = redactValue(k, v);
+  }
+  return result;
+}
+
+function safeOutputsRaw(data: Record<string, unknown> | undefined): { outputs_raw?: Record<string, unknown>; outputs_raw_omitted?: boolean } {
+  if (!data) return {};
+  const redacted = redactRecord(data);
+  const serialized = JSON.stringify(redacted);
+  if (serialized.length <= OUTPUTS_RAW_CAP) {
+    return { outputs_raw: redacted };
+  }
+  return { outputs_raw_omitted: true };
 }
 
 function compactInputs(args: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(args)) {
     if (v !== undefined && v !== null && v !== '') {
-      result[k] = typeof v === 'string' && v.length > 200 ? v.substring(0, 200) : v;
+      result[k] = redactValue(k, typeof v === 'string' && v.length > 200 ? v.substring(0, 200) : v);
     }
   }
   return result;
@@ -478,6 +511,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         await logStepStarted(userId, runId, step.id, step.label, conversationId, clientRequestId);
         updateStepStatus(planId, step.id, 'running');
 
+        const stepStartedAt = new Date();
         let result: ActionResult;
         try {
           result = await executeAction({
@@ -490,8 +524,46 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             clientRequestId,
           });
         } catch (stepError: any) {
+          const stepFinishedAt = new Date();
           const errorMessage = stepError.message || 'Step execution threw an exception';
           console.error(`[PLAN_EXECUTOR] Step ${step.id} threw error:`, errorMessage);
+
+          if (isStepArtefactsEnabled()) {
+            try {
+              const exSummary = `fail – ${errorMessage.substring(0, SUMMARY_CAP)}`;
+              await createArtefact({
+                runId,
+                type: 'step_result',
+                title: `Step result: ${i + 1}/${steps.length} - ${step.label}`,
+                summary: exSummary,
+                payload: {
+                  run_id: runId,
+                  client_request_id: clientRequestId || null,
+                  goal,
+                  plan_version: currentPlanVersion,
+                  step_id: step.id,
+                  step_title: step.label,
+                  step_index: i,
+                  step_status: 'fail',
+                  inputs_summary: redactRecord(compactInputs(currentStepArgs)),
+                  outputs_summary: {},
+                  outputs_raw_omitted: true,
+                  timings: {
+                    started_at: stepStartedAt.toISOString(),
+                    finished_at: stepFinishedAt.toISOString(),
+                    duration_ms: stepFinishedAt.getTime() - stepStartedAt.getTime(),
+                  },
+                  step_type: stepType,
+                  errors: [errorMessage],
+                  retry_count: stepRetryCount,
+                  metrics: {},
+                },
+                userId, conversationId,
+              });
+            } catch (artefactErr: any) {
+              console.warn(`[PLAN_EXECUTOR] step_result artefact write failed (continuing): ${artefactErr.message}`);
+            }
+          }
 
           updateRunSummary(runSummary, { success: false, leadsFound: 0, costUnits: 0.25 });
           await logStepFailed(userId, runId, step.id, step.label, errorMessage, conversationId, clientRequestId);
@@ -504,28 +576,46 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         }
 
         if (!result.success) {
+          const stepFinishedAt = new Date();
           console.error(`[PLAN_EXECUTOR] Step ${step.id} failed:`, result.error);
           await logStepFailed(userId, runId, step.id, step.label, result.error || 'Unknown error', conversationId, clientRequestId);
           updateStepStatus(planId, step.id, 'failed', result.error);
 
-          try {
-            await createArtefact({
-              runId,
-              type: 'step_result',
-              title: `Step result: ${step.label}${attemptLabel}`,
-              summary: `Failed: ${result.error || 'Unknown error'}`,
-              payload: {
-                step_index: i, step_title: step.label, step_type: stepType,
-                step_status: 'fail',
-                inputs: compactInputs(currentStepArgs),
-                outputs: {}, metrics: {},
-                errors: [result.error || 'Unknown error'],
-                retry_count: stepRetryCount, plan_version: currentPlanVersion,
-              },
-              userId, conversationId,
-            });
-          } catch (artefactErr: any) {
-            console.error(`[PLAN_EXECUTOR] Failed step artefact creation failed: ${artefactErr.message}`);
+          if (isStepArtefactsEnabled()) {
+            try {
+              const failSummary = `fail – ${(result.error || 'Unknown error').substring(0, SUMMARY_CAP)}`;
+              await createArtefact({
+                runId,
+                type: 'step_result',
+                title: `Step result: ${i + 1}/${steps.length} - ${step.label}`,
+                summary: failSummary,
+                payload: {
+                  run_id: runId,
+                  client_request_id: clientRequestId || null,
+                  goal,
+                  plan_version: currentPlanVersion,
+                  step_id: step.id,
+                  step_title: step.label,
+                  step_index: i,
+                  step_status: 'fail',
+                  inputs_summary: redactRecord(compactInputs(currentStepArgs)),
+                  outputs_summary: {},
+                  ...safeOutputsRaw(result.data as Record<string, unknown> | undefined),
+                  timings: {
+                    started_at: stepStartedAt.toISOString(),
+                    finished_at: stepFinishedAt.toISOString(),
+                    duration_ms: stepFinishedAt.getTime() - stepStartedAt.getTime(),
+                  },
+                  step_type: stepType,
+                  errors: [result.error || 'Unknown error'],
+                  retry_count: stepRetryCount,
+                  metrics: {},
+                },
+                userId, conversationId,
+              });
+            } catch (artefactErr: any) {
+              console.warn(`[PLAN_EXECUTOR] step_result artefact write failed (continuing): ${artefactErr.message}`);
+            }
           }
 
           updateRunSummary(runSummary, { success: false, leadsFound: 0, costUnits: 0.25 });
@@ -545,47 +635,66 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
 
         console.log(`[PLAN_EXECUTOR] Step ${i + 1} execution succeeded: ${result.summary}`);
 
+        const stepFinishedAt = new Date();
         const stepInputs = compactInputs(currentStepArgs);
         const stepOutputs = result.data ? compactOutputs(result.data) : {};
         const stepMetrics = result.data ? extractMetrics(stepType, result.data) : {};
 
         let stepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
-        try {
-          stepArtefact = await createArtefact({
-            runId,
-            type: 'step_result',
-            title: `Step result: ${step.label}${attemptLabel}`,
-            summary: result.summary || `Step ${step.id} completed successfully`,
-            payload: {
-              step_index: i, step_title: step.label, step_type: stepType,
-              step_status: 'pass',
-              inputs: stepInputs, outputs: stepOutputs, metrics: stepMetrics,
-              errors: [],
-              retry_count: stepRetryCount, plan_version: currentPlanVersion,
-            },
-            userId, conversationId,
-          });
+        if (isStepArtefactsEnabled()) {
+          try {
+            const successSummary = `success – ${(result.summary || `Step ${step.id} completed`).substring(0, SUMMARY_CAP)}`;
+            stepArtefact = await createArtefact({
+              runId,
+              type: 'step_result',
+              title: `Step result: ${i + 1}/${steps.length} - ${step.label}`,
+              summary: successSummary,
+              payload: {
+                run_id: runId,
+                client_request_id: clientRequestId || null,
+                goal,
+                plan_version: currentPlanVersion,
+                step_id: step.id,
+                step_title: step.label,
+                step_index: i,
+                step_status: 'success',
+                inputs_summary: redactRecord(stepInputs),
+                outputs_summary: stepOutputs,
+                ...safeOutputsRaw(result.data as Record<string, unknown> | undefined),
+                timings: {
+                  started_at: stepStartedAt.toISOString(),
+                  finished_at: stepFinishedAt.toISOString(),
+                  duration_ms: stepFinishedAt.getTime() - stepStartedAt.getTime(),
+                },
+                step_type: stepType,
+                metrics: stepMetrics,
+                errors: [],
+                retry_count: stepRetryCount,
+              },
+              userId, conversationId,
+            });
 
-          console.log(`[TOWER_SEQ] ${ts()} STEP_RESULT_WRITTEN runId=${runId} step=${i + 1} artefactId=${stepArtefact.id} type=step_result`);
+            console.log(`[TOWER_SEQ] ${ts()} STEP_RESULT_WRITTEN runId=${runId} step=${i + 1} artefactId=${stepArtefact.id} type=step_result`);
 
-          await logAFREvent({
-            userId, runId, conversationId, clientRequestId,
-            actionTaken: 'artefact_created', status: 'success',
-            taskGenerated: `step_result artefact created for step ${i + 1}: ${step.label}`,
-            runType: 'plan',
-            metadata: { artefactId: stepArtefact.id, artefact_type: 'step_result', step_index: i },
-          }).catch(() => {});
-        } catch (artefactErr: any) {
-          console.error(`[PLAN_EXECUTOR] Step artefact creation failed: ${artefactErr.message}`);
-          if (towerDuringRun) {
-            const errMsg = `step_result artefact write failed: ${artefactErr.message}`;
-            await createArtefact({
-              runId, type: 'error', title: `Error: artefact write failed (step ${i + 1})`,
-              summary: errMsg, payload: { step_index: i, error: errMsg }, userId, conversationId,
+            await logAFREvent({
+              userId, runId, conversationId, clientRequestId,
+              actionTaken: 'artefact_created', status: 'success',
+              taskGenerated: `step_result artefact created for step ${i + 1}: ${step.label}`,
+              runType: 'plan',
+              metadata: { artefactId: stepArtefact.id, artefact_type: 'step_result', step_index: i },
             }).catch(() => {});
-            failProgress(planId, errMsg);
-            await safeUpdatePlanStatus(planId, 'failed');
-            return { success: false, stepsCompleted, totalSteps: steps.length, error: errMsg };
+          } catch (artefactErr: any) {
+            console.warn(`[PLAN_EXECUTOR] step_result artefact write failed (continuing): ${artefactErr.message}`);
+            if (towerDuringRun) {
+              const errMsg = `step_result artefact write failed: ${artefactErr.message}`;
+              await createArtefact({
+                runId, type: 'error', title: `Error: artefact write failed (step ${i + 1})`,
+                summary: errMsg, payload: { step_index: i, error: errMsg }, userId, conversationId,
+              }).catch(() => {});
+              failProgress(planId, errMsg);
+              await safeUpdatePlanStatus(planId, 'failed');
+              return { success: false, stepsCompleted, totalSteps: steps.length, error: errMsg };
+            }
           }
         }
 

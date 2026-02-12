@@ -7,6 +7,31 @@ import { updateStepStatus, completePlan, failPlan } from './plan-progress';
 import type { LeadGenPlan, LeadGenPlanStep } from './types/lead-gen-plan';
 import { executeAction, type ActionType, type ActionInput } from './actions/registry';
 import { validateDAG, type DAGValidationResult } from './dag-mutator';
+import { createArtefact } from './supervisor/artefacts';
+import { isStepArtefactsEnabled } from './supervisor/plan-executor';
+
+const STEP_SUMMARY_CAP = 2000;
+const STEP_OUTPUTS_RAW_CAP = 50_000;
+const STEP_SECRET_RE = /^(auth|authorization|cookie|token|secret|api[_-]?key|password|credential|session|bearer)/i;
+
+function redactInputs(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (STEP_SECRET_RE.test(k)) { result[k] = '[REDACTED]'; continue; }
+    if (typeof v === 'string' && v.length > STEP_SUMMARY_CAP) { result[k] = v.substring(0, STEP_SUMMARY_CAP) + '…[truncated]'; continue; }
+    if (v !== undefined && v !== null && v !== '') result[k] = v;
+  }
+  return result;
+}
+
+function safeLegacyOutputsRaw(data: unknown): { outputs_raw?: unknown; outputs_raw_omitted?: boolean } {
+  if (!data) return {};
+  try {
+    const s = JSON.stringify(data);
+    if (s.length <= STEP_OUTPUTS_RAW_CAP) return { outputs_raw: data };
+  } catch {}
+  return { outputs_raw_omitted: true };
+}
 
 /**
  * Map legacy tool identifiers to canonical action types
@@ -142,14 +167,13 @@ export async function executeLeadGenerationPlan(planId: string): Promise<void> {
       // Update progress to "running"
       updateStepStatus(planId, step.id, "running");
       
+      const stepStartedAt = new Date();
       try {
-        // Inject results from dependency steps
         if (step.dependsOn && step.dependsOn.length > 0) {
           const dependencyResults = step.dependsOn
             .map(depId => stepResults.get(depId))
             .filter(Boolean);
           
-          // If this is an EMAIL_FINDER step, inject leads from previous steps
           if (step.type === 'EMAIL_FINDER' && step.input) {
             const allLeads = dependencyResults
               .flatMap(result => result.data?.leads || []);
@@ -158,29 +182,104 @@ export async function executeLeadGenerationPlan(planId: string): Promise<void> {
           }
         }
         
-        // Execute the real action
         await executeStep(step, i, userId);
         
-        // Store results for downstream steps
         if (step.result?.data) {
           stepResults.set(step.id, step.result);
         }
         
-        // Update progress to "completed" with result summary
         const summary = step.result?.summary || 'Step completed';
         updateStepStatus(planId, step.id, "completed", summary);
         console.log(`PLAN_EXEC_STEP_COMPLETED: Step ${i + 1}/${plan.steps.length} - ${summary}`);
         
-        // Update the plan in database with step results
+        if (isStepArtefactsEnabled()) {
+          const stepFinished = new Date();
+          try {
+            const stepInput = convertStepToActionInput(step, userId);
+            await createArtefact({
+              runId: planId,
+              type: 'step_result',
+              title: `Step result: ${i + 1}/${plan.steps.length} - ${step.label || step.tool}`,
+              summary: `success – ${summary.substring(0, STEP_SUMMARY_CAP)}`,
+              payload: {
+                run_id: planId,
+                client_request_id: null,
+                goal: (plan as any).goal || null,
+                plan_version: 1,
+                step_id: step.id,
+                step_title: step.label || step.tool,
+                step_index: i,
+                step_status: 'success',
+                step_type: step.type || step.tool || 'UNKNOWN',
+                inputs_summary: redactInputs(stepInput as Record<string, unknown>),
+                outputs_summary: typeof step.result?.data === 'object' && step.result?.data ? Object.fromEntries(
+                  Object.entries(step.result.data as Record<string, unknown>).map(([k, v]) => [
+                    k, Array.isArray(v) ? `${v.length} items` : v
+                  ])
+                ) : {},
+                ...safeLegacyOutputsRaw(step.result?.data),
+                timings: {
+                  started_at: stepStartedAt.toISOString(),
+                  finished_at: stepFinished.toISOString(),
+                  duration_ms: stepFinished.getTime() - stepStartedAt.getTime(),
+                },
+                metrics: {},
+                errors: [],
+                retry_count: 0,
+              },
+              userId,
+            });
+          } catch (artErr: any) {
+            console.warn(`[PLAN_EXEC] step_result artefact write failed (continuing): ${artErr.message}`);
+          }
+        }
+
         plan.steps[i] = step;
         await storage.updatePlan(planId, { planData: plan as any });
         
       } catch (stepError: any) {
+        const stepFinished = new Date();
         const errorMsg = stepError.message || 'Step execution failed';
         console.error(`PLAN_EXEC_STEP_FAILED: Step ${i + 1} failed:`, errorMsg);
         updateStepStatus(planId, step.id, "failed", errorMsg);
         
-        // Update the plan with failure
+        if (isStepArtefactsEnabled()) {
+          try {
+            const stepInput = convertStepToActionInput(step, userId);
+            await createArtefact({
+              runId: planId,
+              type: 'step_result',
+              title: `Step result: ${i + 1}/${plan.steps.length} - ${step.label || step.tool}`,
+              summary: `fail – ${errorMsg.substring(0, STEP_SUMMARY_CAP)}`,
+              payload: {
+                run_id: planId,
+                client_request_id: null,
+                goal: (plan as any).goal || null,
+                plan_version: 1,
+                step_id: step.id,
+                step_title: step.label || step.tool,
+                step_index: i,
+                step_status: 'fail',
+                step_type: step.type || step.tool || 'UNKNOWN',
+                inputs_summary: redactInputs(stepInput as Record<string, unknown>),
+                outputs_summary: {},
+                outputs_raw_omitted: true,
+                timings: {
+                  started_at: stepStartedAt.toISOString(),
+                  finished_at: stepFinished.toISOString(),
+                  duration_ms: stepFinished.getTime() - stepStartedAt.getTime(),
+                },
+                errors: [errorMsg],
+                metrics: {},
+                retry_count: 0,
+              },
+              userId,
+            });
+          } catch (artErr: any) {
+            console.warn(`[PLAN_EXEC] step_result artefact write failed (continuing): ${artErr.message}`);
+          }
+        }
+
         step.status = 'failed';
         step.result = {
           success: false,
@@ -190,7 +289,7 @@ export async function executeLeadGenerationPlan(planId: string): Promise<void> {
         plan.steps[i] = step;
         await storage.updatePlan(planId, { planData: plan as any });
         
-        throw stepError; // Fail the whole plan if a step fails
+        throw stepError;
       }
     }
 
