@@ -1,0 +1,56 @@
+We are trying to complete a real agentic loop:
+
+plan → act → step_result → tower_judgement → react (continue / retry / change plan / stop)
+
+We have a concern that we may currently be in a chicken-and-egg state.
+
+Specifically:
+
+* Step_result artefacts may not be getting judged inline
+* Not because wiring is wrong
+* But because, in some flows, there is not yet a meaningful “step output” for Tower to judge
+
+I need you to **investigate and reason**, not implement yet.
+
+Please do the following analysis:
+
+1. Identify which execution paths currently:
+
+   * Generate a plan with multiple steps
+   * But do NOT actually call real tools per step (or only call a single tool for the whole run)
+
+2. For those paths, answer:
+
+   * Are step_results being created with meaningful outputs?
+   * If a step_result is empty / trivial / identical to the final result, would Tower have anything to judge differently at step level?
+
+3. Based on the current architecture, assess whether:
+   A) Step judgement is failing because wiring is missing
+   B) Step judgement is failing because step artefacts are too thin / non-distinct
+   C) Both are true
+
+4. Explicitly answer this question:
+   “Do we need to build real per-step tool execution first in order for step judgement to be meaningful?”
+
+5. If yes, propose a **minimal sequencing plan**, choosing one of these approaches (or suggesting another):
+
+   * Option 1: Build real per-step tool calls first, then wire judgement
+   * Option 2: Temporarily emit minimal but honest step outputs (clearly marked as provisional) so Tower can judge structure/quality, not results
+   * Option 3: Build judgement plumbing first but accept that early verdicts will always be ACCEPT until tools exist
+   * Option 4: A different approach you believe is cleaner
+
+6. Important constraints:
+
+   * We do NOT want fake UI or pretend artefacts
+   * We will accept *temporary scaffolding* only if it is explicit, minimal, and removable
+   * Manual judgement and end-of-run judgement must remain intact at all times
+
+7. Output format:
+
+   * Short, structured analysis
+   * Clear conclusion: “this is a wiring problem”, “this is a sequencing problem”, or “both”
+   * A concrete recommended next step (one thing to build next)
+
+Do NOT make code changes yet.
+Do NOT optimise.
+This is about understanding whether we’re judging nothing, or failing to judge something real.
