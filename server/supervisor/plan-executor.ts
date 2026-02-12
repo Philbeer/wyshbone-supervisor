@@ -528,40 +528,71 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           const errorMessage = stepError.message || 'Step execution threw an exception';
           console.error(`[PLAN_EXECUTOR] Step ${step.id} threw error:`, errorMessage);
 
-          if (isStepArtefactsEnabled()) {
+          let exceptionStepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
+          try {
+            const exSummary = `fail – ${errorMessage.substring(0, SUMMARY_CAP)}`;
+            exceptionStepArtefact = await createArtefact({
+              runId,
+              type: 'step_result',
+              title: `Step result: ${i + 1}/${steps.length} - ${step.label}`,
+              summary: exSummary,
+              payload: {
+                run_id: runId,
+                client_request_id: clientRequestId || null,
+                goal,
+                plan_version: currentPlanVersion,
+                step_id: step.id,
+                step_title: step.label,
+                step_index: i,
+                step_status: 'fail',
+                inputs_summary: redactRecord(compactInputs(currentStepArgs)),
+                outputs_summary: {},
+                outputs_raw_omitted: true,
+                timings: {
+                  started_at: stepStartedAt.toISOString(),
+                  finished_at: stepFinishedAt.toISOString(),
+                  duration_ms: stepFinishedAt.getTime() - stepStartedAt.getTime(),
+                },
+                step_type: stepType,
+                errors: [errorMessage],
+                retry_count: stepRetryCount,
+                metrics: {},
+              },
+              userId, conversationId,
+            });
+          } catch (artefactErr: any) {
+            console.warn(`[PLAN_EXECUTOR] step_result artefact write failed (continuing): ${artefactErr.message}`);
+          }
+
+          // Step-level judgement (observation only)
+          // Unconditionally call Tower after tool completes. No branching on verdict.
+          if (exceptionStepArtefact) {
             try {
-              const exSummary = `fail – ${errorMessage.substring(0, SUMMARY_CAP)}`;
+              const obsResult = await judgeArtefact({
+                artefact: exceptionStepArtefact,
+                runId, goal, userId, conversationId,
+              });
               await createArtefact({
                 runId,
-                type: 'step_result',
-                title: `Step result: ${i + 1}/${steps.length} - ${step.label}`,
-                summary: exSummary,
+                type: 'tower_judgement',
+                title: `Tower Judgement: ${obsResult.judgement.verdict} (step ${i + 1})`,
+                summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | ${step.label}`,
                 payload: {
-                  run_id: runId,
-                  client_request_id: clientRequestId || null,
-                  goal,
-                  plan_version: currentPlanVersion,
-                  step_id: step.id,
-                  step_title: step.label,
+                  verdict: obsResult.judgement.verdict,
+                  action: obsResult.judgement.action,
+                  reasons: obsResult.judgement.reasons,
+                  metrics: obsResult.judgement.metrics,
                   step_index: i,
-                  step_status: 'fail',
-                  inputs_summary: redactRecord(compactInputs(currentStepArgs)),
-                  outputs_summary: {},
-                  outputs_raw_omitted: true,
-                  timings: {
-                    started_at: stepStartedAt.toISOString(),
-                    finished_at: stepFinishedAt.toISOString(),
-                    duration_ms: stepFinishedAt.getTime() - stepStartedAt.getTime(),
-                  },
-                  step_type: stepType,
-                  errors: [errorMessage],
-                  retry_count: stepRetryCount,
-                  metrics: {},
+                  step_label: step.label,
+                  judged_artefact_id: exceptionStepArtefact.id,
+                  stubbed: obsResult.stubbed,
+                  observation_only: true,
                 },
                 userId, conversationId,
               });
-            } catch (artefactErr: any) {
-              console.warn(`[PLAN_EXECUTOR] step_result artefact write failed (continuing): ${artefactErr.message}`);
+              console.log(`[STEP_OBSERVATION] ${ts()} step=${i + 1} verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+            } catch (obsErr: any) {
+              console.warn(`[STEP_OBSERVATION] Tower observation failed for step ${i + 1} (continuing): ${obsErr.message}`);
             }
           }
 
@@ -581,40 +612,71 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           await logStepFailed(userId, runId, step.id, step.label, result.error || 'Unknown error', conversationId, clientRequestId);
           updateStepStatus(planId, step.id, 'failed', result.error);
 
-          if (isStepArtefactsEnabled()) {
+          let failStepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
+          try {
+            const failSummary = `fail – ${(result.error || 'Unknown error').substring(0, SUMMARY_CAP)}`;
+            failStepArtefact = await createArtefact({
+              runId,
+              type: 'step_result',
+              title: `Step result: ${i + 1}/${steps.length} - ${step.label}`,
+              summary: failSummary,
+              payload: {
+                run_id: runId,
+                client_request_id: clientRequestId || null,
+                goal,
+                plan_version: currentPlanVersion,
+                step_id: step.id,
+                step_title: step.label,
+                step_index: i,
+                step_status: 'fail',
+                inputs_summary: redactRecord(compactInputs(currentStepArgs)),
+                outputs_summary: {},
+                ...safeOutputsRaw(result.data as Record<string, unknown> | undefined),
+                timings: {
+                  started_at: stepStartedAt.toISOString(),
+                  finished_at: stepFinishedAt.toISOString(),
+                  duration_ms: stepFinishedAt.getTime() - stepStartedAt.getTime(),
+                },
+                step_type: stepType,
+                errors: [result.error || 'Unknown error'],
+                retry_count: stepRetryCount,
+                metrics: {},
+              },
+              userId, conversationId,
+            });
+          } catch (artefactErr: any) {
+            console.warn(`[PLAN_EXECUTOR] step_result artefact write failed (continuing): ${artefactErr.message}`);
+          }
+
+          // Step-level judgement (observation only)
+          // Unconditionally call Tower after tool completes. No branching on verdict.
+          if (failStepArtefact) {
             try {
-              const failSummary = `fail – ${(result.error || 'Unknown error').substring(0, SUMMARY_CAP)}`;
+              const obsResult = await judgeArtefact({
+                artefact: failStepArtefact,
+                runId, goal, userId, conversationId,
+              });
               await createArtefact({
                 runId,
-                type: 'step_result',
-                title: `Step result: ${i + 1}/${steps.length} - ${step.label}`,
-                summary: failSummary,
+                type: 'tower_judgement',
+                title: `Tower Judgement: ${obsResult.judgement.verdict} (step ${i + 1})`,
+                summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | ${step.label}`,
                 payload: {
-                  run_id: runId,
-                  client_request_id: clientRequestId || null,
-                  goal,
-                  plan_version: currentPlanVersion,
-                  step_id: step.id,
-                  step_title: step.label,
+                  verdict: obsResult.judgement.verdict,
+                  action: obsResult.judgement.action,
+                  reasons: obsResult.judgement.reasons,
+                  metrics: obsResult.judgement.metrics,
                   step_index: i,
-                  step_status: 'fail',
-                  inputs_summary: redactRecord(compactInputs(currentStepArgs)),
-                  outputs_summary: {},
-                  ...safeOutputsRaw(result.data as Record<string, unknown> | undefined),
-                  timings: {
-                    started_at: stepStartedAt.toISOString(),
-                    finished_at: stepFinishedAt.toISOString(),
-                    duration_ms: stepFinishedAt.getTime() - stepStartedAt.getTime(),
-                  },
-                  step_type: stepType,
-                  errors: [result.error || 'Unknown error'],
-                  retry_count: stepRetryCount,
-                  metrics: {},
+                  step_label: step.label,
+                  judged_artefact_id: failStepArtefact.id,
+                  stubbed: obsResult.stubbed,
+                  observation_only: true,
                 },
                 userId, conversationId,
               });
-            } catch (artefactErr: any) {
-              console.warn(`[PLAN_EXECUTOR] step_result artefact write failed (continuing): ${artefactErr.message}`);
+              console.log(`[STEP_OBSERVATION] ${ts()} step=${i + 1} verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+            } catch (obsErr: any) {
+              console.warn(`[STEP_OBSERVATION] Tower observation failed for step ${i + 1} (continuing): ${obsErr.message}`);
             }
           }
 
@@ -641,60 +703,58 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         const stepMetrics = result.data ? extractMetrics(stepType, result.data) : {};
 
         let stepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
-        if (isStepArtefactsEnabled()) {
-          try {
-            const successSummary = `success – ${(result.summary || `Step ${step.id} completed`).substring(0, SUMMARY_CAP)}`;
-            stepArtefact = await createArtefact({
-              runId,
-              type: 'step_result',
-              title: `Step result: ${i + 1}/${steps.length} - ${step.label}`,
-              summary: successSummary,
-              payload: {
-                run_id: runId,
-                client_request_id: clientRequestId || null,
-                goal,
-                plan_version: currentPlanVersion,
-                step_id: step.id,
-                step_title: step.label,
-                step_index: i,
-                step_status: 'success',
-                inputs_summary: redactRecord(stepInputs),
-                outputs_summary: stepOutputs,
-                ...safeOutputsRaw(result.data as Record<string, unknown> | undefined),
-                timings: {
-                  started_at: stepStartedAt.toISOString(),
-                  finished_at: stepFinishedAt.toISOString(),
-                  duration_ms: stepFinishedAt.getTime() - stepStartedAt.getTime(),
-                },
-                step_type: stepType,
-                metrics: stepMetrics,
-                errors: [],
-                retry_count: stepRetryCount,
+        try {
+          const successSummary = `success – ${(result.summary || `Step ${step.id} completed`).substring(0, SUMMARY_CAP)}`;
+          stepArtefact = await createArtefact({
+            runId,
+            type: 'step_result',
+            title: `Step result: ${i + 1}/${steps.length} - ${step.label}`,
+            summary: successSummary,
+            payload: {
+              run_id: runId,
+              client_request_id: clientRequestId || null,
+              goal,
+              plan_version: currentPlanVersion,
+              step_id: step.id,
+              step_title: step.label,
+              step_index: i,
+              step_status: 'success',
+              inputs_summary: redactRecord(stepInputs),
+              outputs_summary: stepOutputs,
+              ...safeOutputsRaw(result.data as Record<string, unknown> | undefined),
+              timings: {
+                started_at: stepStartedAt.toISOString(),
+                finished_at: stepFinishedAt.toISOString(),
+                duration_ms: stepFinishedAt.getTime() - stepStartedAt.getTime(),
               },
-              userId, conversationId,
-            });
+              step_type: stepType,
+              metrics: stepMetrics,
+              errors: [],
+              retry_count: stepRetryCount,
+            },
+            userId, conversationId,
+          });
 
-            console.log(`[TOWER_SEQ] ${ts()} STEP_RESULT_WRITTEN runId=${runId} step=${i + 1} artefactId=${stepArtefact.id} type=step_result`);
+          console.log(`[TOWER_SEQ] ${ts()} STEP_RESULT_WRITTEN runId=${runId} step=${i + 1} artefactId=${stepArtefact.id} type=step_result`);
 
-            await logAFREvent({
-              userId, runId, conversationId, clientRequestId,
-              actionTaken: 'artefact_created', status: 'success',
-              taskGenerated: `step_result artefact created for step ${i + 1}: ${step.label}`,
-              runType: 'plan',
-              metadata: { artefactId: stepArtefact.id, artefact_type: 'step_result', step_index: i },
+          await logAFREvent({
+            userId, runId, conversationId, clientRequestId,
+            actionTaken: 'artefact_created', status: 'success',
+            taskGenerated: `step_result artefact created for step ${i + 1}: ${step.label}`,
+            runType: 'plan',
+            metadata: { artefactId: stepArtefact.id, artefact_type: 'step_result', step_index: i },
+          }).catch(() => {});
+        } catch (artefactErr: any) {
+          console.warn(`[PLAN_EXECUTOR] step_result artefact write failed (continuing): ${artefactErr.message}`);
+          if (towerDuringRun) {
+            const errMsg = `step_result artefact write failed: ${artefactErr.message}`;
+            await createArtefact({
+              runId, type: 'error', title: `Error: artefact write failed (step ${i + 1})`,
+              summary: errMsg, payload: { step_index: i, error: errMsg }, userId, conversationId,
             }).catch(() => {});
-          } catch (artefactErr: any) {
-            console.warn(`[PLAN_EXECUTOR] step_result artefact write failed (continuing): ${artefactErr.message}`);
-            if (towerDuringRun) {
-              const errMsg = `step_result artefact write failed: ${artefactErr.message}`;
-              await createArtefact({
-                runId, type: 'error', title: `Error: artefact write failed (step ${i + 1})`,
-                summary: errMsg, payload: { step_index: i, error: errMsg }, userId, conversationId,
-              }).catch(() => {});
-              failProgress(planId, errMsg);
-              await safeUpdatePlanStatus(planId, 'failed');
-              return { success: false, stepsCompleted, totalSteps: steps.length, error: errMsg };
-            }
+            failProgress(planId, errMsg);
+            await safeUpdatePlanStatus(planId, 'failed');
+            return { success: false, stepsCompleted, totalSteps: steps.length, error: errMsg };
           }
         }
 
@@ -749,6 +809,38 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         }
 
         accumulateLeads({ toolName: stepType, toolArgs: currentStepArgs }, result.data, leadsMap, leadsFilters);
+
+        // Step-level judgement (observation only)
+        // Unconditionally call Tower after tool completes. No branching on verdict.
+        if (stepArtefact) {
+          try {
+            const obsResult = await judgeArtefact({
+              artefact: stepArtefact,
+              runId, goal, userId, conversationId,
+            });
+            await createArtefact({
+              runId,
+              type: 'tower_judgement',
+              title: `Tower Judgement: ${obsResult.judgement.verdict} (step ${i + 1})`,
+              summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | ${step.label}`,
+              payload: {
+                verdict: obsResult.judgement.verdict,
+                action: obsResult.judgement.action,
+                reasons: obsResult.judgement.reasons,
+                metrics: obsResult.judgement.metrics,
+                step_index: i,
+                step_label: step.label,
+                judged_artefact_id: stepArtefact.id,
+                stubbed: obsResult.stubbed,
+                observation_only: true,
+              },
+              userId, conversationId,
+            });
+            console.log(`[STEP_OBSERVATION] ${ts()} step=${i + 1} verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+          } catch (obsErr: any) {
+            console.warn(`[STEP_OBSERVATION] Tower observation failed for step ${i + 1} (continuing): ${obsErr.message}`);
+          }
+        }
 
         if (!shouldJudge || !artefactToJudge) {
           await logStepCompleted(userId, runId, step.id, step.label, result.summary, conversationId, clientRequestId);
