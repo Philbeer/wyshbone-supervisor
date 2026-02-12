@@ -183,15 +183,21 @@ app.use((req, res, next) => {
   }, () => {
     log(`serving on http://${host}:${port}`);
 
-    // Startup verification: confirm tools-schema alias state
+    // Startup verification: confirm tools-schema alias state + git commit
+    import('child_process').then(({ execSync }) => {
+      try {
+        const gitHash = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim();
+        console.log(`[STARTUP_VERIFY] git_commit=${gitHash} build_ts=${new Date().toISOString()} supabase_ref=${(process.env.SUPABASE_URL || '').replace('https://', '').split('.')[0]} export_key=${process.env.EXPORT_KEY || 'unset'} step_artefacts=${process.env.ENABLE_STEP_ARTEFACTS ?? 'default(true)'}`);
+      } catch (_) {}
+    });
     import('fs').then(({ readFileSync }) => {
       try {
         const schema = JSON.parse(readFileSync('./server/services/tools-schema.json', 'utf-8'));
         const allAliases: string[] = (schema.tools || []).flatMap((t: any) => t.aliases || []);
         const hasLegacyAlias = allAliases.includes('search_wyshbone_database');
-        console.log(`[STARTUP_VERIFY] build_ts=${new Date().toISOString()} legacy_alias_present=${hasLegacyAlias} aliases=${JSON.stringify(allAliases)}`);
+        console.log(`[STARTUP_VERIFY] legacy_alias_present=${hasLegacyAlias} aliases=${JSON.stringify(allAliases)}`);
       } catch (e: any) {
-        console.log(`[STARTUP_VERIFY] build_ts=${new Date().toISOString()} alias_check_error=${e.message}`);
+        console.log(`[STARTUP_VERIFY] alias_check_error=${e.message}`);
       }
     });
     
