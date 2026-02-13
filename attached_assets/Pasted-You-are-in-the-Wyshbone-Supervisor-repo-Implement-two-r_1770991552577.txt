@@ -1,0 +1,96 @@
+You are in the Wyshbone Supervisor repo. Implement two requirements in the production execution path used by chat tasks:
+
+Requirements
+
+Preserve the user goal verbatim
+
+Capture the exact raw user message string as original_user_goal.
+
+Store it unchanged and pass it through the whole run.
+
+Do not replace it with “Local” or “B2B outreach” strings.
+
+Internal parsing can create a normalized_goal, but original_user_goal must remain the source of truth and must be visible in artefacts.
+
+Create an explicit Plan v1 artefact before any tool executes
+
+Before step 1 starts, create an artefact:
+
+type: plan
+
+title: Plan v1
+
+summary: 1-2 lines
+
+payload_json must include at minimum:
+
+run_id
+
+original_user_goal (verbatim)
+
+normalized_goal (optional)
+
+constraints (list, derived from message, e.g. ["count=5", "prefix=P", "location=Arundel", "use=Google Places"])
+
+assumptions (list, e.g. ["Google Places cannot filter prefix; we will search then filter locally"])
+
+steps (array):
+
+step_index
+
+step_id (stable id)
+
+tool (e.g. SEARCH_PLACES)
+
+tool_args (include the actual query/location/count you intend to request)
+
+expected_output (short)
+
+post_processing (optional, e.g. "filter names starting with P, take first 5")
+
+created_at
+
+Where to implement
+
+Implement this in the actual run path that executes your lead search now (where Step 1/1 SEARCH_PLACES is kicked off).
+
+Do not add a second planner. Use the existing logic but output it as a plan artefact before execution.
+
+Important behaviour changes
+
+The run log line “Tower loop chat: Find 20 pubs in Local for B2B outreach” must stop being the canonical goal. It can remain as a debug line but it must not overwrite the user goal.
+
+The plan must reflect the user goal intent. If the user asked for 5 and prefix P, the plan must show how you intend to satisfy it (even if that means “search broad then filter”).
+
+Acceptance tests
+
+Run: “Find 5 pubs in Arundel that begin with P with google places search”
+Must produce, in order:
+
+plan artefact: Plan v1
+
+includes original_user_goal exactly matching the user text
+
+includes steps showing SEARCH_PLACES query for Arundel (not “Local”)
+
+includes post processing step or note for prefix filter + trim to 5
+
+Step starts and executes
+
+step_result artefact
+
+Tower inline judgement of step_result
+
+leads_list artefact
+
+Tower hard gate judgement of leads_list
+
+Output requirements
+
+Rewrite full files as needed, do not provide partial snippets.
+
+Keep it minimal: just goal preservation + plan artefact.
+
+No new flags.
+
+Implement now.

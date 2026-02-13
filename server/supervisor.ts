@@ -753,24 +753,40 @@ class SupervisorService {
     const rawMsg = (requestData.user_message || '') as string;
     const searchQuery = requestData.search_query;
 
+    const originalUserGoal = rawMsg.trim();
+
     let businessType = searchQuery?.business_type as string | undefined;
     let location = (searchQuery?.location as string) || '';
     let requestedCount = 20;
+    let prefixFilter: string | undefined;
+    let toolPreference: string | undefined;
 
-    if (!businessType && rawMsg) {
+    if (rawMsg) {
       const msg = rawMsg.trim();
-      const inMatch = msg.match(/\s+in\s+(.+)$/i);
-      if (inMatch) {
-        location = inMatch[1].trim();
-        businessType = msg.replace(/^find\s+/i, '').replace(/\s+in\s+.+$/i, '').trim() || undefined;
-      } else {
-        businessType = msg.replace(/^find\s+/i, '').trim() || undefined;
+
+      const prefixMatch = msg.match(/\b(?:begin|start|starting)\s+with\s+([A-Za-z])\b/i);
+      if (prefixMatch) prefixFilter = prefixMatch[1].toUpperCase();
+
+      const toolMatch = msg.match(/\bwith\s+(google\s+places?\s+search|google\s+places?|google\s+maps?)\b/i);
+      if (toolMatch) toolPreference = 'GOOGLE_PLACES';
+
+      const inMatch = msg.match(/\bin\s+([A-Z][a-zA-Z\s,]+?)(?:\s+(?:that|who|which|with|using)\b|$)/i);
+      if (!location && inMatch) {
+        location = inMatch[1].trim().replace(/,\s*$/, '');
       }
-      if (businessType) {
-        const numMatch = businessType.match(/^(\d+)\s+/);
-        if (numMatch) {
-          requestedCount = Math.min(parseInt(numMatch[1], 10), 200);
-          businessType = businessType.replace(/^\d+\s*/, '').trim() || undefined;
+
+      if (!businessType) {
+        const numTypeMatch = msg.match(/\bfind\s+(\d+)\s+([a-zA-Z\s]+?)(?:\s+in\b)/i);
+        if (numTypeMatch) {
+          requestedCount = Math.min(parseInt(numTypeMatch[1], 10), 200);
+          businessType = numTypeMatch[2].trim() || undefined;
+        } else {
+          const typeMatch = msg.match(/\bfind\s+([a-zA-Z\s]+?)(?:\s+in\b)/i);
+          if (typeMatch) {
+            businessType = typeMatch[1].trim().replace(/^\d+\s*/, '') || undefined;
+            const numMatch = typeMatch[1].match(/^(\d+)\s+/);
+            if (numMatch) requestedCount = Math.min(parseInt(numMatch[1], 10), 200);
+          }
         }
       }
     }
@@ -779,7 +795,30 @@ class SupervisorService {
     if (!location) location = 'Local';
     const city = location.split(',')[0].trim();
     const country = location.split(',')[1]?.trim() || 'UK';
-    const goal = `Find ${requestedCount} ${businessType} in ${city} for B2B outreach`;
+
+    const constraints: string[] = [];
+    constraints.push(`count=${requestedCount}`);
+    constraints.push(`business_type=${businessType}`);
+    constraints.push(`location=${city}`);
+    if (prefixFilter) constraints.push(`prefix=${prefixFilter}`);
+    if (toolPreference) constraints.push(`use=${toolPreference}`);
+
+    const assumptions: string[] = [];
+    if (prefixFilter) {
+      assumptions.push(`Google Places cannot filter by name prefix; will search broadly then filter locally for names starting with "${prefixFilter}"`);
+    }
+    if (requestedCount < 20) {
+      assumptions.push(`Will request up to 20 results from Google Places, then trim to ${requestedCount} after any local filtering`);
+    }
+    assumptions.push(`Location "${city}" will be used as-is in the Google Places text query`);
+
+    const searchCount = Math.max(requestedCount, 20);
+    const postProcessing: string[] = [];
+    if (prefixFilter) postProcessing.push(`Filter names starting with "${prefixFilter}"`);
+    if (requestedCount < 20 || prefixFilter) postProcessing.push(`Take first ${requestedCount} results`);
+
+    const normalizedGoal = `Find ${requestedCount} ${businessType} in ${city}${prefixFilter ? ` starting with ${prefixFilter}` : ''} for B2B outreach`;
+    const goal = normalizedGoal;
 
     console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" count=${requestedCount} goal="${goal}"`);
 
@@ -795,7 +834,9 @@ class SupervisorService {
         status: 'executing',
         metadata: {
           feature_flag: 'TOWER_LOOP_CHAT_MODE',
-          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: requestedCount } }] },
+          original_user_goal: originalUserGoal,
+          normalized_goal: normalizedGoal,
+          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount } }] },
         },
       });
       console.log(`[TOWER_LOOP_CHAT] [agent_run_create] runId=${chatRunId}`);
@@ -806,16 +847,17 @@ class SupervisorService {
         const isCridConflict = errMsg.includes('client_request_id');
         console.log(`[TOWER_LOOP_CHAT] agent_run duplicate: pkey=${isPkeyConflict} crid=${isCridConflict} runId=${chatRunId} crid=${clientRequestId}`);
 
+        const retryMeta = {
+          feature_flag: 'TOWER_LOOP_CHAT_MODE',
+          retry_reuse: true,
+          original_user_goal: originalUserGoal,
+          normalized_goal: normalizedGoal,
+          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount } }] },
+        };
+
         if (isPkeyConflict) {
           await storage.updateAgentRun(chatRunId, {
-            status: 'executing',
-            error: null,
-            terminalState: null,
-            metadata: {
-              feature_flag: 'TOWER_LOOP_CHAT_MODE',
-              retry_reuse: true,
-              plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: requestedCount } }] },
-            },
+            status: 'executing', error: null, terminalState: null, metadata: retryMeta,
           });
         } else if (isCridConflict && supabase) {
           const { data: existingRun } = await supabase
@@ -828,15 +870,8 @@ class SupervisorService {
             console.log(`[TOWER_LOOP_CHAT] Reusing existing agent_run ${existingRun.id} for crid=${clientRequestId}`);
             chatRunId = existingRun.id;
             await storage.updateAgentRun(existingRun.id, {
-              status: 'executing',
-              error: null,
-              terminalState: null,
-              metadata: {
-                feature_flag: 'TOWER_LOOP_CHAT_MODE',
-                retry_reuse: true,
-                original_run_id: task.request_data.run_id,
-                plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: requestedCount } }] },
-              },
+              status: 'executing', error: null, terminalState: null,
+              metadata: { ...retryMeta, original_run_id: task.request_data.run_id },
             });
           } else {
             console.error(`[TOWER_LOOP_CHAT] crid conflict but no existing run found — cannot proceed`);
@@ -844,14 +879,7 @@ class SupervisorService {
           }
         } else {
           await storage.updateAgentRun(chatRunId, {
-            status: 'executing',
-            error: null,
-            terminalState: null,
-            metadata: {
-              feature_flag: 'TOWER_LOOP_CHAT_MODE',
-              retry_reuse: true,
-              plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: requestedCount } }] },
-            },
+            status: 'executing', error: null, terminalState: null, metadata: retryMeta,
           });
         }
       } else {
@@ -859,17 +887,58 @@ class SupervisorService {
       }
     }
 
-    // 2. AFR: plan_execution_started
+    // 2. Create Plan v1 artefact BEFORE any tool execution
+    const planSteps = [
+      {
+        step_index: 0,
+        step_id: 'search_places_v1',
+        tool: 'SEARCH_PLACES',
+        tool_args: { query: `${businessType} in ${city} ${country}`, location: city, country, maxResults: searchCount },
+        expected_output: `Up to ${searchCount} ${businessType} results from Google Places`,
+        ...(postProcessing.length > 0 ? { post_processing: postProcessing.join('; ') } : {}),
+      },
+    ];
+
+    const planPayload = {
+      run_id: chatRunId,
+      original_user_goal: originalUserGoal,
+      normalized_goal: normalizedGoal,
+      constraints,
+      assumptions,
+      steps: planSteps,
+      created_at: new Date().toISOString(),
+    };
+
+    const planArtefact = await createArtefact({
+      runId: chatRunId,
+      type: 'plan',
+      title: 'Plan v1',
+      summary: `Search ${businessType} in ${city} via Google Places${prefixFilter ? `, filter prefix "${prefixFilter}", return ${requestedCount}` : ''}`,
+      payload: planPayload,
+      userId: task.user_id,
+      conversationId,
+    });
+    console.log(`[TOWER_LOOP_CHAT] [plan_created] Plan v1 artefact id=${planArtefact.id}`);
+
+    await logAFREvent({
+      userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+      actionTaken: 'artefact_created', status: 'success',
+      taskGenerated: `Plan v1 artefact created`,
+      runType: 'plan',
+      metadata: { artefactId: planArtefact.id, artefactType: 'plan', original_user_goal: originalUserGoal },
+    });
+
+    // 3. AFR: plan_execution_started
     await logAFREvent({
       userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
       actionTaken: 'plan_execution_started', status: 'pending',
-      taskGenerated: `Tower loop chat: ${goal}`,
+      taskGenerated: `Executing Plan v1: ${normalizedGoal}`,
       runType: 'plan',
-      metadata: { goal, plan_version: 1, steps: 1, tool: 'SEARCH_PLACES', feature_flag: 'TOWER_LOOP_CHAT_MODE' },
+      metadata: { original_user_goal: originalUserGoal, normalized_goal: normalizedGoal, plan_version: 1, steps: 1, tool: 'SEARCH_PLACES', planArtefactId: planArtefact.id },
     });
-    console.log(`[TOWER_LOOP_CHAT] [plan_execution_started] goal="${goal}"`);
+    console.log(`[TOWER_LOOP_CHAT] [plan_execution_started] original_goal="${originalUserGoal}" normalized="${normalizedGoal}"`);
 
-    // 3. AFR: step_started
+    // 4. AFR: step_started
     await logAFREvent({
       userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
       actionTaken: 'step_started', status: 'pending',
@@ -887,9 +956,9 @@ class SupervisorService {
     let towerLoopStepError: string | undefined;
 
     try {
-      const businesses = await this.searchGooglePlaces(businessType, city, country, requestedCount);
+      const businesses = await this.searchGooglePlaces(businessType, city, country, searchCount);
       if (businesses && businesses.length > 0) {
-        for (const biz of businesses.slice(0, Math.min(requestedCount, 20))) {
+        for (const biz of businesses) {
           leads.push({
             name: biz.displayName?.text || 'Unknown Business',
             address: biz.formattedAddress || `${city}, ${country}`,
@@ -900,6 +969,17 @@ class SupervisorService {
           });
         }
         console.log(`[TOWER_LOOP_CHAT] Google Places returned ${leads.length} results`);
+
+        if (prefixFilter) {
+          const before = leads.length;
+          leads = leads.filter(l => l.name.toUpperCase().startsWith(prefixFilter!));
+          console.log(`[TOWER_LOOP_CHAT] Prefix filter "${prefixFilter}": ${before} → ${leads.length}`);
+        }
+
+        if (leads.length > requestedCount) {
+          leads = leads.slice(0, requestedCount);
+          console.log(`[TOWER_LOOP_CHAT] Trimmed to requested count: ${leads.length}`);
+        }
       } else {
         console.log(`[TOWER_LOOP_CHAT] Google Places returned 0 results — using stub leads`);
         leads = this.generateStubLeads(businessType, city, country);
@@ -964,15 +1044,18 @@ class SupervisorService {
           payload: {
             run_id: chatRunId,
             client_request_id: clientRequestId,
+            original_user_goal: originalUserGoal,
+            normalized_goal: normalizedGoal,
             goal,
             plan_version: 1,
-            step_id: 'chat_tower_loop_search_places',
+            plan_artefact_id: planArtefact.id,
+            step_id: 'search_places_v1',
             step_title: `SEARCH_PLACES – ${businessType} in ${city}`,
             step_type: 'SEARCH_PLACES',
             step_index: 0,
             step_status: towerLoopStepStatus,
-            inputs_summary: compactInputs({ query: businessType, location: city, country, maxResults: requestedCount }),
-            outputs_summary: { leads_count: leads.length, used_stub: usedStub, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}) },
+            inputs_summary: compactInputs({ query: businessType, location: city, country, maxResults: searchCount }),
+            outputs_summary: { leads_count: leads.length, used_stub: usedStub, prefix_filter: prefixFilter || null, requested_count: requestedCount, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}) },
             ...safeOutputsRaw({ leads: safeLeads } as Record<string, unknown>),
             timings: {
               started_at: new Date(towerLoopStepStartedAt).toISOString(),
@@ -1021,13 +1104,17 @@ class SupervisorService {
 
     // 6. Create leads_list artefact (persisted to DB)
     const leadsListPayload = {
+      original_user_goal: originalUserGoal,
+      normalized_goal: normalizedGoal,
+      plan_artefact_id: planArtefact.id,
       delivered_count: leads.length,
       target_count: requestedCount,
-      success_criteria: { target_count: requestedCount },
+      success_criteria: { target_count: requestedCount, ...(prefixFilter ? { prefix: prefixFilter } : {}) },
       query: businessType,
       location: city,
       country,
       used_stub: usedStub,
+      prefix_filter: prefixFilter || null,
       leads: leads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website })),
     };
 
