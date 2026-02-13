@@ -458,63 +458,20 @@ class SupervisorService {
     let leadIds: string[] = [];
     let capabilities: string[] = [];
 
-    const towerLoopChatMode = process.env.TOWER_LOOP_CHAT_MODE === 'true';
-    const isLeadFindIntent = chosenTool === 'SEARCH_PLACES' || effectiveTaskType === 'generate_leads' || effectiveTaskType === 'find_prospects' || (hasLeadIntent && hasVenueType && hasLocation);
+    console.log(`[SUPERVISOR_PLAN] Routing ALL tasks through plan-based execution — task=${task.id} jobId=${jobId} chosenTool=${chosenTool}`);
+    logAFREvent({
+      userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
+      clientRequestId,
+      actionTaken: 'tower_loop_chat_activated', status: 'success',
+      taskGenerated: `Supervisor plan execution — routing through Tower pipeline`,
+      runType: 'plan',
+      metadata: { intent: routeIntent, chosen_tool: chosenTool },
+    }).catch(() => {});
 
-    if (towerLoopChatMode && isLeadFindIntent) {
-      console.log(`[TOWER_LOOP_CHAT] Routing to Tower loop pipeline — flag=TOWER_LOOP_CHAT_MODE task=${task.id} jobId=${jobId}`);
-      logAFREvent({
-        userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
-        clientRequestId,
-        actionTaken: 'tower_loop_chat_activated', status: 'success',
-        taskGenerated: `TOWER_LOOP_CHAT_MODE active — routing lead_find through Tower pipeline`,
-        runType: 'plan',
-        metadata: { feature_flag: 'TOWER_LOOP_CHAT_MODE', intent: routeIntent, chosen_tool: chosenTool },
-      }).catch(() => {});
-
-      const towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId);
-      response = towerResult.response;
-      leadIds = towerResult.leadIds;
-      capabilities = ['lead_generation', 'tower_validated'];
-    } else {
-      switch (effectiveTaskType) {
-        case 'generate_leads':
-        case 'find_prospects':
-          const result = await this.generateLeadsForChat(task, userContext, conversationContext, jobId, clientRequestId);
-          response = result.response;
-          leadIds = result.leadIds;
-          capabilities = ['lead_generation', 'email_enrichment'];
-          break;
-
-        case 'analyze_conversation':
-          response = await this.analyzeConversation(task, userContext, conversationContext);
-          capabilities = ['conversation_analysis'];
-          break;
-
-        case 'provide_insights':
-          response = await this.provideInsights(task, userContext);
-          capabilities = ['business_insights'];
-          break;
-
-        case 'deep_research':
-          const drResult = await this.executeDeepResearchForChat(task, jobId, clientRequestId);
-          response = drResult.response;
-          capabilities = ['deep_research'];
-          break;
-
-        default:
-          if (hasLeadIntent && hasVenueType && hasLocation) {
-            console.log(`[ROUTE_DECISION] tool=SEARCH_PLACES reason="lead_intent+venue+location_fallback" override_from="${effectiveTaskType}"`);
-            const fallbackResult = await this.generateLeadsForChat(task, userContext, conversationContext, jobId, clientRequestId);
-            response = fallbackResult.response;
-            leadIds = fallbackResult.leadIds;
-            capabilities = ['lead_generation', 'email_enrichment'];
-          } else {
-            response = "I'm not sure how to help with that request yet. Let me know if you'd like me to find leads or analyze your conversation!";
-            capabilities = [];
-          }
-      }
-    }
+    const towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId);
+    response = towerResult.response;
+    leadIds = towerResult.leadIds;
+    capabilities = ['lead_generation', 'tower_validated'];
 
     await this.ensureTowerJudgement(jobId, clientRequestId, task.user_id, task.conversation_id);
 

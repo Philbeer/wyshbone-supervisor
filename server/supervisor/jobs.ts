@@ -564,85 +564,75 @@ export async function startJob(request: StartJobRequest): Promise<string> {
   let effectiveJobType = request.jobType;
 
   if (request.jobType === 'deep_research') {
-    const DEEP_RESEARCH_KEYWORDS = /\b(research|investigate|analy[sz]e|summari[sz]e|summary|overview|report|sources|articles?|history|guide|best[- ]of\s+list)\b/i;
-    const deepResearchOptInOnly = process.env.DEEP_RESEARCH_OPT_IN_ONLY !== 'false';
     const userText = String(request.payload?.topic || request.payload?.prompt || request.payload?.user_message || '');
-    const hasGoogleOverride = /\bgoogle\b/i.test(userText);
+    const userId = request.userId || 'system';
+    const runId = request.sourceRunId || jobId;
 
-    console.log(`[ROUTER_SIGNATURE] DEEP_RESEARCH_GUARD_V1_ACTIVE entry=startJob jobId=${jobId} optInOnly=${deepResearchOptInOnly} googleOverride=${hasGoogleOverride} text="${userText.substring(0, 80)}"`);
+    console.log(`[SUPERVISOR_REDIRECT] Redirecting deep_research job to supervisor_task — jobId=${jobId} text="${userText.substring(0, 80)}"`);
 
-    if (hasGoogleOverride || (deepResearchOptInOnly && !DEEP_RESEARCH_KEYWORDS.test(userText))) {
-      const blockReason = hasGoogleOverride ? 'google_override' : 'deep_research_opt_in_only';
-      console.log(`[DEEP_RESEARCH_GUARD] Blocking deep_research at startJob: ${blockReason} in "${userText.substring(0, 80)}" → deferring to supervisor_task SEARCH_PLACES path`);
-      const userId = request.userId || 'system';
-      const runId = request.sourceRunId || jobId;
-
-      logAFREvent({
-        userId, runId,
-        ...(request.clientRequestId ? { clientRequestId: request.clientRequestId } : {}),
-        actionTaken: 'router_override', status: 'success',
-        taskGenerated: `Override: DEEP_RESEARCH → blocked at startJob (${blockReason})`,
-        runType: 'plan',
-        metadata: {
-          original_tool: 'DEEP_RESEARCH',
-          forced_tool: 'SEARCH_PLACES',
-          reason: blockReason,
-          message: userText.substring(0, 200),
-          jobId,
-          entry: 'jobs.ts/startJob',
-        },
-      }).catch(() => {});
-
-      if (supabase) {
-        const taskId = randomUUID();
-        const fullUserMessage = String(request.payload?.user_message || request.payload?.topic || request.payload?.prompt || userText);
-        const { error: insertErr } = await supabase.from('supervisor_tasks').insert({
-          id: taskId,
-          conversation_id: request.payload?.conversation_id || null,
-          user_id: userId,
-          task_type: 'generate_leads',
-          request_data: {
-            user_message: fullUserMessage,
-            run_id: randomUUID(),
-            client_request_id: request.clientRequestId || null,
-          },
-          status: 'pending',
-          created_at: Date.now(),
-        });
-        if (insertErr) {
-          console.warn(`[DEEP_RESEARCH_GUARD] Failed to insert supervisor_task for SEARCH_PLACES redirect: ${insertErr.message}`);
-        } else {
-          console.log(`[DEEP_RESEARCH_GUARD] Created supervisor_task ${taskId} with task_type=generate_leads for SEARCH_PLACES routing`);
-        }
-      }
-
-      const job: Job = {
+    logAFREvent({
+      userId, runId,
+      ...(request.clientRequestId ? { clientRequestId: request.clientRequestId } : {}),
+      actionTaken: 'router_override', status: 'success',
+      taskGenerated: `Redirect: deep_research → supervisor_task (supervisor decides tools)`,
+      runType: 'plan',
+      metadata: {
+        original_job_type: 'deep_research',
+        reason: 'supervisor_decides_all_routing',
+        message: userText.substring(0, 200),
         jobId,
-        jobType: request.jobType,
-        status: 'completed',
-        payload: request.payload,
-        requestedBy: request.requestedBy,
-        sourceRunId: request.sourceRunId,
-        userId: request.userId,
-        clientRequestId: request.clientRequestId,
-        progress: 100,
-        message: `Deep research blocked (${blockReason}) → redirected to SEARCH_PLACES via supervisor_task.`,
-        createdAt: now,
-        endedAt: now,
-        resultSummary: {
-          success: true,
-          jobType: request.jobType,
-          blocked: true,
-          reason: blockReason,
-          redirected_to: 'SEARCH_PLACES',
-          original_text: userText.substring(0, 200),
+        entry: 'jobs.ts/startJob',
+      },
+    }).catch(() => {});
+
+    if (supabase) {
+      const taskId = randomUUID();
+      const fullUserMessage = String(request.payload?.user_message || request.payload?.topic || request.payload?.prompt || userText);
+      const { error: insertErr } = await supabase.from('supervisor_tasks').insert({
+        id: taskId,
+        conversation_id: request.payload?.conversation_id || null,
+        user_id: userId,
+        task_type: 'generate_leads',
+        request_data: {
+          user_message: fullUserMessage,
+          run_id: randomUUID(),
+          client_request_id: request.clientRequestId || null,
         },
-      };
-      jobStore.set(jobId, job);
-      await emitJobEvent('job_queued', job);
-      await emitJobEvent('job_completed', job, { resultSummary: job.resultSummary });
-      return jobId;
+        status: 'pending',
+        created_at: Date.now(),
+      });
+      if (insertErr) {
+        console.warn(`[SUPERVISOR_REDIRECT] Failed to insert supervisor_task: ${insertErr.message}`);
+      } else {
+        console.log(`[SUPERVISOR_REDIRECT] Created supervisor_task ${taskId} — supervisor will decide routing`);
+      }
     }
+
+    const job: Job = {
+      jobId,
+      jobType: request.jobType,
+      status: 'completed',
+      payload: request.payload,
+      requestedBy: request.requestedBy,
+      sourceRunId: request.sourceRunId,
+      userId: request.userId,
+      clientRequestId: request.clientRequestId,
+      progress: 100,
+      message: `Redirected to supervisor — supervisor will create plan and choose tools.`,
+      createdAt: now,
+      endedAt: now,
+      resultSummary: {
+        success: true,
+        jobType: request.jobType,
+        redirected: true,
+        reason: 'supervisor_decides_all_routing',
+        original_text: userText.substring(0, 200),
+      },
+    };
+    jobStore.set(jobId, job);
+    await emitJobEvent('job_queued', job);
+    await emitJobEvent('job_completed', job, { resultSummary: job.resultSummary });
+    return jobId;
   }
   
   const job: Job = {
