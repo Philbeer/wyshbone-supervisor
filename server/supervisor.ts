@@ -762,6 +762,9 @@ class SupervisorService {
     let prefixFilter: string | undefined;
     let toolPreference: string | undefined;
 
+    const userCountMatch = rawMsg.match(/\bfind\s+(\d+)\s+/i);
+    const userRequestedCount = userCountMatch ? Math.min(parseInt(userCountMatch[1], 10), 200) : undefined;
+
     if (rawMsg) {
       const msg = rawMsg.trim();
 
@@ -796,6 +799,7 @@ class SupervisorService {
     if (!location) location = 'Local';
     let city = location.split(',')[0].trim();
     const country = location.split(',')[1]?.trim() || 'UK';
+    const displayCount = userRequestedCount ?? requestedCount;
 
     const constraints: string[] = [];
     constraints.push(`count=${requestedCount}`);
@@ -841,8 +845,80 @@ class SupervisorService {
     }
     console.log(`[TOWER_LOOP_CHAT] Constraint classification — hard: [${hard_constraints.join(', ')}] soft: [${soft_constraints.join(', ')}]`);
 
+    const v1Constraints = {
+      business_type: businessType,
+      location: city,
+      prefix_filter: prefixFilter || null,
+      requested_count: displayCount,
+    };
+
+    function buildConstraintLabel(
+      cur: { business_type: string; location: string; prefix_filter?: string | null; requested_count: number },
+      v1: typeof v1Constraints,
+      planVersion: number,
+    ): { annotations: string[]; relaxed_constraints: string[]; constraint_diffs: { field: string; from: any; to: any }[] } {
+      const annotations: string[] = [];
+      const relaxed_constraints: string[] = [];
+      const constraint_diffs: { field: string; from: any; to: any }[] = [];
+      if (planVersion <= 1) return { annotations, relaxed_constraints, constraint_diffs };
+      if (v1.prefix_filter && !cur.prefix_filter) {
+        annotations.push('prefix relaxed');
+        relaxed_constraints.push('prefix_filter');
+        constraint_diffs.push({ field: 'prefix_filter', from: v1.prefix_filter, to: null });
+      } else if (v1.prefix_filter && cur.prefix_filter && v1.prefix_filter !== cur.prefix_filter) {
+        annotations.push(`prefix changed to ${cur.prefix_filter}`);
+        relaxed_constraints.push('prefix_filter');
+        constraint_diffs.push({ field: 'prefix_filter', from: v1.prefix_filter, to: cur.prefix_filter });
+      }
+      if (cur.location !== v1.location) {
+        const radiusMatch = cur.location.match(/within\s+(\d+\s*km)/i);
+        annotations.push(radiusMatch ? `area expanded to ${radiusMatch[1]}` : 'area expanded');
+        relaxed_constraints.push('location');
+        constraint_diffs.push({ field: 'location', from: v1.location, to: cur.location });
+      }
+      if (cur.business_type !== v1.business_type) {
+        annotations.push('type broadened');
+        relaxed_constraints.push('business_type');
+        constraint_diffs.push({ field: 'business_type', from: v1.business_type, to: cur.business_type });
+      }
+      return { annotations, relaxed_constraints, constraint_diffs };
+    }
+
+    function artefactTitle(
+      prefix: string,
+      count: number,
+      cur: { business_type: string; location: string; prefix_filter?: string | null; requested_count: number },
+      planVersion: number,
+    ): string {
+      const { annotations } = buildConstraintLabel(cur, v1Constraints, planVersion);
+      const loc = cur.location;
+      const parts = [prefix];
+      parts.push(`${count} ${cur.business_type}`);
+      if (cur.prefix_filter) parts.push(`starting with ${cur.prefix_filter}`);
+      parts.push(`in ${loc}`);
+      if (annotations.length > 0) parts.push(`(${annotations.join(', ')})`);
+      return parts.join(' ');
+    }
+
+    function artefactSummary(
+      prefix: string,
+      delivered: number,
+      target: number,
+      cur: { business_type: string; location: string; prefix_filter?: string | null; requested_count: number },
+      planVersion: number,
+      extra?: string,
+    ): string {
+      const { annotations } = buildConstraintLabel(cur, v1Constraints, planVersion);
+      const loc = cur.location;
+      let s = `${prefix}${delivered} of ${target} ${cur.business_type} in ${loc}`;
+      if (cur.prefix_filter) s += ` starting with ${cur.prefix_filter}`;
+      if (annotations.length > 0) s += ` (${annotations.join(', ')})`;
+      if (extra) s += ` ${extra}`;
+      return s;
+    }
+
     const MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '1', 10);
-    console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" count=${requestedCount} goal="${goal}" MAX_REPLANS=${MAX_REPLANS}`);
+    console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" count=${requestedCount} userCount=${displayCount} goal="${goal}" MAX_REPLANS=${MAX_REPLANS}`);
 
     // 1. Create agent_run row (upsert — handles retries with same run_id/client_request_id)
     const nowMs = Date.now();
@@ -936,8 +1012,8 @@ class SupervisorService {
     const planArtefact = await createArtefact({
       runId: chatRunId,
       type: 'plan',
-      title: 'Plan v1',
-      summary: `Search ${businessType} in ${city} via Google Places${prefixFilter ? `, filter prefix "${prefixFilter}", return ${requestedCount}` : ''}`,
+      title: artefactTitle('Plan v1:', displayCount, v1Constraints, 1),
+      summary: `Search ${displayCount} ${businessType} in ${city} via Google Places${prefixFilter ? `, filter prefix "${prefixFilter}"` : ''}`,
       payload: planPayload,
       userId: task.user_id,
       conversationId,
@@ -1063,8 +1139,8 @@ class SupervisorService {
         towerLoopStepArtefact = await createArtefact({
           runId: chatRunId,
           type: 'step_result',
-          title: `Step result: SEARCH_PLACES – ${businessType} in ${city}`,
-          summary: towerLoopStepSummary,
+          title: artefactTitle('Step result: SEARCH_PLACES –', leads.length, v1Constraints, 1),
+          summary: `${towerLoopStepStatus} – ${leads.length} of ${displayCount} ${businessType} in ${city}${prefixFilter ? ` starting with ${prefixFilter}` : ''}`,
           payload: {
             run_id: chatRunId,
             client_request_id: clientRequestId,
@@ -1129,6 +1205,7 @@ class SupervisorService {
     }
 
     // 6. Create leads_list artefact (persisted to DB)
+    const v1Label = buildConstraintLabel(v1Constraints, v1Constraints, 1);
     const leadsListPayload = {
       original_user_goal: originalUserGoal,
       normalized_goal: normalizedGoal,
@@ -1136,21 +1213,23 @@ class SupervisorService {
       soft_constraints,
       plan_artefact_id: planArtefact.id,
       delivered_count: leads.length,
-      target_count: requestedCount,
-      success_criteria: { target_count: requestedCount, ...(prefixFilter ? { prefix: prefixFilter } : {}) },
+      target_count: displayCount,
+      success_criteria: { target_count: displayCount, ...(prefixFilter ? { prefix: prefixFilter } : {}) },
       query: businessType,
       location: city,
       country,
       used_stub: usedStub,
       prefix_filter: prefixFilter || null,
+      relaxed_constraints: v1Label.relaxed_constraints,
+      constraint_diffs: v1Label.constraint_diffs,
       leads: leads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website })),
     };
 
     const leadsListArtefact = await createArtefact({
       runId: chatRunId,
       type: 'leads_list',
-      title: `Leads list: ${leads.length} ${businessType} in ${city}`,
-      summary: `Delivered ${leads.length} of ${requestedCount} requested for "${businessType}" in ${city}${usedStub ? ' (stub fallback)' : ''}`,
+      title: artefactTitle('Leads list:', leads.length, v1Constraints, 1),
+      summary: artefactSummary('Delivered ', leads.length, displayCount, v1Constraints, 1, usedStub ? '(stub fallback)' : undefined),
       payload: leadsListPayload,
       userId: task.user_id,
       conversationId,
@@ -1265,7 +1344,7 @@ class SupervisorService {
       runId: chatRunId,
       type: 'tower_judgement',
       title: `Tower Judgement: ${verdict}`,
-      summary: `Verdict: ${verdict} | Action: ${action} | Delivered: ${leads.length} of ${requestedCount}`,
+      summary: `Verdict: ${verdict} | Action: ${action} | Delivered: ${leads.length} of ${displayCount}`,
       payload: {
         verdict,
         action,
@@ -1306,6 +1385,7 @@ class SupervisorService {
     let finalLeads = leads;
     let finalLeadsListArtefact = leadsListArtefact;
     let finalTowerResult = towerResult;
+    let finalConstraints = { ...v1Constraints };
     let planVersion = 1;
     let replansUsed = 0;
     let currentConstraints: PlanV2Constraints = {
@@ -1427,7 +1507,7 @@ class SupervisorService {
       const replanPlanArtefact = await createArtefact({
         runId: chatRunId,
         type: 'plan',
-        title: `Plan ${vLabel}`,
+        title: artefactTitle(`Plan ${vLabel}:`, v2.requested_count, v2, planVersion),
         summary: `${replanResult.strategy_summary} — re-searching ${v2.business_type} in ${v2.location}`,
         payload: replanPlanPayload,
         userId: task.user_id,
@@ -1535,8 +1615,8 @@ class SupervisorService {
       const replanStepArtefact = await createArtefact({
         runId: chatRunId,
         type: 'step_result',
-        title: `Step result (${vLabel}): SEARCH_PLACES – ${v2.business_type} in ${v2.location}`,
-        summary: `Plan ${vLabel}: Found ${replanLeads.length} ${v2.business_type} in ${v2.location}`,
+        title: artefactTitle(`Step result (${vLabel}): SEARCH_PLACES –`, replanLeads.length, v2, planVersion),
+        summary: artefactSummary(`Plan ${vLabel}: Found `, replanLeads.length, v2.requested_count, v2, planVersion),
         payload: {
           plan_version: planVersion,
           plan_artefact_id: replanPlanArtefact.id,
@@ -1585,6 +1665,7 @@ class SupervisorService {
         }
       }
 
+      const replanLabel = buildConstraintLabel(v2, v1Constraints, planVersion);
       const replanLeadsListPayload = {
         original_user_goal: originalUserGoal,
         normalized_goal: normalizedGoal,
@@ -1600,6 +1681,8 @@ class SupervisorService {
         country: v2.country,
         used_stub: replanUsedStub,
         prefix_filter: v2.prefix_filter || null,
+        relaxed_constraints: replanLabel.relaxed_constraints,
+        constraint_diffs: replanLabel.constraint_diffs,
         leads: replanLeads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website })),
         replan_context: {
           prior_plan_version: planVersion - 1,
@@ -1612,8 +1695,8 @@ class SupervisorService {
       const replanLeadsListArtefact = await createArtefact({
         runId: chatRunId,
         type: 'leads_list',
-        title: `Leads list ${vLabel}: ${replanLeads.length} ${v2.business_type} in ${v2.location}`,
-        summary: `Plan ${vLabel}: ${replanLeads.length} of ${v2.requested_count} ${v2.business_type} in ${v2.location}`,
+        title: artefactTitle(`Leads list ${vLabel}:`, replanLeads.length, v2, planVersion),
+        summary: artefactSummary(`Plan ${vLabel}: `, replanLeads.length, v2.requested_count, v2, planVersion, replanUsedStub ? '(stub fallback)' : undefined),
         payload: replanLeadsListPayload,
         userId: task.user_id,
         conversationId,
@@ -1702,6 +1785,7 @@ class SupervisorService {
       finalLeads = replanLeads;
       finalLeadsListArtefact = replanLeadsListArtefact;
       finalTowerResult = replanTowerResult;
+      finalConstraints = { business_type: v2.business_type, location: v2.location, prefix_filter: v2.prefix_filter || null, requested_count: v2.requested_count };
       businessType = v2.business_type;
       city = v2.location;
       prefixFilter = v2.prefix_filter;
@@ -1769,26 +1853,33 @@ class SupervisorService {
       conversationId,
     }).catch(() => {});
 
+    const finalLabel = buildConstraintLabel(finalConstraints, v1Constraints, planVersion);
+    const finalAnnotations = finalLabel.annotations.length > 0 ? ` (${finalLabel.annotations.join(', ')})` : '';
+    const finalLocDisplay = finalConstraints.location;
+    const finalPrefixDisplay = finalConstraints.prefix_filter ? ` starting with ${finalConstraints.prefix_filter}` : '';
+
     await this.postArtefactToUI({
       runId: chatRunId,
       clientRequestId,
       type: 'leads',
       payload: {
-        title: `${finalLeads.length} ${businessType} leads in ${city}`,
-        summary: `Found ${finalLeads.length} ${businessType} prospects in ${city}${usedStub ? ' (stub data)' : ''}${planVersion > 1 ? ` (Plan v${planVersion})` : ''} — Tower verdict: ${finalVerdict}`,
+        title: artefactTitle('', finalLeads.length, finalConstraints, planVersion).trim(),
+        summary: `Found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalPrefixDisplay}${finalAnnotations}${usedStub ? ' (stub data)' : ''} — Tower verdict: ${finalVerdict}`,
         leads: finalLeads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website, placeId: l.placeId, source: l.source })),
-        query: { businessType, location: city, country },
+        query: { businessType: finalConstraints.business_type, location: finalLocDisplay, country },
         tool: 'SEARCH_PLACES',
         tower_verdict: finalVerdict,
         plan_version: planVersion,
+        relaxed_constraints: finalLabel.relaxed_constraints,
+        constraint_diffs: finalLabel.constraint_diffs,
       },
       userId: task.user_id,
       conversationId,
     }).catch(() => {});
 
     const chatResponse = isHalted
-      ? `I found ${finalLeads.length} ${businessType} prospects in ${city}${planVersion > 1 ? ` after adjusting the search plan` : ''}, but the results didn't fully meet quality criteria (Tower verdict: ${finalVerdict}). You can still view what was found in your results. Would you like me to try a different search?`
-      : `I found ${finalLeads.length} ${businessType} prospects in ${city}${planVersion > 1 ? ` (adjusted search plan)` : ''}, validated by our quality system. View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
+      ? `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planVersion > 1 ? ` after adjusting the search plan` : ''}, but the results didn't fully meet quality criteria (Tower verdict: ${finalVerdict}). You can still view what was found in your results. Would you like me to try a different search?`
+      : `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planVersion > 1 ? ` (adjusted search plan)` : ''}, validated by our quality system. View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
 
     console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub}`);
 
