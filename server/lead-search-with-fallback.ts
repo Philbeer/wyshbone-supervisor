@@ -52,12 +52,12 @@ export interface LeadSearchWithFallbackResult {
  * Search using Google Places API
  */
 async function searchGooglePlaces(params: LeadSearchParams): Promise<{ leads: any[]; error?: string }> {
-  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
   
   if (!apiKey) {
     return {
       leads: [],
-      error: "GOOGLE_PLACES_API_KEY not configured"
+      error: "GOOGLE_PLACES_API_KEY or GOOGLE_MAPS_API_KEY not configured"
     };
   }
 
