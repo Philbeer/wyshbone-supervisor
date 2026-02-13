@@ -802,21 +802,81 @@ class SupervisorService {
 
     console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" count=${requestedCount} goal="${goal}"`);
 
-    // 1. Create agent_run row
+    // 1. Create agent_run row (upsert — handles retries with same run_id/client_request_id)
     const nowMs = Date.now();
-    await storage.createAgentRun({
-      id: chatRunId,
-      clientRequestId,
-      userId: task.user_id,
-      createdAt: nowMs,
-      updatedAt: nowMs,
-      status: 'executing',
-      metadata: {
-        feature_flag: 'TOWER_LOOP_CHAT_MODE',
-        plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: requestedCount } }] },
-      },
-    });
-    console.log(`[TOWER_LOOP_CHAT] [agent_run_create] runId=${chatRunId}`);
+    try {
+      await storage.createAgentRun({
+        id: chatRunId,
+        clientRequestId,
+        userId: task.user_id,
+        createdAt: nowMs,
+        updatedAt: nowMs,
+        status: 'executing',
+        metadata: {
+          feature_flag: 'TOWER_LOOP_CHAT_MODE',
+          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: requestedCount } }] },
+        },
+      });
+      console.log(`[TOWER_LOOP_CHAT] [agent_run_create] runId=${chatRunId}`);
+    } catch (createErr: any) {
+      const errMsg = createErr.message || '';
+      if (errMsg.includes('duplicate key') || errMsg.includes('unique constraint')) {
+        const isPkeyConflict = errMsg.includes('agent_runs_pkey');
+        const isCridConflict = errMsg.includes('client_request_id');
+        console.log(`[TOWER_LOOP_CHAT] agent_run duplicate: pkey=${isPkeyConflict} crid=${isCridConflict} runId=${chatRunId} crid=${clientRequestId}`);
+
+        if (isPkeyConflict) {
+          await storage.updateAgentRun(chatRunId, {
+            status: 'executing',
+            error: null,
+            terminalState: null,
+            metadata: {
+              feature_flag: 'TOWER_LOOP_CHAT_MODE',
+              retry_reuse: true,
+              plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: requestedCount } }] },
+            },
+          });
+        } else if (isCridConflict && supabase) {
+          const { data: existingRun } = await supabase
+            .from('agent_runs')
+            .select('id')
+            .eq('client_request_id', clientRequestId)
+            .maybeSingle();
+          
+          if (existingRun) {
+            console.log(`[TOWER_LOOP_CHAT] Reusing existing agent_run ${existingRun.id} for crid=${clientRequestId}`);
+            chatRunId = existingRun.id;
+            await storage.updateAgentRun(existingRun.id, {
+              status: 'executing',
+              error: null,
+              terminalState: null,
+              metadata: {
+                feature_flag: 'TOWER_LOOP_CHAT_MODE',
+                retry_reuse: true,
+                original_run_id: task.request_data.run_id,
+                plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: requestedCount } }] },
+              },
+            });
+          } else {
+            console.error(`[TOWER_LOOP_CHAT] crid conflict but no existing run found — cannot proceed`);
+            throw createErr;
+          }
+        } else {
+          await storage.updateAgentRun(chatRunId, {
+            status: 'executing',
+            error: null,
+            terminalState: null,
+            metadata: {
+              feature_flag: 'TOWER_LOOP_CHAT_MODE',
+              retry_reuse: true,
+              plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: requestedCount } }] },
+            },
+          });
+        }
+      } else {
+        throw createErr;
+      }
+    }
 
     // 2. AFR: plan_execution_started
     await logAFREvent({
