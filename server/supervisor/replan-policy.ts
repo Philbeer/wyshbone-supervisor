@@ -56,18 +56,67 @@ export function extractChangePlanDirective(
 
   let suggested_changes: TowerSuggestedChange[] = [];
   if (Array.isArray(raw.suggested_changes)) {
-    suggested_changes = raw.suggested_changes.map((sc: any) => ({
-      field: sc.field || 'unknown',
-      action: sc.action || 'relax',
-      reason: sc.reason || '',
-      current_value: sc.current_value,
-      suggested_value: sc.suggested_value,
-    }));
-  } else {
+    const hasStructured = raw.suggested_changes.some((sc: any) => typeof sc === 'object' && sc.field);
+    if (hasStructured) {
+      suggested_changes = raw.suggested_changes
+        .filter((sc: any) => typeof sc === 'object' && sc.field)
+        .map((sc: any) => ({
+          field: sc.field,
+          action: sc.action || 'relax',
+          reason: sc.reason || '',
+          current_value: sc.current_value,
+          suggested_value: sc.suggested_value,
+        }));
+    } else {
+      suggested_changes = raw.suggested_changes
+        .filter((sc: any) => typeof sc === 'string')
+        .map((s: string) => parseStringSuggestion(s))
+        .filter((sc): sc is TowerSuggestedChange => sc !== null);
+    }
+  }
+  if (suggested_changes.length === 0) {
     suggested_changes = deriveChangesFromGaps(gaps);
   }
 
   return { gaps, suggested_changes };
+}
+
+function parseStringSuggestion(s: string): TowerSuggestedChange | null {
+  const lower = s.toLowerCase();
+
+  if (lower.includes('prefix') || lower.includes('filter')) {
+    return {
+      field: 'prefix_filter',
+      action: 'drop',
+      reason: s,
+    };
+  }
+
+  if (lower.includes('location') || lower.includes('area') || lower.includes('radius') || lower.includes('region')) {
+    return {
+      field: 'location',
+      action: 'expand',
+      reason: s,
+    };
+  }
+
+  if (lower.includes('count') || lower.includes('more') || lower.includes('increase') || lower.includes('volume')) {
+    return {
+      field: 'search_count',
+      action: 'increase',
+      reason: s,
+    };
+  }
+
+  if (lower.includes('type') || lower.includes('broaden') || lower.includes('category') || lower.includes('business')) {
+    return {
+      field: 'business_type',
+      action: 'broaden',
+      reason: s,
+    };
+  }
+
+  return null;
 }
 
 function inferGapType(reason: string): string {
