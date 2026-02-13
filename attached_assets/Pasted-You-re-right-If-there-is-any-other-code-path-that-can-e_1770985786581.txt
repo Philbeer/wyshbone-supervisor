@@ -1,0 +1,135 @@
+You’re right. If there is any other code path that can execute Google Places (or any “leadgen”) outside the Supervisor agentic loop, it will keep poisoning the proof trail forever. It has to be impossible to run it any other way.
+
+Here are the two copy paste prompts to give to UI and Supervisor to enforce a single execution engine, and delete the rest.
+
+Prompt A: UI repo (server) - delete all execution paths, keep only CHAT or ENQUEUE
+
+Paste this into Claude Code in the UI repo:
+
+You are in the Wyshbone UI server repo. We are enforcing a hard rule:
+
+HARD RULE
+
+UI server must never execute leadgen tools (Google Places, deep research, region jobs, etc).
+UI server can only do ONE of two things on /api/chat:
+
+CHAT lane: stream a normal chat response (no side effects, no tool execution, no artefacts creation).
+
+RUN lane: enqueue an agentic run by inserting a supervisor_tasks row in Supabase, then stream “delegated” and end.
+
+There must be zero other execution paths anywhere in the UI server. If any exist, delete them.
+
+What to do (must be done)
+
+Rewrite /api/chat so it does:
+
+auth + schema validation
+
+save message
+
+decide mode via decideChatMode()
+
+if RUN: insert supervisor_tasks row and return
+
+if CHAT: do normal chat streaming response
+
+Delete or fully remove all of these from the UI server:
+
+any server-side deep research detection/validation/redirect logic
+
+summarise detection logic
+
+region job detection logic
+
+pending confirmation / partial workflow completion machinery
+
+any keyword/regex intent routers that do early returns before RUN enqueue
+
+any debug endpoints that execute runs inline (simulate-chat-task etc)
+
+any endpoints that call Google Places directly
+
+any endpoints that create leads_list, plan_result, or execution artefacts from UI server
+
+Hard guardrail (critical):
+Add a single shared function assertNoExecutionInUI() and call it inside any code that previously executed tools.
+It should:
+
+throw an error with a clear message: "UI execution path forbidden: must enqueue supervisor_tasks"
+
+This ensures if any legacy path is accidentally left reachable, it immediately fails loudly.
+
+Client side (critical):
+Remove client-side deep research interception that prevents POST to /api/chat. The UI must always POST; server decides.
+
+Definition of Done
+
+There is no code in the UI server that can run Google Places, deep research, or create execution artefacts.
+
+The ONLY way to execute leadgen is by creating a supervisor_tasks row.
+
+If any legacy code is hit, it throws the explicit “UI execution forbidden” error.
+
+Rewrite full files. Do not leave stubs or flags.
+
+Prompt B: Supervisor repo - make Supervisor the ONLY executor, and make bypass visible
+
+Paste this into Claude Code in the Supervisor repo:
+
+You are in the Wyshbone Supervisor repo. We are enforcing a hard rule:
+
+HARD RULE
+
+Supervisor is the only execution engine.
+If a run is “completed” without Supervisor execution traces, that is a bug and must be made obvious.
+
+What to do (must be done)
+
+Remove duplicate/ignored routing in Supervisor intake
+If processChatTask() calculates routing but then always calls executeTowerLoopChat() anyway, delete that routing block. Keep one simple path:
+
+load pending task
+
+run executeTowerLoopChat(...)
+
+write outputs
+
+mark task complete
+
+Make inline observation mandatory
+After each step:
+
+create step_result artefact using the ONE canonical run_id
+
+call Tower inline to judge it
+No other run_id generation inside executors. If run_id missing, STOP hard with a clear artefact.
+
+Backfill must not mask bypasses
+Update backfill poller logic:
+
+If a run has no Supervisor execution traces (no step_result created inline, no executor logs/markers), then backfill must:
+
+write ONE artefact: run_invalid (or run_bypassed_supervisor) with summary “Executed outside Supervisor”
+
+do not create step_result and do not call Tower for fresh runs
+This prevents UI execution paths from “looking fine” after backfill.
+
+(You can keep backfill for legacy runs behind a strict rule: only runs older than X hours/days.)
+
+Kill the giant debug inline executor
+Replace /api/debug/simulate-chat-task (or equivalent) with:
+
+insert supervisor_tasks row only
+
+return task id
+No inline tool execution in debug routes.
+
+Definition of Done
+
+Every normal run produces step_result inline immediately (no +30s backfill patching).
+
+Backfill never creates step_result/tower_judgement for fresh runs. It only flags bypasses.
+
+Debug matches production (enqueue only).
+
+Rewrite full files. No flags.

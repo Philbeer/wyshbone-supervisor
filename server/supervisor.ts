@@ -86,17 +86,12 @@ class SupervisorService {
         return;
       }
 
-      const towerDuringRun = process.env.ENABLE_TOWER_DURING_RUN === 'true';
       const tasks: Promise<void>[] = [
         this.processNewSignals(),
         this.processSupervisorTasks(),
         this.monitorGoals(),
+        this.flagBypassedRuns(),
       ];
-      if (!towerDuringRun) {
-        tasks.push(this.backfillTowerJudgements());
-      } else {
-        console.log('[SUPERVISOR] ENABLE_TOWER_DURING_RUN=true — backfill poller disabled (Tower judgement is synchronous)');
-      }
       await Promise.all(tasks);
     } catch (error) {
       console.error('Error in supervisor poll:', error);
@@ -330,8 +325,6 @@ class SupervisorService {
     const leadIds = towerResult.leadIds;
     const capabilities = ['lead_generation', 'tower_validated'];
 
-    await this.ensureTowerJudgement(jobId, clientRequestId, task.user_id, task.conversation_id);
-
     const messageId = randomUUID();
     const { data: newMessage, error: messageError } = await supabase
       .from('messages')
@@ -370,153 +363,9 @@ class SupervisorService {
       .eq('id', task.id);
   }
 
-  private async ensureTowerJudgement(
-    runId: string,
-    clientRequestId: string,
-    userId: string,
-    conversationId: string,
-  ): Promise<void> {
-    try {
-      const artefacts = await storage.getArtefactsByRunId(runId);
-      const hasTowerJudgement = artefacts.some(a => a.type === 'tower_judgement');
+  // ensureTowerJudgement: REMOVED — inline observation is mandatory. No safety nets.
 
-      if (hasTowerJudgement) {
-        console.log(`[TOWER_SAFETY] runId=${runId} tower_judgement already exists — skipping safety net`);
-        return;
-      }
-
-      const leadsListArtefact = artefacts
-        .filter(a => a.type === 'leads_list')
-        .sort((a, b) => {
-          const ta = typeof a.createdAt === 'number' ? a.createdAt : new Date(String(a.createdAt)).getTime();
-          const tb = typeof b.createdAt === 'number' ? b.createdAt : new Date(String(b.createdAt)).getTime();
-          return tb - ta;
-        })[0];
-
-      if (!leadsListArtefact) {
-        console.log(`[TOWER_SAFETY] runId=${runId} no leads_list artefact found — nothing to judge`);
-        return;
-      }
-
-      console.log(`[TOWER_SAFETY] runId=${runId} NO tower_judgement found — triggering safety net judgement on leads_list=${leadsListArtefact.id}`);
-
-      const payload = (leadsListArtefact.payloadJson as Record<string, unknown>) || {};
-      const delivered = payload.delivered_count ?? 0;
-      const requested = payload.target_count ?? 0;
-      const query = payload.query ?? 'unknown';
-      const location = payload.location ?? 'unknown';
-      const goal = `Find ${requested} ${query} in ${location}`;
-
-      await logAFREvent({
-        userId, runId, conversationId, clientRequestId,
-        actionTaken: 'tower_call_started', status: 'pending',
-        taskGenerated: `[Safety net] Calling Tower to judge leads_list artefact ${leadsListArtefact.id}`,
-        runType: 'plan',
-        metadata: { artefactId: leadsListArtefact.id, goal, safety_net: true },
-      });
-
-      let towerResult;
-      try {
-        towerResult = await judgeArtefact({
-          artefact: leadsListArtefact,
-          runId,
-          goal,
-          userId,
-          conversationId,
-          successCriteria: { target_leads: requested },
-        });
-      } catch (towerErr: any) {
-        const errMsg = towerErr.message || 'Tower call failed';
-        console.error(`[TOWER_SAFETY] Tower call failed: ${errMsg}`);
-
-        const errorArtefact = await createArtefact({
-          runId,
-          type: 'tower_judgement',
-          title: `Tower Judgement: error`,
-          summary: `[Safety net] Tower unreachable/failed: ${errMsg}`,
-          payload: { verdict: 'error', action: 'stop', reasons: [errMsg], metrics: {}, delivered, requested, error: errMsg, safety_net: true },
-          userId,
-          conversationId,
-        });
-
-        await this.postArtefactToUI({
-          runId, clientRequestId,
-          type: 'tower_judgement',
-          payload: { verdict: 'error', action: 'stop', reasons: [errMsg], metrics: {}, delivered, requested, error: errMsg, safety_net: true },
-          userId, conversationId,
-        }).catch(() => {});
-
-        await logAFREvent({
-          userId, runId, conversationId, clientRequestId,
-          actionTaken: 'tower_verdict', status: 'failed',
-          taskGenerated: `[Safety net] Tower error: ${errMsg}`,
-          runType: 'plan',
-          metadata: { artefactId: leadsListArtefact.id, verdict: 'error', error: errMsg, towerJudgementArtefactId: errorArtefact.id, safety_net: true },
-        });
-
-        return;
-      }
-
-      const verdict = towerResult.judgement.verdict;
-      const action = towerResult.judgement.action;
-      console.log(`[TOWER_SAFETY] verdict=${verdict} action=${action} stubbed=${towerResult.stubbed}`);
-
-      const towerJudgementArtefact = await createArtefact({
-        runId,
-        type: 'tower_judgement',
-        title: `Tower Judgement: ${verdict}`,
-        summary: `[Safety net] Verdict: ${verdict} | Action: ${action} | Delivered: ${delivered} of ${requested}`,
-        payload: {
-          verdict, action,
-          reasons: towerResult.judgement.reasons,
-          metrics: towerResult.judgement.metrics,
-          delivered, requested,
-          artefact_id: leadsListArtefact.id,
-          stubbed: towerResult.stubbed,
-          safety_net: true,
-        },
-        userId,
-        conversationId,
-      });
-
-      await this.postArtefactToUI({
-        runId, clientRequestId,
-        type: 'tower_judgement',
-        payload: {
-          verdict, action,
-          reasons: towerResult.judgement.reasons,
-          metrics: towerResult.judgement.metrics,
-          delivered, requested,
-          artefact_id: leadsListArtefact.id,
-          stubbed: towerResult.stubbed,
-          safety_net: true,
-        },
-        userId, conversationId,
-      }).catch(() => {});
-
-      await logAFREvent({
-        userId, runId, conversationId, clientRequestId,
-        actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success',
-        taskGenerated: `[Safety net] Tower verdict: ${verdict} — action: ${action}`,
-        runType: 'plan',
-        metadata: {
-          verdict, action,
-          artefactId: leadsListArtefact.id,
-          towerJudgementArtefactId: towerJudgementArtefact.id,
-          delivered, requested,
-          reasons: towerResult.judgement.reasons,
-          stubbed: towerResult.stubbed,
-          safety_net: true,
-        },
-      });
-
-      console.log(`[TOWER_SAFETY] runId=${runId} safety net complete — tower_judgement=${towerJudgementArtefact.id} verdict=${verdict}`);
-    } catch (err: any) {
-      console.error(`[TOWER_SAFETY] runId=${runId} safety net failed (non-fatal): ${err.message}`);
-    }
-  }
-
-  private async backfillTowerJudgements(): Promise<void> {
+  private async flagBypassedRuns(): Promise<void> {
     if (!supabase) return;
 
     try {
@@ -535,200 +384,54 @@ class SupervisorService {
         try {
           const { data: artefacts, error: artErr } = await supabase
             .from('artefacts')
-            .select('id, run_id, type, title, summary, payload_json, created_at')
+            .select('id, run_id, type')
             .eq('run_id', run.id);
 
           if (artErr || !artefacts) continue;
 
-          const hasLeadsList = artefacts.some(a => a.type === 'leads_list');
-          const hasTowerJudgement = artefacts.some(a => a.type === 'tower_judgement');
           const hasStepResult = artefacts.some(a => a.type === 'step_result');
+          const hasBypassFlag = artefacts.some(a => a.type === 'run_bypassed_supervisor');
 
-          if (!hasLeadsList || hasTowerJudgement) continue;
+          if (hasStepResult || hasBypassFlag) continue;
 
-          const leadsListArt = artefacts.find(a => a.type === 'leads_list')!;
-          const payload = leadsListArt.payload_json || {};
+          const hasLeadsList = artefacts.some(a => a.type === 'leads_list');
+          if (!hasLeadsList) continue;
 
-          let leadsCount = 0;
-          let query = 'businesses';
-          let location = 'unknown';
-
-          if (Array.isArray(payload)) {
-            leadsCount = payload.length;
-          } else if (typeof payload === 'object') {
-            leadsCount = payload.delivered_count ?? payload.leads?.length ?? Object.keys(payload).filter(k => /^\d+$/.test(k)).length;
-            query = payload.query || 'businesses';
-            location = payload.location || 'unknown';
-          }
-
-          if (typeof leadsListArt.title === 'string') {
-            const titleMatch = leadsListArt.title.match(/(\d+)\s+(.+?)\s+(?:in|businesses?\s+in)\s+(.+)/i);
-            if (titleMatch) {
-              leadsCount = leadsCount || parseInt(titleMatch[1], 10);
-              query = query === 'businesses' ? titleMatch[2] : query;
-              location = location === 'unknown' ? titleMatch[3] : location;
-            }
-          }
-
-          const userMessage = run.metadata?.userMessagePreview || `Find ${query} in ${location}`;
-          const goal = `Find ${query} in ${location} for B2B outreach`;
-
-          // Backfill step_result if missing (for runs created by external UI backend)
-          if (!hasStepResult) {
-            try {
-              const stepResultId = randomUUID();
-              const stepStatus = leadsCount > 0 ? 'success' : 'fail';
-              const stepSummary = leadsCount > 0
-                ? `success – found ${leadsCount} ${query} in ${location}`
-                : `fail – 0 results for ${query} in ${location}`;
-              const { error: stepInsertErr } = await supabase.from('artefacts').insert({
-                id: stepResultId,
-                run_id: run.id,
-                type: 'step_result',
-                title: `Step result: SEARCH_PLACES – ${query} in ${location}`,
-                summary: stepSummary,
-                payload_json: {
-                  run_id: run.id,
-                  client_request_id: run.client_request_id || null,
-                  goal,
-                  plan_version: 1,
-                  step_id: 'backfill_search_places',
-                  step_title: `SEARCH_PLACES – ${query} in ${location}`,
-                  step_type: 'SEARCH_PLACES',
-                  step_index: 0,
-                  step_status: stepStatus,
-                  inputs_summary: { query, location },
-                  outputs_summary: { leads_count: leadsCount },
-                  backfill: true,
-                },
-              });
-
-              if (stepInsertErr) {
-                console.warn(`[TOWER_BACKFILL] runId=${run.id} failed to insert step_result: ${stepInsertErr.message}`);
-              } else {
-                console.log(`[TOWER_BACKFILL] runId=${run.id} step_result backfilled — status=${stepStatus} leads=${leadsCount}`);
-
-                // Observation Tower judgement on the backfilled step_result
-                try {
-                  const stepArtefactForJudge = {
-                    id: stepResultId,
-                    runId: run.id,
-                    type: 'step_result' as const,
-                    title: `Step result: SEARCH_PLACES – ${query} in ${location}`,
-                    summary: stepSummary,
-                    payloadJson: { run_id: run.id, goal, step_type: 'SEARCH_PLACES', step_status: stepStatus, leads_count: leadsCount },
-                    createdAt: new Date(),
-                  };
-                  const obsResult = await judgeArtefact({
-                    artefact: stepArtefactForJudge,
-                    runId: run.id, goal, userId: run.user_id,
-                  });
-                  const obsId = randomUUID();
-                  const { error: obsInsertErr } = await supabase.from('artefacts').insert({
-                    id: obsId,
-                    run_id: run.id,
-                    type: 'tower_judgement',
-                    title: `Tower Judgement: ${obsResult.judgement.verdict} (step observation)`,
-                    summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | SEARCH_PLACES`,
-                    payload_json: {
-                      verdict: obsResult.judgement.verdict, action: obsResult.judgement.action,
-                      reasons: obsResult.judgement.reasons, metrics: obsResult.judgement.metrics,
-                      step_index: 0, step_label: `SEARCH_PLACES – ${query} in ${location}`,
-                      judged_artefact_id: stepResultId, stubbed: obsResult.stubbed,
-                      observation_only: true, backfill: true,
-                    },
-                  });
-                  if (obsInsertErr) {
-                    console.warn(`[TOWER_BACKFILL] runId=${run.id} failed to insert observation tower_judgement: ${obsInsertErr.message}`);
-                  } else {
-                    console.log(`[STEP_OBSERVATION] [backfill] runId=${run.id} verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only)`);
-                  }
-                } catch (obsErr: any) {
-                  console.warn(`[STEP_OBSERVATION] [backfill] runId=${run.id} Tower observation failed (continuing): ${obsErr.message}`);
-                }
-              }
-            } catch (stepErr: any) {
-              console.warn(`[TOWER_BACKFILL] runId=${run.id} step_result backfill failed (non-fatal): ${stepErr.message}`);
-            }
-          }
-
-          console.log(`[TOWER_BACKFILL] runId=${run.id} found leads_list but no tower_judgement — triggering backfill (${leadsCount} leads)`);
-
-          const artefactForJudge = {
-            id: leadsListArt.id,
-            runId: run.id,
-            type: 'leads_list' as const,
-            title: leadsListArt.title || '',
-            summary: leadsListArt.summary || null,
-            payloadJson: payload,
-            createdAt: typeof leadsListArt.created_at === 'string' ? new Date(leadsListArt.created_at).getTime() : leadsListArt.created_at,
-          };
-
-          let towerResult;
-          try {
-            towerResult = await judgeArtefact({
-              artefact: artefactForJudge,
-              runId: run.id,
-              goal,
-              userId: run.user_id,
-              successCriteria: { target_leads: leadsCount },
-            });
-          } catch (towerErr: any) {
-            console.error(`[TOWER_BACKFILL] runId=${run.id} Tower call failed: ${towerErr.message}`);
-            const { error: insertErr } = await supabase.from('artefacts').insert({
-              id: randomUUID(),
-              run_id: run.id,
-              type: 'tower_judgement',
-              title: 'Tower Judgement: error',
-              summary: `Tower unreachable: ${towerErr.message}`,
-              payload_json: { verdict: 'error', action: 'stop', reasons: [towerErr.message], metrics: {}, delivered: leadsCount, error: towerErr.message, backfill: true },
-            });
-            if (insertErr) console.error(`[TOWER_BACKFILL] runId=${run.id} failed to insert error artefact: ${insertErr.message}`);
-            continue;
-          }
-
-          const verdict = towerResult.judgement.verdict;
-          const action = towerResult.judgement.action;
+          console.warn(`[BYPASS_DETECTOR] runId=${run.id} has leads_list but NO step_result — executed outside Supervisor`);
 
           const { error: insertErr } = await supabase.from('artefacts').insert({
             id: randomUUID(),
             run_id: run.id,
-            type: 'tower_judgement',
-            title: `Tower Judgement: ${verdict}`,
-            summary: `Verdict: ${verdict} | Action: ${action} | Leads: ${leadsCount}`,
+            type: 'run_bypassed_supervisor',
+            title: 'Run bypassed Supervisor execution',
+            summary: 'This run produced artefacts without Supervisor inline execution. No step_result or tower_judgement was created inline. This is a bug — all execution must go through the Supervisor.',
             payload_json: {
-              verdict,
-              action,
-              reasons: towerResult.judgement.reasons,
-              metrics: towerResult.judgement.metrics,
-              delivered: leadsCount,
-              artefact_id: leadsListArt.id,
-              stubbed: towerResult.stubbed,
-              backfill: true,
+              detected_at: new Date().toISOString(),
+              artefact_types_found: [...new Set(artefacts.map(a => a.type))],
+              user_id: run.user_id,
             },
           });
 
           if (insertErr) {
-            console.error(`[TOWER_BACKFILL] runId=${run.id} failed to insert tower_judgement: ${insertErr.message}`);
-            continue;
+            console.error(`[BYPASS_DETECTOR] runId=${run.id} failed to insert bypass flag: ${insertErr.message}`);
+          } else {
+            console.warn(`[BYPASS_DETECTOR] runId=${run.id} flagged as run_bypassed_supervisor`);
           }
-
-          console.log(`[TOWER_BACKFILL] runId=${run.id} tower_judgement created — verdict=${verdict} action=${action}`);
 
           await logAFREvent({
             userId: run.user_id, runId: run.id,
             clientRequestId: run.client_request_id,
-            actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success',
-            taskGenerated: `[Backfill] Tower verdict: ${verdict} — action: ${action}`,
+            actionTaken: 'run_bypassed_supervisor', status: 'failed',
+            taskGenerated: 'Run executed outside Supervisor — no inline step_result found',
             runType: 'plan',
-            metadata: { verdict, action, leadsCount, artefactId: leadsListArt.id, stubbed: towerResult.stubbed, backfill: true },
+            metadata: { bypass: true },
           }).catch(() => {});
         } catch (runErr: any) {
-          console.error(`[TOWER_BACKFILL] runId=${run.id} failed (non-fatal): ${runErr.message}`);
+          console.error(`[BYPASS_DETECTOR] runId=${run.id} error (non-fatal): ${runErr.message}`);
         }
       }
     } catch (err: any) {
-      console.error(`[TOWER_BACKFILL] Poller error (non-fatal): ${err.message}`);
+      console.error(`[BYPASS_DETECTOR] Poller error (non-fatal): ${err.message}`);
     }
   }
 
