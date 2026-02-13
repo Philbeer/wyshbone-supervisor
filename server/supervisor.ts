@@ -205,7 +205,7 @@ class SupervisorService {
     try {
       const { data: stuckTasks, error } = await supabase
         .from('supervisor_tasks')
-        .select('id, user_id, conversation_id, request_data, created_at, status')
+        .select('id, user_id, conversation_id, request_data, created_at, status, run_id, client_request_id')
         .eq('status', 'processing')
         .limit(50);
 
@@ -252,7 +252,7 @@ class SupervisorService {
 
       const { data: staleTasks, error } = await supabase
         .from('supervisor_tasks')
-        .select('id, user_id, conversation_id, request_data, created_at, status')
+        .select('id, user_id, conversation_id, request_data, created_at, status, run_id, client_request_id')
         .eq('status', 'processing')
         .lt('created_at', cutoffEpoch)
         .limit(20);
@@ -280,18 +280,17 @@ class SupervisorService {
   }
 
   private async evaluateAndRecoverTask(
-    task: { id: string; user_id: string; conversation_id: string; request_data: any; created_at: any; status: string },
+    task: { id: string; user_id: string; conversation_id: string; request_data: any; created_at: any; status: string; run_id?: string; client_request_id?: string },
     trigger: 'startup' | 'stale_sweep',
   ): Promise<'requeued' | 'skipped' | 'failed'> {
     if (!supabase) return 'failed';
 
-    const runId = task.request_data?.run_id || task.id;
-    const clientRequestId = task.request_data?.client_request_id || `crid_${task.id}`;
+    const runId = task.run_id || task.request_data?.run_id || task.id;
+    const clientRequestId = task.client_request_id || task.request_data?.client_request_id || `crid_${task.id}`;
     const logPrefix = `[RECOVERY][${trigger}] task=${task.id}`;
 
-    if (!task.request_data?.run_id) {
-      console.log(`${logPrefix} no run_id in request_data — using task.id as deterministic fallback`);
-    }
+    const source = task.run_id ? 'column' : task.request_data?.run_id ? 'request_data' : 'fallback';
+    console.log(`${logPrefix} resolved IDs — run_id=${runId} crid=${clientRequestId} source=${source}`);
 
     let agentRunResult: { id: string; status: string; metadata: any } | null = null;
     let artefactsResult: any[] = [];
@@ -478,19 +477,11 @@ class SupervisorService {
     if (!supabase) return;
 
     const requestData = task.request_data;
-    const uiRunId = requestData.run_id || task.id;
-    const clientRequestId = requestData.client_request_id || `crid_${task.id}`;
+    const uiRunId = task.run_id || requestData.run_id || task.id;
+    const clientRequestId = task.client_request_id || requestData.client_request_id || `crid_${task.id}`;
 
-    if (!requestData.run_id || !requestData.client_request_id) {
-      const generated = [!requestData.run_id && `run_id=${uiRunId}`, !requestData.client_request_id && `crid=${clientRequestId}`].filter(Boolean).join(', ');
-      console.log(`[SUPERVISOR] Task ${task.id}: auto-generated missing identifiers (${generated})`);
-
-      const patchedData = { ...requestData, run_id: uiRunId, client_request_id: clientRequestId };
-      await supabase
-        .from('supervisor_tasks')
-        .update({ request_data: patchedData })
-        .eq('id', task.id);
-    }
+    const source = task.run_id ? 'column' : requestData.run_id ? 'request_data' : 'fallback';
+    console.log(`[SUPERVISOR] Task ${task.id}: resolved IDs — run_id=${uiRunId} crid=${clientRequestId} source=${source}`);
 
     const jobId = uiRunId;
     console.log(`[ID_MAP] jobId=${jobId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${task.id} entry=processChatTask`);

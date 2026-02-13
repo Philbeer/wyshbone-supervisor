@@ -28,6 +28,8 @@ export interface SupervisorTask {
   error?: string;
   created_at: number;
   processed_at?: number;
+  run_id?: string;
+  client_request_id?: string;
 }
 
 export interface TaskRequestData {
