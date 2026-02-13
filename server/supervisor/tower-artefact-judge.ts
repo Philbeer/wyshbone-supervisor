@@ -15,6 +15,14 @@ export interface ArtefactJudgementResponse {
   reasons: string[];
   metrics: Record<string, unknown>;
   action: 'continue' | 'stop' | 'retry' | 'change_plan';
+  gaps?: Array<{ type: string; severity?: string; detail?: string } | string>;
+  suggested_changes?: Array<{
+    field: string;
+    action: string;
+    reason?: string;
+    current_value?: unknown;
+    suggested_value?: unknown;
+  }>;
 }
 
 function getTowerBaseUrl(): string | null {

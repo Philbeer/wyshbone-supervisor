@@ -12,6 +12,7 @@ import { executeAction, type ActionResult as LoopActionResult } from './supervis
 import { generateJobId } from './supervisor/jobs';
 import { redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-executor';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
+import { extractChangePlanDirective, applyLeadgenReplanPolicy, type PlanV2Constraints } from './supervisor/replan-policy';
 
 interface UserContext {
   userId: string;
@@ -609,7 +610,7 @@ class SupervisorService {
             summary: 'This run produced artefacts without Supervisor inline execution. No step_result or tower_judgement was created inline. This is a bug — all execution must go through the Supervisor.',
             payload_json: {
               detected_at: new Date().toISOString(),
-              artefact_types_found: [...new Set(artefacts.map(a => a.type))],
+              artefact_types_found: Array.from(new Set(artefacts.map(a => a.type))),
               user_id: run.user_id,
             },
           });
@@ -793,7 +794,7 @@ class SupervisorService {
     if (searchQuery?.count) requestedCount = Math.min(Number(searchQuery.count), 200);
     if (!businessType) businessType = 'pubs';
     if (!location) location = 'Local';
-    const city = location.split(',')[0].trim();
+    let city = location.split(',')[0].trim();
     const country = location.split(',')[1]?.trim() || 'UK';
 
     const constraints: string[] = [];
@@ -1157,7 +1158,21 @@ class SupervisorService {
         goal,
         userId: task.user_id,
         conversationId,
-        successCriteria: { target_count: requestedCount, ...(prefixFilter ? { prefix: prefixFilter } : {}) },
+        successCriteria: {
+          mission_type: 'leadgen',
+          target_count: requestedCount,
+          ...(prefixFilter ? { prefix: prefixFilter } : {}),
+          plan_version: 1,
+          plan_constraints: {
+            business_type: businessType,
+            location: city,
+            country,
+            search_count: searchCount,
+            requested_count: requestedCount,
+            prefix_filter: prefixFilter || null,
+          },
+          max_replan_versions: 2,
+        },
       });
     } catch (towerErr: any) {
       const errMsg = towerErr.message || 'Tower call threw an exception';
@@ -1256,74 +1271,441 @@ class SupervisorService {
     });
     console.log(`[TOWER_LOOP_CHAT] [tower_verdict] verdict=${verdict}`);
 
-    // 12. Terminal AFR event: run_completed or run_halted
-    const isHalted = towerResult.shouldStop || verdict === 'error' || verdict === 'fail';
+    // 12. Replan loop (bounded: max 1 replan, i.e. Plan v1 → Plan v2)
+    let finalVerdict = verdict;
+    let finalAction = action;
+    let finalLeads = leads;
+    let finalLeadsListArtefact = leadsListArtefact;
+    let finalTowerResult = towerResult;
+    let planVersion = 1;
+    const MAX_PLAN_VERSION = 2;
+
+    if (action === 'change_plan' && planVersion < MAX_PLAN_VERSION && !usedStub) {
+      console.log(`[REPLAN] Tower returned change_plan — initiating replan (mission_type=leadgen)`);
+
+      const directive = extractChangePlanDirective(towerResult.judgement);
+      console.log(`[REPLAN] Directive — gaps: ${JSON.stringify(directive.gaps.map(g => g.type))} suggested_changes: ${JSON.stringify(directive.suggested_changes.map(sc => `${sc.action} ${sc.field}`))}`);
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'replan_initiated', status: 'pending',
+        taskGenerated: `Tower change_plan: replanning with ${directive.suggested_changes.length} suggested change(s)`,
+        runType: 'plan',
+        metadata: {
+          plan_version: 1,
+          gaps: directive.gaps,
+          suggested_changes: directive.suggested_changes,
+          v1_delivered: leads.length,
+          v1_requested: requestedCount,
+        },
+      });
+
+      const currentConstraints: PlanV2Constraints = {
+        business_type: businessType!,
+        location: city,
+        country,
+        search_count: searchCount,
+        requested_count: requestedCount,
+        prefix_filter: prefixFilter,
+      };
+
+      const replanResult = applyLeadgenReplanPolicy(currentConstraints, directive);
+      const v2 = replanResult.constraints;
+      planVersion = 2;
+
+      console.log(`[REPLAN] ${replanResult.strategy_summary}`);
+      for (const adj of replanResult.adjustments_applied) {
+        console.log(`[REPLAN]   ${adj.action} ${adj.field}: ${JSON.stringify(adj.from)} → ${JSON.stringify(adj.to)} (${adj.reason})`);
+      }
+
+      const v2PlanSteps = [
+        {
+          step_index: 0,
+          step_id: 'search_places_v2',
+          tool: 'SEARCH_PLACES',
+          tool_args: { query: `${v2.business_type} in ${v2.location} ${v2.country}`, location: v2.location, country: v2.country, maxResults: v2.search_count },
+          expected_output: `Up to ${v2.search_count} ${v2.business_type} results from Google Places`,
+          ...(v2.prefix_filter ? { post_processing: `Filter names starting with "${v2.prefix_filter}"; Take first ${v2.requested_count} results` } : (v2.requested_count < v2.search_count ? { post_processing: `Take first ${v2.requested_count} results` } : {})),
+        },
+      ];
+
+      const v2PlanPayload = {
+        run_id: chatRunId,
+        original_user_goal: originalUserGoal,
+        normalized_goal: normalizedGoal,
+        plan_version: 2,
+        prior_plan_artefact_id: planArtefact.id,
+        prior_verdict: { verdict, action, gaps: directive.gaps, suggested_changes: directive.suggested_changes },
+        adjustments_applied: replanResult.adjustments_applied,
+        strategy_summary: replanResult.strategy_summary,
+        constraints: [
+          `business_type=${v2.business_type}`,
+          `location=${v2.location}`,
+          `count=${v2.requested_count}`,
+          ...(v2.prefix_filter ? [`prefix=${v2.prefix_filter}`] : []),
+        ],
+        steps: v2PlanSteps,
+        created_at: new Date().toISOString(),
+      };
+
+      const v2PlanArtefact = await createArtefact({
+        runId: chatRunId,
+        type: 'plan',
+        title: 'Plan v2',
+        summary: `${replanResult.strategy_summary} — re-searching ${v2.business_type} in ${v2.location}`,
+        payload: v2PlanPayload,
+        userId: task.user_id,
+        conversationId,
+      });
+      console.log(`[REPLAN] Plan v2 artefact id=${v2PlanArtefact.id}`);
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'artefact_created', status: 'success',
+        taskGenerated: `Plan v2 artefact created`,
+        runType: 'plan',
+        metadata: { artefactId: v2PlanArtefact.id, artefactType: 'plan', plan_version: 2, strategy: replanResult.strategy_summary },
+      });
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'plan_execution_started', status: 'pending',
+        taskGenerated: `Executing Plan v2: ${replanResult.strategy_summary}`,
+        runType: 'plan',
+        metadata: { plan_version: 2, strategy: replanResult.strategy_summary, planArtefactId: v2PlanArtefact.id },
+      });
+      console.log(`[REPLAN] [plan_execution_started] plan_version=2 strategy="${replanResult.strategy_summary}"`);
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'step_started', status: 'pending',
+        taskGenerated: `Step 1/1 (v2): SEARCH_PLACES — ${v2.business_type} in ${v2.location}`,
+        runType: 'plan',
+        metadata: { step: 1, total_steps: 1, tool: 'SEARCH_PLACES', query: v2.business_type, location: v2.location, plan_version: 2 },
+      });
+      console.log(`[REPLAN] [step_started] step=1 tool=SEARCH_PLACES (v2)`);
+
+      let v2Leads: typeof leads = [];
+      let v2UsedStub = false;
+      const v2StepStartedAt = Date.now();
+      let v2StepError: string | undefined;
+
+      try {
+        const v2Businesses = await this.searchGooglePlaces(v2.business_type, v2.location, v2.country, v2.search_count);
+        if (v2Businesses && v2Businesses.length > 0) {
+          for (const biz of v2Businesses) {
+            v2Leads.push({
+              name: biz.displayName?.text || 'Unknown Business',
+              address: biz.formattedAddress || `${v2.location}, ${v2.country}`,
+              phone: biz.nationalPhoneNumber || biz.internationalPhoneNumber || null,
+              website: biz.websiteUri || null,
+              placeId: biz.id || '',
+              source: 'google_places',
+            });
+          }
+          console.log(`[REPLAN] Google Places v2 returned ${v2Leads.length} results`);
+
+          if (v2.prefix_filter) {
+            const before = v2Leads.length;
+            v2Leads = v2Leads.filter(l => l.name.toUpperCase().startsWith(v2.prefix_filter!));
+            console.log(`[REPLAN] Prefix filter "${v2.prefix_filter}": ${before} → ${v2Leads.length}`);
+          }
+
+          if (v2Leads.length > v2.requested_count) {
+            v2Leads = v2Leads.slice(0, v2.requested_count);
+            console.log(`[REPLAN] Trimmed to requested count: ${v2Leads.length}`);
+          }
+        } else {
+          console.log(`[REPLAN] Google Places v2 returned 0 results`);
+        }
+      } catch (v2Err: any) {
+        console.warn(`[REPLAN] Google Places v2 failed: ${v2Err.message}`);
+        v2StepError = v2Err.message;
+      }
+
+      const v2StepFinishedAt = Date.now();
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'step_completed', status: v2StepError ? 'failed' : 'success',
+        taskGenerated: `Step 1/1 (v2) completed: ${v2Leads.length} leads`,
+        runType: 'plan',
+        metadata: { step: 1, leads_count: v2Leads.length, plan_version: 2, ...(v2StepError ? { error: v2StepError } : {}) },
+      });
+      console.log(`[REPLAN] [step_completed] leads=${v2Leads.length} (v2)`);
+
+      for (const lead of v2Leads) {
+        try {
+          const created = await storage.createSuggestedLead({
+            userId: task.user_id,
+            rationale: `Tower-validated ${v2.business_type} lead in ${v2.location} (Plan v2)`,
+            source: 'supervisor_chat',
+            score: 0.75,
+            lead: {
+              name: lead.name,
+              address: lead.address,
+              place_id: lead.placeId,
+              domain: lead.website || '',
+              emailCandidates: [],
+              phone: lead.phone || undefined,
+            },
+          });
+          if (created?.id) createdLeadIds.push(String(created.id));
+        } catch (leadErr: any) {
+          console.warn(`[REPLAN] Failed to persist lead: ${leadErr.message}`);
+        }
+      }
+
+      const v2StepArtefact = await createArtefact({
+        runId: chatRunId,
+        type: 'step_result',
+        title: `Step result (v2): SEARCH_PLACES – ${v2.business_type} in ${v2.location}`,
+        summary: `Plan v2: Found ${v2Leads.length} ${v2.business_type} in ${v2.location}`,
+        payload: {
+          plan_version: 2,
+          plan_artefact_id: v2PlanArtefact.id,
+          step_id: 'search_places_v2',
+          step_title: `SEARCH_PLACES – ${v2.business_type} in ${v2.location}`,
+          step_type: 'SEARCH_PLACES',
+          step_index: 0,
+          step_status: v2StepError ? 'failed' : 'success',
+          inputs_summary: compactInputs({ query: v2.business_type, location: v2.location, country: v2.country, maxResults: v2.search_count }),
+          outputs_summary: { leads_count: v2Leads.length, prefix_filter: v2.prefix_filter || null, requested_count: v2.requested_count },
+          timings: {
+            started_at: new Date(v2StepStartedAt).toISOString(),
+            finished_at: new Date(v2StepFinishedAt).toISOString(),
+            duration_ms: v2StepFinishedAt - v2StepStartedAt,
+          },
+        },
+        userId: task.user_id,
+        conversationId,
+      });
+      console.log(`[REPLAN] [step_artefact] id=${v2StepArtefact.id} (v2)`);
+
+      if (v2StepArtefact) {
+        try {
+          const v2ObsResult = await judgeArtefact({
+            artefact: v2StepArtefact,
+            runId: chatRunId, goal, userId: task.user_id, conversationId,
+          });
+          await createArtefact({
+            runId: chatRunId,
+            type: 'tower_judgement',
+            title: `Tower Judgement: ${v2ObsResult.judgement.verdict} (v2 observation)`,
+            summary: `Observation v2: ${v2ObsResult.judgement.verdict} | ${v2ObsResult.judgement.action} | SEARCH_PLACES`,
+            payload: {
+              verdict: v2ObsResult.judgement.verdict, action: v2ObsResult.judgement.action,
+              reasons: v2ObsResult.judgement.reasons, metrics: v2ObsResult.judgement.metrics,
+              plan_version: 2, step_index: 0, judged_artefact_id: v2StepArtefact.id,
+              stubbed: v2ObsResult.stubbed, observation_only: true,
+            },
+            userId: task.user_id, conversationId,
+          });
+          console.log(`[REPLAN] [step_observation] verdict=${v2ObsResult.judgement.verdict} (v2, observation only)`);
+        } catch (obsErr: any) {
+          console.warn(`[REPLAN] Tower observation v2 failed (continuing): ${obsErr.message}`);
+        }
+      }
+
+      const v2LeadsListPayload = {
+        original_user_goal: originalUserGoal,
+        normalized_goal: normalizedGoal,
+        plan_artefact_id: v2PlanArtefact.id,
+        plan_version: 2,
+        delivered_count: v2Leads.length,
+        target_count: v2.requested_count,
+        success_criteria: { target_count: v2.requested_count, ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}) },
+        query: v2.business_type,
+        location: v2.location,
+        country: v2.country,
+        used_stub: v2UsedStub,
+        prefix_filter: v2.prefix_filter || null,
+        leads: v2Leads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website })),
+        replan_context: {
+          prior_plan_version: 1,
+          prior_delivered: leads.length,
+          adjustments: replanResult.adjustments_applied,
+          strategy: replanResult.strategy_summary,
+        },
+      };
+
+      const v2LeadsListArtefact = await createArtefact({
+        runId: chatRunId,
+        type: 'leads_list',
+        title: `Leads list v2: ${v2Leads.length} ${v2.business_type} in ${v2.location}`,
+        summary: `Plan v2: ${v2Leads.length} of ${v2.requested_count} ${v2.business_type} in ${v2.location}`,
+        payload: v2LeadsListPayload,
+        userId: task.user_id,
+        conversationId,
+      });
+      console.log(`[REPLAN] [leads_list_v2] id=${v2LeadsListArtefact.id} delivered=${v2Leads.length}`);
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'tower_call_started', status: 'pending',
+        taskGenerated: `Calling Tower to judge v2 leads_list artefact ${v2LeadsListArtefact.id}`,
+        runType: 'plan',
+        metadata: { artefactId: v2LeadsListArtefact.id, goal, plan_version: 2 },
+      });
+      console.log(`[REPLAN] [tower_call_started] artefactId=${v2LeadsListArtefact.id} (v2)`);
+
+      let v2TowerResult;
+      try {
+        v2TowerResult = await judgeArtefact({
+          artefact: v2LeadsListArtefact,
+          runId: chatRunId,
+          goal,
+          userId: task.user_id,
+          conversationId,
+          successCriteria: {
+            mission_type: 'leadgen',
+            target_count: v2.requested_count,
+            ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}),
+            plan_version: 2,
+            plan_constraints: {
+              business_type: v2.business_type,
+              location: v2.location,
+              country: v2.country,
+              search_count: v2.search_count,
+              requested_count: v2.requested_count,
+              prefix_filter: v2.prefix_filter || null,
+            },
+            max_replan_versions: 2,
+          },
+        });
+      } catch (v2TowerErr: any) {
+        console.error(`[REPLAN] Tower v2 call failed: ${v2TowerErr.message}`);
+        v2TowerResult = {
+          judgement: { verdict: 'error', reasons: [v2TowerErr.message], metrics: {}, action: 'stop' as const },
+          shouldStop: true,
+          stubbed: false,
+        };
+      }
+
+      const v2Verdict = v2TowerResult.judgement.verdict;
+      const v2Action = v2TowerResult.judgement.action;
+      console.log(`[REPLAN] [tower_judgement] verdict=${v2Verdict} action=${v2Action} (v2)`);
+
+      const v2TowerJudgementArtefact = await createArtefact({
+        runId: chatRunId,
+        type: 'tower_judgement',
+        title: `Tower Judgement v2: ${v2Verdict}`,
+        summary: `v2 Verdict: ${v2Verdict} | Action: ${v2Action} | Delivered: ${v2Leads.length} of ${v2.requested_count}`,
+        payload: {
+          verdict: v2Verdict, action: v2Action,
+          reasons: v2TowerResult.judgement.reasons, metrics: v2TowerResult.judgement.metrics,
+          plan_version: 2, delivered: v2Leads.length, requested: v2.requested_count,
+          artefact_id: v2LeadsListArtefact.id, stubbed: v2TowerResult.stubbed,
+        },
+        userId: task.user_id,
+        conversationId,
+      });
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'tower_verdict', status: v2TowerResult.shouldStop ? 'failed' : 'success',
+        taskGenerated: `Tower v2 verdict: ${v2Verdict} — action: ${v2Action}`,
+        runType: 'plan',
+        metadata: {
+          plan_version: 2, verdict: v2Verdict, action: v2Action,
+          artefactId: v2LeadsListArtefact.id, towerJudgementArtefactId: v2TowerJudgementArtefact.id,
+          delivered: v2Leads.length, requested: v2.requested_count,
+          stubbed: v2TowerResult.stubbed,
+        },
+      });
+      console.log(`[REPLAN] [tower_verdict] verdict=${v2Verdict} (v2)`);
+
+      finalVerdict = v2Verdict;
+      finalAction = v2Action;
+      finalLeads = v2Leads;
+      finalLeadsListArtefact = v2LeadsListArtefact;
+      finalTowerResult = v2TowerResult;
+      planVersion = 2;
+      businessType = v2.business_type;
+      city = v2.location;
+      prefixFilter = v2.prefix_filter;
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'replan_completed', status: v2TowerResult.shouldStop ? 'failed' : 'success',
+        taskGenerated: `Replan completed: v2 delivered ${v2Leads.length}, verdict=${v2Verdict}`,
+        runType: 'plan',
+        metadata: {
+          plan_version: 2, v1_delivered: leads.length, v2_delivered: v2Leads.length,
+          v2_verdict: v2Verdict, v2_action: v2Action,
+          strategy: replanResult.strategy_summary,
+        },
+      });
+      console.log(`[REPLAN] [replan_completed] v1_delivered=${leads.length} v2_delivered=${v2Leads.length} verdict=${v2Verdict}`);
+    }
+
+    const isHalted = finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'fail';
     if (isHalted) {
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'run_halted', status: 'failed',
-        taskGenerated: `Tower loop chat halted: verdict=${verdict} action=${action}`,
+        taskGenerated: `Tower loop chat halted: verdict=${finalVerdict} action=${finalAction} plan_version=${planVersion}`,
         runType: 'plan',
-        metadata: { verdict, action, leads_count: leads.length, requested: requestedCount },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, requested: requestedCount, plan_version: planVersion },
       });
-      console.log(`[TOWER_LOOP_CHAT] [run_halted] verdict=${verdict}`);
+      console.log(`[TOWER_LOOP_CHAT] [run_halted] verdict=${finalVerdict} plan_version=${planVersion}`);
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict, action, leads_count: leads.length, halted: true } });
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, halted: true, plan_version: planVersion } });
     } else {
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'run_completed', status: 'success',
-        taskGenerated: `Tower loop chat completed: ${leads.length} leads, verdict=${verdict}`,
+        taskGenerated: `Tower loop chat completed: ${finalLeads.length} leads, verdict=${finalVerdict} plan_version=${planVersion}`,
         runType: 'plan',
-        metadata: { verdict, action, leads_count: leads.length, requested: requestedCount },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, requested: requestedCount, plan_version: planVersion },
       });
-      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${verdict} leads=${leads.length}`);
+      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} plan_version=${planVersion}`);
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict, action, leads_count: leads.length, halted: false } });
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, halted: false, plan_version: planVersion } });
     }
 
-    // 12b. Post tower_judgement artefact to UI for automatic display
     await this.postArtefactToUI({
       runId: chatRunId,
       clientRequestId,
       type: 'tower_judgement',
       payload: {
-        verdict,
-        action,
-        reasons: towerResult.judgement.reasons,
-        metrics: towerResult.judgement.metrics,
-        delivered: leads.length,
+        verdict: finalVerdict,
+        action: finalAction,
+        reasons: finalTowerResult.judgement.reasons,
+        metrics: finalTowerResult.judgement.metrics,
+        delivered: finalLeads.length,
         requested: requestedCount,
-        artefact_id: leadsListArtefact.id,
+        artefact_id: finalLeadsListArtefact.id,
         used_stub: usedStub,
-        stubbed: towerResult.stubbed,
+        stubbed: finalTowerResult.stubbed,
+        plan_version: planVersion,
       },
       userId: task.user_id,
       conversationId,
     }).catch(() => {});
 
-    // 13. Also post artefact to UI for visibility
     await this.postArtefactToUI({
       runId: chatRunId,
       clientRequestId,
       type: 'leads',
       payload: {
-        title: `${leads.length} ${businessType} leads in ${city}`,
-        summary: `Found ${leads.length} ${businessType} prospects in ${city}${usedStub ? ' (stub data)' : ''} — Tower verdict: ${verdict}`,
-        leads: leads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website, placeId: l.placeId, source: l.source })),
+        title: `${finalLeads.length} ${businessType} leads in ${city}`,
+        summary: `Found ${finalLeads.length} ${businessType} prospects in ${city}${usedStub ? ' (stub data)' : ''}${planVersion > 1 ? ` (Plan v${planVersion})` : ''} — Tower verdict: ${finalVerdict}`,
+        leads: finalLeads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website, placeId: l.placeId, source: l.source })),
         query: { businessType, location: city, country },
         tool: 'SEARCH_PLACES',
-        tower_verdict: verdict,
+        tower_verdict: finalVerdict,
+        plan_version: planVersion,
       },
       userId: task.user_id,
       conversationId,
     }).catch(() => {});
 
     const chatResponse = isHalted
-      ? `I found ${leads.length} ${businessType} prospects in ${city}, but the results didn't fully meet quality criteria (Tower verdict: ${verdict}). You can still view what was found in your results. Would you like me to try a different search?`
-      : `I found ${leads.length} ${businessType} prospects in ${city}, validated by our quality system. View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
+      ? `I found ${finalLeads.length} ${businessType} prospects in ${city}${planVersion > 1 ? ` after adjusting the search plan` : ''}, but the results didn't fully meet quality criteria (Tower verdict: ${finalVerdict}). You can still view what was found in your results. Would you like me to try a different search?`
+      : `I found ${finalLeads.length} ${businessType} prospects in ${city}${planVersion > 1 ? ` (adjusted search plan)` : ''}, validated by our quality system. View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
 
-    console.log(`[TOWER_LOOP_CHAT] [complete] leads=${leads.length} verdict=${verdict} halted=${isHalted} stub=${usedStub}`);
+    console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub}`);
 
     return { response: chatResponse, leadIds: createdLeadIds };
   }
