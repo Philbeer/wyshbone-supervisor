@@ -369,7 +369,15 @@ class SupervisorService {
     let routeReason: string;
     let routeIntent: string;
 
-    if (hasLeadIntent && hasVenueType && hasLocation) {
+    const hasGoogleOverride = /\bgoogle\b/i.test(rawMsg);
+
+    if (hasGoogleOverride) {
+      chosenTool = 'SEARCH_PLACES';
+      routeIntent = 'lead_find';
+      routeReason = `google_override: message contains "google" → forcing SEARCH_PLACES`;
+      effectiveTaskType = 'generate_leads';
+      console.log(`[ROUTE_DECISION] intent=lead_find tool=SEARCH_PLACES reason="google_override" message="${rawMsg.substring(0, 80)}"`);
+    } else if (hasLeadIntent && hasVenueType && hasLocation) {
       chosenTool = 'SEARCH_PLACES';
       routeIntent = 'lead_find';
       if (effectiveTaskType !== 'generate_leads' && effectiveTaskType !== 'find_prospects') {
