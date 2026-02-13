@@ -57,17 +57,38 @@ export function extractChangePlanDirective(
   let suggested_changes: TowerSuggestedChange[] = [];
   if (Array.isArray(raw.suggested_changes)) {
     suggested_changes = raw.suggested_changes.map((sc: any) => ({
-      field: sc.field || 'unknown',
-      action: sc.action || 'relax',
+      field: mapTowerField(sc.field),
+      action: mapTowerType(sc.type, sc.action),
       reason: sc.reason || '',
-      current_value: sc.current_value,
-      suggested_value: sc.suggested_value,
+      current_value: sc.current_value ?? sc.from,
+      suggested_value: sc.suggested_value ?? sc.to,
     }));
   } else {
     suggested_changes = deriveChangesFromGaps(gaps);
   }
 
   return { gaps, suggested_changes };
+}
+
+function mapTowerField(field: string | undefined): string {
+  if (!field) return 'unknown';
+  const f = field.toLowerCase();
+  if (f === 'prefix') return 'prefix_filter';
+  if (f === 'radius') return 'search_count';
+  return f;
+}
+
+function mapTowerType(type: string | undefined, action: string | undefined): TowerSuggestedChange['action'] {
+  if (action && ['drop', 'relax', 'expand', 'increase', 'broaden'].includes(action)) {
+    return action as TowerSuggestedChange['action'];
+  }
+  if (!type) return 'relax';
+  const t = type.toUpperCase();
+  if (t === 'RELAX_CONSTRAINT') return 'drop';
+  if (t === 'EXPAND_AREA') return 'expand';
+  if (t === 'BROADEN_QUERY') return 'broaden';
+  if (t === 'CHANGE_TOOL') return 'relax';
+  return 'relax';
 }
 
 function inferGapType(reason: string): string {
@@ -128,7 +149,7 @@ export function applyLeadgenReplanPolicy(
   for (const change of directive.suggested_changes) {
     switch (change.field) {
       case 'prefix_filter':
-        if (change.action === 'drop' && next.prefix_filter) {
+        if ((change.action === 'drop' || change.action === 'relax') && next.prefix_filter) {
           adjustments.push({
             field: 'prefix_filter',
             action: 'drop',
