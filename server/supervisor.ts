@@ -50,7 +50,7 @@ interface UserContext {
 }
 
 class SupervisorService {
-  private pollInterval: number = 30000; // 30 seconds
+  private pollInterval: number = 3000; // 3 seconds — must beat UI's own task processor
   private isRunning: boolean = false;
   private timeoutId?: NodeJS.Timeout;
   private batchSize: number = 50; // Process up to 50 signals per poll
