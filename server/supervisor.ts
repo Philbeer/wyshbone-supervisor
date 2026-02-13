@@ -1020,7 +1020,8 @@ class SupervisorService {
         });
         console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_tower_loop_search_places status=${towerLoopStepStatus}`);
       } catch (stepArtErr: any) {
-        console.warn(`[STEP_ARTEFACT] Failed to create step_result for tower_loop_chat (non-fatal): ${stepArtErr.message}`);
+        console.warn(`[STEP_ARTEFACT] FAILED to create step_result for tower_loop_chat (non-fatal): ${stepArtErr.message}`);
+        console.warn(`[STEP_ARTEFACT] runId=${chatRunId} — Tower observation will be SKIPPED because step_result artefact failed`);
       }
 
       // Step-level judgement (observation only)
@@ -1046,7 +1047,10 @@ class SupervisorService {
           console.log(`[STEP_OBSERVATION] step=tower_loop_chat verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
         } catch (obsErr: any) {
           console.warn(`[STEP_OBSERVATION] Tower observation failed for tower loop chat (continuing): ${obsErr.message}`);
+          console.warn(`[STEP_OBSERVATION] runId=${chatRunId} stepArtefactId=${towerLoopStepArtefact.id} — observation artefact NOT created`);
         }
+      } else {
+        console.warn(`[STEP_OBSERVATION] runId=${chatRunId} SKIPPED — no step_result artefact available to judge`);
       }
     }
 

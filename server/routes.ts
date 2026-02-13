@@ -154,11 +154,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/plan/approve", async (req, res) => {
     const startTime = Date.now();
     const userId = getUserId(req);
-    const { planId } = req.body;
+    const { planId, run_id: externalRunId, client_request_id: externalCrid } = req.body;
+    const { randomUUID } = await import('crypto');
+    const runId = externalRunId || randomUUID();
+    const clientRequestId = externalCrid || randomUUID();
 
     console.log(`\n${'='.repeat(60)}`);
     console.log(`[PLAN_APPROVE] RECEIVED REQUEST`);
     console.log(`  planId: ${planId}`);
+    console.log(`  runId: ${runId} (source: ${externalRunId ? 'UI' : 'generated'})`);
+    console.log(`  clientRequestId: ${clientRequestId}`);
     console.log(`  userId: ${userId}`);
     console.log(`  timestamp: ${new Date().toISOString()}`);
     console.log(`${'='.repeat(60)}\n`);
@@ -219,6 +224,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log(`[PLAN_APPROVE] Updating plan status to 'executing'...`);
       await storage.updatePlanStatus(planId, "executing");
 
+      const now = new Date();
+      try {
+        await storage.createAgentRun({
+          id: runId,
+          clientRequestId,
+          userId,
+          status: 'executing',
+          createdAt: now,
+          updatedAt: now,
+          uiReady: 1,
+          metadata: { planId: plan.id, goalText: dbPlan.goalText, clientRequestId, source: 'plan_approve' },
+        });
+        console.log(`[PLAN_APPROVE] Created agent_run ${runId} for plan ${planId}`);
+      } catch (dbErr: any) {
+        console.warn(`[PLAN_APPROVE] agent_run creation failed (may already exist): ${dbErr.message}`);
+      }
+
       // Start progress tracking (use planId)
       console.log(`[PLAN_APPROVE] Starting progress tracking for plan ${planId}...`);
       startPlanProgress(plan.id, plan.id, plan.steps);
@@ -226,10 +248,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Execute plan - either via Supervisor or UI based on feature flag
       if (SUPERVISOR_EXECUTION_ENABLED) {
         console.log(`[PLAN_APPROVE] SUPERVISOR_EXECUTION_ENABLED=true - delegating to Supervisor`);
+        console.log(`[PLAN_APPROVE] Passing jobId=${runId} to plan executor (ensures artefacts use correct runId)`);
         
         const { startPlanExecutionAsync } = await import('./supervisor/plan-executor');
         startPlanExecutionAsync({
           planId: plan.id,
+          jobId: runId,
+          clientRequestId,
           userId,
           conversationId: undefined,
           goal: dbPlan.goalText || 'Lead generation',
@@ -254,12 +279,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log(`\n${'='.repeat(60)}`);
       console.log(`[PLAN_APPROVE] SUCCESS - Execution kicked off`);
       console.log(`  planId: ${plan.id}`);
+      console.log(`  runId: ${runId}`);
       console.log(`  status: executing`);
       console.log(`  elapsed: ${elapsed}ms`);
       console.log(`${'='.repeat(60)}\n`);
 
       res.json({ 
         planId: plan.id,
+        runId,
+        clientRequestId,
         status: "executing",
         message: "Plan approved and execution started"
       });
