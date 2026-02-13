@@ -1,0 +1,62 @@
+I can see the issue — the first message triggered some local processing ("Searching now...", "Classifying intent", "Finalising response") before it reached the supervisor on the second try. Let me investigate what's happening in the flow.
+
+Let me investigate what's generating those "Searching now...", "Classifying intent", "Finalising response" progress steps in the UI. These appear to be client-side elements firing before/during the API call.
+
+Now I can see what's happening. The SSE progress stages ("OK, working", "Classifying intent", "Finalising response") are emitted by the server's /api/chat handler. Let me look at the full CHAT lane flow to see if there's anything else being called between those stages:
+
+Now let me look at the CHAT lane code that follows (after the RUN lane block) to understand what happens for messages routed to CHAT:
+
+Now I see the issue. Let me check what decideChatMode does with the actual message and also look at the first message's server logs:
+
+Found the issue. The log says it clearly:
+
+🔀 [FORK] mode=RUN reason="Matched keyword: "google"" crid=6a561476...
+[FORK] decideChatMode=RUN but detectSupervisorIntent=false, falling through to CHAT lane
+So decideChatMode correctly routed it to RUN, but detectSupervisorIntent() returned false, so it fell through to the CHAT lane where GPT-5 responded conversationally (saying "I'll search..." without actually searching). Let me examine detectSupervisorIntent:
+
+Found it. The issue is clear from the logs:
+
+🔀 [FORK] mode=RUN reason="Matched keyword: "google""
+[FORK] decideChatMode=RUN but detectSupervisorIntent=false, falling through to CHAT lane
+decideChatMode() correctly says RUN, but detectSupervisorIntent() returns false because its keyword list doesn't include "find pub" or "find pubs" — it only has specific business types like "find restaurant", "find salon", etc. So the message falls through to the CHAT lane where GPT just talks about searching without actually doing it.
+
+The fix: broaden detectSupervisorIntent() to catch what decideChatMode already knows is a RUN-worthy message.
+
+Now I also need to add a broader fallback pattern for generic "find X in Y" patterns that decideChatMode would catch. Let me also add a fallback: if decideChatMode says RUN, use a broader matching approach:
+
+Good. Now let me also add a CHAT lane system prompt guardrail so that when GPT does respond in CHAT lane, it doesn't falsely claim it's going to search. Let me check the conversation config:
+
+There's a problem — the CHAT lane system prompt still says "AVAILABLE TOOLS" with tool descriptions! This is misleading GPT into thinking it can execute tools. Let me read the full config:
+
+This is the root cause! The CHAT lane system prompt tells GPT it has "AVAILABLE TOOLS" and instructs it to "use search_google_places IMMEDIATELY". So when a message falls through to CHAT, GPT thinks it should search and says "Searching now..." even though it has no tools available.
+
+I need to update the system prompt for the CHAT lane context:
+
+Now let me verify the fix works with the exact message the user sent, restart, and verify:
+
+The test confirms:
+
+"google places" keyword → matches ✅
+"pubs in" keyword → matches ✅
+Generic pattern → also matches ✅
+The message will now hit at least 2 keyword matches and properly trigger supervisor intent. Now let me mark task 1 done and handle task 2 (already done with the system prompt update), then restart and verify:
+
+App is running cleanly. Now let me run the final architect review:
+
+Architect passed. Let me mark all tasks complete:
+
+Both fixes are in place and the app is running. Here's what was done:
+
+Problem: Messages like "Find 5 pubs in Arundel that begin with P with google places search" were correctly identified as RUN lane by the first router, but then the intent verifier didn't recognize them, causing them to fall back to the conversational AI — which then falsely claimed it was searching.
+
+Two fixes applied:
+
+Broader intent detection — Added recognition for venue types (pub, bar, brewery, etc.), location phrases ("pubs in", "bars in"), tool references ("google places"), and a catch-all pattern for "find [something] in [location]". That exact message now matches on multiple keywords.
+
+Conversational AI guardrail — Updated the AI's instructions to explicitly state it has no tools and must never claim to be executing searches. If a message somehow still reaches the conversational lane, the AI will explain the request needs to go through the task system instead of pretending to search.
+
+Suggested follow-ups (from the code review):
+
+Add a unit test for the intent detection to lock in this fix
+Tighten the catch-all pattern so it doesn't capture extra text after the location name
+Verify in live logs that the supervisor task gets created end-to-end for this query

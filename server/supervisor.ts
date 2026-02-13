@@ -285,17 +285,12 @@ class SupervisorService {
   ): Promise<'requeued' | 'skipped' | 'failed'> {
     if (!supabase) return 'failed';
 
-    const runId = task.request_data?.run_id;
-    const clientRequestId = task.request_data?.client_request_id;
+    const runId = task.request_data?.run_id || task.id;
+    const clientRequestId = task.request_data?.client_request_id || `crid_${task.id}`;
     const logPrefix = `[RECOVERY][${trigger}] task=${task.id}`;
 
-    if (!runId) {
-      console.warn(`${logPrefix} no run_id in request_data — marking as failed`);
-      await supabase
-        .from('supervisor_tasks')
-        .update({ status: 'failed', error: `Recovery: no run_id in request_data (${trigger})` })
-        .eq('id', task.id);
-      return 'failed';
+    if (!task.request_data?.run_id) {
+      console.log(`${logPrefix} no run_id in request_data — using task.id as deterministic fallback`);
     }
 
     let agentRunResult: { id: string; status: string; metadata: any } | null = null;
@@ -483,23 +478,18 @@ class SupervisorService {
     if (!supabase) return;
 
     const requestData = task.request_data;
-    const uiRunId = requestData.run_id;
-    const clientRequestId = requestData.client_request_id;
+    const uiRunId = requestData.run_id || task.id;
+    const clientRequestId = requestData.client_request_id || `crid_${task.id}`;
 
-    if (!uiRunId || !clientRequestId) {
-      const missing = [!uiRunId && 'run_id', !clientRequestId && 'client_request_id'].filter(Boolean).join(', ');
-      console.error(`[SUPERVISOR] Task ${task.id}: missing required identifiers (${missing}) in request_data — aborting`);
-      logAFREvent({
-        userId: task.user_id, runId: uiRunId || 'unknown', conversationId: task.conversation_id,
-        actionTaken: 'artefact_post_failed', status: 'failed',
-        taskGenerated: `Artefact POST aborted: missing identifiers (${missing})`,
-        runType: 'plan', metadata: { taskId: task.id, errorCode: 'missing_identifiers', missing },
-      }).catch(() => {});
+    if (!requestData.run_id || !requestData.client_request_id) {
+      const generated = [!requestData.run_id && `run_id=${uiRunId}`, !requestData.client_request_id && `crid=${clientRequestId}`].filter(Boolean).join(', ');
+      console.log(`[SUPERVISOR] Task ${task.id}: auto-generated missing identifiers (${generated})`);
+
+      const patchedData = { ...requestData, run_id: uiRunId, client_request_id: clientRequestId };
       await supabase
         .from('supervisor_tasks')
-        .update({ status: 'failed', error: `Missing required identifiers: ${missing}` })
+        .update({ request_data: patchedData })
         .eq('id', task.id);
-      return;
     }
 
     const jobId = uiRunId;
