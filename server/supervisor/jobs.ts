@@ -603,7 +603,7 @@ export async function startJob(request: StartJobRequest): Promise<string> {
           task_type: 'generate_leads',
           request_data: {
             user_message: fullUserMessage,
-            run_id: request.sourceRunId || jobId,
+            run_id: randomUUID(),
             client_request_id: request.clientRequestId || null,
           },
           status: 'pending',
