@@ -54,7 +54,10 @@ class SupervisorService {
   private isRunning: boolean = false;
   private timeoutId?: NodeJS.Timeout;
   private batchSize: number = 50; // Process up to 50 signals per poll
-  private missingTableWarned: boolean = false; // Track if we've warned about missing table
+  private missingTableWarned: boolean = false;
+  private startupRecoveryDone: boolean = false;
+  private static readonly STALE_TASK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+  private static readonly MAX_RECOVERY_ATTEMPTS = 3;
 
   async start() {
     if (this.isRunning) {
@@ -64,6 +67,8 @@ class SupervisorService {
 
     this.isRunning = true;
     console.log('🤖 Supervisor service started - monitoring for new signals...');
+
+    await this.recoverOrphanedTasks();
     await this.poll();
   }
 
@@ -193,10 +198,226 @@ class SupervisorService {
     }
   }
 
+  private async recoverOrphanedTasks(): Promise<void> {
+    if (!supabase || this.startupRecoveryDone) return;
+    this.startupRecoveryDone = true;
+
+    try {
+      const { data: stuckTasks, error } = await supabase
+        .from('supervisor_tasks')
+        .select('id, user_id, conversation_id, request_data, created_at, status')
+        .eq('status', 'processing')
+        .limit(50);
+
+      if (error) {
+        if (error.code === 'PGRST205') return;
+        console.error(`[RECOVERY] Failed to query stuck tasks: ${error.message}`);
+        return;
+      }
+
+      if (!stuckTasks || stuckTasks.length === 0) {
+        console.log('[RECOVERY] No orphaned tasks found on startup');
+        return;
+      }
+
+      console.log(`[RECOVERY] Found ${stuckTasks.length} orphaned task(s) in 'processing' state — evaluating for requeue`);
+
+      let requeued = 0;
+      let skipped = 0;
+      let failed = 0;
+
+      for (const task of stuckTasks) {
+        try {
+          const result = await this.evaluateAndRecoverTask(task, 'startup');
+          if (result === 'requeued') requeued++;
+          else if (result === 'skipped') skipped++;
+          else failed++;
+        } catch (err: any) {
+          console.error(`[RECOVERY] Task ${task.id}: unexpected error — ${err.message}`);
+          failed++;
+        }
+      }
+
+      console.log(`[RECOVERY] Startup recovery complete: ${requeued} requeued, ${skipped} skipped (already completed), ${failed} failed`);
+    } catch (err: any) {
+      console.error(`[RECOVERY] Startup recovery failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  private async sweepStaleTasks(): Promise<void> {
+    if (!supabase) return;
+
+    try {
+      const cutoffEpoch = Date.now() - SupervisorService.STALE_TASK_TIMEOUT_MS;
+
+      const { data: staleTasks, error } = await supabase
+        .from('supervisor_tasks')
+        .select('id, user_id, conversation_id, request_data, created_at, status')
+        .eq('status', 'processing')
+        .lt('created_at', cutoffEpoch)
+        .limit(20);
+
+      if (error) {
+        if (error.code === 'PGRST205') return;
+        console.error(`[STALE_SWEEP] Failed to query stale tasks: ${error.message}`);
+        return;
+      }
+
+      if (!staleTasks || staleTasks.length === 0) return;
+
+      console.log(`[STALE_SWEEP] Found ${staleTasks.length} stale task(s) processing for >${SupervisorService.STALE_TASK_TIMEOUT_MS / 1000}s`);
+
+      for (const task of staleTasks) {
+        try {
+          await this.evaluateAndRecoverTask(task, 'stale_sweep');
+        } catch (err: any) {
+          console.error(`[STALE_SWEEP] Task ${task.id}: unexpected error — ${err.message}`);
+        }
+      }
+    } catch (err: any) {
+      console.error(`[STALE_SWEEP] Sweep failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  private async evaluateAndRecoverTask(
+    task: { id: string; user_id: string; conversation_id: string; request_data: any; created_at: any; status: string },
+    trigger: 'startup' | 'stale_sweep',
+  ): Promise<'requeued' | 'skipped' | 'failed'> {
+    if (!supabase) return 'failed';
+
+    const runId = task.request_data?.run_id;
+    const clientRequestId = task.request_data?.client_request_id;
+    const logPrefix = `[RECOVERY][${trigger}] task=${task.id}`;
+
+    if (!runId) {
+      console.warn(`${logPrefix} no run_id in request_data — marking as failed`);
+      await supabase
+        .from('supervisor_tasks')
+        .update({ status: 'failed', error: `Recovery: no run_id in request_data (${trigger})` })
+        .eq('id', task.id);
+      return 'failed';
+    }
+
+    let agentRunResult: { id: string; status: string; metadata: any } | null = null;
+    let artefactsResult: any[] = [];
+    try {
+      const [runRes, artRes] = await Promise.all([
+        supabase.from('agent_runs').select('id, status, metadata').eq('id', runId).maybeSingle(),
+        storage.getArtefactsByRunId(runId),
+      ]);
+      agentRunResult = runRes.data as any;
+      artefactsResult = artRes || [];
+    } catch (err: any) {
+      console.warn(`${logPrefix} failed to fetch run/artefact data: ${err.message}`);
+    }
+
+    const agentRun = agentRunResult as { id: string; status: string; metadata: any } | null;
+    const artefacts = artefactsResult || [];
+    const hasLeadsList = artefacts.some((a: any) => a.type === 'leads_list');
+    const hasStepResult = artefacts.some((a: any) => a.type === 'step_result');
+    const hasTowerJudgement = artefacts.some((a: any) => a.type === 'tower_judgement');
+
+    if (agentRun && (agentRun.status === 'completed' || agentRun.status === 'failed')) {
+      if (hasLeadsList && hasStepResult && hasTowerJudgement) {
+        console.log(`${logPrefix} runId=${runId} already completed with artefacts — marking task completed`);
+        await supabase
+          .from('supervisor_tasks')
+          .update({ status: 'completed', result: { recovered: true, trigger, note: 'Run already completed with artefacts' } })
+          .eq('id', task.id);
+
+        logAFREvent({
+          userId: task.user_id, runId, clientRequestId,
+          conversationId: task.conversation_id,
+          actionTaken: 'task_recovery_skipped', status: 'success',
+          taskGenerated: `Task already completed — agent_run=${agentRun.status}, artefacts=${artefacts.length}`,
+          runType: 'plan',
+          metadata: { taskId: task.id, trigger, agentRunStatus: agentRun.status, artefactCount: artefacts.length },
+        }).catch(() => {});
+
+        return 'skipped';
+      }
+
+      if (agentRun.status === 'completed' && !hasLeadsList) {
+        console.warn(`${logPrefix} runId=${runId} marked completed but has NO artefacts — empty run, resetting for retry`);
+      }
+    }
+
+    const existingMetadata = (agentRun?.metadata as Record<string, any>) || {};
+    const attempts = (existingMetadata.recovery_attempts || 0) + 1;
+
+    if (attempts > SupervisorService.MAX_RECOVERY_ATTEMPTS) {
+      console.error(`${logPrefix} runId=${runId} exceeded max recovery attempts (${SupervisorService.MAX_RECOVERY_ATTEMPTS}) — marking as permanently failed`);
+      await supabase
+        .from('supervisor_tasks')
+        .update({ status: 'failed', error: `Exceeded max recovery attempts (${SupervisorService.MAX_RECOVERY_ATTEMPTS})` })
+        .eq('id', task.id);
+
+      if (agentRun) {
+        await storage.updateAgentRun(runId, {
+          status: 'failed',
+          terminalState: 'recovery_exhausted',
+          error: `Task failed after ${SupervisorService.MAX_RECOVERY_ATTEMPTS} recovery attempts`,
+          endedAt: new Date(),
+          metadata: { ...existingMetadata, recovery_attempts: attempts, recovery_exhausted: true },
+        }).catch(() => {});
+      }
+
+      logAFREvent({
+        userId: task.user_id, runId, clientRequestId,
+        conversationId: task.conversation_id,
+        actionTaken: 'task_recovery_exhausted', status: 'failed',
+        taskGenerated: `Recovery exhausted after ${attempts} attempts — task permanently failed`,
+        runType: 'plan',
+        metadata: { taskId: task.id, trigger, attempts },
+      }).catch(() => {});
+
+      return 'failed';
+    }
+
+    console.log(`${logPrefix} runId=${runId} requeuing (attempt ${attempts}) — agent_run status=${agentRun?.status || 'none'}, artefacts=${artefacts.length}`);
+
+    const { error: requeueErr } = await supabase
+      .from('supervisor_tasks')
+      .update({ status: 'pending' })
+      .eq('id', task.id)
+      .eq('status', 'processing');
+
+    if (requeueErr) {
+      console.error(`${logPrefix} failed to requeue task: ${requeueErr.message}`);
+      return 'failed';
+    }
+
+    if (agentRun) {
+      await storage.updateAgentRun(runId, {
+        status: 'executing',
+        metadata: {
+          ...existingMetadata,
+          recovery_attempts: attempts,
+          last_recovery_trigger: trigger,
+          last_recovery_at: new Date().toISOString(),
+        },
+      }).catch((err: any) => {
+        console.warn(`${logPrefix} failed to reset agent_run: ${err.message}`);
+      });
+    }
+
+    logAFREvent({
+      userId: task.user_id, runId, clientRequestId,
+      conversationId: task.conversation_id,
+      actionTaken: 'task_recovered', status: 'success',
+      taskGenerated: `Task requeued from ${trigger} (attempt ${attempts})`,
+      runType: 'plan',
+      metadata: { taskId: task.id, trigger, attempts, previousAgentRunStatus: agentRun?.status || 'none', artefactCount: artefacts.length },
+    }).catch(() => {});
+
+    return 'requeued';
+  }
+
   private async processSupervisorTasks() {
     if (!supabase) return;
     
-    // Fetch pending supervisor tasks from Supabase
+    await this.sweepStaleTasks();
+
     const { data: tasks, error } = await supabase
       .from('supervisor_tasks')
       .select('*')
