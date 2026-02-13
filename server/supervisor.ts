@@ -821,6 +821,26 @@ class SupervisorService {
     const normalizedGoal = `Find ${requestedCount} ${businessType} in ${city}${prefixFilter ? ` starting with ${prefixFilter}` : ''} for B2B outreach`;
     const goal = normalizedGoal;
 
+    const hardKeywords = /\b(must|only|exactly|strict|strictly|no\s+other|within)\b/i;
+    const locationHardKeywords = /\bin\s+\w+\s+only\b/i;
+    const userMsgLower = originalUserGoal.toLowerCase();
+    const hasHardSignal = hardKeywords.test(userMsgLower) || locationHardKeywords.test(originalUserGoal);
+
+    const hard_constraints: string[] = ['business_type', 'requested_count'];
+    const soft_constraints: string[] = [];
+
+    if (hasHardSignal) {
+      if (/\b(only|within)\b/i.test(userMsgLower) && city) hard_constraints.push('location');
+      else soft_constraints.push('location');
+
+      if (/\b(must|only|exactly|strict|strictly)\b/i.test(userMsgLower) && prefixFilter) hard_constraints.push('prefix_filter');
+      else if (prefixFilter) soft_constraints.push('prefix_filter');
+    } else {
+      soft_constraints.push('location');
+      if (prefixFilter) soft_constraints.push('prefix_filter');
+    }
+    console.log(`[TOWER_LOOP_CHAT] Constraint classification — hard: [${hard_constraints.join(', ')}] soft: [${soft_constraints.join(', ')}]`);
+
     const MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '1', 10);
     console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" count=${requestedCount} goal="${goal}" MAX_REPLANS=${MAX_REPLANS}`);
 
@@ -905,6 +925,8 @@ class SupervisorService {
       run_id: chatRunId,
       original_user_goal: originalUserGoal,
       normalized_goal: normalizedGoal,
+      hard_constraints,
+      soft_constraints,
       constraints,
       assumptions,
       steps: planSteps,
@@ -1048,6 +1070,8 @@ class SupervisorService {
             client_request_id: clientRequestId,
             original_user_goal: originalUserGoal,
             normalized_goal: normalizedGoal,
+            hard_constraints,
+            soft_constraints,
             goal,
             plan_version: 1,
             plan_artefact_id: planArtefact.id,
@@ -1108,6 +1132,8 @@ class SupervisorService {
     const leadsListPayload = {
       original_user_goal: originalUserGoal,
       normalized_goal: normalizedGoal,
+      hard_constraints,
+      soft_constraints,
       plan_artefact_id: planArtefact.id,
       delivered_count: leads.length,
       target_count: requestedCount,
@@ -1164,6 +1190,8 @@ class SupervisorService {
           target_count: requestedCount,
           ...(prefixFilter ? { prefix: prefixFilter } : {}),
           plan_version: 1,
+          hard_constraints,
+          soft_constraints,
           plan_constraints: {
             business_type: businessType,
             location: city,
@@ -1379,6 +1407,8 @@ class SupervisorService {
         run_id: chatRunId,
         original_user_goal: originalUserGoal,
         normalized_goal: normalizedGoal,
+        hard_constraints,
+        soft_constraints,
         plan_version: planVersion,
         prior_plan_artefact_id: priorPlanArtefactId,
         prior_verdict: { verdict: finalVerdict, action: finalAction, gaps: directive.gaps, suggested_changes: directive.suggested_changes },
@@ -1510,6 +1540,8 @@ class SupervisorService {
         payload: {
           plan_version: planVersion,
           plan_artefact_id: replanPlanArtefact.id,
+          hard_constraints,
+          soft_constraints,
           step_id: `search_places_${vLabel}`,
           step_title: `SEARCH_PLACES – ${v2.business_type} in ${v2.location}`,
           step_type: 'SEARCH_PLACES',
@@ -1556,6 +1588,8 @@ class SupervisorService {
       const replanLeadsListPayload = {
         original_user_goal: originalUserGoal,
         normalized_goal: normalizedGoal,
+        hard_constraints,
+        soft_constraints,
         plan_artefact_id: replanPlanArtefact.id,
         plan_version: planVersion,
         delivered_count: replanLeads.length,
@@ -1608,6 +1642,8 @@ class SupervisorService {
             target_count: v2.requested_count,
             ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}),
             plan_version: planVersion,
+            hard_constraints,
+            soft_constraints,
             plan_constraints: {
               business_type: v2.business_type,
               location: v2.location,
