@@ -561,29 +561,11 @@ export async function startJob(request: StartJobRequest): Promise<string> {
   const jobId = generateJobId();
   const now = new Date().toISOString();
 
-  let effectiveJobType = request.jobType;
-
   if (request.jobType === 'deep_research') {
     const userText = String(request.payload?.topic || request.payload?.prompt || request.payload?.user_message || '');
     const userId = request.userId || 'system';
-    const runId = request.sourceRunId || jobId;
 
-    console.log(`[SUPERVISOR_REDIRECT] Redirecting deep_research job to supervisor_task — jobId=${jobId} text="${userText.substring(0, 80)}"`);
-
-    logAFREvent({
-      userId, runId,
-      ...(request.clientRequestId ? { clientRequestId: request.clientRequestId } : {}),
-      actionTaken: 'router_override', status: 'success',
-      taskGenerated: `Redirect: deep_research → supervisor_task (supervisor decides tools)`,
-      runType: 'plan',
-      metadata: {
-        original_job_type: 'deep_research',
-        reason: 'supervisor_decides_all_routing',
-        message: userText.substring(0, 200),
-        jobId,
-        entry: 'jobs.ts/startJob',
-      },
-    }).catch(() => {});
+    console.log(`[SUPERVISOR_REDIRECT] deep_research → supervisor_task — jobId=${jobId} text="${userText.substring(0, 80)}"`);
 
     if (supabase) {
       const taskId = randomUUID();
@@ -604,7 +586,7 @@ export async function startJob(request: StartJobRequest): Promise<string> {
       if (insertErr) {
         console.warn(`[SUPERVISOR_REDIRECT] Failed to insert supervisor_task: ${insertErr.message}`);
       } else {
-        console.log(`[SUPERVISOR_REDIRECT] Created supervisor_task ${taskId} — supervisor will decide routing`);
+        console.log(`[SUPERVISOR_REDIRECT] Created supervisor_task ${taskId}`);
       }
     }
 
@@ -618,15 +600,13 @@ export async function startJob(request: StartJobRequest): Promise<string> {
       userId: request.userId,
       clientRequestId: request.clientRequestId,
       progress: 100,
-      message: `Redirected to supervisor — supervisor will create plan and choose tools.`,
+      message: `Redirected to supervisor.`,
       createdAt: now,
       endedAt: now,
       resultSummary: {
         success: true,
         jobType: request.jobType,
         redirected: true,
-        reason: 'supervisor_decides_all_routing',
-        original_text: userText.substring(0, 200),
       },
     };
     jobStore.set(jobId, job);
@@ -637,7 +617,7 @@ export async function startJob(request: StartJobRequest): Promise<string> {
   
   const job: Job = {
     jobId,
-    jobType: effectiveJobType,
+    jobType: request.jobType,
     status: 'queued',
     payload: request.payload,
     requestedBy: request.requestedBy,
@@ -645,7 +625,7 @@ export async function startJob(request: StartJobRequest): Promise<string> {
     userId: request.userId,
     clientRequestId: request.clientRequestId,
     progress: 0,
-    message: `Job ${effectiveJobType} queued`,
+    message: `Job ${request.jobType} queued`,
     createdAt: now
   };
   
