@@ -72,3 +72,7 @@ The frontend uses React, TypeScript, Vite, and Wouter, with styling managed by T
 - **OpenAI API**: For deep research via Responses API.
 - **Perplexity API**: For deep research with `llama-3.1-sonar-large-128k-online`.
 - **Anthropic API**: For deep research with Claude models.
+
+## Recent Changes
+- **2026-02-13**: `MAX_REPLANS` env var: Configurable bound on how many replans are allowed after Plan v1. Default: 1 (Plan v1 → Plan v2 only). The replan section is now a `while` loop instead of a single `if` block, supporting arbitrary `MAX_REPLANS` values (e.g., `MAX_REPLANS=3` allows up to Plan v4). When the limit is hit, the system creates a terminal artefact explaining the halt (original goal, replans attempted, configured limit), emits `run_halted` AFR with `reason: max_replans_exceeded`, and stops cleanly. `MAX_REPLANS` is logged at run start. Each iteration feeds forward `currentConstraints`, `priorPlanArtefactId`, and `priorLeadsCount` so successive replans build on each other's results.
+- **2026-02-13**: Tower field mapping fix in `replan-policy.ts`: Added `mapTowerField` (Tower's `prefix` → internal `prefix_filter`) and `mapTowerType` (Tower's `RELAX_CONSTRAINT` → internal `drop`, `EXPAND_AREA` → `expand`, `BROADEN_QUERY` → `broaden`). Also reads Tower's `from`/`to` fields alongside `current_value`/`suggested_value`. Policy now accepts both `drop` and `relax` actions for prefix_filter removal.

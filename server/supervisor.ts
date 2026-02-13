@@ -821,7 +821,8 @@ class SupervisorService {
     const normalizedGoal = `Find ${requestedCount} ${businessType} in ${city}${prefixFilter ? ` starting with ${prefixFilter}` : ''} for B2B outreach`;
     const goal = normalizedGoal;
 
-    console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" count=${requestedCount} goal="${goal}"`);
+    const MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '1', 10);
+    console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" count=${requestedCount} goal="${goal}" MAX_REPLANS=${MAX_REPLANS}`);
 
     // 1. Create agent_run row (upsert — handles retries with same run_id/client_request_id)
     const nowMs = Date.now();
@@ -1271,57 +1272,102 @@ class SupervisorService {
     });
     console.log(`[TOWER_LOOP_CHAT] [tower_verdict] verdict=${verdict}`);
 
-    // 12. Replan loop (bounded: max 1 replan, i.e. Plan v1 → Plan v2)
+    // 12. Replan loop (bounded by MAX_REPLANS env var)
     let finalVerdict = verdict;
     let finalAction = action;
     let finalLeads = leads;
     let finalLeadsListArtefact = leadsListArtefact;
     let finalTowerResult = towerResult;
     let planVersion = 1;
-    const MAX_PLAN_VERSION = 2;
+    let replansUsed = 0;
+    let currentConstraints: PlanV2Constraints = {
+      business_type: businessType!,
+      location: city,
+      country,
+      search_count: searchCount,
+      requested_count: requestedCount,
+      prefix_filter: prefixFilter,
+    };
+    let priorPlanArtefactId = planArtefact.id;
+    let priorLeadsCount = leads.length;
 
-    if (action === 'change_plan' && planVersion < MAX_PLAN_VERSION && !usedStub) {
-      console.log(`[REPLAN] Tower returned change_plan — initiating replan (mission_type=leadgen)`);
+    while (finalAction === 'change_plan' && !usedStub) {
+      if (replansUsed >= MAX_REPLANS) {
+        console.log(`[REPLAN] max_replans_exceeded — replans_used=${replansUsed} MAX_REPLANS=${MAX_REPLANS} plan_version=${planVersion}`);
 
-      const directive = extractChangePlanDirective(towerResult.judgement);
+        const terminalArtefact = await createArtefact({
+          runId: chatRunId,
+          type: 'terminal',
+          title: `Run halted: max replans exceeded`,
+          summary: `Stopped after ${replansUsed} replan(s) (limit: ${MAX_REPLANS}). Tower continued to request changes but the configured maximum was reached.`,
+          payload: {
+            reason: 'max_replans_exceeded',
+            original_user_goal: originalUserGoal,
+            replans_attempted: replansUsed,
+            max_replans: MAX_REPLANS,
+            final_plan_version: planVersion,
+            final_delivered: finalLeads.length,
+            final_verdict: finalVerdict,
+          },
+          userId: task.user_id,
+          conversationId,
+        });
+        console.log(`[REPLAN] Terminal artefact id=${terminalArtefact.id}`);
+
+        await logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+          actionTaken: 'run_halted', status: 'failed',
+          taskGenerated: `Run halted: max_replans_exceeded (${replansUsed}/${MAX_REPLANS}). Plan v${planVersion} was the last attempt.`,
+          runType: 'plan',
+          metadata: {
+            reason: 'max_replans_exceeded',
+            replans_used: replansUsed,
+            max_replans: MAX_REPLANS,
+            plan_version: planVersion,
+            delivered: finalLeads.length,
+            terminal_artefact_id: terminalArtefact.id,
+          },
+        });
+
+        break;
+      }
+
+      console.log(`[REPLAN] Tower returned change_plan — initiating replan ${replansUsed + 1}/${MAX_REPLANS} (mission_type=leadgen, current_plan_version=${planVersion})`);
+
+      const directive = extractChangePlanDirective(finalTowerResult.judgement);
       console.log(`[REPLAN] Directive — gaps: ${JSON.stringify(directive.gaps.map(g => g.type))} suggested_changes: ${JSON.stringify(directive.suggested_changes.map(sc => `${sc.action} ${sc.field}`))}`);
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'replan_initiated', status: 'pending',
-        taskGenerated: `Tower change_plan: replanning with ${directive.suggested_changes.length} suggested change(s)`,
+        taskGenerated: `Tower change_plan: replanning with ${directive.suggested_changes.length} suggested change(s) (replan ${replansUsed + 1}/${MAX_REPLANS})`,
         runType: 'plan',
         metadata: {
-          plan_version: 1,
+          plan_version: planVersion,
           gaps: directive.gaps,
           suggested_changes: directive.suggested_changes,
-          v1_delivered: leads.length,
-          v1_requested: requestedCount,
+          prior_delivered: priorLeadsCount,
+          requested: currentConstraints.requested_count,
+          replan_number: replansUsed + 1,
+          max_replans: MAX_REPLANS,
         },
       });
 
-      const currentConstraints: PlanV2Constraints = {
-        business_type: businessType!,
-        location: city,
-        country,
-        search_count: searchCount,
-        requested_count: requestedCount,
-        prefix_filter: prefixFilter,
-      };
-
       const replanResult = applyLeadgenReplanPolicy(currentConstraints, directive);
       const v2 = replanResult.constraints;
-      planVersion = 2;
+      replansUsed++;
+      planVersion++;
+      const vLabel = `v${planVersion}`;
 
       console.log(`[REPLAN] ${replanResult.strategy_summary}`);
       for (const adj of replanResult.adjustments_applied) {
         console.log(`[REPLAN]   ${adj.action} ${adj.field}: ${JSON.stringify(adj.from)} → ${JSON.stringify(adj.to)} (${adj.reason})`);
       }
 
-      const v2PlanSteps = [
+      const replanPlanSteps = [
         {
           step_index: 0,
-          step_id: 'search_places_v2',
+          step_id: `search_places_${vLabel}`,
           tool: 'SEARCH_PLACES',
           tool_args: { query: `${v2.business_type} in ${v2.location} ${v2.country}`, location: v2.location, country: v2.country, maxResults: v2.search_count },
           expected_output: `Up to ${v2.search_count} ${v2.business_type} results from Google Places`,
@@ -1329,13 +1375,13 @@ class SupervisorService {
         },
       ];
 
-      const v2PlanPayload = {
+      const replanPlanPayload = {
         run_id: chatRunId,
         original_user_goal: originalUserGoal,
         normalized_goal: normalizedGoal,
-        plan_version: 2,
-        prior_plan_artefact_id: planArtefact.id,
-        prior_verdict: { verdict, action, gaps: directive.gaps, suggested_changes: directive.suggested_changes },
+        plan_version: planVersion,
+        prior_plan_artefact_id: priorPlanArtefactId,
+        prior_verdict: { verdict: finalVerdict, action: finalAction, gaps: directive.gaps, suggested_changes: directive.suggested_changes },
         adjustments_applied: replanResult.adjustments_applied,
         strategy_summary: replanResult.strategy_summary,
         constraints: [
@@ -1344,57 +1390,57 @@ class SupervisorService {
           `count=${v2.requested_count}`,
           ...(v2.prefix_filter ? [`prefix=${v2.prefix_filter}`] : []),
         ],
-        steps: v2PlanSteps,
+        steps: replanPlanSteps,
         created_at: new Date().toISOString(),
       };
 
-      const v2PlanArtefact = await createArtefact({
+      const replanPlanArtefact = await createArtefact({
         runId: chatRunId,
         type: 'plan',
-        title: 'Plan v2',
+        title: `Plan ${vLabel}`,
         summary: `${replanResult.strategy_summary} — re-searching ${v2.business_type} in ${v2.location}`,
-        payload: v2PlanPayload,
+        payload: replanPlanPayload,
         userId: task.user_id,
         conversationId,
       });
-      console.log(`[REPLAN] Plan v2 artefact id=${v2PlanArtefact.id}`);
+      console.log(`[REPLAN] Plan ${vLabel} artefact id=${replanPlanArtefact.id}`);
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'artefact_created', status: 'success',
-        taskGenerated: `Plan v2 artefact created`,
+        taskGenerated: `Plan ${vLabel} artefact created`,
         runType: 'plan',
-        metadata: { artefactId: v2PlanArtefact.id, artefactType: 'plan', plan_version: 2, strategy: replanResult.strategy_summary },
+        metadata: { artefactId: replanPlanArtefact.id, artefactType: 'plan', plan_version: planVersion, strategy: replanResult.strategy_summary },
       });
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'plan_execution_started', status: 'pending',
-        taskGenerated: `Executing Plan v2: ${replanResult.strategy_summary}`,
+        taskGenerated: `Executing Plan ${vLabel}: ${replanResult.strategy_summary}`,
         runType: 'plan',
-        metadata: { plan_version: 2, strategy: replanResult.strategy_summary, planArtefactId: v2PlanArtefact.id },
+        metadata: { plan_version: planVersion, strategy: replanResult.strategy_summary, planArtefactId: replanPlanArtefact.id },
       });
-      console.log(`[REPLAN] [plan_execution_started] plan_version=2 strategy="${replanResult.strategy_summary}"`);
+      console.log(`[REPLAN] [plan_execution_started] plan_version=${planVersion} strategy="${replanResult.strategy_summary}"`);
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'step_started', status: 'pending',
-        taskGenerated: `Step 1/1 (v2): SEARCH_PLACES — ${v2.business_type} in ${v2.location}`,
+        taskGenerated: `Step 1/1 (${vLabel}): SEARCH_PLACES — ${v2.business_type} in ${v2.location}`,
         runType: 'plan',
-        metadata: { step: 1, total_steps: 1, tool: 'SEARCH_PLACES', query: v2.business_type, location: v2.location, plan_version: 2 },
+        metadata: { step: 1, total_steps: 1, tool: 'SEARCH_PLACES', query: v2.business_type, location: v2.location, plan_version: planVersion },
       });
-      console.log(`[REPLAN] [step_started] step=1 tool=SEARCH_PLACES (v2)`);
+      console.log(`[REPLAN] [step_started] step=1 tool=SEARCH_PLACES (${vLabel})`);
 
-      let v2Leads: typeof leads = [];
-      let v2UsedStub = false;
-      const v2StepStartedAt = Date.now();
-      let v2StepError: string | undefined;
+      let replanLeads: typeof leads = [];
+      let replanUsedStub = false;
+      const replanStepStartedAt = Date.now();
+      let replanStepError: string | undefined;
 
       try {
-        const v2Businesses = await this.searchGooglePlaces(v2.business_type, v2.location, v2.country, v2.search_count);
-        if (v2Businesses && v2Businesses.length > 0) {
-          for (const biz of v2Businesses) {
-            v2Leads.push({
+        const replanBusinesses = await this.searchGooglePlaces(v2.business_type, v2.location, v2.country, v2.search_count);
+        if (replanBusinesses && replanBusinesses.length > 0) {
+          for (const biz of replanBusinesses) {
+            replanLeads.push({
               name: biz.displayName?.text || 'Unknown Business',
               address: biz.formattedAddress || `${v2.location}, ${v2.country}`,
               phone: biz.nationalPhoneNumber || biz.internationalPhoneNumber || null,
@@ -1403,42 +1449,42 @@ class SupervisorService {
               source: 'google_places',
             });
           }
-          console.log(`[REPLAN] Google Places v2 returned ${v2Leads.length} results`);
+          console.log(`[REPLAN] Google Places ${vLabel} returned ${replanLeads.length} results`);
 
           if (v2.prefix_filter) {
-            const before = v2Leads.length;
-            v2Leads = v2Leads.filter(l => l.name.toUpperCase().startsWith(v2.prefix_filter!));
-            console.log(`[REPLAN] Prefix filter "${v2.prefix_filter}": ${before} → ${v2Leads.length}`);
+            const before = replanLeads.length;
+            replanLeads = replanLeads.filter(l => l.name.toUpperCase().startsWith(v2.prefix_filter!));
+            console.log(`[REPLAN] Prefix filter "${v2.prefix_filter}": ${before} → ${replanLeads.length}`);
           }
 
-          if (v2Leads.length > v2.requested_count) {
-            v2Leads = v2Leads.slice(0, v2.requested_count);
-            console.log(`[REPLAN] Trimmed to requested count: ${v2Leads.length}`);
+          if (replanLeads.length > v2.requested_count) {
+            replanLeads = replanLeads.slice(0, v2.requested_count);
+            console.log(`[REPLAN] Trimmed to requested count: ${replanLeads.length}`);
           }
         } else {
-          console.log(`[REPLAN] Google Places v2 returned 0 results`);
+          console.log(`[REPLAN] Google Places ${vLabel} returned 0 results`);
         }
-      } catch (v2Err: any) {
-        console.warn(`[REPLAN] Google Places v2 failed: ${v2Err.message}`);
-        v2StepError = v2Err.message;
+      } catch (replanErr: any) {
+        console.warn(`[REPLAN] Google Places ${vLabel} failed: ${replanErr.message}`);
+        replanStepError = replanErr.message;
       }
 
-      const v2StepFinishedAt = Date.now();
+      const replanStepFinishedAt = Date.now();
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'step_completed', status: v2StepError ? 'failed' : 'success',
-        taskGenerated: `Step 1/1 (v2) completed: ${v2Leads.length} leads`,
+        actionTaken: 'step_completed', status: replanStepError ? 'failed' : 'success',
+        taskGenerated: `Step 1/1 (${vLabel}) completed: ${replanLeads.length} leads`,
         runType: 'plan',
-        metadata: { step: 1, leads_count: v2Leads.length, plan_version: 2, ...(v2StepError ? { error: v2StepError } : {}) },
+        metadata: { step: 1, leads_count: replanLeads.length, plan_version: planVersion, ...(replanStepError ? { error: replanStepError } : {}) },
       });
-      console.log(`[REPLAN] [step_completed] leads=${v2Leads.length} (v2)`);
+      console.log(`[REPLAN] [step_completed] leads=${replanLeads.length} (${vLabel})`);
 
-      for (const lead of v2Leads) {
+      for (const lead of replanLeads) {
         try {
           const created = await storage.createSuggestedLead({
             userId: task.user_id,
-            rationale: `Tower-validated ${v2.business_type} lead in ${v2.location} (Plan v2)`,
+            rationale: `Tower-validated ${v2.business_type} lead in ${v2.location} (Plan ${vLabel})`,
             source: 'supervisor_chat',
             score: 0.75,
             lead: {
@@ -1456,103 +1502,103 @@ class SupervisorService {
         }
       }
 
-      const v2StepArtefact = await createArtefact({
+      const replanStepArtefact = await createArtefact({
         runId: chatRunId,
         type: 'step_result',
-        title: `Step result (v2): SEARCH_PLACES – ${v2.business_type} in ${v2.location}`,
-        summary: `Plan v2: Found ${v2Leads.length} ${v2.business_type} in ${v2.location}`,
+        title: `Step result (${vLabel}): SEARCH_PLACES – ${v2.business_type} in ${v2.location}`,
+        summary: `Plan ${vLabel}: Found ${replanLeads.length} ${v2.business_type} in ${v2.location}`,
         payload: {
-          plan_version: 2,
-          plan_artefact_id: v2PlanArtefact.id,
-          step_id: 'search_places_v2',
+          plan_version: planVersion,
+          plan_artefact_id: replanPlanArtefact.id,
+          step_id: `search_places_${vLabel}`,
           step_title: `SEARCH_PLACES – ${v2.business_type} in ${v2.location}`,
           step_type: 'SEARCH_PLACES',
           step_index: 0,
-          step_status: v2StepError ? 'failed' : 'success',
+          step_status: replanStepError ? 'failed' : 'success',
           inputs_summary: compactInputs({ query: v2.business_type, location: v2.location, country: v2.country, maxResults: v2.search_count }),
-          outputs_summary: { leads_count: v2Leads.length, prefix_filter: v2.prefix_filter || null, requested_count: v2.requested_count },
+          outputs_summary: { leads_count: replanLeads.length, prefix_filter: v2.prefix_filter || null, requested_count: v2.requested_count },
           timings: {
-            started_at: new Date(v2StepStartedAt).toISOString(),
-            finished_at: new Date(v2StepFinishedAt).toISOString(),
-            duration_ms: v2StepFinishedAt - v2StepStartedAt,
+            started_at: new Date(replanStepStartedAt).toISOString(),
+            finished_at: new Date(replanStepFinishedAt).toISOString(),
+            duration_ms: replanStepFinishedAt - replanStepStartedAt,
           },
         },
         userId: task.user_id,
         conversationId,
       });
-      console.log(`[REPLAN] [step_artefact] id=${v2StepArtefact.id} (v2)`);
+      console.log(`[REPLAN] [step_artefact] id=${replanStepArtefact.id} (${vLabel})`);
 
-      if (v2StepArtefact) {
+      if (replanStepArtefact) {
         try {
-          const v2ObsResult = await judgeArtefact({
-            artefact: v2StepArtefact,
+          const replanObsResult = await judgeArtefact({
+            artefact: replanStepArtefact,
             runId: chatRunId, goal, userId: task.user_id, conversationId,
           });
           await createArtefact({
             runId: chatRunId,
             type: 'tower_judgement',
-            title: `Tower Judgement: ${v2ObsResult.judgement.verdict} (v2 observation)`,
-            summary: `Observation v2: ${v2ObsResult.judgement.verdict} | ${v2ObsResult.judgement.action} | SEARCH_PLACES`,
+            title: `Tower Judgement: ${replanObsResult.judgement.verdict} (${vLabel} observation)`,
+            summary: `Observation ${vLabel}: ${replanObsResult.judgement.verdict} | ${replanObsResult.judgement.action} | SEARCH_PLACES`,
             payload: {
-              verdict: v2ObsResult.judgement.verdict, action: v2ObsResult.judgement.action,
-              reasons: v2ObsResult.judgement.reasons, metrics: v2ObsResult.judgement.metrics,
-              plan_version: 2, step_index: 0, judged_artefact_id: v2StepArtefact.id,
-              stubbed: v2ObsResult.stubbed, observation_only: true,
+              verdict: replanObsResult.judgement.verdict, action: replanObsResult.judgement.action,
+              reasons: replanObsResult.judgement.reasons, metrics: replanObsResult.judgement.metrics,
+              plan_version: planVersion, step_index: 0, judged_artefact_id: replanStepArtefact.id,
+              stubbed: replanObsResult.stubbed, observation_only: true,
             },
             userId: task.user_id, conversationId,
           });
-          console.log(`[REPLAN] [step_observation] verdict=${v2ObsResult.judgement.verdict} (v2, observation only)`);
+          console.log(`[REPLAN] [step_observation] verdict=${replanObsResult.judgement.verdict} (${vLabel}, observation only)`);
         } catch (obsErr: any) {
-          console.warn(`[REPLAN] Tower observation v2 failed (continuing): ${obsErr.message}`);
+          console.warn(`[REPLAN] Tower observation ${vLabel} failed (continuing): ${obsErr.message}`);
         }
       }
 
-      const v2LeadsListPayload = {
+      const replanLeadsListPayload = {
         original_user_goal: originalUserGoal,
         normalized_goal: normalizedGoal,
-        plan_artefact_id: v2PlanArtefact.id,
-        plan_version: 2,
-        delivered_count: v2Leads.length,
+        plan_artefact_id: replanPlanArtefact.id,
+        plan_version: planVersion,
+        delivered_count: replanLeads.length,
         target_count: v2.requested_count,
         success_criteria: { target_count: v2.requested_count, ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}) },
         query: v2.business_type,
         location: v2.location,
         country: v2.country,
-        used_stub: v2UsedStub,
+        used_stub: replanUsedStub,
         prefix_filter: v2.prefix_filter || null,
-        leads: v2Leads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website })),
+        leads: replanLeads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website })),
         replan_context: {
-          prior_plan_version: 1,
-          prior_delivered: leads.length,
+          prior_plan_version: planVersion - 1,
+          prior_delivered: priorLeadsCount,
           adjustments: replanResult.adjustments_applied,
           strategy: replanResult.strategy_summary,
         },
       };
 
-      const v2LeadsListArtefact = await createArtefact({
+      const replanLeadsListArtefact = await createArtefact({
         runId: chatRunId,
         type: 'leads_list',
-        title: `Leads list v2: ${v2Leads.length} ${v2.business_type} in ${v2.location}`,
-        summary: `Plan v2: ${v2Leads.length} of ${v2.requested_count} ${v2.business_type} in ${v2.location}`,
-        payload: v2LeadsListPayload,
+        title: `Leads list ${vLabel}: ${replanLeads.length} ${v2.business_type} in ${v2.location}`,
+        summary: `Plan ${vLabel}: ${replanLeads.length} of ${v2.requested_count} ${v2.business_type} in ${v2.location}`,
+        payload: replanLeadsListPayload,
         userId: task.user_id,
         conversationId,
       });
-      console.log(`[REPLAN] [leads_list_v2] id=${v2LeadsListArtefact.id} delivered=${v2Leads.length}`);
+      console.log(`[REPLAN] [leads_list_${vLabel}] id=${replanLeadsListArtefact.id} delivered=${replanLeads.length}`);
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'tower_call_started', status: 'pending',
-        taskGenerated: `Calling Tower to judge v2 leads_list artefact ${v2LeadsListArtefact.id}`,
+        taskGenerated: `Calling Tower to judge ${vLabel} leads_list artefact ${replanLeadsListArtefact.id}`,
         runType: 'plan',
-        metadata: { artefactId: v2LeadsListArtefact.id, goal, plan_version: 2 },
+        metadata: { artefactId: replanLeadsListArtefact.id, goal, plan_version: planVersion },
       });
-      console.log(`[REPLAN] [tower_call_started] artefactId=${v2LeadsListArtefact.id} (v2)`);
+      console.log(`[REPLAN] [tower_call_started] artefactId=${replanLeadsListArtefact.id} (${vLabel})`);
 
-      let v2TowerResult;
+      let replanTowerResult;
       try {
-        v2TowerResult = await judgeArtefact({
-          artefact: v2LeadsListArtefact,
+        replanTowerResult = await judgeArtefact({
+          artefact: replanLeadsListArtefact,
           runId: chatRunId,
           goal,
           userId: task.user_id,
@@ -1561,7 +1607,7 @@ class SupervisorService {
             mission_type: 'leadgen',
             target_count: v2.requested_count,
             ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}),
-            plan_version: 2,
+            plan_version: planVersion,
             plan_constraints: {
               business_type: v2.business_type,
               location: v2.location,
@@ -1570,32 +1616,32 @@ class SupervisorService {
               requested_count: v2.requested_count,
               prefix_filter: v2.prefix_filter || null,
             },
-            max_replan_versions: 2,
+            max_replan_versions: MAX_REPLANS + 1,
           },
         });
-      } catch (v2TowerErr: any) {
-        console.error(`[REPLAN] Tower v2 call failed: ${v2TowerErr.message}`);
-        v2TowerResult = {
-          judgement: { verdict: 'error', reasons: [v2TowerErr.message], metrics: {}, action: 'stop' as const },
+      } catch (replanTowerErr: any) {
+        console.error(`[REPLAN] Tower ${vLabel} call failed: ${replanTowerErr.message}`);
+        replanTowerResult = {
+          judgement: { verdict: 'error', reasons: [replanTowerErr.message], metrics: {}, action: 'stop' as const },
           shouldStop: true,
           stubbed: false,
         };
       }
 
-      const v2Verdict = v2TowerResult.judgement.verdict;
-      const v2Action = v2TowerResult.judgement.action;
-      console.log(`[REPLAN] [tower_judgement] verdict=${v2Verdict} action=${v2Action} (v2)`);
+      const replanVerdict = replanTowerResult.judgement.verdict;
+      const replanAction = replanTowerResult.judgement.action;
+      console.log(`[REPLAN] [tower_judgement] verdict=${replanVerdict} action=${replanAction} (${vLabel})`);
 
-      const v2TowerJudgementArtefact = await createArtefact({
+      const replanTowerJudgementArtefact = await createArtefact({
         runId: chatRunId,
         type: 'tower_judgement',
-        title: `Tower Judgement v2: ${v2Verdict}`,
-        summary: `v2 Verdict: ${v2Verdict} | Action: ${v2Action} | Delivered: ${v2Leads.length} of ${v2.requested_count}`,
+        title: `Tower Judgement ${vLabel}: ${replanVerdict}`,
+        summary: `${vLabel} Verdict: ${replanVerdict} | Action: ${replanAction} | Delivered: ${replanLeads.length} of ${v2.requested_count}`,
         payload: {
-          verdict: v2Verdict, action: v2Action,
-          reasons: v2TowerResult.judgement.reasons, metrics: v2TowerResult.judgement.metrics,
-          plan_version: 2, delivered: v2Leads.length, requested: v2.requested_count,
-          artefact_id: v2LeadsListArtefact.id, stubbed: v2TowerResult.stubbed,
+          verdict: replanVerdict, action: replanAction,
+          reasons: replanTowerResult.judgement.reasons, metrics: replanTowerResult.judgement.metrics,
+          plan_version: planVersion, delivered: replanLeads.length, requested: v2.requested_count,
+          artefact_id: replanLeadsListArtefact.id, stubbed: replanTowerResult.stubbed,
         },
         userId: task.user_id,
         conversationId,
@@ -1603,40 +1649,43 @@ class SupervisorService {
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'tower_verdict', status: v2TowerResult.shouldStop ? 'failed' : 'success',
-        taskGenerated: `Tower v2 verdict: ${v2Verdict} — action: ${v2Action}`,
+        actionTaken: 'tower_verdict', status: replanTowerResult.shouldStop ? 'failed' : 'success',
+        taskGenerated: `Tower ${vLabel} verdict: ${replanVerdict} — action: ${replanAction}`,
         runType: 'plan',
         metadata: {
-          plan_version: 2, verdict: v2Verdict, action: v2Action,
-          artefactId: v2LeadsListArtefact.id, towerJudgementArtefactId: v2TowerJudgementArtefact.id,
-          delivered: v2Leads.length, requested: v2.requested_count,
-          stubbed: v2TowerResult.stubbed,
+          plan_version: planVersion, verdict: replanVerdict, action: replanAction,
+          artefactId: replanLeadsListArtefact.id, towerJudgementArtefactId: replanTowerJudgementArtefact.id,
+          delivered: replanLeads.length, requested: v2.requested_count,
+          stubbed: replanTowerResult.stubbed,
         },
       });
-      console.log(`[REPLAN] [tower_verdict] verdict=${v2Verdict} (v2)`);
+      console.log(`[REPLAN] [tower_verdict] verdict=${replanVerdict} (${vLabel})`);
 
-      finalVerdict = v2Verdict;
-      finalAction = v2Action;
-      finalLeads = v2Leads;
-      finalLeadsListArtefact = v2LeadsListArtefact;
-      finalTowerResult = v2TowerResult;
-      planVersion = 2;
+      finalVerdict = replanVerdict;
+      finalAction = replanAction;
+      finalLeads = replanLeads;
+      finalLeadsListArtefact = replanLeadsListArtefact;
+      finalTowerResult = replanTowerResult;
       businessType = v2.business_type;
       city = v2.location;
       prefixFilter = v2.prefix_filter;
+      currentConstraints = v2;
+      priorPlanArtefactId = replanPlanArtefact.id;
+      priorLeadsCount = replanLeads.length;
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'replan_completed', status: v2TowerResult.shouldStop ? 'failed' : 'success',
-        taskGenerated: `Replan completed: v2 delivered ${v2Leads.length}, verdict=${v2Verdict}`,
+        actionTaken: 'replan_completed', status: replanTowerResult.shouldStop ? 'failed' : 'success',
+        taskGenerated: `Replan ${replansUsed}/${MAX_REPLANS} completed: ${vLabel} delivered ${replanLeads.length}, verdict=${replanVerdict}`,
         runType: 'plan',
         metadata: {
-          plan_version: 2, v1_delivered: leads.length, v2_delivered: v2Leads.length,
-          v2_verdict: v2Verdict, v2_action: v2Action,
+          plan_version: planVersion, prior_delivered: priorLeadsCount, replan_delivered: replanLeads.length,
+          replan_verdict: replanVerdict, replan_action: replanAction,
+          replans_used: replansUsed, max_replans: MAX_REPLANS,
           strategy: replanResult.strategy_summary,
         },
       });
-      console.log(`[REPLAN] [replan_completed] v1_delivered=${leads.length} v2_delivered=${v2Leads.length} verdict=${v2Verdict}`);
+      console.log(`[REPLAN] [replan_completed] replan=${replansUsed}/${MAX_REPLANS} delivered=${replanLeads.length} verdict=${replanVerdict}`);
     }
 
     const isHalted = finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'fail';
