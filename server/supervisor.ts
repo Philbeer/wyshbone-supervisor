@@ -1157,7 +1157,7 @@ class SupervisorService {
         goal,
         userId: task.user_id,
         conversationId,
-        successCriteria: { target_leads: requestedCount },
+        successCriteria: { target_count: requestedCount, ...(prefixFilter ? { prefix: prefixFilter } : {}) },
       });
     } catch (towerErr: any) {
       const errMsg = towerErr.message || 'Tower call threw an exception';
