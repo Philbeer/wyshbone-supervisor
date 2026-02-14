@@ -1837,6 +1837,7 @@ class SupervisorService {
       priorPlanArtefactId = replanPlanArtefact.id;
       priorLeadsCount = replanLeads.length;
 
+      let shouldBreakAfterReplan = false;
       {
         const postAccLeads = Array.from(accumulatedCandidates.values());
         const postHardCheck = checkHardConstraintsSatisfied(postAccLeads, structuredConstraints, userRequestedCountFinal);
@@ -1844,8 +1845,14 @@ class SupervisorService {
           console.log(`[REPLAN] Early stop after accumulation — ${accumulatedCandidates.size} unique >= ${userRequestedCountFinal} user requested, all hard constraints satisfied`);
           finalAction = 'accept';
           finalVerdict = 'pass';
+          shouldBreakAfterReplan = true;
         } else if (accumulatedCandidates.size >= userRequestedCountFinal && !postHardCheck.satisfied) {
           console.log(`[REPLAN] Count met after accumulation (${accumulatedCandidates.size} >= ${userRequestedCountFinal}) but hard constraints unsatisfied: ${postHardCheck.unsatisfied.join(', ')}`);
+        }
+
+        if (newUnique === 0 && !shouldBreakAfterReplan) {
+          console.log(`[REPLAN] Zero new unique leads in ${vLabel} (accumulated ${accumulatedCandidates.size}/${userRequestedCountFinal}) — further expansion unlikely to help. Stopping replan loop.`);
+          shouldBreakAfterReplan = true;
         }
       }
 
@@ -1865,6 +1872,10 @@ class SupervisorService {
         },
       });
       console.log(`[REPLAN] [replan_completed] replan=${replansUsed}/${MAX_REPLANS} delivered=${replanLeads.length} accumulated_unique=${accumulatedCandidates.size} verdict=${replanVerdict}`);
+
+      if (shouldBreakAfterReplan) {
+        break;
+      }
     }
 
     const totalUniqueLeads = accumulatedCandidates.size;
