@@ -48,7 +48,7 @@ export interface RunState {
   lastVerdict?: TowerVerdictV1;
   status: 'running' | 'accepted' | 'stopped' | 'retrying' | 'replanning';
   createdAt: number;
-  requestedCountUser: number;
+  requestedCountUser: number | null;
   searchBudgetCount: number;
   originalUserGoal: string;
   accumulatedCandidates: Map<string, AccumulatedCandidate>;
@@ -109,7 +109,7 @@ export function initRunState(
   conversationId?: string,
   clientRequestId?: string,
   opts?: {
-    requestedCountUser?: number;
+    requestedCountUser?: number | null;
     searchBudgetCount?: number;
     originalUserGoal?: string;
     hardConstraints?: string[];
@@ -126,7 +126,7 @@ export function initRunState(
     lastToolArgs: { ...toolArgs },
     status: 'running',
     createdAt: Date.now(),
-    requestedCountUser: opts?.requestedCountUser ?? 20,
+    requestedCountUser: opts?.requestedCountUser !== undefined ? opts.requestedCountUser : null,
     searchBudgetCount: opts?.searchBudgetCount ?? 20,
     originalUserGoal: opts?.originalUserGoal ?? '',
     accumulatedCandidates: new Map(),
@@ -136,7 +136,7 @@ export function initRunState(
     softConstraints: opts?.softConstraints ?? ['location'],
   };
   runStates.set(runId, state);
-  console.log(`[AGENT_LOOP] RunState initialized: runId=${runId} planVersion=1 crid=${clientRequestId || 'none'} requestedCountUser=${state.requestedCountUser} searchBudgetCount=${state.searchBudgetCount}`);
+  console.log(`[AGENT_LOOP] RunState initialized: runId=${runId} planVersion=1 crid=${clientRequestId || 'none'} requestedCountUser=${state.requestedCountUser ?? 'unspecified'} searchBudgetCount=${state.searchBudgetCount}`);
   return state;
 }
 
@@ -184,10 +184,10 @@ export async function callTowerJudgeV1(
       (artefactPayload.delivered_count as number) ??
       (Array.isArray(artefactPayload.leads) ? artefactPayload.leads.length : 0) ??
       (artefactPayload.places_count as number) ?? 0;
-    const requested = (successCriteria.target_leads as number) ||
-      (artefactPayload.target_count as number) || 20;
+    const rawRequested = successCriteria.target_leads ?? artefactPayload.target_count;
+    const requested = rawRequested != null ? Number(rawRequested) : 0;
 
-    console.log(`[AGENT_LOOP] Stub mode: auto-ACCEPTing (delivered=${leadsCount}, requested=${requested})`);
+    console.log(`[AGENT_LOOP] Stub mode: auto-ACCEPTing (delivered=${leadsCount}, requested=${requested || 'unspecified'})`);
     console.log(`[TOWER_TELEMETRY] tower_call_started runId=${runId} mode=stub`);
     console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=ACCEPT mode=stub`);
     return {
@@ -554,7 +554,9 @@ async function createRerunLeadsListArtefact(
   label: string,
 ): Promise<Record<string, unknown>> {
   const deliveredCount = rerunResult.data?.delivered_count ?? rerunResult.data?.count ?? 0;
-  const targetCount = rerunResult.data?.target_count ?? Number(state.lastToolArgs.target_count) ?? 0;
+  const rawRerunTarget = rerunResult.data?.target_count ?? state.lastToolArgs.target_count;
+  const targetCount = rawRerunTarget != null ? Number(rawRerunTarget) : null;
+  const targetLabel = targetCount != null ? ` of ${targetCount} requested` : '';
   const payload: Record<string, unknown> = {
     delivered_count: deliveredCount,
     target_count: targetCount,
@@ -572,7 +574,7 @@ async function createRerunLeadsListArtefact(
       runId: state.runId,
       type: 'leads_list',
       title: `Leads list (${label}): SEARCH_PLACES v${state.planVersion}`,
-      summary: `Delivered ${deliveredCount} of ${targetCount} requested (${label})`,
+      summary: `Delivered ${deliveredCount}${targetLabel} (${label})`,
       payload,
       userId: state.userId,
       conversationId: state.conversationId,

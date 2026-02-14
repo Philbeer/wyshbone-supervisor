@@ -224,16 +224,16 @@ async function executeSearchPlaces(
   const location = args.location as string || 'UK';
   const country = (args.country as string) || 'GB';
   const maxResults = Number(args.maxResults) || 20;
-  const targetCount = Number(args.target_count) || 20;
+  const targetCount = args.target_count != null ? Number(args.target_count) : null;
   
-  console.log(`[ACTION_EXECUTOR] SEARCH_PLACES: ${query} in ${location}, ${country} (maxResults=${maxResults}, target=${targetCount})`);
+  console.log(`[ACTION_EXECUTOR] SEARCH_PLACES: ${query} in ${location}, ${country} (maxResults=${maxResults}, target=${targetCount ?? 'unspecified'})`);
   
   const result = await searchPlaces(query, location, country, maxResults);
   
   if (result.success) {
     return {
       success: true,
-      summary: `Found ${result.places.length} places for "${query}" in ${location}, ${country} (target: ${targetCount})`,
+      summary: `Found ${result.places.length} places for "${query}" in ${location}, ${country}${targetCount != null ? ` (target: ${targetCount})` : ''}`,
       data: {
         places: result.places,
         count: result.places.length,
@@ -374,9 +374,9 @@ async function executeSearchPlacesProof(
   const query = (args.query as string) || 'pubs';
   const location = (args.location as string) || 'London';
   const country = (args.country as string) || 'UK';
-  const targetCount = Number(args.target_count) || 12;
+  const targetCount = args.target_count != null ? Number(args.target_count) : null;
 
-  console.log(`[ACTION_EXECUTOR] SEARCH_PLACES_PROOF: ${query} in ${location}, ${country} (target=${targetCount}) — deterministic stub, no Google calls`);
+  console.log(`[ACTION_EXECUTOR] SEARCH_PLACES_PROOF: ${query} in ${location}, ${country} (target=${targetCount ?? 'unspecified'}) — deterministic stub, no Google calls`);
 
   const venueNames = [
     'The Red Lion', 'The Lamb and Flag', 'Ye Olde Cheshire Cheese',
@@ -385,7 +385,7 @@ async function executeSearchPlacesProof(
     'The Holly Bush', 'The Dove', 'The Grapes', 'The Mayflower', 'The Ten Bells',
   ];
 
-  const count = Math.min(Math.max(targetCount, 10), 15);
+  const count = Math.min(Math.max(targetCount ?? 12, 10), 15);
   const places = venueNames.slice(0, count).map((name, i) => ({
     name,
     formatted_address: `${10 + i} High Street, ${location}, ${country}`,
@@ -398,7 +398,7 @@ async function executeSearchPlacesProof(
 
   return {
     success: true,
-    summary: `[PROOF] Found ${places.length} places for "${query}" in ${location}, ${country} (deterministic stub — no Google API)`,
+    summary: `[PROOF] Found ${places.length} places for "${query}" in ${location}, ${country}${targetCount != null ? ` (target: ${targetCount})` : ''} (deterministic stub — no Google API)`,
     data: {
       places,
       count: places.length,

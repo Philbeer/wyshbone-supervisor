@@ -911,7 +911,7 @@ class SupervisorService {
           feature_flag: 'TOWER_LOOP_CHAT_MODE',
           original_user_goal: originalUserGoal,
           normalized_goal: normalizedGoal,
-          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount } }] },
+          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount, target_count: userRequestedCountFinal } }] },
         },
       });
       console.log(`[TOWER_LOOP_CHAT] [agent_run_create] runId=${chatRunId}`);
@@ -927,7 +927,7 @@ class SupervisorService {
           retry_reuse: true,
           original_user_goal: originalUserGoal,
           normalized_goal: normalizedGoal,
-          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount } }] },
+          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount, target_count: userRequestedCountFinal } }] },
         };
 
         if (isPkeyConflict) {
@@ -968,7 +968,7 @@ class SupervisorService {
         step_index: 0,
         step_id: 'search_places_v1',
         tool: 'SEARCH_PLACES',
-        tool_args: { query: `${businessType} in ${city} ${country}`, location: city, country, maxResults: searchCount },
+        tool_args: { query: `${businessType} in ${city} ${country}`, location: city, country, maxResults: searchCount, target_count: userRequestedCountFinal },
         expected_output: `Up to ${searchCount} ${businessType} results from Google Places`,
         ...(postProcessing.length > 0 ? { post_processing: postProcessing.join('; ') } : {}),
       },
@@ -1510,7 +1510,7 @@ class SupervisorService {
           step_index: 0,
           step_id: `search_places_${vLabel}`,
           tool: 'SEARCH_PLACES',
-          tool_args: { query: `${v2.business_type} in ${v2.location} ${v2.country}`, location: v2.location, country: v2.country, maxResults: v2.search_count },
+          tool_args: { query: `${v2.business_type} in ${v2.location} ${v2.country}`, location: v2.location, country: v2.country, maxResults: v2.search_count, target_count: v2.requested_count_user },
           expected_output: `Up to ${v2.search_count} ${v2.business_type} results from Google Places`,
           ...(v2.prefix_filter ? { post_processing: `Filter names starting with "${v2.prefix_filter}"; Take first ${v2.requested_count} results` } : (v2.requested_count < v2.search_count ? { post_processing: `Take first ${v2.requested_count} results` } : {})),
         },

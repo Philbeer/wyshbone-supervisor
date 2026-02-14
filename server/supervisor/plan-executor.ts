@@ -721,15 +721,17 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
         let artefactToJudge = stepArtefact;
         if (isSearchPlaces) {
           const toolArgs = currentStepArgs;
-          const targetCount = Number(result.data?.target_count || toolArgs.target_count || toolArgs.maxResults) || 20;
+          const rawTarget = result.data?.target_count ?? toolArgs.target_count;
+          const targetCount = rawTarget != null ? Number(rawTarget) : null;
           const deliveredCount = Number(result.data?.delivered_count || result.data?.count) || 0;
+          const targetLabel = targetCount != null ? ` of ${targetCount} requested` : '';
 
           try {
             const leadsListArtefact = await createArtefact({
               runId,
               type: 'leads_list',
               title: `Leads list: ${step.label}${attemptLabel}`,
-              summary: `Delivered ${deliveredCount} of ${targetCount} requested for "${toolArgs.query || ''}" in ${toolArgs.location || ''}`,
+              summary: `Delivered ${deliveredCount}${targetLabel} for "${toolArgs.query || ''}" in ${toolArgs.location || ''}`,
               payload: {
                 ...stepOutputs, ...stepMetrics,
                 delivered_count: deliveredCount, target_count: targetCount,
@@ -809,8 +811,9 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           continue;
         }
 
+        const rawStepTarget = currentStepArgs.target_count;
         const towerSuccessCriteria = isSearchPlaces
-          ? { ...successCriteria, target_leads: Number(currentStepArgs.target_count || currentStepArgs.maxResults) || 20 }
+          ? { ...successCriteria, target_leads: rawStepTarget != null ? Number(rawStepTarget) : null }
           : undefined;
 
         const judgement = await judgeStepResultSync(
