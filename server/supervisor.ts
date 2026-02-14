@@ -60,8 +60,9 @@ class SupervisorService {
   private batchSize: number = 50; // Process up to 50 signals per poll
   private missingTableWarned: boolean = false;
   private startupRecoveryDone: boolean = false;
-  private static readonly STALE_TASK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+  private static readonly STALE_TASK_TIMEOUT_MS = 90 * 1000; // 90 seconds (was 5 min — too long for stuck tasks)
   private static readonly MAX_RECOVERY_ATTEMPTS = 3;
+  private lastNoTasksLogAt: number = 0;
 
   async start() {
     if (this.isRunning) {
@@ -439,6 +440,11 @@ class SupervisorService {
     }
 
     if (!tasks || tasks.length === 0) {
+      const now = Date.now();
+      if (now - this.lastNoTasksLogAt > 60_000) {
+        console.log('[SUPERVISOR_POLL] No pending tasks (heartbeat)');
+        this.lastNoTasksLogAt = now;
+      }
       return;
     }
 

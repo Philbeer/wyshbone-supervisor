@@ -64,7 +64,6 @@ export async function monitorGoalsOnce(): Promise<GoalMonitorEvent[]> {
     }
 
     if (!monitors || monitors.length === 0) {
-      console.log('[GOAL_MONITOR] No active monitors found');
       return events;
     }
 

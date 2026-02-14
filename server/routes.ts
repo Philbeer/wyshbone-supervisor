@@ -924,6 +924,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     });
 
+    app.get("/api/debug/task-queue", async (req, res) => {
+      if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+      try {
+        const limit = Math.min(Number(req.query.limit) || 20, 50);
+        const { data, error } = await supabase
+          .from('supervisor_tasks')
+          .select('id, status, task_type, created_at, run_id, client_request_id, user_id, conversation_id')
+          .order('created_at', { ascending: false })
+          .limit(limit);
+
+        if (error) throw error;
+
+        const summary = {
+          total: data?.length || 0,
+          by_status: {} as Record<string, number>,
+          tasks: (data || []).map(t => ({
+            ...t,
+            created_at_readable: new Date(Number(t.created_at) || t.created_at).toISOString(),
+            age_seconds: Math.round((Date.now() - (Number(t.created_at) || 0)) / 1000),
+          })),
+        };
+        for (const t of data || []) {
+          summary.by_status[t.status] = (summary.by_status[t.status] || 0) + 1;
+        }
+        res.json(summary);
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     app.get("/api/debug/run-trace", async (req, res) => {
       try {
         const crid = req.query.crid as string | undefined;
