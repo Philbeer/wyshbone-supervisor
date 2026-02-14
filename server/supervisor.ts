@@ -1851,8 +1851,8 @@ class SupervisorService {
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'replan_completed', status: replanTowerResult.shouldStop ? 'failed' : 'success',
-        taskGenerated: `Replan ${replansUsed}/${MAX_REPLANS} completed: ${vLabel} delivered ${replanLeads.length}, accumulated_unique=${accumulatedCandidates.size}, verdict=${replanVerdict}`,
+        actionTaken: 'replan_completed', status: (finalVerdict === 'pass') ? 'success' : (replanTowerResult.shouldStop ? 'failed' : 'success'),
+        taskGenerated: `Replan ${replansUsed}/${MAX_REPLANS} completed: ${vLabel} delivered ${replanLeads.length}, accumulated_unique=${accumulatedCandidates.size}, verdict=${finalVerdict}`,
         runType: 'plan',
         metadata: {
           plan_version: planVersion, prior_delivered: priorLeadsCount, replan_delivered: replanLeads.length,
@@ -1887,7 +1887,14 @@ class SupervisorService {
       console.log(`[TOWER_LOOP_CHAT] Built union leads list: ${trimmedUnion.length} (from ${totalUniqueLeads} unique accumulated across ${replansUsed + 1} plans)`);
     }
 
-    const isHalted = finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'fail';
+    // Regression guard: if early-stop set finalVerdict='pass', override stale shouldStop from prior Tower fail
+    const earlyStopOverride = finalVerdict === 'pass' && finalTowerResult.shouldStop;
+    if (earlyStopOverride) {
+      console.log(`[EarlyStop] satisfied user goal; overriding prior tower fail for terminal status (stale shouldStop=true, finalVerdict=pass)`);
+      finalTowerResult = { ...finalTowerResult, shouldStop: false };
+    }
+
+    const isHalted = finalVerdict !== 'pass' && (finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'fail');
     if (isHalted) {
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
@@ -1905,11 +1912,11 @@ class SupervisorService {
         actionTaken: 'run_completed', status: 'success',
         taskGenerated: `Tower loop chat completed: ${totalUniqueLeads} unique leads (accumulated across ${planVersion} plan versions), verdict=${finalVerdict}`,
         runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal', early_stop_override: true } : {}) },
       });
-      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} plan_version=${planVersion}`);
+      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} plan_version=${planVersion}${earlyStopOverride ? ' (early_stop_override)' : ''}`);
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, halted: false, plan_version: planVersion, replans_used: replansUsed } });
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, halted: false, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal' } : {}) } });
     }
 
     await this.postArtefactToUI({
