@@ -1,0 +1,116 @@
+PROMPT 1 – Supervisor: produce a canonical delivery_summary artefact
+
+Purpose:
+Make Supervisor emit a single, authoritative delivery_summary artefact at the end of a run.
+This is the source of truth for UI + Tower alignment.
+
+Paste this exactly:
+
+SYSTEM / DEV PROMPT
+
+You are working in the Wyshbone Supervisor codebase.
+
+Goal: implement a proper, production-grade end-of-run delivery artefact called delivery_summary.
+
+Constraints:
+
+Do NOT infer anything in the UI
+
+Do NOT change Tower logic yet
+
+Do NOT add hacks or temporary flags
+
+This artefact must be deterministic and truth-preserving
+
+What to build
+
+At the end of a run (PASS or STOP), Supervisor must create one artefact:
+
+type: "delivery_summary"
+
+
+with the following JSON payload shape:
+
+{
+  "requested_count": number,
+
+  "hard_constraints": [string],
+  "soft_constraints": [string],
+
+  "plan_versions": [
+    {
+      "version": number,
+      "changes_made": [string]
+    }
+  ],
+
+  "soft_relaxations": [
+    {
+      "constraint": string,
+      "from": string,
+      "to": string,
+      "reason": string,
+      "plan_version": number
+    }
+  ],
+
+  "delivered_exact": [
+    {
+      "entity_id": string,
+      "name": string,
+      "address": string,
+      "match_level": "exact",
+      "soft_violations": []
+    }
+  ],
+
+  "delivered_closest": [
+    {
+      "entity_id": string,
+      "name": string,
+      "address": string,
+      "match_level": "closest",
+      "soft_violations": [string]
+    }
+  ],
+
+  "delivered_exact_count": number,
+  "delivered_total_count": number,
+  "shortfall": number,
+
+  "stop_reason": string | null,
+
+  "suggested_next_question": string | null
+}
+
+Behaviour rules
+
+A lead is exact only if it satisfies all hard AND all original soft constraints.
+
+A lead is closest if it satisfies all hard constraints but violates ≥1 relaxed soft constraint.
+
+shortfall = max(0, requested_count - delivered_exact_count)
+
+suggested_next_question must be:
+
+"Do you want me to include nearby results?" for relaxed geographic constraints
+
+"Do you want me to include similar matches?" for relaxed attribute/name/category constraints
+
+"Do you want me to broaden the criteria?" if multiple relaxations occurred
+
+null if delivered_exact_count ≥ requested_count
+
+Explicit non-goals
+
+Do NOT merge accumulation logic yet
+
+Do NOT modify how leads are found
+
+Do NOT alter judgement outcomes
+
+Deliverable:
+
+Supervisor emits delivery_summary artefact for every completed run
+
+Artefact is stored and visible in AFR like other artefacts
