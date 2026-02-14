@@ -52,8 +52,8 @@ const SYSTEM_PROMPT = `You are a goal parser for a B2B lead generation system. P
 
 You must return a JSON object with these fields:
 - original_goal: the verbatim user input
-- requested_count_user: the number the user asked for (number or null if not specified)
-- search_budget_count: always max(20, requested_count_user or 20) — this is how many we actually fetch
+- requested_count_user: the number the user explicitly asked for (number or null if not specified). Do NOT invent a count — if the user says "find pubs in london" without a number, set this to null.
+- search_budget_count: always max(20, requested_count_user or 20) — this is how many we actually fetch from the API
 - business_type: the type of business (e.g. "pubs", "dentists", "restaurants")
 - location: the location (e.g. "arundel", "london")
 - country: country code or name, default "UK"

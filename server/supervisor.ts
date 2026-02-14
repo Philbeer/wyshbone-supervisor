@@ -775,10 +775,11 @@ class SupervisorService {
     if (!location) location = 'Local';
     let city = location.split(',')[0].trim();
     const country = parsedGoal.country || location.split(',')[1]?.trim() || 'UK';
-    const displayCount = userRequestedCount ?? requestedCount;
+    const userSpecifiedCount = userRequestedCount !== undefined;
+    const displayCount = userRequestedCount ?? null;
 
     const constraints: string[] = [];
-    constraints.push(`count=${requestedCount}`);
+    if (userSpecifiedCount) constraints.push(`count=${userRequestedCount}`);
     constraints.push(`business_type=${businessType}`);
     constraints.push(`location=${city}`);
     if (prefixFilter) constraints.push(`prefix=${prefixFilter}`);
@@ -792,22 +793,25 @@ class SupervisorService {
     if (nameFilter) {
       assumptions.push(`Google Places cannot filter by name content; will search broadly then filter locally for names containing "${nameFilter}"`);
     }
-    if (requestedCount < 20) {
+    if (!userSpecifiedCount) {
+      assumptions.push(`No count specified by user — will return all results found (search budget: ${parsedGoal.search_budget_count})`);
+    } else if (requestedCount < 20) {
       assumptions.push(`Will request up to 20 results from Google Places, then trim to ${requestedCount} after any local filtering`);
     }
     assumptions.push(`Location "${city}" will be used as-is in the Google Places text query`);
 
-    const userRequestedCountFinal = userRequestedCount ?? requestedCount;
+    const userRequestedCountFinal: number | null = userSpecifiedCount ? userRequestedCount! : null;
     const searchBudgetCount = Math.max(20, requestedCount);
     const searchCount = searchBudgetCount;
     const postProcessing: string[] = [];
     if (prefixFilter) postProcessing.push(`Filter names starting with "${prefixFilter}"`);
     if (nameFilter) postProcessing.push(`Filter names containing "${nameFilter}"`);
-    if (userRequestedCountFinal < searchBudgetCount || prefixFilter || nameFilter) postProcessing.push(`Take first ${userRequestedCountFinal} results`);
-    console.log(`[TOWER_LOOP_CHAT] Count split — requested_count_user=${userRequestedCountFinal} search_budget_count=${searchBudgetCount}`);
+    if (userSpecifiedCount && userRequestedCountFinal! < searchBudgetCount) postProcessing.push(`Take first ${userRequestedCountFinal} results`);
+    console.log(`[TOWER_LOOP_CHAT] Count split — requested_count_user=${userRequestedCountFinal ?? 'any'} search_budget_count=${searchBudgetCount} user_specified=${userSpecifiedCount}`);
 
     const nameDesc = prefixFilter ? ` starting with ${prefixFilter}` : nameFilter ? ` containing "${nameFilter}"` : '';
-    const normalizedGoal = `Find ${requestedCount} ${businessType} in ${city}${nameDesc} for B2B outreach`;
+    const countDesc = userSpecifiedCount ? `${userRequestedCountFinal} ` : '';
+    const normalizedGoal = `Find ${countDesc}${businessType} in ${city}${nameDesc} for B2B outreach`;
     const goal = normalizedGoal;
 
     const hard_constraints: string[] = structuredConstraints.filter(c => c.hard).map(c => c.field === 'count' ? 'requested_count' : c.field === 'business_type' ? 'business_type' : c.field === 'location' ? 'location' : c.field === 'name' && c.type === 'NAME_STARTS_WITH' ? 'prefix_filter' : c.field === 'name' && c.type === 'NAME_CONTAINS' ? 'name_filter' : c.field);
@@ -824,7 +828,7 @@ class SupervisorService {
     };
 
     function buildConstraintLabel(
-      cur: { business_type: string; location: string; prefix_filter?: string | null; requested_count: number },
+      cur: { business_type: string; location: string; prefix_filter?: string | null; requested_count: number | null },
       v1: typeof v1Constraints,
       planVersion: number,
     ): { annotations: string[]; relaxed_constraints: string[]; constraint_diffs: { field: string; from: any; to: any }[] } {
@@ -857,14 +861,14 @@ class SupervisorService {
 
     function artefactTitle(
       prefix: string,
-      count: number,
-      cur: { business_type: string; location: string; prefix_filter?: string | null; requested_count: number },
+      count: number | null,
+      cur: { business_type: string; location: string; prefix_filter?: string | null; requested_count: number | null },
       planVersion: number,
     ): string {
       const { annotations } = buildConstraintLabel(cur, v1Constraints, planVersion);
       const loc = cur.location;
       const parts = [prefix];
-      parts.push(`${count} ${cur.business_type}`);
+      parts.push(count !== null ? `${count} ${cur.business_type}` : cur.business_type);
       if (cur.prefix_filter) parts.push(`starting with ${cur.prefix_filter}`);
       parts.push(`in ${loc}`);
       if (annotations.length > 0) parts.push(`(${annotations.join(', ')})`);
@@ -874,14 +878,15 @@ class SupervisorService {
     function artefactSummary(
       prefix: string,
       delivered: number,
-      target: number,
-      cur: { business_type: string; location: string; prefix_filter?: string | null; requested_count: number },
+      target: number | null,
+      cur: { business_type: string; location: string; prefix_filter?: string | null; requested_count: number | null },
       planVersion: number,
       extra?: string,
     ): string {
       const { annotations } = buildConstraintLabel(cur, v1Constraints, planVersion);
       const loc = cur.location;
-      let s = `${prefix}${delivered} of ${target} ${cur.business_type} in ${loc}`;
+      const targetStr = target !== null ? ` of ${target}` : '';
+      let s = `${prefix}${delivered}${targetStr} ${cur.business_type} in ${loc}`;
       if (cur.prefix_filter) s += ` starting with ${cur.prefix_filter}`;
       if (annotations.length > 0) s += ` (${annotations.join(', ')})`;
       if (extra) s += ` ${extra}`;
@@ -991,7 +996,7 @@ class SupervisorService {
       runId: chatRunId,
       type: 'plan',
       title: artefactTitle('Plan v1:', displayCount, v1Constraints, 1),
-      summary: `Search ${displayCount} ${businessType} in ${city} via Google Places${prefixFilter ? `, filter prefix "${prefixFilter}"` : ''}${nameFilterLabel}`,
+      summary: `Search${displayCount !== null ? ` ${displayCount}` : ''} ${businessType} in ${city} via Google Places${prefixFilter ? `, filter prefix "${prefixFilter}"` : ''}${nameFilterLabel}`,
       payload: planPayload,
       userId: task.user_id,
       conversationId,
@@ -1124,7 +1129,7 @@ class SupervisorService {
           runId: chatRunId,
           type: 'step_result',
           title: artefactTitle('Step result: SEARCH_PLACES –', leads.length, v1Constraints, 1),
-          summary: `${towerLoopStepStatus} – ${leads.length} of ${displayCount} ${businessType} in ${city}${prefixFilter ? ` starting with ${prefixFilter}` : ''}${nameFilter ? ` containing "${nameFilter}"` : ''}`,
+          summary: `${towerLoopStepStatus} – ${leads.length}${displayCount !== null ? ` of ${displayCount}` : ''} ${businessType} in ${city}${prefixFilter ? ` starting with ${prefixFilter}` : ''}${nameFilter ? ` containing "${nameFilter}"` : ''}`,
           payload: {
             run_id: chatRunId,
             client_request_id: clientRequestId,
@@ -1254,7 +1259,8 @@ class SupervisorService {
         conversationId,
         successCriteria: {
           mission_type: 'leadgen',
-          target_count: requestedCount,
+          target_count: userRequestedCountFinal ?? requestedCount,
+          user_specified_count: userSpecifiedCount,
           ...(prefixFilter ? { prefix: prefixFilter } : {}),
           plan_version: 1,
           hard_constraints,
@@ -1264,7 +1270,7 @@ class SupervisorService {
             location: city,
             country,
             search_count: searchCount,
-            requested_count: requestedCount,
+            requested_count: userRequestedCountFinal ?? requestedCount,
             prefix_filter: prefixFilter || null,
           },
           max_replan_versions: 2,
@@ -1478,13 +1484,14 @@ class SupervisorService {
 
       const accLeadsForCheck = Array.from(accumulatedCandidates.values());
       const hardCheck = checkHardConstraintsSatisfied(accLeadsForCheck, structuredConstraints, userRequestedCountFinal);
-      if (hardCheck.satisfied && accumulatedCandidates.size >= userRequestedCountFinal) {
-        console.log(`[REPLAN] Early stop — accumulated ${accumulatedCandidates.size} >= user requested ${userRequestedCountFinal}, all hard constraints satisfied. No need to replan.`);
+      const countMet = userRequestedCountFinal === null || accumulatedCandidates.size >= userRequestedCountFinal;
+      if (hardCheck.satisfied && countMet) {
+        console.log(`[REPLAN] Early stop — accumulated ${accumulatedCandidates.size}${userRequestedCountFinal !== null ? ` >= user requested ${userRequestedCountFinal}` : ' (no count target)'}, all hard constraints satisfied. No need to replan.`);
         finalAction = 'accept';
         finalVerdict = 'pass';
         break;
-      } else if (accumulatedCandidates.size >= userRequestedCountFinal && !hardCheck.satisfied) {
-        console.log(`[REPLAN] Count met (${accumulatedCandidates.size} >= ${userRequestedCountFinal}) but hard constraints unsatisfied: ${hardCheck.unsatisfied.join(', ')} — continuing replan`);
+      } else if (countMet && !hardCheck.satisfied) {
+        console.log(`[REPLAN] Count met (${accumulatedCandidates.size}${userRequestedCountFinal !== null ? ` >= ${userRequestedCountFinal}` : ''}) but hard constraints unsatisfied: ${hardCheck.unsatisfied.join(', ')} — continuing replan`);
         for (const [cid, detail] of Object.entries(hardCheck.details)) {
           console.log(`[REPLAN]   ${cid}: ${detail}`);
         }
@@ -1716,8 +1723,8 @@ class SupervisorService {
         plan_artefact_id: replanPlanArtefact.id,
         plan_version: planVersion,
         delivered_count: replanLeads.length,
-        target_count: v2.requested_count,
-        success_criteria: { target_count: v2.requested_count, ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}) },
+        target_count: v2.requested_count_user ?? v2.requested_count,
+        success_criteria: { target_count: v2.requested_count_user ?? v2.requested_count, user_specified_count: userSpecifiedCount, ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}) },
         query: v2.business_type,
         location: v2.location,
         country: v2.country,
@@ -1764,7 +1771,8 @@ class SupervisorService {
           conversationId,
           successCriteria: {
             mission_type: 'leadgen',
-            target_count: v2.requested_count_user,
+            target_count: v2.requested_count_user ?? v2.requested_count,
+            user_specified_count: userSpecifiedCount,
             accumulated_unique_count: accumulatedCandidates.size,
             ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}),
             plan_version: planVersion,
@@ -1841,13 +1849,14 @@ class SupervisorService {
       {
         const postAccLeads = Array.from(accumulatedCandidates.values());
         const postHardCheck = checkHardConstraintsSatisfied(postAccLeads, structuredConstraints, userRequestedCountFinal);
-        if (postHardCheck.satisfied && accumulatedCandidates.size >= userRequestedCountFinal) {
-          console.log(`[REPLAN] Early stop after accumulation — ${accumulatedCandidates.size} unique >= ${userRequestedCountFinal} user requested, all hard constraints satisfied`);
+        const postCountMet = userRequestedCountFinal === null || accumulatedCandidates.size >= userRequestedCountFinal;
+        if (postHardCheck.satisfied && postCountMet) {
+          console.log(`[REPLAN] Early stop after accumulation — ${accumulatedCandidates.size} unique${userRequestedCountFinal !== null ? ` >= ${userRequestedCountFinal} user requested` : ' (no count target)'}, all hard constraints satisfied`);
           finalAction = 'accept';
           finalVerdict = 'pass';
           shouldBreakAfterReplan = true;
-        } else if (accumulatedCandidates.size >= userRequestedCountFinal && !postHardCheck.satisfied) {
-          console.log(`[REPLAN] Count met after accumulation (${accumulatedCandidates.size} >= ${userRequestedCountFinal}) but hard constraints unsatisfied: ${postHardCheck.unsatisfied.join(', ')}`);
+        } else if (postCountMet && !postHardCheck.satisfied) {
+          console.log(`[REPLAN] Count met after accumulation (${accumulatedCandidates.size}${userRequestedCountFinal !== null ? ` >= ${userRequestedCountFinal}` : ''}) but hard constraints unsatisfied: ${postHardCheck.unsatisfied.join(', ')}`);
         }
 
         if (newUnique === 0 && !shouldBreakAfterReplan) {
@@ -1893,7 +1902,7 @@ class SupervisorService {
           source: candidate.source || 'google_places',
         });
       }
-      const trimmedUnion = unionLeads.slice(0, userRequestedCountFinal);
+      const trimmedUnion = userRequestedCountFinal !== null ? unionLeads.slice(0, userRequestedCountFinal) : unionLeads;
       finalLeads = trimmedUnion;
       console.log(`[TOWER_LOOP_CHAT] Built union leads list: ${trimmedUnion.length} (from ${totalUniqueLeads} unique accumulated across ${replansUsed + 1} plans)`);
     }

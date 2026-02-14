@@ -27,7 +27,7 @@ export interface PlanV2Constraints {
   country: string;
   search_count: number;
   requested_count: number;
-  requested_count_user: number;
+  requested_count_user: number | null;
   search_budget_count: number;
   prefix_filter: string | undefined;
   radius_rung: number;
