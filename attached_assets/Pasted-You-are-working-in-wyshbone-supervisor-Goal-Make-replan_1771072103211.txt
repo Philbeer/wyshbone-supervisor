@@ -1,0 +1,147 @@
+You are working in wyshbone-supervisor.
+
+Goal: Make replanning actually intelligent and honest without hard-coding per use case. Fix the contract with Tower and add accumulation across replans.
+
+Implement these changes:
+
+Split “user requested count” from “search budget count”
+
+Parse user_requested_count from the user message or plan constraints. Example: user asked for 4 dentists.
+
+Keep internal search_budget_count for tool coverage. Default search_budget_count=20 is fine.
+
+IMPORTANT: Tower must judge against user_requested_count, never against search_budget_count.
+
+Tool calls can still fetch up to search_budget_count to have enough candidates.
+
+Add accumulation across replans (merge + dedupe)
+
+Create a RunState accumulator that persists across plan versions in a single run:
+
+accumulated_candidates: array of leads (dedupe by place_id if present, else name + address hash)
+
+per_plan_candidates: store for audit, but do not replace accumulated
+
+After each plan execution, merge new results into accumulated_candidates.
+
+Build the leads_list artefact payload from accumulated_candidates, not just the latest plan’s results.
+
+Include in the leads_list payload:
+
+requested_count_user
+
+search_budget_count
+
+accumulated_count
+
+plan_version
+
+radius_km (if location expansion is used)
+
+constraints_used (prefix, location, business_type)
+
+constraints_relaxed (what changed from v1)
+
+progress_summary: “X in Arundel, Y within 10km, Z within 25km” where possible
+
+Truthful naming and summaries (no lying)
+
+If prefix_filter was dropped, the leads_list title and summary must explicitly say so.
+Example title: “Leads near Arundel (prefix relaxed)”
+
+If location was expanded, title must say “near Arundel” or “within 10km”.
+
+Never keep the original strict wording in titles once constraints were relaxed.
+
+Radius ladder for location expansion (no plateau)
+
+Replace the single step “expand to 10km then 25km and stop” with a ladder:
+
+0km (exact)
+
+5km
+
+10km
+
+25km
+
+50km
+
+100km (or county level string fallback)
+
+Each CHANGE_PLAN that includes “expand location” should move to the next ladder rung.
+
+If already at the largest rung, do not replan with identical params. Instead STOP with reason “cannot_expand_further”.
+
+Replan loop should stop early if user goal met
+
+If accumulated_candidates >= requested_count_user AND hard constraints satisfied, Tower should ACCEPT and Supervisor stops immediately.
+
+Hard vs soft constraints support
+
+Carry a constraints object into plan and leads_list that includes hardness:
+
+hard: must not be relaxed unless user explicitly permits
+
+soft: may be relaxed if Tower requests and user permits
+
+Default rules:
+
+business_type: hard
+
+requested_count_user: hard
+
+prefix_filter: soft unless user says “hard constraint”, “must”, “only”, “exactly”
+
+location: soft unless user says “only in”, “must be in”, “strictly in”, “do not expand”
+
+If a constraint is hard, replan policy must not relax it. If Tower suggests relaxing a hard constraint, Supervisor should STOP with honest explanation and ask user.
+
+Fix the Tower call payload
+
+When calling Tower for leads_list judgement, include:
+
+original_user_goal verbatim
+
+requested_count_user
+
+accumulated_count and accumulated_candidates summary
+
+constraints (including hardness and whether they were relaxed)
+
+plan_version and radius_km
+
+Remove any use of internal normalized goal as the primary goal. It can be included as metadata, but Tower judges against original_user_goal and requested_count_user.
+
+Artefact linking for audit
+
+Ensure plan v2, v3, etc link back to plan v1 artefact id.
+
+Ensure step_result and leads_list include plan_artefact_id and plan_version.
+
+Ensure tower_judgement artefact includes: judged_artefact_id, plan_version, requested_count_user.
+
+Acceptance tests to run (must pass):
+A) “find 4 dentists in Arundel using google places search”
+
+If only 1 in Arundel, system expands radius and accumulates until it finds 4, then ACCEPT, even if search_budget_count=20.
+
+Titles must be honest about radius. No “in Arundel” if within 25km.
+
+B) “Find 5 pubs in Arundel that begin with P … and make the letter P a hard constraint”
+
+System may expand location, but must NOT drop prefix.
+
+It should keep searching wider until max radius or MAX_REPLANS hit, then STOP with honest explanation.
+
+C) Prevent wasted replans:
+
+If a replan would not change any parameters (same radius rung), do not execute it. STOP with reason “no_further_progress_possible”.
+
+Deliverables:
+
+Code changes in Supervisor only (no UI changes required for this).
+
+Update logs to show: requested_count_user vs search_budget_count clearly.
+
+Add minimal unit tests if you already have a test harness; otherwise add a simple runtime guard logging.
