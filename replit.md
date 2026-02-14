@@ -90,3 +90,12 @@ The frontend uses React, TypeScript, Vite, and Wouter, with styling managed by T
   - **PlanV2Constraints**: Extended with `base_location`, `radius_rung`, `radius_km`, `requested_count_user`, `search_budget_count`.
   - **PlanV2Result**: Now includes `blocked_changes`, `no_progress`, `cannot_expand_further` fields for audit and decision-making.
 - **2026-02-14**: Dev-only Explain Run endpoint (`POST /api/dev/explain-run`): Read-only diagnostic endpoint that fetches artefacts and AFR events for a run, builds a compact evidence bundle, and calls an LLM (OpenAI or Anthropic) to produce a factual markdown report. Features anti-hallucination system prompt, goal drift/label honesty audit, per-runId rate limiting (30s), and dev gating (`NODE_ENV !== 'production'` or `DEV_EXPLAIN_RUN=true`). Located in `server/supervisor/explain-run.ts`.
+- **2026-02-14**: LLM-backed Goal-to-Constraints parser (`parseGoalToConstraints` in `server/supervisor/goal-to-constraints.ts`):
+  - Converts natural language user goals into structured constraints (COUNT_MIN, LOCATION_EQUALS, CATEGORY_EQUALS, NAME_STARTS_WITH, NAME_CONTAINS, MUST_USE_TOOL) with hard/soft classification.
+  - Uses OpenAI gpt-4o-mini or Anthropic claude-3-5-haiku with strict JSON schema validation via Zod; falls back to regex if LLM fails.
+  - Returns `business_type`, `location`, `country`, `prefix_filter`, `name_filter`, `requested_count_user`, `search_budget_count`, `constraints[]`, and `success_criteria`.
+  - `name_filter` (NAME_CONTAINS) is applied post-search in both v1 and replan iterations, enabling queries like "businesses with the word swan in the name".
+  - Hard/soft defaults: `business_type` and `requested_count` are hard; `location`, `prefix_filter`, `name_filter` are soft unless user uses keywords like "must", "only", "exactly".
+  - Early stopping now checks both accumulated count >= requested AND all hard constraints satisfied (via `checkHardConstraintsSatisfied()`).
+  - Plan v1 and leads_list artefact payloads now include `structured_constraints`, `success_criteria`, `name_filter`, `requested_count_user`, `requested_count_internal`.
+  - Explain-run evidence bundle updated to expose `name_filter`, `prefix_filter`, and `structured_constraints` for leads_list artefacts.
