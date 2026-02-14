@@ -895,6 +895,27 @@ class SupervisorService {
 
     const MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '5', 10);
     const accumulatedCandidates = new Map<string, AccumulatedCandidate>();
+
+    const hasHardNameConstraints = structuredConstraints.some(c => (c.type === 'NAME_STARTS_WITH' || c.type === 'NAME_CONTAINS') && c.hard);
+    function countMatchingLeads(candidates: Map<string, AccumulatedCandidate>): { matching: AccumulatedCandidate[]; total: number } {
+      const all = Array.from(candidates.values());
+      if (!hasHardNameConstraints) return { matching: all, total: all.length };
+      let matching = all;
+      const nameStartsConstraint = structuredConstraints.find(c => c.type === 'NAME_STARTS_WITH' && c.hard);
+      const nameContainsConstraint = structuredConstraints.find(c => c.type === 'NAME_CONTAINS' && c.hard);
+      if (nameStartsConstraint) {
+        const pfx = (typeof nameStartsConstraint.value === 'string' ? nameStartsConstraint.value : '').toLowerCase();
+        if (pfx) matching = matching.filter(l => l.name.toLowerCase().startsWith(pfx));
+      }
+      if (nameContainsConstraint) {
+        const word = (typeof nameContainsConstraint.value === 'string' ? nameContainsConstraint.value : '').toLowerCase();
+        if (word) matching = matching.filter(l => l.name.toLowerCase().includes(word));
+      }
+      return { matching, total: all.length };
+    }
+
+    const perPlanAdded: Array<{ plan_version: number; added_matching: number; added_total: number }> = [];
+
     console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" requested_count_user=${userRequestedCountFinal} search_budget_count=${searchBudgetCount} goal="${goal}" MAX_REPLANS=${MAX_REPLANS}`);
 
     // 1. Create agent_run row (upsert — handles retries with same run_id/client_request_id)
@@ -1404,7 +1425,35 @@ class SupervisorService {
       mergeCandidate(accumulatedCandidates, key, lead, 1);
     }
     perPlanCounts.set(1, leads.length);
-    console.log(`[TOWER_LOOP_CHAT] v1 accumulated ${leads.length} leads (total unique: ${accumulatedCandidates.size})`);
+    const v1MatchInfo = countMatchingLeads(accumulatedCandidates);
+    perPlanAdded.push({ plan_version: 1, added_matching: v1MatchInfo.matching.length, added_total: leads.length });
+    console.log(`[TOWER_LOOP_CHAT] v1 accumulated ${leads.length} leads (total unique: ${accumulatedCandidates.size}, matching: ${v1MatchInfo.matching.length})`);
+
+    try {
+      await createArtefact({
+        runId: chatRunId,
+        type: 'accumulation_update',
+        title: `Accumulation after Plan v1`,
+        summary: `${v1MatchInfo.matching.length} matching of ${accumulatedCandidates.size} unique leads (requested: ${userRequestedCountFinal ?? 'any'})`,
+        payload: {
+          plan_version: 1,
+          added_total: leads.length,
+          added_matching: v1MatchInfo.matching.length,
+          total_unique: accumulatedCandidates.size,
+          matching_unique: v1MatchInfo.matching.length,
+          requested_user: userRequestedCountFinal,
+          constraints_hard: hard_constraints,
+          constraints_soft: soft_constraints,
+          dedupe_key_strategy: 'place_id_or_name_address',
+          per_plan_added: perPlanAdded,
+        },
+        userId: task.user_id,
+        conversationId,
+      });
+      console.log(`[ACCUMULATION] v1 artefact created: matching=${v1MatchInfo.matching.length} total_unique=${accumulatedCandidates.size}`);
+    } catch (accErr: any) {
+      console.warn(`[ACCUMULATION] Failed to create accumulation_update artefact (v1): ${accErr.message}`);
+    }
 
     while (finalAction === 'change_plan' && !usedStub) {
       if (replansUsed >= MAX_REPLANS) {
@@ -1482,16 +1531,18 @@ class SupervisorService {
         break;
       }
 
+      const preReplanMatchInfo = countMatchingLeads(accumulatedCandidates);
+      const matchingCount = preReplanMatchInfo.matching.length;
       const accLeadsForCheck = Array.from(accumulatedCandidates.values());
       const hardCheck = checkHardConstraintsSatisfied(accLeadsForCheck, structuredConstraints, userRequestedCountFinal);
-      const countMet = userRequestedCountFinal === null || accumulatedCandidates.size >= userRequestedCountFinal;
+      const countMet = userRequestedCountFinal === null || matchingCount >= userRequestedCountFinal;
       if (hardCheck.satisfied && countMet) {
-        console.log(`[REPLAN] Early stop — accumulated ${accumulatedCandidates.size}${userRequestedCountFinal !== null ? ` >= user requested ${userRequestedCountFinal}` : ' (no count target)'}, all hard constraints satisfied. No need to replan.`);
+        console.log(`[REPLAN] Early stop — accumulated_matching=${matchingCount}${userRequestedCountFinal !== null ? ` >= user requested ${userRequestedCountFinal}` : ' (no count target)'}, all hard constraints satisfied. No need to replan.`);
         finalAction = 'accept';
         finalVerdict = 'pass';
         break;
       } else if (countMet && !hardCheck.satisfied) {
-        console.log(`[REPLAN] Count met (${accumulatedCandidates.size}${userRequestedCountFinal !== null ? ` >= ${userRequestedCountFinal}` : ''}) but hard constraints unsatisfied: ${hardCheck.unsatisfied.join(', ')} — continuing replan`);
+        console.log(`[REPLAN] Matching count met (${matchingCount}${userRequestedCountFinal !== null ? ` >= ${userRequestedCountFinal}` : ''}) but hard constraints unsatisfied: ${hardCheck.unsatisfied.join(', ')} — continuing replan`);
         for (const [cid, detail] of Object.entries(hardCheck.details)) {
           console.log(`[REPLAN]   ${cid}: ${detail}`);
         }
@@ -1715,6 +1766,7 @@ class SupervisorService {
       }
 
       const replanLabel = buildConstraintLabel(v2, v1Constraints, planVersion);
+      const midReplanMatchInfo = countMatchingLeads(accumulatedCandidates);
       const replanLeadsListPayload = {
         original_user_goal: originalUserGoal,
         normalized_goal: normalizedGoal,
@@ -1723,6 +1775,8 @@ class SupervisorService {
         plan_artefact_id: replanPlanArtefact.id,
         plan_version: planVersion,
         delivered_count: replanLeads.length,
+        accumulated_total_unique: accumulatedCandidates.size,
+        accumulated_matching: midReplanMatchInfo.matching.length,
         target_count: v2.requested_count_user ?? v2.requested_count,
         success_criteria: { target_count: v2.requested_count_user ?? v2.requested_count, user_specified_count: userSpecifiedCount, ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}) },
         query: v2.business_type,
@@ -1736,6 +1790,8 @@ class SupervisorService {
         replan_context: {
           prior_plan_version: planVersion - 1,
           prior_delivered: priorLeadsCount,
+          accumulated_total_unique: accumulatedCandidates.size,
+          accumulated_matching: midReplanMatchInfo.matching.length,
           adjustments: replanResult.adjustments_applied,
           strategy: replanResult.strategy_summary,
         },
@@ -1774,6 +1830,7 @@ class SupervisorService {
             target_count: v2.requested_count_user ?? v2.requested_count,
             user_specified_count: userSpecifiedCount,
             accumulated_unique_count: accumulatedCandidates.size,
+            accumulated_matching_count: midReplanMatchInfo.matching.length,
             ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}),
             plan_version: planVersion,
             hard_constraints,
@@ -1847,32 +1904,65 @@ class SupervisorService {
 
       let shouldBreakAfterReplan = false;
       {
+        const postMatchInfo = countMatchingLeads(accumulatedCandidates);
+        const postMatchingCount = postMatchInfo.matching.length;
+        const prevMatchingTotal = perPlanAdded.reduce((s, p) => s + p.added_matching, 0);
+        const addedMatchingThisPlan = Math.max(0, postMatchingCount - prevMatchingTotal);
+        perPlanAdded.push({ plan_version: planVersion, added_matching: addedMatchingThisPlan, added_total: newUnique });
         const postAccLeads = Array.from(accumulatedCandidates.values());
         const postHardCheck = checkHardConstraintsSatisfied(postAccLeads, structuredConstraints, userRequestedCountFinal);
-        const postCountMet = userRequestedCountFinal === null || accumulatedCandidates.size >= userRequestedCountFinal;
+        const postCountMet = userRequestedCountFinal === null || postMatchingCount >= userRequestedCountFinal;
         if (postHardCheck.satisfied && postCountMet) {
-          console.log(`[REPLAN] Early stop after accumulation — ${accumulatedCandidates.size} unique${userRequestedCountFinal !== null ? ` >= ${userRequestedCountFinal} user requested` : ' (no count target)'}, all hard constraints satisfied`);
+          console.log(`[REPLAN] Early stop after accumulation — accumulated_matching=${postMatchingCount}${userRequestedCountFinal !== null ? ` >= ${userRequestedCountFinal} user requested` : ' (no count target)'}, all hard constraints satisfied`);
           finalAction = 'accept';
           finalVerdict = 'pass';
           shouldBreakAfterReplan = true;
         } else if (postCountMet && !postHardCheck.satisfied) {
-          console.log(`[REPLAN] Count met after accumulation (${accumulatedCandidates.size}${userRequestedCountFinal !== null ? ` >= ${userRequestedCountFinal}` : ''}) but hard constraints unsatisfied: ${postHardCheck.unsatisfied.join(', ')}`);
+          console.log(`[REPLAN] Matching count met after accumulation (${postMatchingCount}${userRequestedCountFinal !== null ? ` >= ${userRequestedCountFinal}` : ''}) but hard constraints unsatisfied: ${postHardCheck.unsatisfied.join(', ')}`);
         }
 
         if (newUnique === 0 && !shouldBreakAfterReplan) {
-          console.log(`[REPLAN] Zero new unique leads in ${vLabel} (accumulated ${accumulatedCandidates.size}/${userRequestedCountFinal}) — further expansion unlikely to help. Stopping replan loop.`);
+          console.log(`[REPLAN] Zero new unique leads in ${vLabel} (accumulated matching=${postMatchingCount} total=${accumulatedCandidates.size}/${userRequestedCountFinal}) — further expansion unlikely to help. Stopping replan loop.`);
           shouldBreakAfterReplan = true;
+        }
+
+        try {
+          await createArtefact({
+            runId: chatRunId,
+            type: 'accumulation_update',
+            title: `Accumulation after Plan ${vLabel}`,
+            summary: `${postMatchingCount} matching of ${accumulatedCandidates.size} unique leads (requested: ${userRequestedCountFinal ?? 'any'})`,
+            payload: {
+              plan_version: planVersion,
+              added_total: newUnique,
+              added_matching: perPlanAdded[perPlanAdded.length - 1]?.added_matching ?? 0,
+              total_unique: accumulatedCandidates.size,
+              matching_unique: postMatchingCount,
+              requested_user: userRequestedCountFinal,
+              constraints_hard: hard_constraints,
+              constraints_soft: soft_constraints,
+              dedupe_key_strategy: 'place_id_or_name_address',
+              per_plan_added: perPlanAdded,
+              early_stop: shouldBreakAfterReplan,
+            },
+            userId: task.user_id,
+            conversationId,
+          });
+          console.log(`[ACCUMULATION] ${vLabel} artefact created: matching=${postMatchingCount} total_unique=${accumulatedCandidates.size}`);
+        } catch (accErr: any) {
+          console.warn(`[ACCUMULATION] Failed to create accumulation_update artefact (${vLabel}): ${accErr.message}`);
         }
       }
 
+      const replanCompletedMatchInfo = countMatchingLeads(accumulatedCandidates);
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'replan_completed', status: (finalVerdict === 'pass') ? 'success' : (replanTowerResult.shouldStop ? 'failed' : 'success'),
-        taskGenerated: `Replan ${replansUsed}/${MAX_REPLANS} completed: ${vLabel} delivered ${replanLeads.length}, accumulated_unique=${accumulatedCandidates.size}, verdict=${finalVerdict}`,
+        taskGenerated: `Replan ${replansUsed}/${MAX_REPLANS} completed: ${vLabel} delivered ${replanLeads.length}, accumulated_unique=${accumulatedCandidates.size}, accumulated_matching=${replanCompletedMatchInfo.matching.length}, verdict=${finalVerdict}`,
         runType: 'plan',
         metadata: {
           plan_version: planVersion, prior_delivered: priorLeadsCount, replan_delivered: replanLeads.length,
-          accumulated_unique: accumulatedCandidates.size, requested_count_user: userRequestedCountFinal,
+          accumulated_unique: accumulatedCandidates.size, accumulated_matching: replanCompletedMatchInfo.matching.length, requested_count_user: userRequestedCountFinal,
           replan_verdict: replanVerdict, replan_action: replanAction,
           replans_used: replansUsed, max_replans: MAX_REPLANS,
           strategy: replanResult.strategy_summary,
@@ -1880,7 +1970,7 @@ class SupervisorService {
           blocked_changes: replanResult.blocked_changes,
         },
       });
-      console.log(`[REPLAN] [replan_completed] replan=${replansUsed}/${MAX_REPLANS} delivered=${replanLeads.length} accumulated_unique=${accumulatedCandidates.size} verdict=${replanVerdict}`);
+      console.log(`[REPLAN] [replan_completed] replan=${replansUsed}/${MAX_REPLANS} delivered=${replanLeads.length} accumulated_unique=${accumulatedCandidates.size} accumulated_matching=${replanCompletedMatchInfo.matching.length} verdict=${replanVerdict}`);
 
       if (shouldBreakAfterReplan) {
         break;
@@ -1888,12 +1978,13 @@ class SupervisorService {
     }
 
     const totalUniqueLeads = accumulatedCandidates.size;
+    const finalMatchInfo = countMatchingLeads(accumulatedCandidates);
+    const totalMatchingLeads = finalMatchInfo.matching.length;
 
-    if (replansUsed > 0 && totalUniqueLeads > finalLeads.length) {
-      const unionLeads: typeof leads = [];
-      const accEntries = Array.from(accumulatedCandidates.values());
-      for (const candidate of accEntries) {
-        unionLeads.push({
+    if (hasHardNameConstraints || (replansUsed > 0 && totalUniqueLeads > finalLeads.length)) {
+      const matchingLeads: typeof leads = [];
+      for (const candidate of finalMatchInfo.matching) {
+        matchingLeads.push({
           name: candidate.name,
           address: candidate.address || '',
           phone: candidate.phone || null,
@@ -1902,9 +1993,9 @@ class SupervisorService {
           source: candidate.source || 'google_places',
         });
       }
-      const trimmedUnion = userRequestedCountFinal !== null ? unionLeads.slice(0, userRequestedCountFinal) : unionLeads;
+      const trimmedUnion = userRequestedCountFinal !== null ? matchingLeads.slice(0, userRequestedCountFinal) : matchingLeads;
       finalLeads = trimmedUnion;
-      console.log(`[TOWER_LOOP_CHAT] Built union leads list: ${trimmedUnion.length} (from ${totalUniqueLeads} unique accumulated across ${replansUsed + 1} plans)`);
+      console.log(`[TOWER_LOOP_CHAT] Built union leads list: ${trimmedUnion.length} matching (from ${totalUniqueLeads} unique, ${totalMatchingLeads} matching accumulated across ${replansUsed + 1} plans)`);
     }
 
     // Regression guard: if early-stop set finalVerdict='pass', override stale shouldStop from prior Tower fail
@@ -1921,22 +2012,22 @@ class SupervisorService {
         actionTaken: 'run_halted', status: 'failed',
         taskGenerated: `Tower loop chat halted: verdict=${finalVerdict} action=${finalAction} plan_version=${planVersion}`,
         runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed },
       });
-      console.log(`[TOWER_LOOP_CHAT] [run_halted] verdict=${finalVerdict} plan_version=${planVersion} accumulated_unique=${totalUniqueLeads}`);
+      console.log(`[TOWER_LOOP_CHAT] [run_halted] verdict=${finalVerdict} plan_version=${planVersion} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads}`);
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, halted: true, plan_version: planVersion, replans_used: replansUsed } });
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: true, plan_version: planVersion, replans_used: replansUsed } });
     } else {
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'run_completed', status: 'success',
-        taskGenerated: `Tower loop chat completed: ${totalUniqueLeads} unique leads (accumulated across ${planVersion} plan versions), verdict=${finalVerdict}`,
+        taskGenerated: `Tower loop chat completed: ${totalMatchingLeads} matching of ${totalUniqueLeads} unique leads (accumulated across ${planVersion} plan versions), verdict=${finalVerdict}`,
         runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal', early_stop_override: true } : {}) },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal', early_stop_override: true } : {}) },
       });
-      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} plan_version=${planVersion}${earlyStopOverride ? ' (early_stop_override)' : ''}`);
+      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads} plan_version=${planVersion}${earlyStopOverride ? ' (early_stop_override)' : ''}`);
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, halted: false, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal' } : {}) } });
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: false, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal' } : {}) } });
     }
 
     await this.postArtefactToUI({
@@ -1951,6 +2042,7 @@ class SupervisorService {
         delivered: finalLeads.length,
         requested: userRequestedCountFinal,
         accumulated_unique: totalUniqueLeads,
+        accumulated_matching: totalMatchingLeads,
         artefact_id: finalLeadsListArtefact.id,
         used_stub: usedStub,
         stubbed: finalTowerResult.stubbed,
@@ -1965,18 +2057,26 @@ class SupervisorService {
     const finalLocDisplay = finalConstraints.location;
     const finalPrefixDisplay = finalConstraints.prefix_filter ? ` starting with ${finalConstraints.prefix_filter}` : '';
 
+    const hasNameConstraints = !!(prefixFilter || nameFilter);
+    const matchingQualifier = hasNameConstraints && totalMatchingLeads !== totalUniqueLeads
+      ? ` (${totalMatchingLeads} matching your name criteria out of ${totalUniqueLeads} total found)`
+      : '';
+
     await this.postArtefactToUI({
       runId: chatRunId,
       clientRequestId,
       type: 'leads',
       payload: {
         title: artefactTitle('', finalLeads.length, finalConstraints, planVersion).trim(),
-        summary: `Found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalPrefixDisplay}${finalAnnotations}${usedStub ? ' (stub data)' : ''} — Tower verdict: ${finalVerdict}`,
+        summary: `Found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalPrefixDisplay}${matchingQualifier}${finalAnnotations}${usedStub ? ' (stub data)' : ''} — Tower verdict: ${finalVerdict}`,
         leads: finalLeads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website, placeId: l.placeId, source: l.source })),
         query: { businessType: finalConstraints.business_type, location: finalLocDisplay, country },
         tool: 'SEARCH_PLACES',
         tower_verdict: finalVerdict,
         plan_version: planVersion,
+        accumulated_unique: totalUniqueLeads,
+        accumulated_matching: totalMatchingLeads,
+        per_plan_added: perPlanAdded,
         relaxed_constraints: finalLabel.relaxed_constraints,
         constraint_diffs: finalLabel.constraint_diffs,
       },
@@ -1984,9 +2084,13 @@ class SupervisorService {
       conversationId,
     }).catch(() => {});
 
+    const planAdjustmentNote = planVersion > 1 ? ` after ${planVersion} search plan iterations` : '';
+    const matchingNote = hasNameConstraints && totalMatchingLeads !== totalUniqueLeads
+      ? ` (${totalMatchingLeads} matching your name criteria out of ${totalUniqueLeads} total found)`
+      : '';
     const chatResponse = isHalted
-      ? `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planVersion > 1 ? ` after adjusting the search plan` : ''}, but the results didn't fully meet quality criteria (Tower verdict: ${finalVerdict}). You can still view what was found in your results. Would you like me to try a different search?`
-      : `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planVersion > 1 ? ` (adjusted search plan)` : ''}, validated by our quality system. View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
+      ? `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}, but the results didn't fully meet quality criteria (Tower verdict: ${finalVerdict}). You can still view what was found in your results. Would you like me to try a different search?`
+      : `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}, validated by our quality system. View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
 
     console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub}`);
 

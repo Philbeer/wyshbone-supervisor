@@ -39,11 +39,18 @@ The frontend utilizes React, TypeScript, Vite, and Wouter for development, with 
 - **Automated Replan Loop**: If Tower returns `change_plan` on a `leads_list` artefact, the supervisor automatically replans by applying policies (e.g., expanding location, increasing search count) and re-executes the plan, up to a maximum of two plan versions.
 - **Intelligent Replanning**:
     - Separates `requested_count_user` (user request) from `search_budget_count` (tools fetch).
-    - Accumulates and deduplicates leads across replan versions.
+    - Accumulates and deduplicates leads across replan versions using `place_id` or `name+address` hash.
     - Implements a progressive geographic expansion strategy (radius ladder).
     - Enforces hard constraints (`business_type`, `requested_count`) while allowing relaxation of soft constraints (`location`, `prefix_filter`).
     - Includes early stopping when the goal is met or no further progress can be made.
     - Supports a configurable maximum number of replans.
+- **Partial Accumulation Across Replans** (Feb 2026):
+    - Distinguishes between `accumulated_total_unique` (all deduped leads found) and `accumulated_matching` (leads satisfying hard NAME constraints like `NAME_STARTS_WITH`, `NAME_CONTAINS`).
+    - Early stop decisions use `accumulated_matching` count against `requested_count_user`, not total unique count.
+    - Emits `accumulation_update` artefacts after each plan execution showing matching vs total progress.
+    - Tower `leads_list` payloads include `accumulated_total_unique` and `accumulated_matching` for informed judgements.
+    - Final leads artefact and chat response provide honest summaries: "X matching of Y total found".
+    - `perPlanAdded` array tracks per-plan contribution (matching delta and new unique count).
 - **LLM-backed Goal-to-Constraints Parser**: Converts natural language user goals into structured constraints with hard/soft classification using LLMs (OpenAI, Anthropic) and strict JSON schema validation. Handles various constraint types like `COUNT_MIN`, `LOCATION_EQUALS`, `CATEGORY_EQUALS`, `NAME_STARTS_WITH`, `NAME_CONTAINS`, and `MUST_USE_TOOL`.
 
 ### System Design Choices
