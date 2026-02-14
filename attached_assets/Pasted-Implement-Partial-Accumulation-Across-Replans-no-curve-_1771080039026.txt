@@ -1,0 +1,137 @@
+Implement Partial Accumulation Across Replans (no curve fitting)
+
+Goal
+When a run replans (v1 -> v2 -> v3...), we must accumulate and dedupe leads across plans, then judge and present results honestly:
+
+If user asked for 4 “swan” pubs and we found 2 across all attempts, final output should be:
+
+“Found 2 of 4 matching ‘swan’ near Arundel after expanding radius to 10km. Couldn’t find 2 more.”
+
+If later replans add more, we should stop early once accumulated matches >= requested_count_user.
+
+Key rules
+
+Accumulate only VALID leads
+
+If there is a hard constraint (NAME_CONTAINS=swan, NAME_STARTS_WITH=P hard, etc), only leads that satisfy it count toward the accumulated total for the success check.
+
+Still keep non-matching leads in raw outputs if useful for debugging, but they must not be counted as “delivered”.
+
+Dedupe across attempts
+
+Dedupe by place_id if present.
+
+Fallback dedupe key: normalized(name) + normalized(address) + phone (if present).
+
+Always preserve honest labels
+
+Leads list titles and summaries must reflect what constraints were applied/relaxed.
+
+Example: if prefix was dropped, title must not claim “begin with P”.
+Use “near Arundel (prefix relaxed)” or “constraint relaxed: prefix”.
+
+Implementation approach (minimal, robust)
+A) Add a run-level accumulator to RunState:
+
+accumulated_leads_all: Lead[] (all unique leads seen)
+
+accumulated_leads_matching: Lead[] (unique leads that satisfy current HARD constraints)
+
+per_plan_added: { plan_version: number, added_matching: number, added_total: number }
+
+B) On each plan completion (after post-processing but before Tower hard gate):
+
+Compute:
+
+new_total_unique
+
+new_matching_unique (matching current constraint set for that plan)
+
+Update accumulator and write an artefact:
+type: "accumulation_update"
+title: "Accumulation after Plan vX"
+payload: {
+plan_version,
+added_total,
+added_matching,
+total_unique,
+matching_unique,
+requested_user,
+constraints_hard,
+constraints_soft,
+dedupe_key_strategy
+}
+
+C) Early stop should use accumulated_matching vs requested_count_user
+
+If accumulated_matching >= requested_count_user:
+
+Stop replanning
+
+Final verdict is PASS
+
+Emit run_completed (not run_halted)
+
+Final leads artefact should contain the accumulated_matching set (trim to requested_count_user unless user asked for “at least”)
+
+D) Tower hard gate judgement should use delivered = accumulated_matching (not just the most recent plan’s leads)
+
+When calling Tower on leads_list:
+
+Provide the accumulated summary so Tower judges the true outcome.
+
+Keep plan-local leads_list artefacts for audit, but the “final” judgement should reflect accumulated progress.
+
+E) Final response and UI artefacts
+
+Always create a final artefact:
+type: "leads"
+title: "Final results: X of Y"
+summary: honest sentence with max radius reached + constraints
+payload: {
+requested_user,
+delivered_matching,
+delivered_total_unique_seen,
+max_radius_used,
+constraints_hard,
+constraints_soft,
+relaxed_constraints_applied,
+plans_attempted,
+stop_reason (success | max_replans_exceeded | tower_stop)
+leads: accumulated_matching (or best-effort if fail)
+}
+
+Acceptance tests
+
+“Find 4 pubs in Arundel with the word swan in the name”
+
+If v1=1, v2 adds 1 more, v3 adds 0, final should deliver 2/4 (FAIL) but include the 2 leads found.
+
+If any replan finds 4 total matching, it should PASS and stop immediately.
+
+Prefix hard constraint
+
+“Find 5 pubs in Arundel starting with P. Make P hard. Expand radius if needed.”
+
+It must keep accumulating only leads that start with P.
+
+It must not pass just because it found 20 pubs without P.
+
+Non-goals (do not do now)
+
+No new tools
+
+No new UI components
+
+No new model prompts
+
+No learning
+Just accumulation + honest final output + correct Tower delivered count.
+
+Deliverables
+
+Code changes + brief note of where logic lives
+
+One new artefact type: accumulation_update
+
+Updated Tower call payload for leads_list judgement to include accumulated delivered counts
