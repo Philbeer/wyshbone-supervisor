@@ -15,6 +15,7 @@ import { judgeArtefact } from './supervisor/tower-artefact-judge';
 import { extractChangePlanDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, type PlanV2Constraints } from './supervisor/replan-policy';
 import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, type ParsedGoal, type StructuredConstraint } from './supervisor/goal-to-constraints';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
+import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation } from './supervisor/delivery-summary';
 
 interface UserContext {
   userId: string;
@@ -1345,6 +1346,21 @@ class SupervisorService {
 
       await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: 'error', error: errMsg, leads_count: leads.length } });
 
+      await emitDeliverySummary({
+        runId: chatRunId,
+        userId: task.user_id,
+        conversationId,
+        originalUserGoal,
+        requestedCount: userRequestedCountFinal ?? requestedCount,
+        hardConstraints: hard_constraints,
+        softConstraints: soft_constraints,
+        planVersions: [{ version: 1, changes_made: ['Initial plan'] }],
+        softRelaxations: [],
+        leads: leads.map(l => ({ entity_id: l.placeId, name: l.name, address: l.address })),
+        finalVerdict: 'error',
+        stopReason: `Tower error: ${errMsg}`,
+      });
+
       const errorResponse = `I found ${leads.length} ${businessType!} prospects in ${city}, but Tower validation was unavailable. You can still view the results in your [dashboard](/leads).`;
       console.log(`[TOWER_LOOP_CHAT] [complete] leads=${leads.length} verdict=error (Tower unavailable)`);
       return { response: errorResponse, leadIds: createdLeadIds };
@@ -1419,6 +1435,8 @@ class SupervisorService {
     let priorPlanArtefactId = planArtefact.id;
     let priorLeadsCount = leads.length;
     const perPlanCounts = new Map<number, number>();
+    const dsPlanVersions: PlanVersionEntry[] = [{ version: 1, changes_made: ['Initial plan'] }];
+    const dsSoftRelaxations: SoftRelaxation[] = [];
 
     for (const lead of leads) {
       const key = makeDedupeKey(lead);
@@ -1552,9 +1570,21 @@ class SupervisorService {
       const vLabel = `v${planVersion}`;
 
       console.log(`[REPLAN] ${replanResult.strategy_summary}`);
+      const dsChanges: string[] = [];
       for (const adj of replanResult.adjustments_applied) {
         console.log(`[REPLAN]   ${adj.action} ${adj.field}: ${JSON.stringify(adj.from)} → ${JSON.stringify(adj.to)} (${adj.reason})`);
+        dsChanges.push(`${adj.action} ${adj.field}: ${JSON.stringify(adj.from)} → ${JSON.stringify(adj.to)}`);
+        if (soft_constraints.includes(adj.field)) {
+          dsSoftRelaxations.push({
+            constraint: adj.field,
+            from: String(adj.from ?? ''),
+            to: String(adj.to ?? ''),
+            reason: adj.reason || replanResult.strategy_summary,
+            plan_version: planVersion,
+          });
+        }
       }
+      dsPlanVersions.push({ version: planVersion, changes_made: dsChanges.length > 0 ? dsChanges : [replanResult.strategy_summary] });
 
       const replanPlanSteps = [
         {
@@ -2083,6 +2113,26 @@ class SupervisorService {
       userId: task.user_id,
       conversationId,
     }).catch(() => {});
+
+    const dsLeads = accumulatedCandidates.size > 0
+      ? Array.from(accumulatedCandidates.values())
+          .filter(c => finalLeads.some(fl => fl.placeId === c.place_id || fl.name === c.name))
+          .map(c => ({ entity_id: c.place_id || c.dedupe_key, name: c.name, address: c.address || '', found_in_plan_version: c.found_in_plan_version }))
+      : finalLeads.map(l => ({ entity_id: l.placeId, name: l.name, address: l.address, found_in_plan_version: 1 }));
+    await emitDeliverySummary({
+      runId: chatRunId,
+      userId: task.user_id,
+      conversationId,
+      originalUserGoal,
+      requestedCount: userRequestedCountFinal ?? requestedCount,
+      hardConstraints: hard_constraints,
+      softConstraints: soft_constraints,
+      planVersions: dsPlanVersions,
+      softRelaxations: dsSoftRelaxations,
+      leads: dsLeads,
+      finalVerdict: isHalted ? finalVerdict : 'pass',
+      stopReason: isHalted ? `Tower verdict: ${finalVerdict}, action: ${finalAction}` : null,
+    });
 
     const planAdjustmentNote = planVersion > 1 ? ` after ${planVersion} search plan iterations` : '';
     const matchingNote = hasNameConstraints && totalMatchingLeads !== totalUniqueLeads

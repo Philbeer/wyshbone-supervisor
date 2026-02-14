@@ -13,6 +13,7 @@
 
 import { logAFREvent } from './afr-logger';
 import { createArtefact } from './artefacts';
+import { emitDeliverySummary } from './delivery-summary';
 import { storage } from '../storage';
 import type { ActionResult } from './action-executor';
 
@@ -350,6 +351,40 @@ async function postRunSummary(
   }
 }
 
+async function emitAgentLoopDeliverySummary(
+  state: RunState,
+  verdict: TowerVerdictV1,
+  stopped: boolean,
+  stopReason?: string,
+): Promise<void> {
+  const requested = typeof verdict.requested === 'number' ? verdict.requested : (state.requestedCountUser ?? 0);
+  const candidates = Array.from(state.accumulatedCandidates.values());
+  const leads = candidates.map(c => ({
+    entity_id: c.place_id || c.dedupe_key,
+    name: c.name,
+    address: c.address || '',
+    found_in_plan_version: c.found_in_plan_version,
+  }));
+
+  await emitDeliverySummary({
+    runId: state.runId,
+    userId: state.userId,
+    conversationId: state.conversationId,
+    originalUserGoal: state.originalUserGoal,
+    requestedCount: requested,
+    hardConstraints: state.hardConstraints,
+    softConstraints: state.softConstraints,
+    planVersions: Array.from({ length: state.planVersion }, (_, i) => ({
+      version: i + 1,
+      changes_made: i === 0 ? ['Initial plan'] : [`Plan v${i + 1}`],
+    })),
+    softRelaxations: [],
+    leads,
+    finalVerdict: stopped ? (verdict.verdict || 'STOP') : 'pass',
+    stopReason: stopped ? (stopReason || `Tower verdict: ${verdict.verdict}`) : null,
+  });
+}
+
 async function postTowerJudgementArtefact(runId: string, state: RunState, verdict: TowerVerdictV1, artefactId?: string): Promise<void> {
   try {
     await createArtefact({
@@ -618,6 +653,7 @@ export async function handleTowerVerdict(
       state.status = 'accepted';
       console.log(`[AGENT_REACT] action=accept runId=${runId} planVersion=${state.planVersion}`);
       await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+      await emitAgentLoopDeliverySummary(state, verdict, false);
       await emitRunCompleted(state, runId, verdict);
       emitFinalLog(state, verdict, false);
       return { action: 'accept', verdict, planVersion: state.planVersion, runState: state };
@@ -628,6 +664,7 @@ export async function handleTowerVerdict(
         console.log(`[AGENT_REACT] action=stop runId=${runId} planVersion=${state.planVersion} reason=max_retries_exceeded`);
         state.status = 'stopped';
         await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+        await emitAgentLoopDeliverySummary(state, verdict, true, `max retries (${MAX_RETRIES}) exceeded`);
         await emitRunStopped(state, runId, `max retries (${MAX_RETRIES}) exceeded`, { reason: 'max_retries_exceeded', retryCount: state.retryCount });
         emitFinalLog(state, verdict, true);
         return { action: 'stop', verdict, planVersion: state.planVersion, runState: state };
@@ -642,6 +679,7 @@ export async function handleTowerVerdict(
         console.error(`[AGENT_LOOP] Retry failed: ${retryResult.error}`);
         state.status = 'stopped';
         await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+        await emitAgentLoopDeliverySummary(state, verdict, true, `retry execution failed: ${retryResult.error}`);
         await emitRunStopped(state, runId, `retry execution failed: ${retryResult.error}`, { reason: 'retry_failed' });
         emitFinalLog(state, verdict, true);
         return { action: 'stop', verdict, planVersion: state.planVersion, runState: state };
@@ -663,6 +701,7 @@ export async function handleTowerVerdict(
         state.status = 'accepted';
         console.log(`[AGENT_REACT] action=accept runId=${runId} planVersion=${state.planVersion} (after retry)`);
         await postRunSummary(runId, state.userId, retryVerdict, state.planVersion, state.conversationId);
+        await emitAgentLoopDeliverySummary(state, retryVerdict, false);
         await emitRunCompleted(state, runId, retryVerdict);
         emitFinalLog(state, retryVerdict, false);
         return { action: 'accept', verdict: retryVerdict, planVersion: state.planVersion, runState: state };
@@ -675,6 +714,7 @@ export async function handleTowerVerdict(
           : 'still RETRY after retry — stopping';
         console.log(`[AGENT_REACT] action=stop runId=${runId} reason="${reason}"`);
         await postRunSummary(runId, state.userId, retryVerdict, state.planVersion, state.conversationId);
+        await emitAgentLoopDeliverySummary(state, retryVerdict, true, reason);
         await emitRunStopped(state, runId, reason, { reason: 'retry_insufficient', delivered: retryDelivered, requested: retryRequested });
         emitFinalLog(state, retryVerdict, true);
         return { action: 'stop', verdict: retryVerdict, planVersion: state.planVersion, runState: state };
@@ -682,6 +722,7 @@ export async function handleTowerVerdict(
 
       state.status = 'accepted';
       await postRunSummary(runId, state.userId, retryVerdict, state.planVersion, state.conversationId);
+      await emitAgentLoopDeliverySummary(state, retryVerdict, false);
       await emitRunCompleted(state, runId, retryVerdict);
       emitFinalLog(state, retryVerdict, false);
       return { action: 'accept', verdict: retryVerdict, planVersion: state.planVersion, runState: state };
@@ -692,6 +733,7 @@ export async function handleTowerVerdict(
         console.log(`[AGENT_REACT] action=stop runId=${runId} planVersion=${state.planVersion} reason=max_plan_version_reached`);
         state.status = 'stopped';
         await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+        await emitAgentLoopDeliverySummary(state, verdict, true, `max plan version (${MAX_PLAN_VERSION}) reached`);
         await emitRunStopped(state, runId, `max plan version (${MAX_PLAN_VERSION}) reached`, { reason: 'max_plan_version_reached', planVersion: state.planVersion });
         emitFinalLog(state, verdict, true);
         return { action: 'stop', verdict, planVersion: state.planVersion, runState: state };
@@ -729,6 +771,7 @@ export async function handleTowerVerdict(
         console.error(`[AGENT_LOOP] Replan execution failed: ${replanResult.error}`);
         state.status = 'stopped';
         await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+        await emitAgentLoopDeliverySummary(state, verdict, true, `replan execution failed: ${replanResult.error}`);
         await emitRunStopped(state, runId, `replan execution failed: ${replanResult.error}`, { reason: 'replan_failed' });
         emitFinalLog(state, verdict, true);
         return { action: 'stop', verdict, planVersion: state.planVersion, runState: state };
@@ -747,6 +790,7 @@ export async function handleTowerVerdict(
         state.status = 'accepted';
         console.log(`[AGENT_REACT] action=accept runId=${runId} planVersion=${state.planVersion} (after replan)`);
         await postRunSummary(runId, state.userId, replanVerdict, state.planVersion, state.conversationId);
+        await emitAgentLoopDeliverySummary(state, replanVerdict, false);
         await emitRunCompleted(state, runId, replanVerdict);
         emitFinalLog(state, replanVerdict, false);
         return { action: 'accept', verdict: replanVerdict, adjustedArgs: adjustment.args, planVersion: state.planVersion, runState: state };
@@ -758,6 +802,7 @@ export async function handleTowerVerdict(
         : `${replanVerdict.verdict} after replan — stopping`;
       console.log(`[AGENT_REACT] action=stop runId=${runId} reason="${stopReason}"`);
       await postRunSummary(runId, state.userId, replanVerdict, state.planVersion, state.conversationId);
+      await emitAgentLoopDeliverySummary(state, replanVerdict, true, stopReason);
       await emitRunStopped(state, runId, stopReason, {
         reason: 'replan_insufficient',
         delivered: replanVerdict.delivered,
@@ -772,6 +817,7 @@ export async function handleTowerVerdict(
       state.status = 'stopped';
       console.log(`[AGENT_REACT] action=stop runId=${runId} planVersion=${state.planVersion}`);
       await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+      await emitAgentLoopDeliverySummary(state, verdict, true, `Tower verdict: ${verdict.rationale}`);
       await emitRunStopped(state, runId, `Tower verdict: ${verdict.rationale}`, {
         verdict: verdict.verdict,
         rationale: verdict.rationale,
@@ -785,6 +831,7 @@ export async function handleTowerVerdict(
       console.error(`[AGENT_LOOP] Unknown verdict: ${(verdict as any).verdict} — treating as ACCEPT`);
       state.status = 'accepted';
       await postRunSummary(runId, state.userId, verdict, state.planVersion, state.conversationId);
+      await emitAgentLoopDeliverySummary(state, verdict, false);
       emitFinalLog(state, verdict, false);
       return { action: 'accept', verdict, planVersion: state.planVersion, runState: state };
     }

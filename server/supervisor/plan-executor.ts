@@ -32,10 +32,22 @@ import {
   failPlan as failProgress,
 } from '../plan-progress';
 import { createArtefact } from './artefacts';
+import { emitDeliverySummary } from './delivery-summary';
 import { judgeArtefact } from './tower-artefact-judge';
 
 const MAX_RETRIES_PER_STEP = 2;
 const MAX_PLAN_VERSIONS = 2;
+
+function deriveConstraintsFromFilters(filters: Record<string, string>): { hard: string[]; soft: string[] } {
+  const hard: string[] = [];
+  const soft: string[] = [];
+  if (filters.query) hard.push(`query=${filters.query}`);
+  if (filters.location) soft.push(`location=${filters.location}`);
+  if (filters.radius) soft.push(`radius=${filters.radius}`);
+  if (filters.type) soft.push(`type=${filters.type}`);
+  if (filters.keyword) soft.push(`keyword=${filters.keyword}`);
+  return { hard, soft };
+}
 
 export function isStepArtefactsEnabled(): boolean {
   const val = process.env.ENABLE_STEP_ARTEFACTS;
@@ -867,6 +879,16 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
 
               failProgress(planId, `Halted: ${haltReason}`);
               await safeUpdatePlanStatus(planId, 'failed');
+              const peRetryConstraints = deriveConstraintsFromFilters(leadsFilters);
+              await emitDeliverySummary({
+                runId, userId, conversationId, originalUserGoal: goal,
+                requestedCount: Number(successCriteria.target_leads ?? 0),
+                hardConstraints: peRetryConstraints.hard, softConstraints: peRetryConstraints.soft,
+                planVersions: Array.from({ length: currentPlanVersion }, (_, vi) => ({ version: vi + 1, changes_made: vi === 0 ? ['Initial plan'] : [`Plan v${vi + 1}`] })),
+                softRelaxations: [],
+                leads: Array.from(leadsMap.values()).map(l => ({ entity_id: String(l.place_id || ''), name: String(l.name || ''), address: String(l.address || '') })),
+                finalVerdict: 'STOP', stopReason: haltReason,
+              }).catch((dsErr: any) => console.error(`[PLAN_EXECUTOR] delivery_summary failed: ${dsErr.message}`));
               return { success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason };
             }
 
@@ -907,6 +929,16 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
 
               failProgress(planId, `Halted: ${haltReason}`);
               await safeUpdatePlanStatus(planId, 'failed');
+              const peCpConstraints = deriveConstraintsFromFilters(leadsFilters);
+              await emitDeliverySummary({
+                runId, userId, conversationId, originalUserGoal: goal,
+                requestedCount: Number(successCriteria.target_leads ?? 0),
+                hardConstraints: peCpConstraints.hard, softConstraints: peCpConstraints.soft,
+                planVersions: Array.from({ length: currentPlanVersion }, (_, vi) => ({ version: vi + 1, changes_made: vi === 0 ? ['Initial plan'] : [`Plan v${vi + 1}`] })),
+                softRelaxations: [],
+                leads: Array.from(leadsMap.values()).map(l => ({ entity_id: String(l.place_id || ''), name: String(l.name || ''), address: String(l.address || '') })),
+                finalVerdict: 'STOP', stopReason: haltReason,
+              }).catch((dsErr: any) => console.error(`[PLAN_EXECUTOR] delivery_summary failed: ${dsErr.message}`));
               return { success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason };
             }
 
@@ -976,6 +1008,16 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
 
             failProgress(planId, `Halted: ${haltReason}`);
             await safeUpdatePlanStatus(planId, 'failed');
+            const peStopConstraints = deriveConstraintsFromFilters(leadsFilters);
+            await emitDeliverySummary({
+              runId, userId, conversationId, originalUserGoal: goal,
+              requestedCount: Number(successCriteria.target_leads ?? 0),
+              hardConstraints: peStopConstraints.hard, softConstraints: peStopConstraints.soft,
+              planVersions: Array.from({ length: currentPlanVersion }, (_, vi) => ({ version: vi + 1, changes_made: vi === 0 ? ['Initial plan'] : [`Plan v${vi + 1}`] })),
+              softRelaxations: [],
+              leads: Array.from(leadsMap.values()).map(l => ({ entity_id: String(l.place_id || ''), name: String(l.name || ''), address: String(l.address || '') })),
+              finalVerdict: 'STOP', stopReason: haltReason,
+            }).catch((dsErr: any) => console.error(`[PLAN_EXECUTOR] delivery_summary failed: ${dsErr.message}`));
             return { success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason };
           }
         }
@@ -1062,6 +1104,30 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
 
     console.log(`[PLAN_EXECUTOR] ${summary}`);
 
+    const peLeads = Array.from(leadsMap.values()).map(l => ({
+      entity_id: String(l.place_id || ''),
+      name: String(l.name || ''),
+      address: String(l.address || ''),
+    }));
+    const peSuccessConstraints = deriveConstraintsFromFilters(leadsFilters);
+    await emitDeliverySummary({
+      runId,
+      userId,
+      conversationId,
+      originalUserGoal: goal,
+      requestedCount: Number(successCriteria.target_leads ?? 0),
+      hardConstraints: peSuccessConstraints.hard,
+      softConstraints: peSuccessConstraints.soft,
+      planVersions: Array.from({ length: currentPlanVersion }, (_, i) => ({
+        version: i + 1,
+        changes_made: i === 0 ? ['Initial plan'] : [`Plan v${i + 1}`],
+      })),
+      softRelaxations: [],
+      leads: peLeads,
+      finalVerdict: 'pass',
+      stopReason: null,
+    });
+
     return { success: true, stepsCompleted, totalSteps: steps.length };
 
   } catch (error: any) {
@@ -1071,6 +1137,30 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
     await logPlanFailed(userId, runId, errorMessage, conversationId, clientRequestId);
     failProgress(planId, errorMessage);
     await safeUpdatePlanStatus(planId, 'failed');
+
+    const peLeadsFail = Array.from(leadsMap.values()).map(l => ({
+      entity_id: String(l.place_id || ''),
+      name: String(l.name || ''),
+      address: String(l.address || ''),
+    }));
+    const peFailConstraints = deriveConstraintsFromFilters(leadsFilters);
+    await emitDeliverySummary({
+      runId,
+      userId,
+      conversationId,
+      originalUserGoal: goal,
+      requestedCount: Number(successCriteria.target_leads ?? 0),
+      hardConstraints: peFailConstraints.hard,
+      softConstraints: peFailConstraints.soft,
+      planVersions: Array.from({ length: currentPlanVersion }, (_, i) => ({
+        version: i + 1,
+        changes_made: i === 0 ? ['Initial plan'] : [`Plan v${i + 1}`],
+      })),
+      softRelaxations: [],
+      leads: peLeadsFail,
+      finalVerdict: 'STOP',
+      stopReason: errorMessage,
+    }).catch((dsErr: any) => console.error(`[PLAN_EXECUTOR] delivery_summary emission failed: ${dsErr.message}`));
 
     return { success: false, stepsCompleted, totalSteps: steps.length, error: errorMessage };
   }
