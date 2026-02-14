@@ -73,8 +73,9 @@ export function getAllRunStates(): RunState[] {
 
 export const RADIUS_LADDER_KM = [0, 5, 10, 25, 50, 100];
 
-export function makeDedupeKey(lead: { placeId?: string; name?: string; address?: string }): string {
-  if (lead.placeId) return `pid:${lead.placeId}`;
+export function makeDedupeKey(lead: { placeId?: string; place_id?: string; name?: string; address?: string }): string {
+  const pid = lead.placeId || lead.place_id;
+  if (pid) return `pid:${pid}`;
   const norm = `${(lead.name || '').toLowerCase().trim()}|${(lead.address || '').toLowerCase().trim()}`;
   return `hash:${norm}`;
 }
@@ -82,13 +83,13 @@ export function makeDedupeKey(lead: { placeId?: string; name?: string; address?:
 export function mergeCandidate(
   acc: Map<string, AccumulatedCandidate>,
   key: string,
-  lead: { name: string; address?: string; phone?: string | null; website?: string | null; placeId?: string; source?: string },
+  lead: { name: string; address?: string; phone?: string | null; website?: string | null; placeId?: string; place_id?: string; source?: string },
   planVersion: number,
   radiusKm?: number,
 ): boolean {
   if (acc.has(key)) return false;
   acc.set(key, {
-    place_id: lead.placeId,
+    place_id: lead.placeId || lead.place_id,
     name: lead.name,
     address: lead.address,
     phone: lead.phone,

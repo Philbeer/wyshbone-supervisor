@@ -1867,6 +1867,25 @@ class SupervisorService {
     }
 
     const totalUniqueLeads = accumulatedCandidates.size;
+
+    if (replansUsed > 0 && totalUniqueLeads > finalLeads.length) {
+      const unionLeads: typeof leads = [];
+      const accEntries = Array.from(accumulatedCandidates.values());
+      for (const candidate of accEntries) {
+        unionLeads.push({
+          name: candidate.name,
+          address: candidate.address || '',
+          phone: candidate.phone || null,
+          website: candidate.website || null,
+          placeId: candidate.place_id || '',
+          source: candidate.source || 'google_places',
+        });
+      }
+      const trimmedUnion = unionLeads.slice(0, userRequestedCountFinal);
+      finalLeads = trimmedUnion;
+      console.log(`[TOWER_LOOP_CHAT] Built union leads list: ${trimmedUnion.length} (from ${totalUniqueLeads} unique accumulated across ${replansUsed + 1} plans)`);
+    }
+
     const isHalted = finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'fail';
     if (isHalted) {
       await logAFREvent({
@@ -1902,7 +1921,8 @@ class SupervisorService {
         reasons: finalTowerResult.judgement.reasons,
         metrics: finalTowerResult.judgement.metrics,
         delivered: finalLeads.length,
-        requested: requestedCount,
+        requested: userRequestedCountFinal,
+        accumulated_unique: totalUniqueLeads,
         artefact_id: finalLeadsListArtefact.id,
         used_stub: usedStub,
         stubbed: finalTowerResult.stubbed,
