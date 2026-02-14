@@ -32,6 +32,7 @@ import {
 } from "./features/saveLead";
 import { planExecutionRouter } from "./supervisor/plan-execution";
 import { jobsRouter } from "./supervisor/jobs-router";
+import { handleExplainRun } from "./supervisor/explain-run";
 
 // SUPERVISOR_EXECUTION_ENABLED: REMOVED — all execution goes through Supervisor unconditionally.
 
@@ -1146,6 +1147,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   } else {
     console.log('[DEBUG] Debug endpoints disabled (ENABLE_DEBUG_ENDPOINTS !== "true" or NODE_ENV === "production")');
   }
+
+  app.post("/api/dev/explain-run", handleExplainRun);
+  console.log('[DEBUG] Registered: POST /api/dev/explain-run');
 
   // Get user context (profile, facts, messages, etc.)
   app.get("/api/user/context", async (req, res) => {

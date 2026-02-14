@@ -89,3 +89,4 @@ The frontend uses React, TypeScript, Vite, and Wouter, with styling managed by T
   - **MAX_REPLANS default**: Changed from 1 to 5 to support full radius ladder traversal.
   - **PlanV2Constraints**: Extended with `base_location`, `radius_rung`, `radius_km`, `requested_count_user`, `search_budget_count`.
   - **PlanV2Result**: Now includes `blocked_changes`, `no_progress`, `cannot_expand_further` fields for audit and decision-making.
+- **2026-02-14**: Dev-only Explain Run endpoint (`POST /api/dev/explain-run`): Read-only diagnostic endpoint that fetches artefacts and AFR events for a run, builds a compact evidence bundle, and calls an LLM (OpenAI or Anthropic) to produce a factual markdown report. Features anti-hallucination system prompt, goal drift/label honesty audit, per-runId rate limiting (30s), and dev gating (`NODE_ENV !== 'production'` or `DEV_EXPLAIN_RUN=true`). Located in `server/supervisor/explain-run.ts`.
