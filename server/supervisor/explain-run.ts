@@ -50,6 +50,9 @@ function compactPayload(type: string, payload: Record<string, unknown> | null): 
         constraint_diffs: payload.constraint_diffs ?? null,
         location: payload.location ?? null,
         business_type: payload.business_type ?? null,
+        name_filter: payload.name_filter ?? null,
+        prefix_filter: payload.prefix_filter ?? null,
+        structured_constraints: payload.structured_constraints ?? null,
       };
 
     case 'tower_judgement':

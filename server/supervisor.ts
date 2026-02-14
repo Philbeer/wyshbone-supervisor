@@ -13,6 +13,7 @@ import { generateJobId } from './supervisor/jobs';
 import { redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-executor';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
 import { extractChangePlanDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, type PlanV2Constraints } from './supervisor/replan-policy';
+import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, type ParsedGoal, type StructuredConstraint } from './supervisor/goal-to-constraints';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
 
 interface UserContext {
@@ -757,49 +758,23 @@ class SupervisorService {
 
     const originalUserGoal = rawMsg.trim();
 
-    let businessType = searchQuery?.business_type as string | undefined;
-    let location = (searchQuery?.location as string) || '';
-    let requestedCount = 20;
-    let prefixFilter: string | undefined;
-    let toolPreference: string | undefined;
+    const parsedGoal = await parseGoalToConstraints(originalUserGoal);
 
-    const userCountMatch = rawMsg.match(/\bfind\s+(\d+)\s+/i);
-    const userRequestedCount = userCountMatch ? Math.min(parseInt(userCountMatch[1], 10), 200) : undefined;
+    let businessType: string = searchQuery?.business_type as string || parsedGoal.business_type;
+    let location = (searchQuery?.location as string) || parsedGoal.location;
+    let requestedCount = parsedGoal.search_budget_count;
+    const prefixFilter = parsedGoal.prefix_filter || undefined;
+    const nameFilter = parsedGoal.name_filter || undefined;
+    const toolPreference = parsedGoal.tool_preference || undefined;
+    const structuredConstraints = parsedGoal.constraints;
+    const successCriteria = parsedGoal.success_criteria;
 
-    if (rawMsg) {
-      const msg = rawMsg.trim();
-
-      const prefixMatch = msg.match(/\b(?:begin|start|starting)\s+with\s+([A-Za-z])\b/i);
-      if (prefixMatch) prefixFilter = prefixMatch[1].toUpperCase();
-
-      const toolMatch = msg.match(/\bwith\s+(google\s+places?\s+search|google\s+places?|google\s+maps?)\b/i);
-      if (toolMatch) toolPreference = 'GOOGLE_PLACES';
-
-      const inMatch = msg.match(/\bin\s+([A-Z][a-zA-Z\s,]+?)(?:\s+(?:that|who|which|with|using)\b|$)/i);
-      if (!location && inMatch) {
-        location = inMatch[1].trim().replace(/,\s*$/, '');
-      }
-
-      if (!businessType) {
-        const numTypeMatch = msg.match(/\bfind\s+(\d+)\s+([a-zA-Z\s]+?)(?:\s+in\b)/i);
-        if (numTypeMatch) {
-          requestedCount = Math.min(parseInt(numTypeMatch[1], 10), 200);
-          businessType = numTypeMatch[2].trim() || undefined;
-        } else {
-          const typeMatch = msg.match(/\bfind\s+([a-zA-Z\s]+?)(?:\s+in\b)/i);
-          if (typeMatch) {
-            businessType = typeMatch[1].trim().replace(/^\d+\s*/, '') || undefined;
-            const numMatch = typeMatch[1].match(/^(\d+)\s+/);
-            if (numMatch) requestedCount = Math.min(parseInt(numMatch[1], 10), 200);
-          }
-        }
-      }
-    }
+    const userRequestedCount = parsedGoal.requested_count_user ?? undefined;
     if (searchQuery?.count) requestedCount = Math.min(Number(searchQuery.count), 200);
     if (!businessType) businessType = 'pubs';
     if (!location) location = 'Local';
     let city = location.split(',')[0].trim();
-    const country = location.split(',')[1]?.trim() || 'UK';
+    const country = parsedGoal.country || location.split(',')[1]?.trim() || 'UK';
     const displayCount = userRequestedCount ?? requestedCount;
 
     const constraints: string[] = [];
@@ -807,11 +782,15 @@ class SupervisorService {
     constraints.push(`business_type=${businessType}`);
     constraints.push(`location=${city}`);
     if (prefixFilter) constraints.push(`prefix=${prefixFilter}`);
+    if (nameFilter) constraints.push(`name_contains=${nameFilter}`);
     if (toolPreference) constraints.push(`use=${toolPreference}`);
 
     const assumptions: string[] = [];
     if (prefixFilter) {
       assumptions.push(`Google Places cannot filter by name prefix; will search broadly then filter locally for names starting with "${prefixFilter}"`);
+    }
+    if (nameFilter) {
+      assumptions.push(`Google Places cannot filter by name content; will search broadly then filter locally for names containing "${nameFilter}"`);
     }
     if (requestedCount < 20) {
       assumptions.push(`Will request up to 20 results from Google Places, then trim to ${requestedCount} after any local filtering`);
@@ -823,30 +802,18 @@ class SupervisorService {
     const searchCount = searchBudgetCount;
     const postProcessing: string[] = [];
     if (prefixFilter) postProcessing.push(`Filter names starting with "${prefixFilter}"`);
-    if (userRequestedCountFinal < searchBudgetCount || prefixFilter) postProcessing.push(`Take first ${userRequestedCountFinal} results`);
+    if (nameFilter) postProcessing.push(`Filter names containing "${nameFilter}"`);
+    if (userRequestedCountFinal < searchBudgetCount || prefixFilter || nameFilter) postProcessing.push(`Take first ${userRequestedCountFinal} results`);
     console.log(`[TOWER_LOOP_CHAT] Count split — requested_count_user=${userRequestedCountFinal} search_budget_count=${searchBudgetCount}`);
 
-    const normalizedGoal = `Find ${requestedCount} ${businessType} in ${city}${prefixFilter ? ` starting with ${prefixFilter}` : ''} for B2B outreach`;
+    const nameDesc = prefixFilter ? ` starting with ${prefixFilter}` : nameFilter ? ` containing "${nameFilter}"` : '';
+    const normalizedGoal = `Find ${requestedCount} ${businessType} in ${city}${nameDesc} for B2B outreach`;
     const goal = normalizedGoal;
 
-    const hardKeywords = /\b(must|only|exactly|strict|strictly|no\s+other|within)\b/i;
-    const locationHardKeywords = /\bin\s+\w+\s+only\b/i;
-    const userMsgLower = originalUserGoal.toLowerCase();
-    const hasHardSignal = hardKeywords.test(userMsgLower) || locationHardKeywords.test(originalUserGoal);
-
-    const hard_constraints: string[] = ['business_type', 'requested_count'];
-    const soft_constraints: string[] = [];
-
-    if (hasHardSignal) {
-      if (/\b(only|within)\b/i.test(userMsgLower) && city) hard_constraints.push('location');
-      else soft_constraints.push('location');
-
-      if (/\b(must|only|exactly|strict|strictly)\b/i.test(userMsgLower) && prefixFilter) hard_constraints.push('prefix_filter');
-      else if (prefixFilter) soft_constraints.push('prefix_filter');
-    } else {
-      soft_constraints.push('location');
-      if (prefixFilter) soft_constraints.push('prefix_filter');
-    }
+    const hard_constraints: string[] = structuredConstraints.filter(c => c.hard).map(c => c.field === 'count' ? 'requested_count' : c.field === 'business_type' ? 'business_type' : c.field === 'location' ? 'location' : c.field === 'name' && c.type === 'NAME_STARTS_WITH' ? 'prefix_filter' : c.field === 'name' && c.type === 'NAME_CONTAINS' ? 'name_filter' : c.field);
+    const soft_constraints: string[] = structuredConstraints.filter(c => !c.hard).map(c => c.field === 'count' ? 'requested_count' : c.field === 'business_type' ? 'business_type' : c.field === 'location' ? 'location' : c.field === 'name' && c.type === 'NAME_STARTS_WITH' ? 'prefix_filter' : c.field === 'name' && c.type === 'NAME_CONTAINS' ? 'name_filter' : c.field);
+    if (!hard_constraints.includes('business_type')) hard_constraints.push('business_type');
+    if (!hard_constraints.includes('requested_count')) hard_constraints.push('requested_count');
     console.log(`[TOWER_LOOP_CHAT] Constraint classification — hard: [${hard_constraints.join(', ')}] soft: [${soft_constraints.join(', ')}]`);
 
     const v1Constraints = {
@@ -1009,16 +976,22 @@ class SupervisorService {
       hard_constraints,
       soft_constraints,
       constraints,
+      structured_constraints: structuredConstraints,
+      success_criteria: successCriteria,
       assumptions,
       steps: planSteps,
+      requested_count_user: userRequestedCountFinal,
+      search_budget_count: searchBudgetCount,
+      name_filter: nameFilter || null,
       created_at: new Date().toISOString(),
     };
 
+    const nameFilterLabel = nameFilter ? `, containing "${nameFilter}"` : '';
     const planArtefact = await createArtefact({
       runId: chatRunId,
       type: 'plan',
       title: artefactTitle('Plan v1:', displayCount, v1Constraints, 1),
-      summary: `Search ${displayCount} ${businessType} in ${city} via Google Places${prefixFilter ? `, filter prefix "${prefixFilter}"` : ''}`,
+      summary: `Search ${displayCount} ${businessType} in ${city} via Google Places${prefixFilter ? `, filter prefix "${prefixFilter}"` : ''}${nameFilterLabel}`,
       payload: planPayload,
       userId: task.user_id,
       conversationId,
@@ -1079,6 +1052,12 @@ class SupervisorService {
           const before = leads.length;
           leads = leads.filter(l => l.name.toUpperCase().startsWith(prefixFilter!));
           console.log(`[TOWER_LOOP_CHAT] Prefix filter "${prefixFilter}": ${before} → ${leads.length}`);
+        }
+
+        if (nameFilter) {
+          const before = leads.length;
+          leads = leads.filter(l => l.name.toLowerCase().includes(nameFilter!.toLowerCase()));
+          console.log(`[TOWER_LOOP_CHAT] Name contains filter "${nameFilter}": ${before} → ${leads.length}`);
         }
 
         if (leads.length > requestedCount) {
@@ -1145,7 +1124,7 @@ class SupervisorService {
           runId: chatRunId,
           type: 'step_result',
           title: artefactTitle('Step result: SEARCH_PLACES –', leads.length, v1Constraints, 1),
-          summary: `${towerLoopStepStatus} – ${leads.length} of ${displayCount} ${businessType} in ${city}${prefixFilter ? ` starting with ${prefixFilter}` : ''}`,
+          summary: `${towerLoopStepStatus} – ${leads.length} of ${displayCount} ${businessType} in ${city}${prefixFilter ? ` starting with ${prefixFilter}` : ''}${nameFilter ? ` containing "${nameFilter}"` : ''}`,
           payload: {
             run_id: chatRunId,
             client_request_id: clientRequestId,
@@ -1162,7 +1141,7 @@ class SupervisorService {
             step_index: 0,
             step_status: towerLoopStepStatus,
             inputs_summary: compactInputs({ query: businessType, location: city, country, maxResults: searchCount }),
-            outputs_summary: { leads_count: leads.length, used_stub: usedStub, prefix_filter: prefixFilter || null, requested_count: requestedCount, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}) },
+            outputs_summary: { leads_count: leads.length, used_stub: usedStub, prefix_filter: prefixFilter || null, name_filter: nameFilter || null, requested_count: requestedCount, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}) },
             ...safeOutputsRaw({ leads: safeLeads } as Record<string, unknown>),
             timings: {
               started_at: new Date(towerLoopStepStartedAt).toISOString(),
@@ -1219,12 +1198,16 @@ class SupervisorService {
       plan_artefact_id: planArtefact.id,
       delivered_count: leads.length,
       target_count: displayCount,
-      success_criteria: { target_count: displayCount, ...(prefixFilter ? { prefix: prefixFilter } : {}) },
+      success_criteria: successCriteria,
+      structured_constraints: structuredConstraints,
       query: businessType,
       location: city,
       country,
       used_stub: usedStub,
       prefix_filter: prefixFilter || null,
+      name_filter: nameFilter || null,
+      requested_count_user: userRequestedCountFinal,
+      requested_count_internal: searchBudgetCount,
       relaxed_constraints: v1Label.relaxed_constraints,
       constraint_diffs: v1Label.constraint_diffs,
       leads: leads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website })),
@@ -1386,7 +1369,7 @@ class SupervisorService {
 
     // 12. Replan loop (bounded by MAX_REPLANS env var)
     let finalVerdict = verdict;
-    let finalAction = action;
+    let finalAction: string = action;
     let finalLeads = leads;
     let finalLeadsListArtefact = leadsListArtefact;
     let finalTowerResult = towerResult;
@@ -1493,11 +1476,18 @@ class SupervisorService {
         break;
       }
 
-      if (accumulatedCandidates.size >= userRequestedCountFinal) {
-        console.log(`[REPLAN] Early stop — accumulated ${accumulatedCandidates.size} >= user requested ${userRequestedCountFinal}. No need to replan.`);
+      const accLeadsForCheck = Array.from(accumulatedCandidates.values());
+      const hardCheck = checkHardConstraintsSatisfied(accLeadsForCheck, structuredConstraints, userRequestedCountFinal);
+      if (hardCheck.satisfied && accumulatedCandidates.size >= userRequestedCountFinal) {
+        console.log(`[REPLAN] Early stop — accumulated ${accumulatedCandidates.size} >= user requested ${userRequestedCountFinal}, all hard constraints satisfied. No need to replan.`);
         finalAction = 'accept';
         finalVerdict = 'pass';
         break;
+      } else if (accumulatedCandidates.size >= userRequestedCountFinal && !hardCheck.satisfied) {
+        console.log(`[REPLAN] Count met (${accumulatedCandidates.size} >= ${userRequestedCountFinal}) but hard constraints unsatisfied: ${hardCheck.unsatisfied.join(', ')} — continuing replan`);
+        for (const [cid, detail] of Object.entries(hardCheck.details)) {
+          console.log(`[REPLAN]   ${cid}: ${detail}`);
+        }
       }
       replansUsed++;
       planVersion++;
@@ -1601,6 +1591,12 @@ class SupervisorService {
             const before = replanLeads.length;
             replanLeads = replanLeads.filter(l => l.name.toUpperCase().startsWith(v2.prefix_filter!));
             console.log(`[REPLAN] Prefix filter "${v2.prefix_filter}": ${before} → ${replanLeads.length}`);
+          }
+
+          if (nameFilter) {
+            const before = replanLeads.length;
+            replanLeads = replanLeads.filter(l => l.name.toLowerCase().includes(nameFilter!.toLowerCase()));
+            console.log(`[REPLAN] Name contains filter "${nameFilter}" (${vLabel}): ${before} → ${replanLeads.length}`);
           }
 
           if (replanLeads.length > v2.search_budget_count) {
@@ -1837,15 +1833,20 @@ class SupervisorService {
       finalConstraints = { business_type: v2.business_type, location: v2.location, prefix_filter: v2.prefix_filter || null, requested_count: v2.requested_count };
       businessType = v2.business_type;
       city = v2.location;
-      prefixFilter = v2.prefix_filter;
       currentConstraints = v2;
       priorPlanArtefactId = replanPlanArtefact.id;
       priorLeadsCount = replanLeads.length;
 
-      if (accumulatedCandidates.size >= userRequestedCountFinal) {
-        console.log(`[REPLAN] Early stop after accumulation — ${accumulatedCandidates.size} unique >= ${userRequestedCountFinal} user requested`);
-        finalAction = 'accept';
-        finalVerdict = 'pass';
+      {
+        const postAccLeads = Array.from(accumulatedCandidates.values());
+        const postHardCheck = checkHardConstraintsSatisfied(postAccLeads, structuredConstraints, userRequestedCountFinal);
+        if (postHardCheck.satisfied && accumulatedCandidates.size >= userRequestedCountFinal) {
+          console.log(`[REPLAN] Early stop after accumulation — ${accumulatedCandidates.size} unique >= ${userRequestedCountFinal} user requested, all hard constraints satisfied`);
+          finalAction = 'accept';
+          finalVerdict = 'pass';
+        } else if (accumulatedCandidates.size >= userRequestedCountFinal && !postHardCheck.satisfied) {
+          console.log(`[REPLAN] Count met after accumulation (${accumulatedCandidates.size} >= ${userRequestedCountFinal}) but hard constraints unsatisfied: ${postHardCheck.unsatisfied.join(', ')}`);
+        }
       }
 
       await logAFREvent({
