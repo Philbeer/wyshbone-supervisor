@@ -12,7 +12,8 @@ import { executeAction, type ActionResult as LoopActionResult } from './supervis
 import { generateJobId } from './supervisor/jobs';
 import { redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-executor';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
-import { extractChangePlanDirective, applyLeadgenReplanPolicy, type PlanV2Constraints } from './supervisor/replan-policy';
+import { extractChangePlanDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, type PlanV2Constraints } from './supervisor/replan-policy';
+import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
 
 interface UserContext {
   userId: string;
@@ -817,10 +818,13 @@ class SupervisorService {
     }
     assumptions.push(`Location "${city}" will be used as-is in the Google Places text query`);
 
-    const searchCount = Math.max(requestedCount, 20);
+    const userRequestedCountFinal = userRequestedCount ?? requestedCount;
+    const searchBudgetCount = Math.max(20, requestedCount);
+    const searchCount = searchBudgetCount;
     const postProcessing: string[] = [];
     if (prefixFilter) postProcessing.push(`Filter names starting with "${prefixFilter}"`);
-    if (requestedCount < 20 || prefixFilter) postProcessing.push(`Take first ${requestedCount} results`);
+    if (userRequestedCountFinal < searchBudgetCount || prefixFilter) postProcessing.push(`Take first ${userRequestedCountFinal} results`);
+    console.log(`[TOWER_LOOP_CHAT] Count split — requested_count_user=${userRequestedCountFinal} search_budget_count=${searchBudgetCount}`);
 
     const normalizedGoal = `Find ${requestedCount} ${businessType} in ${city}${prefixFilter ? ` starting with ${prefixFilter}` : ''} for B2B outreach`;
     const goal = normalizedGoal;
@@ -917,8 +921,9 @@ class SupervisorService {
       return s;
     }
 
-    const MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '1', 10);
-    console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" count=${requestedCount} userCount=${displayCount} goal="${goal}" MAX_REPLANS=${MAX_REPLANS}`);
+    const MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '5', 10);
+    const accumulatedCandidates = new Map<string, AccumulatedCandidate>();
+    console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" requested_count_user=${userRequestedCountFinal} search_budget_count=${searchBudgetCount} goal="${goal}" MAX_REPLANS=${MAX_REPLANS}`);
 
     // 1. Create agent_run row (upsert — handles retries with same run_id/client_request_id)
     const nowMs = Date.now();
@@ -1391,13 +1396,26 @@ class SupervisorService {
     let currentConstraints: PlanV2Constraints = {
       business_type: businessType!,
       location: city,
+      base_location: city,
       country,
-      search_count: searchCount,
+      search_count: searchBudgetCount,
       requested_count: requestedCount,
+      requested_count_user: userRequestedCountFinal,
+      search_budget_count: searchBudgetCount,
       prefix_filter: prefixFilter,
+      radius_rung: 0,
+      radius_km: 0,
     };
     let priorPlanArtefactId = planArtefact.id;
     let priorLeadsCount = leads.length;
+    const perPlanCounts = new Map<number, number>();
+
+    for (const lead of leads) {
+      const key = makeDedupeKey(lead);
+      mergeCandidate(accumulatedCandidates, key, lead, 1);
+    }
+    perPlanCounts.set(1, leads.length);
+    console.log(`[TOWER_LOOP_CHAT] v1 accumulated ${leads.length} leads (total unique: ${accumulatedCandidates.size})`);
 
     while (finalAction === 'change_plan' && !usedStub) {
       if (replansUsed >= MAX_REPLANS) {
@@ -1455,14 +1473,32 @@ class SupervisorService {
           gaps: directive.gaps,
           suggested_changes: directive.suggested_changes,
           prior_delivered: priorLeadsCount,
-          requested: currentConstraints.requested_count,
+          accumulated_unique: accumulatedCandidates.size,
+          requested_count_user: userRequestedCountFinal,
           replan_number: replansUsed + 1,
           max_replans: MAX_REPLANS,
         },
       });
 
-      const replanResult = applyLeadgenReplanPolicy(currentConstraints, directive);
+      const replanResult = applyLeadgenReplanPolicy(currentConstraints, directive, hard_constraints, soft_constraints, planVersion);
       const v2 = replanResult.constraints;
+
+      if (replanResult.no_progress && replanResult.cannot_expand_further) {
+        console.log(`[REPLAN] Stopping — no progress possible and radius at max. Accumulated ${accumulatedCandidates.size} unique leads.`);
+        break;
+      }
+
+      if (constraintsAreIdentical(currentConstraints, v2)) {
+        console.log(`[REPLAN] Stopping — constraints identical after policy application. Would re-run same search.`);
+        break;
+      }
+
+      if (accumulatedCandidates.size >= userRequestedCountFinal) {
+        console.log(`[REPLAN] Early stop — accumulated ${accumulatedCandidates.size} >= user requested ${userRequestedCountFinal}. No need to replan.`);
+        finalAction = 'accept';
+        finalVerdict = 'pass';
+        break;
+      }
       replansUsed++;
       planVersion++;
       const vLabel = `v${planVersion}`;
@@ -1567,9 +1603,9 @@ class SupervisorService {
             console.log(`[REPLAN] Prefix filter "${v2.prefix_filter}": ${before} → ${replanLeads.length}`);
           }
 
-          if (replanLeads.length > v2.requested_count) {
-            replanLeads = replanLeads.slice(0, v2.requested_count);
-            console.log(`[REPLAN] Trimmed to requested count: ${replanLeads.length}`);
+          if (replanLeads.length > v2.search_budget_count) {
+            replanLeads = replanLeads.slice(0, v2.search_budget_count);
+            console.log(`[REPLAN] Trimmed to search budget: ${replanLeads.length}`);
           }
         } else {
           console.log(`[REPLAN] Google Places ${vLabel} returned 0 results`);
@@ -1578,6 +1614,16 @@ class SupervisorService {
         console.warn(`[REPLAN] Google Places ${vLabel} failed: ${replanErr.message}`);
         replanStepError = replanErr.message;
       }
+
+      let newUnique = 0;
+      for (const lead of replanLeads) {
+        const key = makeDedupeKey(lead);
+        if (!accumulatedCandidates.has(key)) newUnique++;
+        mergeCandidate(accumulatedCandidates, key, lead, planVersion);
+      }
+      perPlanCounts.set(planVersion, replanLeads.length);
+      const progressSummary = buildProgressSummary(accumulatedCandidates.size, perPlanCounts, currentConstraints.base_location, v2.radius_km);
+      console.log(`[REPLAN] Accumulated: ${progressSummary} (${newUnique} new unique this round)`);
 
       const replanStepFinishedAt = Date.now();
 
@@ -1722,7 +1768,8 @@ class SupervisorService {
           conversationId,
           successCriteria: {
             mission_type: 'leadgen',
-            target_count: v2.requested_count,
+            target_count: v2.requested_count_user,
+            accumulated_unique_count: accumulatedCandidates.size,
             ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}),
             plan_version: planVersion,
             hard_constraints,
@@ -1732,8 +1779,10 @@ class SupervisorService {
               location: v2.location,
               country: v2.country,
               search_count: v2.search_count,
-              requested_count: v2.requested_count,
+              requested_count_user: v2.requested_count_user,
+              search_budget_count: v2.search_budget_count,
               prefix_filter: v2.prefix_filter || null,
+              radius_km: v2.radius_km,
             },
             max_replan_versions: MAX_REPLANS + 1,
           },
@@ -1793,21 +1842,31 @@ class SupervisorService {
       priorPlanArtefactId = replanPlanArtefact.id;
       priorLeadsCount = replanLeads.length;
 
+      if (accumulatedCandidates.size >= userRequestedCountFinal) {
+        console.log(`[REPLAN] Early stop after accumulation — ${accumulatedCandidates.size} unique >= ${userRequestedCountFinal} user requested`);
+        finalAction = 'accept';
+        finalVerdict = 'pass';
+      }
+
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'replan_completed', status: replanTowerResult.shouldStop ? 'failed' : 'success',
-        taskGenerated: `Replan ${replansUsed}/${MAX_REPLANS} completed: ${vLabel} delivered ${replanLeads.length}, verdict=${replanVerdict}`,
+        taskGenerated: `Replan ${replansUsed}/${MAX_REPLANS} completed: ${vLabel} delivered ${replanLeads.length}, accumulated_unique=${accumulatedCandidates.size}, verdict=${replanVerdict}`,
         runType: 'plan',
         metadata: {
           plan_version: planVersion, prior_delivered: priorLeadsCount, replan_delivered: replanLeads.length,
+          accumulated_unique: accumulatedCandidates.size, requested_count_user: userRequestedCountFinal,
           replan_verdict: replanVerdict, replan_action: replanAction,
           replans_used: replansUsed, max_replans: MAX_REPLANS,
           strategy: replanResult.strategy_summary,
+          radius_km: v2.radius_km, radius_rung: v2.radius_rung,
+          blocked_changes: replanResult.blocked_changes,
         },
       });
-      console.log(`[REPLAN] [replan_completed] replan=${replansUsed}/${MAX_REPLANS} delivered=${replanLeads.length} verdict=${replanVerdict}`);
+      console.log(`[REPLAN] [replan_completed] replan=${replansUsed}/${MAX_REPLANS} delivered=${replanLeads.length} accumulated_unique=${accumulatedCandidates.size} verdict=${replanVerdict}`);
     }
 
+    const totalUniqueLeads = accumulatedCandidates.size;
     const isHalted = finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'fail';
     if (isHalted) {
       await logAFREvent({
@@ -1815,22 +1874,22 @@ class SupervisorService {
         actionTaken: 'run_halted', status: 'failed',
         taskGenerated: `Tower loop chat halted: verdict=${finalVerdict} action=${finalAction} plan_version=${planVersion}`,
         runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, requested: requestedCount, plan_version: planVersion },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed },
       });
-      console.log(`[TOWER_LOOP_CHAT] [run_halted] verdict=${finalVerdict} plan_version=${planVersion}`);
+      console.log(`[TOWER_LOOP_CHAT] [run_halted] verdict=${finalVerdict} plan_version=${planVersion} accumulated_unique=${totalUniqueLeads}`);
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, halted: true, plan_version: planVersion } });
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, halted: true, plan_version: planVersion, replans_used: replansUsed } });
     } else {
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'run_completed', status: 'success',
-        taskGenerated: `Tower loop chat completed: ${finalLeads.length} leads, verdict=${finalVerdict} plan_version=${planVersion}`,
+        taskGenerated: `Tower loop chat completed: ${totalUniqueLeads} unique leads (accumulated across ${planVersion} plan versions), verdict=${finalVerdict}`,
         runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, requested: requestedCount, plan_version: planVersion },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed },
       });
-      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} plan_version=${planVersion}`);
+      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} plan_version=${planVersion}`);
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, halted: false, plan_version: planVersion } });
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, halted: false, plan_version: planVersion, replans_used: replansUsed } });
     }
 
     await this.postArtefactToUI({

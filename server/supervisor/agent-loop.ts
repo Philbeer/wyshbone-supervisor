@@ -25,6 +25,18 @@ export interface TowerVerdictV1 {
   rationale: string;
 }
 
+export interface AccumulatedCandidate {
+  place_id?: string;
+  name: string;
+  address?: string;
+  phone?: string | null;
+  website?: string | null;
+  source?: string;
+  found_in_plan_version: number;
+  found_at_radius_km: number;
+  dedupe_key: string;
+}
+
 export interface RunState {
   runId: string;
   userId: string;
@@ -36,6 +48,14 @@ export interface RunState {
   lastVerdict?: TowerVerdictV1;
   status: 'running' | 'accepted' | 'stopped' | 'retrying' | 'replanning';
   createdAt: number;
+  requestedCountUser: number;
+  searchBudgetCount: number;
+  originalUserGoal: string;
+  accumulatedCandidates: Map<string, AccumulatedCandidate>;
+  perPlanCandidates: Map<number, AccumulatedCandidate[]>;
+  currentRadiusRung: number;
+  hardConstraints: string[];
+  softConstraints: string[];
 }
 
 const MAX_RETRIES = 1;
@@ -51,12 +71,49 @@ export function getAllRunStates(): RunState[] {
   return Array.from(runStates.values());
 }
 
+export const RADIUS_LADDER_KM = [0, 5, 10, 25, 50, 100];
+
+export function makeDedupeKey(lead: { placeId?: string; name?: string; address?: string }): string {
+  if (lead.placeId) return `pid:${lead.placeId}`;
+  const norm = `${(lead.name || '').toLowerCase().trim()}|${(lead.address || '').toLowerCase().trim()}`;
+  return `hash:${norm}`;
+}
+
+export function mergeCandidate(
+  acc: Map<string, AccumulatedCandidate>,
+  key: string,
+  lead: { name: string; address?: string; phone?: string | null; website?: string | null; placeId?: string; source?: string },
+  planVersion: number,
+  radiusKm?: number,
+): boolean {
+  if (acc.has(key)) return false;
+  acc.set(key, {
+    place_id: lead.placeId,
+    name: lead.name,
+    address: lead.address,
+    phone: lead.phone,
+    website: lead.website,
+    source: lead.source,
+    found_in_plan_version: planVersion,
+    found_at_radius_km: radiusKm ?? 0,
+    dedupe_key: key,
+  });
+  return true;
+}
+
 export function initRunState(
   runId: string,
   userId: string,
   toolArgs: Record<string, unknown>,
   conversationId?: string,
   clientRequestId?: string,
+  opts?: {
+    requestedCountUser?: number;
+    searchBudgetCount?: number;
+    originalUserGoal?: string;
+    hardConstraints?: string[];
+    softConstraints?: string[];
+  },
 ): RunState {
   const state: RunState = {
     runId,
@@ -68,9 +125,17 @@ export function initRunState(
     lastToolArgs: { ...toolArgs },
     status: 'running',
     createdAt: Date.now(),
+    requestedCountUser: opts?.requestedCountUser ?? 20,
+    searchBudgetCount: opts?.searchBudgetCount ?? 20,
+    originalUserGoal: opts?.originalUserGoal ?? '',
+    accumulatedCandidates: new Map(),
+    perPlanCandidates: new Map(),
+    currentRadiusRung: 0,
+    hardConstraints: opts?.hardConstraints ?? ['business_type', 'requested_count'],
+    softConstraints: opts?.softConstraints ?? ['location'],
   };
   runStates.set(runId, state);
-  console.log(`[AGENT_LOOP] RunState initialized: runId=${runId} planVersion=1 crid=${clientRequestId || 'none'}`);
+  console.log(`[AGENT_LOOP] RunState initialized: runId=${runId} planVersion=1 crid=${clientRequestId || 'none'} requestedCountUser=${state.requestedCountUser} searchBudgetCount=${state.searchBudgetCount}`);
   return state;
 }
 
