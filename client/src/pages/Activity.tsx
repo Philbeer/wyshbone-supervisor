@@ -10,7 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Play, Radio, CheckCircle, AlertTriangle, Clock, Loader2, Inbox, Eye, MapPin, Globe, Phone, Mail } from "lucide-react";
+import { Play, Radio, CheckCircle, AlertTriangle, Clock, Loader2, Inbox, Eye, MapPin, Globe, Phone, Mail, Target, TrendingDown, HelpCircle, ShieldCheck, ShieldAlert, ArrowRight } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 
 interface ActivityEvent {
@@ -34,6 +34,21 @@ interface LeadResult {
   place_id: string;
   score?: number;
   emailCandidates?: string[];
+}
+
+interface DeliverySummaryPayload {
+  requested_count: number;
+  hard_constraints: string[];
+  soft_constraints: string[];
+  plan_versions: { version: number; changes_made: string[] }[];
+  soft_relaxations: { constraint: string; from: string; to: string; reason: string; plan_version: number }[];
+  delivered_exact: { entity_id: string; name: string; address: string; match_level: string; soft_violations: string[] }[];
+  delivered_closest: { entity_id: string; name: string; address: string; match_level: string; soft_violations: string[] }[];
+  delivered_exact_count: number;
+  delivered_total_count: number;
+  shortfall: number;
+  stop_reason: string | null;
+  suggested_next_question: string | null;
 }
 
 interface ArtefactData {
@@ -70,6 +85,167 @@ function statusBadge(status: string) {
   if (status === "success") return <Badge variant="secondary">success</Badge>;
   if (status === "failed") return <Badge variant="destructive">failed</Badge>;
   return <Badge variant="outline">pending</Badge>;
+}
+
+function DeliverySummaryCard({ payload }: { payload: DeliverySummaryPayload }) {
+  const isPassed = !payload.stop_reason;
+  const fillPercent = payload.requested_count > 0
+    ? Math.min(100, Math.round((payload.delivered_exact_count / payload.requested_count) * 100))
+    : 0;
+
+  return (
+    <Card className="border-2" data-testid="card-delivery-summary">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Target className="h-4 w-4" />
+            Delivery Summary
+          </CardTitle>
+          <Badge
+            variant={isPassed ? "secondary" : "destructive"}
+            data-testid="badge-delivery-verdict"
+          >
+            {isPassed ? "PASS" : "STOP"}
+          </Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-3 gap-3" data-testid="grid-delivery-counts">
+          <div className="text-center p-2 rounded-md bg-muted/50">
+            <div className="text-lg font-semibold" data-testid="text-exact-count">{payload.delivered_exact_count}</div>
+            <div className="text-xs text-muted-foreground">Exact</div>
+          </div>
+          <div className="text-center p-2 rounded-md bg-muted/50">
+            <div className="text-lg font-semibold" data-testid="text-closest-count">{payload.delivered_closest.length}</div>
+            <div className="text-xs text-muted-foreground">Closest</div>
+          </div>
+          <div className="text-center p-2 rounded-md bg-muted/50">
+            <div className="text-lg font-semibold" data-testid="text-requested-count">{payload.requested_count}</div>
+            <div className="text-xs text-muted-foreground">Requested</div>
+          </div>
+        </div>
+
+        <div data-testid="progress-fill-rate">
+          <div className="flex items-center justify-between text-xs mb-1">
+            <span className="text-muted-foreground">Exact match fill rate</span>
+            <span className="font-medium">{fillPercent}%</span>
+          </div>
+          <div className="h-2 rounded-full bg-muted overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${fillPercent === 100 ? "bg-green-500" : fillPercent >= 50 ? "bg-yellow-500" : "bg-destructive"}`}
+              style={{ width: `${fillPercent}%` }}
+            />
+          </div>
+        </div>
+
+        {payload.shortfall > 0 && (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground" data-testid="text-shortfall">
+            <TrendingDown className="h-3 w-3 text-destructive shrink-0" />
+            <span>Shortfall: <span className="font-medium text-foreground">{payload.shortfall}</span> exact match{payload.shortfall !== 1 ? "es" : ""} still needed</span>
+          </div>
+        )}
+
+        {payload.stop_reason && (
+          <div className="flex items-start gap-2 text-xs p-2 rounded-md bg-destructive/10 text-destructive" data-testid="text-stop-reason">
+            <ShieldAlert className="h-3 w-3 shrink-0 mt-0.5" />
+            <span>{payload.stop_reason}</span>
+          </div>
+        )}
+
+        {(payload.hard_constraints.length > 0 || payload.soft_constraints.length > 0) && (
+          <div className="space-y-1.5" data-testid="section-constraints">
+            <div className="text-xs font-medium text-muted-foreground">Constraints</div>
+            <div className="flex flex-wrap gap-1.5">
+              {payload.hard_constraints.map((c, i) => (
+                <Badge key={`h-${i}`} variant="secondary" className="text-xs" data-testid={`badge-hard-constraint-${i}`}>
+                  {c}
+                </Badge>
+              ))}
+              {payload.soft_constraints.map((c, i) => (
+                <Badge key={`s-${i}`} variant="outline" className="text-xs" data-testid={`badge-soft-constraint-${i}`}>
+                  {c}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {payload.soft_relaxations.length > 0 && (
+          <div className="space-y-1.5" data-testid="section-relaxations">
+            <div className="text-xs font-medium text-muted-foreground">Relaxed Constraints</div>
+            {payload.soft_relaxations.map((r, i) => (
+              <div key={i} className="flex items-center gap-1.5 text-xs p-1.5 rounded bg-muted/50" data-testid={`row-relaxation-${i}`}>
+                <span className="text-muted-foreground line-through">{r.from}</span>
+                <ArrowRight className="h-3 w-3 text-muted-foreground shrink-0" />
+                <span className="font-medium">{r.to}</span>
+                <span className="text-muted-foreground ml-auto">v{r.plan_version}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {payload.delivered_exact.length > 0 && (
+          <div className="space-y-1.5" data-testid="section-exact-leads">
+            <div className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+              <ShieldCheck className="h-3 w-3 text-green-600 dark:text-green-400" />
+              Exact Matches ({payload.delivered_exact.length})
+            </div>
+            {payload.delivered_exact.map((lead, i) => (
+              <div key={lead.entity_id || i} className="flex items-center gap-2 text-xs p-1.5 rounded bg-muted/50" data-testid={`row-exact-lead-${i}`}>
+                <CheckCircle className="h-3 w-3 text-green-600 dark:text-green-400 shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-medium truncate">{lead.name}</div>
+                  {lead.address && <div className="text-muted-foreground truncate">{lead.address}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {payload.delivered_closest.length > 0 && (
+          <div className="space-y-1.5" data-testid="section-closest-leads">
+            <div className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+              <ShieldAlert className="h-3 w-3 text-yellow-600 dark:text-yellow-400" />
+              Closest Matches ({payload.delivered_closest.length})
+            </div>
+            {payload.delivered_closest.map((lead, i) => (
+              <div key={lead.entity_id || i} className="text-xs p-1.5 rounded bg-muted/50" data-testid={`row-closest-lead-${i}`}>
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="h-3 w-3 text-yellow-600 dark:text-yellow-400 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="font-medium truncate">{lead.name}</div>
+                    {lead.address && <div className="text-muted-foreground truncate">{lead.address}</div>}
+                  </div>
+                </div>
+                {lead.soft_violations.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1 ml-5">
+                    {lead.soft_violations.map((v, vi) => (
+                      <Badge key={vi} variant="outline" className="text-[10px] px-1.5 py-0 text-yellow-700 dark:text-yellow-300 border-yellow-300 dark:border-yellow-700">
+                        {v}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {payload.plan_versions.length > 1 && (
+          <div className="text-xs text-muted-foreground" data-testid="text-plan-versions">
+            Search went through {payload.plan_versions.length} plan version{payload.plan_versions.length !== 1 ? "s" : ""}
+          </div>
+        )}
+
+        {payload.suggested_next_question && (
+          <div className="flex items-start gap-2 text-xs p-2 rounded-md bg-primary/10 text-primary" data-testid="text-suggested-question">
+            <HelpCircle className="h-3 w-3 shrink-0 mt-0.5" />
+            <span>{payload.suggested_next_question}</span>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 export default function Activity() {
@@ -186,6 +362,8 @@ export default function Activity() {
 
   const leadsArtefact = artefacts.find(a => a.type === "leads");
   const leads = leadsArtefact?.payloadJson?.leads || [];
+  const deliverySummaryArtefact = artefacts.find(a => a.type === "delivery_summary");
+  const deliverySummary = deliverySummaryArtefact?.payloadJson as unknown as DeliverySummaryPayload | undefined;
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -342,6 +520,10 @@ export default function Activity() {
               </div>
             ) : (
               <div className="space-y-4">
+                {deliverySummary && (
+                  <DeliverySummaryCard payload={deliverySummary} />
+                )}
+
                 {leadsArtefact && (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between flex-wrap gap-2">
@@ -420,7 +602,7 @@ export default function Activity() {
                   </div>
                 )}
 
-                {artefacts.filter(a => a.type !== "leads").map((art, idx) => (
+                {artefacts.filter(a => a.type !== "leads" && a.type !== "delivery_summary").map((art, idx) => (
                   <Card key={art.id}>
                     <CardContent className="p-4">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
