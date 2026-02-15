@@ -6,13 +6,17 @@
  * Step 3: Mitigation (success or failure depending on scenario + constraints)
  *
  * Each step writes:
- *   - factory_state artefact (tool output + step_index)
- *   - factory_decision artefact (decision + reason + expected impact)
+ *   - factory_state artefact (tool output + diagnosis fields)
+ *   - factory_decision artefact (decision + reason + intervention rationale)
  *
- * Tower judgement is called after every step. Reactions:
- *   - CHANGE_PLAN → switch mitigation strategy and continue
- *   - STOP → terminate and write plan_result
+ * Tower judgement is called after every step. Triggers:
+ *   - CHANGE_PLAN → scrap above target, OR trend rising for 2 steps, OR defect type shift (mitigation mismatch), OR energy exceeds limit
+ *   - STOP → floor above target (unachievable), or energy critical with no path to recovery
  *   - continue → proceed to next step
+ *
+ * Intervention selection is cause-based:
+ *   - moisture → dryer_boost or switch_resin_batch
+ *   - tool_wear → reduce_speed or schedule_tool_refurb
  */
 
 import { randomUUID } from 'crypto';
@@ -20,6 +24,8 @@ import {
   runFactorySim,
   buildDemoSteps,
   ALTERNATIVE_MITIGATIONS,
+  CAUSE_BASED_INTERVENTIONS,
+  getEnergyLimit,
   type FactorySimInput,
   type FactorySimOutput,
   type DemoScenario,
@@ -34,6 +40,17 @@ interface FactoryTowerVerdict {
   action: 'continue' | 'change_plan' | 'stop';
   reasons: string[];
   metrics: Record<string, unknown>;
+  trigger: string;
+}
+
+interface StepHistory {
+  stepIndex: number;
+  scrap: number;
+  defect: string;
+  trend: string;
+  cause: string;
+  energy: number;
+  energyStatus: string;
 }
 
 function judgeFactoryStep(
@@ -41,68 +58,179 @@ function judgeFactoryStep(
   simOutput: FactorySimOutput,
   maxScrapPercent: number,
   scenario: DemoScenario,
+  history: StepHistory[],
+  energyLimit: number,
 ): FactoryTowerVerdict {
   const scrap = simOutput.scrap_rate_now;
   const floor = simOutput.achievable_scrap_floor;
+  const energy = simOutput.energy_kwh_per_good_part;
+  const cause = simOutput.probable_cause;
+  const trend = simOutput.trend;
+  const defect = simOutput.defect_type;
   const aboveTarget = scrap > maxScrapPercent;
   const floorAboveTarget = floor > maxScrapPercent;
+
+  const metrics: Record<string, unknown> = {
+    scrap_rate: scrap, target: maxScrapPercent, floor, step: stepIndex,
+    defect, cause, trend, energy, energy_limit: energyLimit,
+  };
 
   if (stepIndex === 0) {
     if (aboveTarget && floorAboveTarget) {
       return {
         verdict: 'fail', action: 'stop',
-        reasons: [`Baseline scrap ${scrap}% already above target ${maxScrapPercent}%. Achievable floor ${floor}% is also above target — impossible to meet constraint.`],
-        metrics: { scrap_rate: scrap, target: maxScrapPercent, floor, step: stepIndex },
+        reasons: [
+          `Baseline scrap ${scrap}% already above target ${maxScrapPercent}%.`,
+          `Diagnosed cause: ${formatCause(cause)}. Achievable floor ${floor}% is also above target — impossible to meet constraint.`,
+        ],
+        metrics, trigger: 'floor_above_target',
+      };
+    }
+    if (energy > energyLimit) {
+      return {
+        verdict: 'warn', action: 'continue',
+        reasons: [
+          `Baseline scrap ${scrap}% acceptable, but energy ${energy} kWh/part exceeds limit ${energyLimit} kWh. Monitoring.`,
+          `Diagnosed cause: ${formatCause(cause)}. Trend: ${trend}.`,
+        ],
+        metrics, trigger: 'energy_warning_baseline',
       };
     }
     return {
       verdict: 'pass', action: 'continue',
-      reasons: [`Baseline scrap ${scrap}% acceptable. Proceeding to monitor for drift.`],
-      metrics: { scrap_rate: scrap, target: maxScrapPercent, floor, step: stepIndex },
+      reasons: [
+        `Baseline scrap ${scrap}% acceptable. Diagnosed cause: ${formatCause(cause)}.`,
+        `Trend: ${trend}. Energy: ${energy} kWh/part (within limit). Proceeding to monitor for drift.`,
+      ],
+      metrics, trigger: 'baseline_ok',
     };
   }
 
-  if (stepIndex === 1) {
-    if (aboveTarget && floorAboveTarget) {
-      return {
-        verdict: 'fail', action: 'stop',
-        reasons: [`Scrap ${scrap}% above target ${maxScrapPercent}%. Floor ${floor}% makes target unachievable under current conditions.`],
-        metrics: { scrap_rate: scrap, target: maxScrapPercent, floor, step: stepIndex, defect: simOutput.defect_type },
-      };
-    }
-    if (aboveTarget) {
-      return {
-        verdict: 'warn', action: 'change_plan',
-        reasons: [`Drift detected: scrap ${scrap}% exceeds target ${maxScrapPercent}%. Floor ${floor}% suggests recovery is possible with different mitigation.`],
-        metrics: { scrap_rate: scrap, target: maxScrapPercent, floor, step: stepIndex, defect: simOutput.defect_type },
-      };
-    }
-    return {
-      verdict: 'pass', action: 'continue',
-      reasons: [`Scrap ${scrap}% within target ${maxScrapPercent}%. No intervention required.`],
-      metrics: { scrap_rate: scrap, target: maxScrapPercent, floor, step: stepIndex },
-    };
-  }
+  const trendRising2Steps = history.length >= 1 && history[history.length - 1].trend === 'rising' && trend === 'rising';
 
-  if (aboveTarget && floorAboveTarget) {
+  const prevDefect = history.length > 0 ? history[history.length - 1].defect : null;
+  const defectShifted = prevDefect !== null && prevDefect !== 'none' && defect !== 'none' && defect !== prevDefect;
+
+  const energyExceeded = energy > energyLimit;
+  const energyCritical = simOutput.energy_status === 'critical';
+
+  if (floorAboveTarget && aboveTarget) {
     return {
       verdict: 'fail', action: 'stop',
-      reasons: [`Mitigation insufficient. Scrap ${scrap}% still above target ${maxScrapPercent}%. Floor ${floor}% confirms target is unachievable.`],
-      metrics: { scrap_rate: scrap, target: maxScrapPercent, floor, step: stepIndex },
+      reasons: [
+        `Scrap ${scrap}% above target ${maxScrapPercent}%. Floor ${floor}% makes target unachievable.`,
+        `Root cause: ${formatCause(cause)}. Trend: ${trend}.`,
+        ...(energyCritical ? [`Energy ${energy} kWh/part is critical — no viable path forward.`] : []),
+      ],
+      metrics, trigger: 'floor_above_target',
     };
   }
+
+  if (energyCritical && aboveTarget) {
+    return {
+      verdict: 'fail', action: 'stop',
+      reasons: [
+        `Energy ${energy} kWh/part is critical (limit ${energyLimit}). Scrap ${scrap}% above target.`,
+        `Root cause: ${formatCause(cause)}. Current approach is consuming too much energy with no path to recovery.`,
+      ],
+      metrics, trigger: 'energy_critical_stop',
+    };
+  }
+
+  if (defectShifted && stepIndex >= 2) {
+    return {
+      verdict: 'warn', action: 'change_plan',
+      reasons: [
+        `Defect type shifted from "${prevDefect}" to "${defect}" after mitigation — indicates mitigation mismatch.`,
+        `Root cause (${formatCause(cause)}) was not addressed by the chosen action. Different intervention needed.`,
+      ],
+      metrics: { ...metrics, previous_defect: prevDefect, defect_shift: true },
+      trigger: 'defect_shift_mismatch',
+    };
+  }
+
+  if (trendRising2Steps && !aboveTarget) {
+    return {
+      verdict: 'warn', action: 'change_plan',
+      reasons: [
+        `Scrap trend has been rising for 2 consecutive steps (${history[history.length - 1].scrap}% → ${scrap}%), still under target but deteriorating.`,
+        `Root cause: ${formatCause(cause)}. Preemptive intervention recommended before target is breached.`,
+      ],
+      metrics, trigger: 'trend_rising_preemptive',
+    };
+  }
+
   if (aboveTarget) {
     return {
       verdict: 'warn', action: 'change_plan',
-      reasons: [`Scrap ${scrap}% still above target ${maxScrapPercent}% after mitigation. Floor ${floor}% means a different strategy could work.`],
-      metrics: { scrap_rate: scrap, target: maxScrapPercent, floor, step: stepIndex },
+      reasons: [
+        `Scrap ${scrap}% exceeds target ${maxScrapPercent}%. Floor ${floor}% suggests recovery is possible.`,
+        `Root cause: ${formatCause(cause)}. Trend: ${trend}. Selecting cause-appropriate intervention.`,
+        ...(energyExceeded ? [`Energy ${energy} kWh/part exceeds limit ${energyLimit} — factor this into intervention choice.`] : []),
+      ],
+      metrics, trigger: 'scrap_above_target',
     };
   }
+
+  if (energyExceeded && stepIndex >= 2) {
+    return {
+      verdict: 'warn', action: 'change_plan',
+      reasons: [
+        `Scrap ${scrap}% is within target, but energy ${energy} kWh/part exceeds limit ${energyLimit}.`,
+        `Current mitigation is energy-inefficient. A different approach may address quality without the energy penalty.`,
+      ],
+      metrics, trigger: 'energy_exceeded',
+    };
+  }
+
   return {
     verdict: 'pass', action: 'continue',
-    reasons: [`Mitigation successful. Scrap ${scrap}% within target ${maxScrapPercent}%.`],
-    metrics: { scrap_rate: scrap, target: maxScrapPercent, floor, step: stepIndex },
+    reasons: [
+      `Scrap ${scrap}% within target ${maxScrapPercent}%. Energy ${energy} kWh/part within limit.`,
+      `Root cause: ${formatCause(cause)}. Trend: ${trend}. No intervention required.`,
+    ],
+    metrics, trigger: 'all_ok',
   };
+}
+
+function formatCause(cause: string): string {
+  const labels: Record<string, string> = {
+    moisture_instability: 'moisture instability (resin too wet)',
+    tool_wear: 'tool wear (cavity degradation)',
+    temp_swing: 'temperature swing',
+    none: 'no issues detected',
+    unknown: 'undetermined',
+  };
+  return labels[cause] ?? cause;
+}
+
+function selectIntervention(
+  cause: string,
+  previousMitigation: string | null,
+  scenario: DemoScenario,
+  defectShifted: boolean,
+): { intervention: string; rationale: string; considered: string[] } {
+  const causeEntry = CAUSE_BASED_INTERVENTIONS[cause] ?? CAUSE_BASED_INTERVENTIONS['unknown'];
+  const considered = causeEntry.options;
+
+  let selected: string;
+
+  if (defectShifted && previousMitigation) {
+    selected = considered.find(o => o !== previousMitigation) ?? considered[0];
+  } else if (previousMitigation) {
+    selected = considered.find(o => o !== previousMitigation) ?? considered[0];
+  } else {
+    selected = considered[0];
+  }
+
+  const alternatives = ALTERNATIVE_MITIGATIONS[scenario] || [];
+  if (!considered.includes(selected) && alternatives.length > 0) {
+    selected = alternatives.find(a => a !== previousMitigation) ?? alternatives[0];
+  }
+
+  const rationale = causeEntry.rationale[selected] ?? `Selected ${selected} based on ${cause} diagnosis`;
+
+  return { intervention: selected, rationale, considered };
 }
 
 export interface FactoryDemoParams {
@@ -112,6 +240,7 @@ export interface FactoryDemoParams {
   clientRequestId?: string;
   scenario?: DemoScenario;
   maxScrapPercent?: number;
+  energyPriceBand?: string;
 }
 
 export interface FactoryDemoResult {
@@ -131,33 +260,35 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
     clientRequestId,
     scenario = 'moisture_high',
     maxScrapPercent = 2.0,
+    energyPriceBand = 'standard',
   } = params;
 
   const logPrefix = `[FACTORY_DEMO]`;
-  console.log(`${logPrefix} Starting demo — scenario=${scenario} max_scrap=${maxScrapPercent}% runId=${runId}`);
+  const energyLimit = getEnergyLimit(energyPriceBand);
+  console.log(`${logPrefix} Starting demo — scenario=${scenario} max_scrap=${maxScrapPercent}% energy_limit=${energyLimit}kWh runId=${runId}`);
 
-  const constraints = { max_scrap_percent: maxScrapPercent };
+  const constraints = { max_scrap_percent: maxScrapPercent, max_energy_kwh: energyLimit };
   const steps = buildDemoSteps(scenario);
-  const goal = `Injection moulding demo: keep scrap below ${maxScrapPercent}% under scenario "${scenario}"`;
 
   await logAFREvent({
     userId, runId, conversationId, clientRequestId,
     actionTaken: 'factory_demo_started', status: 'pending',
-    taskGenerated: `Factory demo: ${scenario}, max scrap ${maxScrapPercent}%`,
+    taskGenerated: `Factory demo: ${scenario}, max scrap ${maxScrapPercent}%, energy band ${energyPriceBand}`,
     runType: 'plan',
-    metadata: { scenario, maxScrapPercent, stepCount: steps.length },
+    metadata: { scenario, maxScrapPercent, energyPriceBand, energyLimit, stepCount: steps.length },
   }).catch(() => {});
 
   const planArtefact = await createArtefact({
     runId, userId, conversationId,
     type: 'plan',
     title: `Factory Demo Plan: ${scenario}`,
-    summary: `3-step injection moulding simulation (${scenario}), max scrap ${maxScrapPercent}%`,
+    summary: `3-step injection moulding simulation (${scenario}), max scrap ${maxScrapPercent}%, energy limit ${energyLimit} kWh/part`,
     payload: {
       scenario,
       constraints,
       steps: steps.map(s => ({ step: s.step_index + 1, label: s.label, action: s.proposed_action })),
       plan_version: 1,
+      energy_price_band: energyPriceBand,
     },
   });
 
@@ -169,6 +300,8 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
   let currentMitigation = steps[2].proposed_action;
   let mitigationAttempts = 0;
   const MAX_MITIGATION_SWITCHES = 2;
+  const stepHistory: StepHistory[] = [];
+  let changePlanTrigger: string | null = null;
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
@@ -196,7 +329,7 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
     let driftReason = 'No drift detected';
     if (driftDetected) {
       const delta = +(simOutput.scrap_rate_now - baselineScrap!).toFixed(2);
-      driftReason = `Scrap increased by ${delta}pp from baseline ${baselineScrap}% to ${simOutput.scrap_rate_now}%. Defect: ${simOutput.defect_type}. ${simOutput.notes}`;
+      driftReason = `Scrap increased by ${delta}pp from baseline ${baselineScrap}% to ${simOutput.scrap_rate_now}%. Probable cause: ${formatCause(simOutput.probable_cause)}. Defect: ${simOutput.defect_type}. ${simOutput.notes}`;
     } else if (i > 0) {
       driftReason = `Scrap ${simOutput.scrap_rate_now}% is at or below baseline ${baselineScrap}%. No adverse drift.`;
     }
@@ -205,7 +338,7 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
       runId, userId, conversationId,
       type: 'factory_state',
       title: `Factory State: Step ${i + 1} — ${step.label}`,
-      summary: `scrap=${simOutput.scrap_rate_now}% defect=${simOutput.defect_type} energy=${simOutput.energy_kwh_per_good_part}kWh floor=${simOutput.achievable_scrap_floor}%`,
+      summary: `scrap=${simOutput.scrap_rate_now}% defect=${simOutput.defect_type} cause=${simOutput.probable_cause} trend=${simOutput.trend} energy=${simOutput.energy_kwh_per_good_part}kWh(${simOutput.energy_status})`,
       payload: {
         ...simOutput,
         step_index: step.step_index,
@@ -216,38 +349,63 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
         drift_detected: driftDetected,
         drift_reason: driftReason,
         energy_per_part: simOutput.energy_kwh_per_good_part,
+        energy_limit: energyLimit,
+        diagnosis: {
+          probable_cause: simOutput.probable_cause,
+          trend: simOutput.trend,
+          energy_status: simOutput.energy_status,
+        },
       },
     });
 
     const isAboveTarget = simOutput.scrap_rate_now > constraints.max_scrap_percent;
     const isFloorAboveTarget = simOutput.achievable_scrap_floor > constraints.max_scrap_percent;
+    const prevDefect = previousState?.defect_type ?? null;
+    const defectShifted = prevDefect !== null && prevDefect !== 'none' && simOutput.defect_type !== 'none' && simOutput.defect_type !== prevDefect;
+
     let decision: string;
     let reason: string;
     let expectedImpact: string;
+    let interventionRationale: string | null = null;
+    let interventionConsidered: string[] | null = null;
 
     if (i === 0) {
       decision = 'proceed_to_monitoring';
-      reason = `Baseline scrap ${simOutput.scrap_rate_now}% recorded. Floor=${simOutput.achievable_scrap_floor}%.`;
-      expectedImpact = 'Drift expected in next cycle batch.';
+      reason = `Baseline assessment complete. Scrap ${simOutput.scrap_rate_now}%, floor=${simOutput.achievable_scrap_floor}%. Diagnosis: ${formatCause(simOutput.probable_cause)}, trend ${simOutput.trend}.`;
+      expectedImpact = 'Monitoring for drift in next cycle batch.';
     } else if (i === 1) {
-      decision = isAboveTarget ? 'intervene' : 'continue_monitoring';
-      reason = isAboveTarget
-        ? `Scrap ${simOutput.scrap_rate_now}% exceeds target ${constraints.max_scrap_percent}%. Defect: ${simOutput.defect_type}.`
-        : `Scrap ${simOutput.scrap_rate_now}% still within target.`;
-      expectedImpact = isAboveTarget
-        ? `Mitigation "${currentMitigation}" should reduce scrap toward floor ${simOutput.achievable_scrap_floor}%.`
-        : 'No intervention needed.';
+      if (isAboveTarget) {
+        const selection = selectIntervention(simOutput.probable_cause, null, scenario, false);
+        currentMitigation = selection.intervention;
+        decision = 'intervene';
+        reason = `Scrap ${simOutput.scrap_rate_now}% exceeds target ${constraints.max_scrap_percent}%. Diagnosed cause: ${formatCause(simOutput.probable_cause)} (trend: ${simOutput.trend}). Defect: ${simOutput.defect_type}.`;
+        expectedImpact = `Selected "${selection.intervention}" — ${selection.rationale}. Considered: ${selection.considered.join(', ')}.`;
+        interventionRationale = selection.rationale;
+        interventionConsidered = selection.considered;
+      } else {
+        decision = 'continue_monitoring';
+        reason = `Scrap ${simOutput.scrap_rate_now}% still within target. Diagnosis: ${formatCause(simOutput.probable_cause)}, trend ${simOutput.trend}.`;
+        expectedImpact = 'No intervention needed at this time.';
+      }
     } else {
       const improved = simOutput.scrap_rate_now < (previousState?.scrap_rate_now ?? simOutput.scrap_rate_now);
-      decision = isAboveTarget ? 'escalate' : 'accept';
-      reason = isAboveTarget
-        ? `After "${action}", scrap=${simOutput.scrap_rate_now}% still above target. Floor=${simOutput.achievable_scrap_floor}%.`
-        : `Mitigation "${action}" succeeded. Scrap=${simOutput.scrap_rate_now}% within target.`;
-      expectedImpact = isAboveTarget
-        ? (isFloorAboveTarget
+      if (defectShifted) {
+        decision = 'mitigation_mismatch';
+        reason = `After "${action}", defect type shifted from "${prevDefect}" to "${simOutput.defect_type}" — indicates the intervention did not address the root cause (${formatCause(simOutput.probable_cause)}).`;
+        expectedImpact = isFloorAboveTarget
+          ? `Floor ${simOutput.achievable_scrap_floor}% > target — recovery unlikely with any intervention.`
+          : `A different intervention targeting ${formatCause(simOutput.probable_cause)} may resolve this.`;
+      } else if (isAboveTarget) {
+        decision = 'escalate';
+        reason = `After "${action}", scrap=${simOutput.scrap_rate_now}% still above target. Cause: ${formatCause(simOutput.probable_cause)}, trend: ${simOutput.trend}.`;
+        expectedImpact = isFloorAboveTarget
           ? `Floor ${simOutput.achievable_scrap_floor}% > target ${constraints.max_scrap_percent}% — target is UNACHIEVABLE with current conditions.`
-          : 'Alternative mitigation may help.')
-        : 'Production can continue normally.';
+          : 'Alternative mitigation may help.';
+      } else {
+        decision = 'accept';
+        reason = `Mitigation "${action}" succeeded. Scrap=${simOutput.scrap_rate_now}% within target. Root cause (${formatCause(simOutput.probable_cause)}) ${improved ? 'addressed' : 'managed'}.`;
+        expectedImpact = 'Production can continue normally.';
+      }
     }
 
     const decisionArtefact = await createArtefact({
@@ -265,25 +423,45 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
         target_scrap: constraints.max_scrap_percent,
         achievable_floor: simOutput.achievable_scrap_floor,
         floor_above_target: isFloorAboveTarget,
+        diagnosis: {
+          probable_cause: simOutput.probable_cause,
+          trend: simOutput.trend,
+          energy_status: simOutput.energy_status,
+          defect_shifted: defectShifted,
+          previous_defect: prevDefect,
+        },
+        ...(interventionRationale ? { intervention_rationale: interventionRationale } : {}),
+        ...(interventionConsidered ? { intervention_considered: interventionConsidered } : {}),
       },
     });
 
     console.log(`${logPrefix} Step ${i + 1} artefacts written: state=${stateArtefact.id} decision=${decisionArtefact.id}`);
 
-    const towerVerdict = judgeFactoryStep(step.step_index, simOutput, constraints.max_scrap_percent, scenario);
+    const towerVerdict = judgeFactoryStep(step.step_index, simOutput, constraints.max_scrap_percent, scenario, stepHistory, energyLimit);
     const verdict = towerVerdict.verdict;
     const towerAction = towerVerdict.action;
+
+    stepHistory.push({
+      stepIndex: step.step_index,
+      scrap: simOutput.scrap_rate_now,
+      defect: simOutput.defect_type,
+      trend: simOutput.trend,
+      cause: simOutput.probable_cause,
+      energy: simOutput.energy_kwh_per_good_part,
+      energyStatus: simOutput.energy_status,
+    });
 
     const judgementArtefact = await createArtefact({
       runId, userId, conversationId,
       type: 'tower_judgement',
       title: `Tower Judgement: ${verdict} (Step ${i + 1})`,
-      summary: `Verdict: ${verdict} | Action: ${towerAction} | Scrap: ${simOutput.scrap_rate_now}% vs target ${constraints.max_scrap_percent}%`,
+      summary: `Verdict: ${verdict} | Action: ${towerAction} | Trigger: ${towerVerdict.trigger} | Scrap: ${simOutput.scrap_rate_now}% vs target ${constraints.max_scrap_percent}%`,
       payload: {
         verdict,
         action: towerAction,
         reasons: towerVerdict.reasons,
         metrics: towerVerdict.metrics,
+        trigger: towerVerdict.trigger,
         step_index: step.step_index,
         step_label: step.label,
         judged_artefact_id: stateArtefact.id,
@@ -292,27 +470,27 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
       },
     });
 
-    console.log(`${logPrefix} Tower verdict step ${i + 1}: ${verdict} → ${towerAction}`);
+    console.log(`${logPrefix} Tower verdict step ${i + 1}: ${verdict} → ${towerAction} (trigger: ${towerVerdict.trigger})`);
 
     await logAFREvent({
       userId, runId, conversationId, clientRequestId,
       actionTaken: 'tower_verdict', status: towerAction === 'stop' ? 'failed' : 'success',
-      taskGenerated: `Factory demo step ${i + 1}: Tower ${verdict}→${towerAction}`,
+      taskGenerated: `Factory demo step ${i + 1}: Tower ${verdict}→${towerAction} (${towerVerdict.trigger})`,
       runType: 'plan',
-      metadata: { step_index: step.step_index, verdict, action: towerAction, scrap: simOutput.scrap_rate_now },
+      metadata: { step_index: step.step_index, verdict, action: towerAction, trigger: towerVerdict.trigger, scrap: simOutput.scrap_rate_now, cause: simOutput.probable_cause },
     }).catch(() => {});
 
     stepsCompleted = i + 1;
 
     if (towerAction === 'stop') {
-      console.log(`${logPrefix} Tower STOP at step ${i + 1}. Terminating.`);
+      console.log(`${logPrefix} Tower STOP at step ${i + 1} (trigger: ${towerVerdict.trigger}). Terminating.`);
       stoppedByTower = true;
 
       await createArtefact({
         runId, userId, conversationId,
         type: 'plan_result',
         title: `Factory Demo Result: STOPPED at Step ${i + 1}`,
-        summary: `Tower stopped the run. Scrap ${simOutput.scrap_rate_now}% (target ${constraints.max_scrap_percent}%). ${isFloorAboveTarget ? 'Floor above target — unachievable.' : ''}`,
+        summary: `Tower stopped the run (${towerVerdict.trigger}). Scrap ${simOutput.scrap_rate_now}% (target ${constraints.max_scrap_percent}%). Cause: ${formatCause(simOutput.probable_cause)}.`,
         payload: {
           outcome: 'stopped',
           stopped_at_step: i + 1,
@@ -322,20 +500,30 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
           floor_above_target: isFloorAboveTarget,
           scenario,
           tower_verdict: verdict,
+          stop_trigger: towerVerdict.trigger,
           plan_changed: planChanged,
+          change_plan_trigger: changePlanTrigger,
           mitigation_attempts: mitigationAttempts,
+          final_diagnosis: {
+            probable_cause: simOutput.probable_cause,
+            trend: simOutput.trend,
+            energy_status: simOutput.energy_status,
+          },
         },
       });
       break;
     }
 
     if (towerAction === 'change_plan' && i < steps.length - 1) {
-      const alternatives = ALTERNATIVE_MITIGATIONS[scenario] || [];
-      const nextMitigation = alternatives.find(a => a !== currentMitigation);
+      changePlanTrigger = towerVerdict.trigger;
+      const defectShiftedNow = towerVerdict.trigger === 'defect_shift_mismatch';
 
-      if (nextMitigation && mitigationAttempts < MAX_MITIGATION_SWITCHES) {
-        console.log(`${logPrefix} Tower CHANGE_PLAN: switching mitigation from "${currentMitigation}" to "${nextMitigation}"`);
-        currentMitigation = nextMitigation;
+      const selection = selectIntervention(simOutput.probable_cause, currentMitigation, scenario, defectShiftedNow);
+
+      if (selection.intervention !== currentMitigation && mitigationAttempts < MAX_MITIGATION_SWITCHES) {
+        console.log(`${logPrefix} Tower CHANGE_PLAN (${towerVerdict.trigger}): switching from "${currentMitigation}" to "${selection.intervention}" — ${selection.rationale}`);
+        const previousMitigation = currentMitigation;
+        currentMitigation = selection.intervention;
         planChanged = true;
         mitigationAttempts++;
 
@@ -343,18 +531,26 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
           runId, userId, conversationId,
           type: 'plan',
           title: `Factory Demo Plan v${mitigationAttempts + 1}: Strategy Change`,
-          summary: `Tower requested plan change. Mitigation switched to "${nextMitigation}".`,
+          summary: `Tower change_plan (${towerVerdict.trigger}). Diagnosed ${formatCause(simOutput.probable_cause)}. Switched from "${previousMitigation}" to "${selection.intervention}".`,
           payload: {
             scenario,
             constraints,
             plan_version: mitigationAttempts + 1,
-            previous_mitigation: steps[2].proposed_action,
-            new_mitigation: nextMitigation,
-            reason: `Tower change_plan at step ${i + 1}`,
+            previous_mitigation: previousMitigation,
+            new_mitigation: selection.intervention,
+            reason: `Tower change_plan at step ${i + 1} (trigger: ${towerVerdict.trigger})`,
+            trigger: towerVerdict.trigger,
+            diagnosis: {
+              probable_cause: simOutput.probable_cause,
+              trend: simOutput.trend,
+              defect_shifted: defectShiftedNow,
+            },
+            intervention_rationale: selection.rationale,
+            alternatives_considered: selection.considered,
           },
         });
       } else {
-        console.log(`${logPrefix} Tower CHANGE_PLAN but no alternative mitigations available. Continuing.`);
+        console.log(`${logPrefix} Tower CHANGE_PLAN but no alternative mitigations available. Continuing with "${currentMitigation}".`);
       }
     }
   }
@@ -367,7 +563,7 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
       runId, userId, conversationId,
       type: 'plan_result',
       title: `Factory Demo Result: ${withinTarget ? 'SUCCESS' : 'PARTIAL'}`,
-      summary: `Completed all ${stepsCompleted} steps. Final scrap ${finalScrap}% (target ${constraints.max_scrap_percent}%).`,
+      summary: `Completed all ${stepsCompleted} steps. Final scrap ${finalScrap}% (target ${constraints.max_scrap_percent}%). Cause: ${formatCause(priorState?.probable_cause ?? 'none')}.`,
       payload: {
         outcome: withinTarget ? 'success' : 'partial',
         steps_completed: stepsCompleted,
@@ -376,15 +572,22 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
         achievable_floor: priorState?.achievable_scrap_floor ?? 0,
         scenario,
         plan_changed: planChanged,
+        change_plan_trigger: changePlanTrigger,
         mitigation_used: currentMitigation,
         mitigation_attempts: mitigationAttempts,
+        final_diagnosis: {
+          probable_cause: priorState?.probable_cause ?? 'none',
+          trend: priorState?.trend ?? 'stable',
+          energy_status: priorState?.energy_status ?? 'within_limit',
+        },
       },
     });
   }
 
+  const causeLabel = formatCause(priorState?.probable_cause ?? 'none');
   const summary = stoppedByTower
-    ? `Factory demo stopped by Tower at step ${stepsCompleted}. Scrap ${priorState?.scrap_rate_now}% exceeded target ${constraints.max_scrap_percent}%.`
-    : `Factory demo completed ${stepsCompleted} steps. Final scrap ${priorState?.scrap_rate_now}% (target ${constraints.max_scrap_percent}%).`;
+    ? `Factory demo stopped at step ${stepsCompleted}. Cause: ${causeLabel}. Scrap ${priorState?.scrap_rate_now}% exceeded target ${constraints.max_scrap_percent}%.`
+    : `Factory demo completed ${stepsCompleted} steps. Cause: ${causeLabel}. Final scrap ${priorState?.scrap_rate_now}% (target ${constraints.max_scrap_percent}%).`;
 
   console.log(`${logPrefix} Demo complete: ${summary}`);
 
@@ -393,7 +596,7 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
     actionTaken: 'factory_demo_completed', status: stoppedByTower ? 'failed' : 'success',
     taskGenerated: summary,
     runType: 'plan',
-    metadata: { scenario, stepsCompleted, stoppedByTower, planChanged },
+    metadata: { scenario, stepsCompleted, stoppedByTower, planChanged, changePlanTrigger, cause: priorState?.probable_cause },
   }).catch(() => {});
 
   try {

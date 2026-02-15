@@ -10,6 +10,14 @@ export interface RunConfig {
   goal?: string;
 }
 
+export interface StepDiagnosis {
+  probable_cause: string | null;
+  trend: string | null;
+  energy_status: string | null;
+  defect_shifted: boolean;
+  previous_defect: string | null;
+}
+
 export interface StepFact {
   step_index: number;
   label: string;
@@ -28,6 +36,10 @@ export interface StepFact {
   tower_verdict: string | null;
   tower_action: string | null;
   tower_reasons: string[];
+  tower_trigger: string | null;
+  diagnosis: StepDiagnosis;
+  intervention_rationale: string | null;
+  intervention_considered: string[] | null;
 }
 
 export interface OutcomeFact {
@@ -39,9 +51,11 @@ export interface OutcomeFact {
   achievable_floor: number | null;
   floor_above_target: boolean | null;
   plan_changed: boolean;
+  change_plan_trigger: string | null;
   mitigation_used: string | null;
   mitigation_attempts: number;
   stop_reason: string | null;
+  final_diagnosis: StepDiagnosis | null;
 }
 
 export interface RunFactsBundle {
@@ -53,6 +67,33 @@ export interface RunFactsBundle {
   outcome: OutcomeFact;
 }
 
+const CAUSE_PLAIN: Record<string, string> = {
+  moisture_instability: 'moisture in the raw material',
+  tool_wear: 'worn tooling',
+  temp_swing: 'temperature swings',
+  none: 'no specific problem',
+  unknown: 'an undetermined issue',
+};
+
+const TRIGGER_PLAIN: Record<string, string> = {
+  floor_above_target: 'the problem could not be fixed enough to meet the goal',
+  energy_critical_stop: 'energy use was too high with no path to recovery',
+  scrap_above_target: 'waste exceeded the goal',
+  defect_shift_mismatch: 'the first fix created a new type of defect instead of solving the original one',
+  trend_rising_preemptive: 'waste was rising steadily and heading toward the goal',
+  energy_exceeded: 'energy use per part was too high',
+  baseline_ok: 'everything looked fine at the start',
+  all_ok: 'everything was within limits',
+};
+
+function causePlain(cause: string | null): string {
+  return CAUSE_PLAIN[cause ?? 'unknown'] ?? cause ?? 'an unknown issue';
+}
+
+function triggerPlain(trigger: string | null): string {
+  return TRIGGER_PLAIN[trigger ?? ''] ?? trigger ?? 'conditions changed';
+}
+
 function buildFactoryTldr(bundle: RunFactsBundle): string {
   const goal = bundle.outcome.target_scrap;
   const goalLabel = goal !== null ? `${goal}%` : 'an acceptable level';
@@ -62,30 +103,40 @@ function buildFactoryTldr(bundle: RunFactsBundle): string {
   const planChanged = bundle.outcome.plan_changed;
   const outcome = bundle.outcome.outcome;
 
+  const cause = bundle.outcome.final_diagnosis?.probable_cause ?? null;
+  const causeName = causePlain(cause);
+
+  const changeTrigger = bundle.outcome.change_plan_trigger;
+  const mitigationUsed = bundle.outcome.mitigation_used;
+
+  const driftStep = bundle.steps.find(s => s.diagnosis.probable_cause && s.diagnosis.probable_cause !== 'none' && s.tower_action === 'change_plan');
+  const driftTrigger = driftStep?.tower_trigger ?? changeTrigger;
+
   let sentence1 = `You asked the system to run the factory with no more than ${goalLabel} waste.`;
 
   let sentence2: string;
   let sentence3: string | null = null;
 
   if (stopped) {
-    if (bundle.outcome.stopped_at_step === 0 || bundle.outcome.stopped_at_step === 1) {
+    const stoppedStep = bundle.outcome.stopped_at_step;
+    if (stoppedStep === 0 || stoppedStep === 1) {
       sentence2 = finalScrap !== null
-        ? `The factory produced ${finalScrap}% waste right away, which was already over the ${goalLabel} goal.`
-        : `The factory immediately produced more waste than allowed.`;
+        ? `The system diagnosed ${causeName} and found waste at ${finalScrap}%, already over the ${goalLabel} goal.`
+        : `The system found a problem right away that put waste over the goal.`;
     } else {
       sentence2 = finalScrap !== null
-        ? `Waste reached ${finalScrap}% during production and could not be brought down enough.`
-        : `Waste rose during production and could not be reduced enough.`;
+        ? `The system diagnosed ${causeName}. Despite trying to fix it, waste stayed at ${finalScrap}%.`
+        : `The system identified a problem but could not fix it enough.`;
     }
     if (lowestPossible !== null && goal !== null && lowestPossible > goal) {
       sentence3 = `The system stopped because even the best possible waste level (${lowestPossible}%) was still above your ${goalLabel} goal.`;
     } else {
-      sentence3 = `The system stopped the run because the goal could not be met.`;
+      sentence3 = `The system stopped because the goal could not be met under current conditions.`;
     }
   } else if (planChanged) {
-    sentence2 = finalScrap !== null
-      ? `Waste increased during production, so the system changed its approach.`
-      : `Production conditions changed, so the system adjusted its strategy.`;
+    const triggerExplanation = triggerPlain(driftTrigger);
+    sentence2 = `The system diagnosed ${causeName} and noticed ${triggerExplanation}, so it changed its approach${mitigationUsed ? ` to "${mitigationUsed.replace(/_/g, ' ')}"` : ''}.`;
+
     if (outcome === 'success' || outcome === 'completed') {
       sentence3 = finalScrap !== null
         ? `After the change, waste dropped to ${finalScrap}% and production finished successfully.`
@@ -98,7 +149,9 @@ function buildFactoryTldr(bundle: RunFactsBundle): string {
       sentence2 = finalScrap !== null
         ? `The factory kept waste at ${finalScrap}% throughout the run, well within the goal.`
         : `The factory stayed within the waste goal throughout the run.`;
-      sentence3 = `No changes were needed.`;
+      sentence3 = cause && cause !== 'none'
+        ? `The system monitored for ${causeName} but no intervention was needed.`
+        : `No problems were detected and no changes were needed.`;
     } else {
       sentence2 = `The run ended without a clear result in the recorded data.`;
     }
@@ -120,6 +173,17 @@ function buildTldr(bundle: RunFactsBundle): string {
 
 function extractPayload(artefact: Artefact): Record<string, unknown> {
   return (artefact.payloadJson as Record<string, unknown>) ?? {};
+}
+
+function extractDiagnosis(payload: Record<string, unknown>): StepDiagnosis {
+  const diag = (payload.diagnosis as Record<string, unknown>) ?? {};
+  return {
+    probable_cause: (diag.probable_cause as string) ?? (payload.probable_cause as string) ?? null,
+    trend: (diag.trend as string) ?? (payload.trend as string) ?? null,
+    energy_status: (diag.energy_status as string) ?? (payload.energy_status as string) ?? null,
+    defect_shifted: (diag.defect_shifted as boolean) ?? false,
+    previous_defect: (diag.previous_defect as string) ?? null,
+  };
 }
 
 function buildFactoryFactsBundle(runId: string, artefacts: Artefact[]): RunFactsBundle {
@@ -181,9 +245,14 @@ function buildFactoryFactsBundle(runId: string, artefacts: Artefact[]): RunFacts
       tower_verdict: (jp.verdict as string) ?? null,
       tower_action: (jp.action as string) ?? null,
       tower_reasons: (jp.reasons as string[]) ?? [],
+      tower_trigger: (jp.trigger as string) ?? null,
+      diagnosis: extractDiagnosis(sp),
+      intervention_rationale: (dp.intervention_rationale as string) ?? null,
+      intervention_considered: (dp.intervention_considered as string[]) ?? null,
     });
   }
 
+  const resultDiag = (resultPayload.final_diagnosis as Record<string, unknown>) ?? {};
   const outcome: OutcomeFact = {
     outcome: (resultPayload.outcome as string) ?? 'unknown',
     stopped_by_tower: (resultPayload.outcome as string) === 'stopped',
@@ -193,9 +262,19 @@ function buildFactoryFactsBundle(runId: string, artefacts: Artefact[]): RunFacts
     achievable_floor: (resultPayload.achievable_floor as number) ?? null,
     floor_above_target: (resultPayload.floor_above_target as boolean) ?? null,
     plan_changed: (resultPayload.plan_changed as boolean) ?? false,
+    change_plan_trigger: (resultPayload.change_plan_trigger as string) ?? null,
     mitigation_used: (resultPayload.mitigation_used as string) ?? null,
     mitigation_attempts: (resultPayload.mitigation_attempts as number) ?? 0,
     stop_reason: resultArtefact?.summary ?? null,
+    final_diagnosis: Object.keys(resultDiag).length > 0
+      ? {
+          probable_cause: (resultDiag.probable_cause as string) ?? null,
+          trend: (resultDiag.trend as string) ?? null,
+          energy_status: (resultDiag.energy_status as string) ?? null,
+          defect_shifted: false,
+          previous_defect: null,
+        }
+      : null,
   };
 
   return {
@@ -226,6 +305,8 @@ STRICT RULES:
 4. Use exact numbers from the bundle (scrap rates, floor values, energy figures).
 5. Write in clear, professional prose. No markdown headers — use the section labels provided.
 6. Keep each section concise (2-4 sentences max).
+7. Always mention the diagnosed cause (probable_cause) and trend when available.
+8. When a plan change occurred, explain the trigger and why the new intervention was chosen.
 
 OUTPUT FORMAT (use these exact section labels):
 
@@ -236,16 +317,19 @@ State the goal and the key constraint (target scrap %).
 List the scenario, constraints, and any user-specified parameters.
 
 **What the factory reported**
-For each step, state: measured scrap %, achievable floor %, defect type, energy per part, and whether drift was detected. Use the step labels from the bundle.
+For each step, state: measured scrap %, achievable floor %, defect type, energy per part, diagnosed cause, and trend. Use the step labels from the bundle.
+
+**What was diagnosed**
+Summarize the root cause identified across steps. Describe how the trend evolved and whether defect types shifted.
 
 **How it was judged against the goal**
-For each step, state the Tower verdict and action, with the reasoning. Compare measured scrap to the target.
+For each step, state the Tower verdict, action, and trigger. Explain the reasoning — not just "scrap vs target" but also cause, trend, and energy factors.
 
 **What was decided**
-State the decision at each step and any plan changes (mitigation switches).
+State the decision at each step. If intervention was chosen, explain which options were considered and why one was selected based on the diagnosed cause.
 
 **Outcome**
-State the final result: success, stopped, or partial. If stopped, explain why using the exact numbers (floor vs target). State final scrap rate and whether the target was achievable.`;
+State the final result: success, stopped, or partial. Include the root cause, final trend, and whether the target was achievable.`;
 
 async function callLLMForNarrative(factsBundle: RunFactsBundle): Promise<string> {
   const openaiKey = process.env.OPENAI_API_KEY;

@@ -929,17 +929,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const { executeFactoryDemo } = await import('./supervisor/factory-demo');
         const { randomUUID } = await import('crypto');
         const scenario = req.body?.scenario || 'moisture_high';
-        const maxScrapPercent = req.body?.max_scrap_percent ?? 2.0;
+        const maxScrapPercent = req.body?.max_scrap_percent ?? req.body?.maxScrapPercent ?? 2.0;
+        const energyPriceBand = req.body?.energy_price_band || req.body?.energyPriceBand || 'standard';
         const runId = randomUUID();
         const userId = req.body?.user_id || 'debug-user';
 
-        console.log(`[DEBUG] Running factory demo — scenario=${scenario} max_scrap=${maxScrapPercent}%`);
+        console.log(`[DEBUG] Running factory demo — scenario=${scenario} max_scrap=${maxScrapPercent}% energy_band=${energyPriceBand}`);
 
         const result = await executeFactoryDemo({
           runId,
           userId,
           scenario,
           maxScrapPercent,
+          energyPriceBand,
         });
 
         const artefacts = await storage.getArtefactsByRunId(runId);
