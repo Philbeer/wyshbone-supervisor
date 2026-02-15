@@ -1,0 +1,69 @@
+Supervisor: Implement machine switching on CHANGE_PLAN for factory demo
+
+Goal: Make the factory demo visibly agentic by switching from Machine 1 (primary) to Machine 2 (alternate) when Tower returns CHANGE_PLAN.
+
+Behaviour:
+
+Parse demo metadata:
+
+conditions (ambient temp, moisture, energy band)
+
+constraints.max_scrap_percent
+
+machines.primary + machines.alternate
+
+Start the run using machines.primary.
+
+After each step, create artefacts:
+
+factory_state (must include which machine was used)
+
+factory_decision (must state the chosen machine and why)
+
+tower_judgement
+
+If Tower verdict is CHANGE_PLAN:
+
+Create a new plan artefact “Plan v2: Switch to alternate machine”
+
+Switch execution to machines.alternate for subsequent steps
+
+Continue the run (do not reset factory conditions; only change the machine profile)
+
+If Tower verdict is STOP, stop and write plan_result STOPPED.
+
+If Tower verdict is CONTINUE, keep using the current machine.
+
+Simulator requirements (keep minimal and deterministic):
+
+The simulator must use machine profile + conditions to produce different outcomes.
+
+Minimal rule is fine, e.g. alternate machine is more stable under moisture_high so it yields lower scrap / different defect mix.
+
+Must remain deterministic for demo repeatability.
+
+Artefact requirements (for legibility):
+
+factory_state payload must include:
+
+machine_used: "primary" | "alternate"
+
+machine_id/tool_id (whatever identifiers exist)
+
+scrap_percent, defect, energy_per_part, floor_percent
+
+factory_decision must explicitly say:
+
+“Stayed on Machine 1” OR “Switched to Machine 2”
+
+Reason tied to goal (scrap/defect/energy)
+
+TL;DR and narrative must mention machine switching when it occurs.
+
+Success criteria:
+
+In AFR timeline, a CHANGE_PLAN run visibly switches machine_used from primary to alternate
+
+The final scrap changes accordingly and the run can succeed or stop depending on constraints
+
+Non-technical user can see: “It moved production to machine 2 because machine 1 couldn’t meet the waste target.”

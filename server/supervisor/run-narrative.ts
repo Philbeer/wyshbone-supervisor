@@ -8,6 +8,10 @@ export interface RunConfig {
   constraints: Record<string, unknown>;
   user_inputs?: Record<string, unknown>;
   goal?: string;
+  machines?: {
+    primary: { id: string; label: string; notes: string };
+    alternate: { id: string; label: string; notes: string };
+  };
 }
 
 export interface StepDiagnosis {
@@ -40,6 +44,8 @@ export interface StepFact {
   diagnosis: StepDiagnosis;
   intervention_rationale: string | null;
   intervention_considered: string[] | null;
+  machine_used: string | null;
+  machine_label: string | null;
 }
 
 export interface OutcomeFact {
@@ -51,6 +57,9 @@ export interface OutcomeFact {
   achievable_floor: number | null;
   floor_above_target: boolean | null;
   plan_changed: boolean;
+  machine_switched: boolean;
+  final_machine: string | null;
+  final_machine_label: string | null;
   change_plan_trigger: string | null;
   mitigation_used: string | null;
   mitigation_attempts: number;
@@ -102,6 +111,8 @@ function buildFactoryTldr(bundle: RunFactsBundle): string {
   const stopped = bundle.outcome.stopped_by_tower;
   const planChanged = bundle.outcome.plan_changed;
   const outcome = bundle.outcome.outcome;
+  const machineSwitched = bundle.outcome.machine_switched;
+  const finalMachineLabel = bundle.outcome.final_machine_label;
 
   const cause = bundle.outcome.final_diagnosis?.probable_cause ?? null;
   const causeName = causePlain(cause);
@@ -112,6 +123,9 @@ function buildFactoryTldr(bundle: RunFactsBundle): string {
   const driftStep = bundle.steps.find(s => s.diagnosis.probable_cause && s.diagnosis.probable_cause !== 'none' && s.tower_action === 'change_plan');
   const driftTrigger = driftStep?.tower_trigger ?? changeTrigger;
 
+  const primaryLabel = bundle.config.machines?.primary?.label ?? 'Machine 1';
+  const alternateLabel = bundle.config.machines?.alternate?.label ?? 'Machine 2';
+
   let sentence1 = `You asked the system to run the factory with no more than ${goalLabel} waste.`;
 
   let sentence2: string;
@@ -119,13 +133,14 @@ function buildFactoryTldr(bundle: RunFactsBundle): string {
 
   if (stopped) {
     const stoppedStep = bundle.outcome.stopped_at_step;
+    const stoppedMachine = finalMachineLabel ?? primaryLabel;
     if (stoppedStep === 0 || stoppedStep === 1) {
       sentence2 = finalScrap !== null
-        ? `The system diagnosed ${causeName} and found waste at ${finalScrap}%, already over the ${goalLabel} goal.`
-        : `The system found a problem right away that put waste over the goal.`;
+        ? `The system diagnosed ${causeName} on ${stoppedMachine} and found waste at ${finalScrap}%, already over the ${goalLabel} goal.`
+        : `The system found a problem on ${stoppedMachine} right away that put waste over the goal.`;
     } else {
       sentence2 = finalScrap !== null
-        ? `The system diagnosed ${causeName}. Despite trying to fix it, waste stayed at ${finalScrap}%.`
+        ? `The system diagnosed ${causeName}. Despite trying to fix it${machineSwitched ? ` and switching to ${alternateLabel}` : ''}, waste stayed at ${finalScrap}%.`
         : `The system identified a problem but could not fix it enough.`;
     }
     if (lowestPossible !== null && goal !== null && lowestPossible > goal) {
@@ -133,10 +148,19 @@ function buildFactoryTldr(bundle: RunFactsBundle): string {
     } else {
       sentence3 = `The system stopped because the goal could not be met under current conditions.`;
     }
+  } else if (planChanged && machineSwitched) {
+    const triggerExplanation = triggerPlain(driftTrigger);
+    sentence2 = `The system diagnosed ${causeName} on ${primaryLabel} and noticed ${triggerExplanation}, so it moved production to ${alternateLabel}.`;
+    if (outcome === 'success' || outcome === 'completed') {
+      sentence3 = finalScrap !== null
+        ? `On ${alternateLabel}, waste dropped to ${finalScrap}% and production finished successfully.`
+        : `After the switch, waste came back within the goal and production continued.`;
+    } else {
+      sentence3 = `Despite the switch, the run did not fully meet the goal.`;
+    }
   } else if (planChanged) {
     const triggerExplanation = triggerPlain(driftTrigger);
     sentence2 = `The system diagnosed ${causeName} and noticed ${triggerExplanation}, so it changed its approach${mitigationUsed ? ` to "${mitigationUsed.replace(/_/g, ' ')}"` : ''}.`;
-
     if (outcome === 'success' || outcome === 'completed') {
       sentence3 = finalScrap !== null
         ? `After the change, waste dropped to ${finalScrap}% and production finished successfully.`
@@ -147,7 +171,7 @@ function buildFactoryTldr(bundle: RunFactsBundle): string {
   } else {
     if (outcome === 'success' || outcome === 'completed') {
       sentence2 = finalScrap !== null
-        ? `The factory kept waste at ${finalScrap}% throughout the run, well within the goal.`
+        ? `The factory kept waste at ${finalScrap}% throughout the run on ${primaryLabel}, well within the goal.`
         : `The factory stayed within the waste goal throughout the run.`;
       sentence3 = cause && cause !== 'none'
         ? `The system monitored for ${causeName} but no intervention was needed.`
@@ -202,12 +226,19 @@ function buildFactoryFactsBundle(runId: string, artefacts: Artefact[]): RunFacts
 
   const constraints = (planPayload.constraints as Record<string, unknown>) ?? {};
   const scenario = (planPayload.scenario as string) ?? 'unknown';
+  const machinesRaw = (planPayload.machines as Record<string, unknown>) ?? {};
 
   const config: RunConfig = {
     run_type: 'factory_demo',
     scenario,
     constraints,
     goal: planArtefact?.summary ?? `Injection moulding demo: scenario=${scenario}`,
+    machines: Object.keys(machinesRaw).length > 0
+      ? {
+          primary: (machinesRaw.primary as { id: string; label: string; notes: string }) ?? { id: 'M1', label: 'Machine 1', notes: '' },
+          alternate: (machinesRaw.alternate as { id: string; label: string; notes: string }) ?? { id: 'M2', label: 'Machine 2', notes: '' },
+        }
+      : undefined,
   };
 
   const steps: StepFact[] = [];
@@ -249,6 +280,8 @@ function buildFactoryFactsBundle(runId: string, artefacts: Artefact[]): RunFacts
       diagnosis: extractDiagnosis(sp),
       intervention_rationale: (dp.intervention_rationale as string) ?? null,
       intervention_considered: (dp.intervention_considered as string[]) ?? null,
+      machine_used: (sp.machine_used as string) ?? (dp.machine_used as string) ?? null,
+      machine_label: (sp.machine_label as string) ?? (dp.machine_label as string) ?? null,
     });
   }
 
@@ -262,6 +295,9 @@ function buildFactoryFactsBundle(runId: string, artefacts: Artefact[]): RunFacts
     achievable_floor: (resultPayload.achievable_floor as number) ?? null,
     floor_above_target: (resultPayload.floor_above_target as boolean) ?? null,
     plan_changed: (resultPayload.plan_changed as boolean) ?? false,
+    machine_switched: (resultPayload.machine_switched as boolean) ?? false,
+    final_machine: (resultPayload.final_machine as string) ?? null,
+    final_machine_label: (resultPayload.final_machine_label as string) ?? null,
     change_plan_trigger: (resultPayload.change_plan_trigger as string) ?? null,
     mitigation_used: (resultPayload.mitigation_used as string) ?? null,
     mitigation_attempts: (resultPayload.mitigation_attempts as number) ?? 0,
@@ -307,6 +343,7 @@ STRICT RULES:
 6. Keep each section concise (2-4 sentences max).
 7. Always mention the diagnosed cause (probable_cause) and trend when available.
 8. When a plan change occurred, explain the trigger and why the new intervention was chosen.
+9. When a machine switch occurred, clearly state which machine was used at each step and why the switch happened.
 
 OUTPUT FORMAT (use these exact section labels):
 
@@ -314,22 +351,22 @@ OUTPUT FORMAT (use these exact section labels):
 State the goal and the key constraint (target scrap %).
 
 **Inputs used**
-List the scenario, constraints, and any user-specified parameters.
+List the scenario, constraints, machines (primary and alternate), and any user-specified parameters.
 
 **What the factory reported**
-For each step, state: measured scrap %, achievable floor %, defect type, energy per part, diagnosed cause, and trend. Use the step labels from the bundle.
+For each step, state: which machine was used, measured scrap %, achievable floor %, defect type, energy per part, diagnosed cause, and trend.
 
 **What was diagnosed**
-Summarize the root cause identified across steps. Describe how the trend evolved and whether defect types shifted.
+Summarize the root cause identified across steps. Describe how the trend evolved, whether defect types shifted, and whether the machine was switched.
 
 **How it was judged against the goal**
-For each step, state the Tower verdict, action, and trigger. Explain the reasoning — not just "scrap vs target" but also cause, trend, and energy factors.
+For each step, state the Tower verdict, action, and trigger. If a machine switch was triggered, explain why the current machine couldn't meet the goal.
 
 **What was decided**
-State the decision at each step. If intervention was chosen, explain which options were considered and why one was selected based on the diagnosed cause.
+State the decision at each step. If machine was switched, explain which machine was chosen and why. State "Stayed on Machine X" or "Switched to Machine Y" explicitly.
 
 **Outcome**
-State the final result: success, stopped, or partial. Include the root cause, final trend, and whether the target was achievable.`;
+State the final result: success, stopped, or partial. Include which machine finished the run, the root cause, final trend, and whether the target was achievable.`;
 
 async function callLLMForNarrative(factsBundle: RunFactsBundle): Promise<string> {
   const openaiKey = process.env.OPENAI_API_KEY;

@@ -1,12 +1,37 @@
 /**
  * FACTORY_SIM — Deterministic injection-moulding simulator tool.
  *
- * Accepts { scenario, constraints, step_index, prior_state, proposed_action }
+ * Accepts { scenario, constraints, step_index, prior_state, proposed_action, machine }
  * Returns { scrap_rate_now, defect_type, energy_kwh_per_good_part, notes, achievable_scrap_floor,
- *           available_actions, probable_cause, trend, energy_status }
+ *           available_actions, probable_cause, trend, energy_status, machine_used }
  *
- * Scenarios are preset lookup tables keyed by (scenario, step_index, proposed_action).
+ * Scenarios are preset lookup tables keyed by (machine, scenario, step_index, proposed_action).
+ * Machine defaults to "primary". Alternate machine presets produce different outcomes.
  */
+
+export interface MachineProfile {
+  id: string;
+  label: string;
+  tool_id: string;
+  tool_age_cycles: number;
+  dryer_type: string;
+  notes: string;
+}
+
+export const DEFAULT_MACHINES: Record<string, { primary: MachineProfile; alternate: MachineProfile }> = {
+  normal: {
+    primary: { id: 'M1', label: 'Machine 1 (Primary)', tool_id: 'T-4401', tool_age_cycles: 12000, dryer_type: 'standard', notes: 'Standard production machine, tooling at mid-life.' },
+    alternate: { id: 'M2', label: 'Machine 2 (Alternate)', tool_id: 'T-4402', tool_age_cycles: 2000, dryer_type: 'standard', notes: 'Backup machine with newer tooling.' },
+  },
+  moisture_high: {
+    primary: { id: 'M1', label: 'Machine 1 (Primary)', tool_id: 'T-4401', tool_age_cycles: 8000, dryer_type: 'standard', notes: 'Standard dryer, struggles with high-moisture resin.' },
+    alternate: { id: 'M2', label: 'Machine 2 (Alternate)', tool_id: 'T-4403', tool_age_cycles: 5000, dryer_type: 'desiccant', notes: 'Equipped with desiccant dryer — better moisture handling.' },
+  },
+  tool_worn: {
+    primary: { id: 'M1', label: 'Machine 1 (Primary)', tool_id: 'T-4401', tool_age_cycles: 45000, dryer_type: 'standard', notes: 'Tool at 45k of 60k cycle life, cavities 3 and 7 worn.' },
+    alternate: { id: 'M2', label: 'Machine 2 (Alternate)', tool_id: 'T-4404', tool_age_cycles: 8000, dryer_type: 'standard', notes: 'Recently refurbished tool, all cavities in good condition.' },
+  },
+};
 
 export interface FactorySimInput {
   scenario: string;
@@ -14,6 +39,7 @@ export interface FactorySimInput {
   step_index: number;
   prior_state: FactorySimOutput | null;
   proposed_action: string;
+  machine?: 'primary' | 'alternate';
 }
 
 export interface FactorySimOutput {
@@ -26,6 +52,7 @@ export interface FactorySimOutput {
   probable_cause: string;
   trend: 'rising' | 'stable' | 'falling';
   energy_status: 'within_limit' | 'high' | 'critical';
+  machine_used: 'primary' | 'alternate';
 }
 
 interface PresetEntry {
@@ -44,12 +71,12 @@ type PresetKey = `${string}|${number}|${string}`;
 
 const PRESETS: Record<PresetKey, PresetEntry> = {
 
-  // ── Scenario: NORMAL ───────────────────────────────────────────────────
+  // ── Scenario: NORMAL (Primary Machine) ─────────────────────────────────
   'normal|0|baseline': {
     scrap_rate_now: 1.2,
     defect_type: 'none',
     energy_kwh_per_good_part: 0.35,
-    notes: 'Machine running within normal parameters. Resin moisture low, tooling new.',
+    notes: 'Machine 1 running within normal parameters. Resin moisture low, tooling at mid-life.',
     achievable_scrap_floor: 0.5,
     available_actions: ['continue', 'increase_speed', 'reduce_speed'],
     probable_cause: 'none',
@@ -60,7 +87,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 3.8,
     defect_type: 'flash',
     energy_kwh_per_good_part: 0.38,
-    notes: 'Tool wear detected after 12k cycles. Flash defects appearing on parting line. Cavities 3 and 7 showing wear patterns.',
+    notes: 'Machine 1: Tool wear detected after 12k cycles. Flash defects appearing on parting line. Cavities 3 and 7 showing wear patterns.',
     achievable_scrap_floor: 0.8,
     available_actions: ['reduce_speed', 'increase_clamp_pressure', 'schedule_tool_refurb'],
     probable_cause: 'tool_wear',
@@ -71,7 +98,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 1.5,
     defect_type: 'none',
     energy_kwh_per_good_part: 0.40,
-    notes: 'Reduced speed from 42 to 36 rpm. Flash eliminated. Scrap back within target.',
+    notes: 'Machine 1: Reduced speed from 42 to 36 rpm. Flash eliminated. Scrap back within target.',
     achievable_scrap_floor: 0.8,
     available_actions: ['continue', 'schedule_tool_refurb'],
     probable_cause: 'tool_wear',
@@ -82,7 +109,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 2.1,
     defect_type: 'sink_marks',
     energy_kwh_per_good_part: 0.42,
-    notes: 'Higher clamp pressure reduced flash but introduced sink marks — wrong fix for tool wear. Defect type shifted, indicating mitigation mismatch.',
+    notes: 'Machine 1: Higher clamp pressure reduced flash but introduced sink marks — wrong fix for tool wear. Defect type shifted, indicating mitigation mismatch.',
     achievable_scrap_floor: 0.8,
     available_actions: ['reduce_speed', 'schedule_tool_refurb'],
     probable_cause: 'tool_wear',
@@ -93,7 +120,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 1.0,
     defect_type: 'none',
     energy_kwh_per_good_part: 0.36,
-    notes: 'Tool refurbished. Running like new. Root cause (tool wear) eliminated.',
+    notes: 'Machine 1: Tool refurbished. Running like new. Root cause (tool wear) eliminated.',
     achievable_scrap_floor: 0.5,
     available_actions: ['continue'],
     probable_cause: 'none',
@@ -101,12 +128,12 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     energy_status: 'within_limit',
   },
 
-  // ── Scenario: MOISTURE_HIGH ────────────────────────────────────────────
+  // ── Scenario: MOISTURE_HIGH (Primary Machine) ──────────────────────────
   'moisture_high|0|baseline': {
     scrap_rate_now: 2.5,
     defect_type: 'splay',
     energy_kwh_per_good_part: 0.37,
-    notes: 'Elevated resin moisture (0.18%). Splay marks visible on surface. Dryer running but insufficient drying time.',
+    notes: 'Machine 1: Elevated resin moisture (0.18%). Standard dryer running but insufficient drying time. Splay marks visible.',
     achievable_scrap_floor: 1.5,
     available_actions: ['continue', 'dryer_boost', 'switch_resin_batch'],
     probable_cause: 'moisture_instability',
@@ -117,7 +144,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 6.2,
     defect_type: 'splay_and_bubbles',
     energy_kwh_per_good_part: 0.41,
-    notes: 'Moisture worsened to 0.24%. Bubbles now appearing in thick sections. Hygroscopic resin absorbing ambient humidity. Tool also showing minor wear.',
+    notes: 'Machine 1: Moisture worsened to 0.24%. Standard dryer cannot keep up. Bubbles now appearing in thick sections.',
     achievable_scrap_floor: 1.8,
     available_actions: ['dryer_boost', 'switch_resin_batch', 'reduce_speed'],
     probable_cause: 'moisture_instability',
@@ -128,7 +155,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 3.1,
     defect_type: 'splay',
     energy_kwh_per_good_part: 0.44,
-    notes: 'Dryer boosted to 85°C for 4h. Moisture reduced but still above spec (0.12%). Splay persists. Energy per part increased due to extended drying.',
+    notes: 'Machine 1: Dryer boosted to 85°C for 4h. Moisture reduced but standard dryer still insufficient (0.12%). Energy rising.',
     achievable_scrap_floor: 1.5,
     available_actions: ['switch_resin_batch', 'reduce_speed'],
     probable_cause: 'moisture_instability',
@@ -139,7 +166,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 2.0,
     defect_type: 'minor_splay',
     energy_kwh_per_good_part: 0.39,
-    notes: 'Switched to dry batch B-2204 (moisture 0.04%). Significant improvement — root cause addressed directly. Minor residual splay from tooling.',
+    notes: 'Machine 1: Switched to dry batch B-2204 (moisture 0.04%). Significant improvement. Minor residual splay from tooling.',
     achievable_scrap_floor: 1.2,
     available_actions: ['continue', 'reduce_speed'],
     probable_cause: 'moisture_instability',
@@ -150,7 +177,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 4.5,
     defect_type: 'splay_and_flash',
     energy_kwh_per_good_part: 0.46,
-    notes: 'Reducing speed did not help — wrong fix for moisture problem. Slower injection allowed more moisture absorption. Flash from tool wear now visible too.',
+    notes: 'Machine 1: Reducing speed did not help — wrong fix for moisture problem. Flash from tool wear now visible too.',
     achievable_scrap_floor: 1.8,
     available_actions: ['dryer_boost', 'switch_resin_batch'],
     probable_cause: 'moisture_instability',
@@ -158,12 +185,12 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     energy_status: 'critical',
   },
 
-  // ── Scenario: TOOL_WORN ────────────────────────────────────────────────
+  // ── Scenario: TOOL_WORN (Primary Machine) ──────────────────────────────
   'tool_worn|0|baseline': {
     scrap_rate_now: 1.8,
     defect_type: 'none',
     energy_kwh_per_good_part: 0.36,
-    notes: 'Tool at 45k of 60k cycle life. Minor wear on cavity 3. No defects yet but approaching maintenance window.',
+    notes: 'Machine 1: Tool at 45k of 60k cycle life. Minor wear on cavity 3. Approaching maintenance window.',
     achievable_scrap_floor: 0.7,
     available_actions: ['continue', 'reduce_speed', 'increase_speed'],
     probable_cause: 'tool_wear',
@@ -174,7 +201,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 5.4,
     defect_type: 'flash_and_short_shot',
     energy_kwh_per_good_part: 0.39,
-    notes: 'Critical wear on cavities 3 and 7. Parting line degradation causing flash. Short shots from worn gate. Immediate action needed.',
+    notes: 'Machine 1: Critical wear on cavities 3 and 7. Parting line degradation causing flash. Short shots from worn gate.',
     achievable_scrap_floor: 1.0,
     available_actions: ['reduce_speed', 'increase_clamp_pressure', 'schedule_tool_refurb', 'disable_cavities'],
     probable_cause: 'tool_wear',
@@ -185,7 +212,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 3.2,
     defect_type: 'flash',
     energy_kwh_per_good_part: 0.43,
-    notes: 'Speed reduction helped short shots but flash persists — addresses symptom, not root cause. Partial fix only. Energy rising.',
+    notes: 'Machine 1: Speed reduction helped short shots but flash persists — addresses symptom, not root cause. Energy rising.',
     achievable_scrap_floor: 1.0,
     available_actions: ['schedule_tool_refurb', 'disable_cavities'],
     probable_cause: 'tool_wear',
@@ -196,7 +223,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 2.8,
     defect_type: 'sink_marks',
     energy_kwh_per_good_part: 0.45,
-    notes: 'Increased clamp pressure eliminated flash but introduced sink marks — wrong fix, compressing worn cavities. Defect type shifted. Energy spiking.',
+    notes: 'Machine 1: Increased clamp pressure eliminated flash but introduced sink marks — wrong fix. Energy spiking.',
     achievable_scrap_floor: 1.0,
     available_actions: ['reduce_speed', 'schedule_tool_refurb', 'disable_cavities'],
     probable_cause: 'tool_wear',
@@ -207,7 +234,7 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 1.1,
     defect_type: 'none',
     energy_kwh_per_good_part: 0.37,
-    notes: 'Tool refurbished during planned downtime. All cavities restored. Root cause eliminated.',
+    notes: 'Machine 1: Tool refurbished during planned downtime. All cavities restored.',
     achievable_scrap_floor: 0.5,
     available_actions: ['continue'],
     probable_cause: 'none',
@@ -218,10 +245,114 @@ const PRESETS: Record<PresetKey, PresetEntry> = {
     scrap_rate_now: 1.4,
     defect_type: 'none',
     energy_kwh_per_good_part: 0.41,
-    notes: 'Cavities 3 and 7 disabled. Output rate reduced 25% but quality restored. Workaround — root cause still present.',
+    notes: 'Machine 1: Cavities 3 and 7 disabled. Output rate reduced 25% but quality restored.',
     achievable_scrap_floor: 0.7,
     available_actions: ['continue', 'schedule_tool_refurb'],
     probable_cause: 'tool_wear',
+    trend: 'falling',
+    energy_status: 'within_limit',
+  },
+};
+
+// ── ALTERNATE MACHINE PRESETS ─────────────────────────────────────────────
+// These represent outcomes when production is moved to Machine 2.
+// Alternate machine has different characteristics per scenario:
+//   normal: newer tooling → lower scrap after switch
+//   moisture_high: desiccant dryer → much better moisture handling
+//   tool_worn: fresh tool → no wear issues
+
+const ALT_PRESETS: Record<PresetKey, PresetEntry> = {
+
+  // ── Normal scenario on Machine 2 (newer tooling) ───────────────────────
+  'normal|2|continue': {
+    scrap_rate_now: 1.3,
+    defect_type: 'none',
+    energy_kwh_per_good_part: 0.36,
+    notes: 'Machine 2: Newer tool T-4402 (2k cycles). No flash — parting line intact. Running smoothly.',
+    achievable_scrap_floor: 0.5,
+    available_actions: ['continue'],
+    probable_cause: 'none',
+    trend: 'falling',
+    energy_status: 'within_limit',
+  },
+  'normal|2|reduce_speed': {
+    scrap_rate_now: 1.1,
+    defect_type: 'none',
+    energy_kwh_per_good_part: 0.37,
+    notes: 'Machine 2: Fresh tool at reduced speed. Excellent quality.',
+    achievable_scrap_floor: 0.4,
+    available_actions: ['continue'],
+    probable_cause: 'none',
+    trend: 'falling',
+    energy_status: 'within_limit',
+  },
+
+  // ── Moisture_high on Machine 2 (desiccant dryer) ───────────────────────
+  'moisture_high|2|continue': {
+    scrap_rate_now: 1.6,
+    defect_type: 'none',
+    energy_kwh_per_good_part: 0.38,
+    notes: 'Machine 2: Desiccant dryer reduced moisture to 0.03%. Splay eliminated. Quality restored by addressing root cause at the machine level.',
+    achievable_scrap_floor: 0.8,
+    available_actions: ['continue'],
+    probable_cause: 'none',
+    trend: 'falling',
+    energy_status: 'within_limit',
+  },
+  'moisture_high|2|dryer_boost': {
+    scrap_rate_now: 1.4,
+    defect_type: 'none',
+    energy_kwh_per_good_part: 0.40,
+    notes: 'Machine 2: Desiccant dryer already effective — boost further reduced moisture to 0.02%. Excellent results.',
+    achievable_scrap_floor: 0.6,
+    available_actions: ['continue'],
+    probable_cause: 'none',
+    trend: 'falling',
+    energy_status: 'within_limit',
+  },
+  'moisture_high|2|switch_resin_batch': {
+    scrap_rate_now: 1.2,
+    defect_type: 'none',
+    energy_kwh_per_good_part: 0.37,
+    notes: 'Machine 2: Dry resin batch + desiccant dryer = optimal moisture control. Near-zero defects.',
+    achievable_scrap_floor: 0.5,
+    available_actions: ['continue'],
+    probable_cause: 'none',
+    trend: 'falling',
+    energy_status: 'within_limit',
+  },
+
+  // ── Tool_worn on Machine 2 (fresh tool) ────────────────────────────────
+  'tool_worn|2|continue': {
+    scrap_rate_now: 1.2,
+    defect_type: 'none',
+    energy_kwh_per_good_part: 0.35,
+    notes: 'Machine 2: Fresh tool T-4404 (8k cycles). No flash, no short shots. Root cause (worn tool) eliminated by switching machines.',
+    achievable_scrap_floor: 0.5,
+    available_actions: ['continue'],
+    probable_cause: 'none',
+    trend: 'falling',
+    energy_status: 'within_limit',
+  },
+  'tool_worn|2|reduce_speed': {
+    scrap_rate_now: 1.0,
+    defect_type: 'none',
+    energy_kwh_per_good_part: 0.36,
+    notes: 'Machine 2: Fresh tool at reduced speed. Top quality output.',
+    achievable_scrap_floor: 0.4,
+    available_actions: ['continue'],
+    probable_cause: 'none',
+    trend: 'falling',
+    energy_status: 'within_limit',
+  },
+  'tool_worn|2|schedule_tool_refurb': {
+    scrap_rate_now: 0.9,
+    defect_type: 'none',
+    energy_kwh_per_good_part: 0.34,
+    notes: 'Machine 2: Fresh tool + preventive refurb scheduled. Optimal condition.',
+    achievable_scrap_floor: 0.3,
+    available_actions: ['continue'],
+    probable_cause: 'none',
     trend: 'falling',
     energy_status: 'within_limit',
   },
@@ -238,23 +369,32 @@ export function getEnergyLimit(energyPriceBand?: string): number {
 }
 
 export function runFactorySim(input: FactorySimInput): FactorySimOutput {
+  const machine = input.machine ?? 'primary';
   const key: PresetKey = `${input.scenario}|${input.step_index}|${input.proposed_action}`;
-  const preset = PRESETS[key];
 
+  if (machine === 'alternate') {
+    const altPreset = ALT_PRESETS[key];
+    if (altPreset) {
+      return { ...altPreset, machine_used: 'alternate' };
+    }
+  }
+
+  const preset = PRESETS[key];
   if (preset) {
-    return { ...preset };
+    return { ...preset, machine_used: machine };
   }
 
   return {
     scrap_rate_now: input.prior_state?.scrap_rate_now ?? 2.0,
     defect_type: 'unknown',
     energy_kwh_per_good_part: 0.40,
-    notes: `No preset for key="${key}". Returning fallback state.`,
+    notes: `No preset for key="${key}" machine="${machine}". Returning fallback state.`,
     achievable_scrap_floor: input.prior_state?.achievable_scrap_floor ?? 1.0,
     available_actions: ['continue', 'reduce_speed'],
     probable_cause: 'unknown',
     trend: 'stable',
     energy_status: 'within_limit',
+    machine_used: machine,
   };
 }
 
