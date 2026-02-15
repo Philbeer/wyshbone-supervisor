@@ -820,22 +820,36 @@ class SupervisorService {
     console.log(`[SUPERVISOR] Routing to RUN_FACTORY_DEMO — scenario=${scenario} maxScrap=${maxScrap}%`);
 
     const nowMs = Date.now();
-    await storage.createAgentRun({
-      id: runId,
-      clientRequestId,
-      userId: task.user_id,
-      conversationId: task.conversation_id,
-      createdAt: nowMs,
-      updatedAt: nowMs,
-      status: 'executing',
-      metadata: {
-        run_type: 'factory_demo',
-        goal: `Injection moulding demo: scenario=${scenario}, max_scrap=${maxScrap}%`,
-        scenario,
-        maxScrapPercent: maxScrap,
-        taskId: task.id,
-      },
-    });
+    const runMeta = {
+      run_type: 'factory_demo',
+      goal: `Injection moulding demo: scenario=${scenario}, max_scrap=${maxScrap}%`,
+      scenario,
+      maxScrapPercent: maxScrap,
+      taskId: task.id,
+    };
+    try {
+      await storage.createAgentRun({
+        id: runId,
+        clientRequestId,
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+        createdAt: nowMs,
+        updatedAt: nowMs,
+        status: 'executing',
+        metadata: runMeta,
+      });
+      console.log(`[FACTORY_DEMO] [agent_run_create] runId=${runId}`);
+    } catch (createErr: any) {
+      const errMsg = createErr.message || '';
+      if (errMsg.includes('duplicate key') || errMsg.includes('unique constraint')) {
+        console.log(`[FACTORY_DEMO] agent_run already exists for runId=${runId} — updating to executing`);
+        await storage.updateAgentRun(runId, {
+          status: 'executing', error: null, terminalState: null, metadata: runMeta,
+        });
+      } else {
+        throw createErr;
+      }
+    }
 
     try {
       const result = await executeFactoryDemo({
