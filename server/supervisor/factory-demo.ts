@@ -161,6 +161,7 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
   });
 
   let priorState: FactorySimOutput | null = null;
+  let baselineScrap: number | null = null;
   let stepsCompleted = 0;
   let stoppedByTower = false;
   let planChanged = false;
@@ -186,6 +187,19 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
     const previousState = priorState;
     priorState = simOutput;
 
+    if (i === 0) {
+      baselineScrap = simOutput.scrap_rate_now;
+    }
+
+    const driftDetected = baselineScrap !== null && simOutput.scrap_rate_now > baselineScrap;
+    let driftReason = 'No drift detected';
+    if (driftDetected) {
+      const delta = +(simOutput.scrap_rate_now - baselineScrap!).toFixed(2);
+      driftReason = `Scrap increased by ${delta}pp from baseline ${baselineScrap}% to ${simOutput.scrap_rate_now}%. Defect: ${simOutput.defect_type}. ${simOutput.notes}`;
+    } else if (i > 0) {
+      driftReason = `Scrap ${simOutput.scrap_rate_now}% is at or below baseline ${baselineScrap}%. No adverse drift.`;
+    }
+
     const stateArtefact = await createArtefact({
       runId, userId, conversationId,
       type: 'factory_state',
@@ -196,6 +210,11 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
         step_index: step.step_index,
         scenario,
         action_taken: action,
+        baseline_scrap_percent: baselineScrap ?? simOutput.scrap_rate_now,
+        achievable_scrap_floor_percent: simOutput.achievable_scrap_floor,
+        drift_detected: driftDetected,
+        drift_reason: driftReason,
+        energy_per_part: simOutput.energy_kwh_per_good_part,
       },
     });
 
