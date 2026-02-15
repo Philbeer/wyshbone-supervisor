@@ -17,6 +17,7 @@ import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNam
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
 import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation } from './supervisor/delivery-summary';
 import { executeFactoryDemo } from './supervisor/factory-demo';
+import { normalizeSensorScript } from './supervisor/factory-sim';
 
 interface UserContext {
   userId: string;
@@ -863,8 +864,16 @@ class SupervisorService {
     }
 
     try {
-      const rawSensorScript = requestData.demo_sensor_script ?? requestData.sensor_script ?? (constraints as Record<string, unknown>).demo_sensor_script;
-      const demoSensorScript = rawSensorScript && typeof rawSensorScript === 'object' ? rawSensorScript as any : undefined;
+      const metadataFactory = (requestData.metadata as Record<string, unknown>)?.factory as Record<string, unknown> | undefined;
+      const rawSensorScript =
+        requestData.demo_sensor_script ??
+        requestData.sensor_script ??
+        (constraints as Record<string, unknown>).demo_sensor_script ??
+        metadataFactory?.demo_sensor_script ??
+        metadataFactory?.sensor_script;
+      const demoSensorScript = rawSensorScript && typeof rawSensorScript === 'object'
+        ? normalizeSensorScript(rawSensorScript)
+        : undefined;
       if (demoSensorScript) {
         console.log(`[FACTORY_DEMO] Sensor script provided — primary steps: ${Object.keys(demoSensorScript.primary || {}).length}, alternate steps: ${Object.keys(demoSensorScript.alternate || {}).length}`);
       }

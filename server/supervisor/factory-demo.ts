@@ -575,6 +575,42 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
       break;
     }
 
+    if (towerAction === 'change_plan' && i >= steps.length - 1) {
+      console.log(`${logPrefix} Tower CHANGE_PLAN at final step ${i + 1} — no more steps available. Treating as STOP.`);
+      stoppedByTower = true;
+
+      await createArtefact({
+        runId, userId, conversationId,
+        type: 'plan_result',
+        title: `Factory Demo Result: STOPPED at Step ${i + 1}`,
+        summary: `Tower requested plan change on ${machineLabel()} (${towerVerdict.trigger}) at final step — no recovery path. Scrap ${simOutput.scrap_rate_now}% (target ${constraints.max_scrap_percent}%). Cause: ${formatCause(simOutput.probable_cause)}.`,
+        payload: {
+          outcome: 'stopped',
+          stopped_at_step: i + 1,
+          stop_reason: 'change_plan_at_final_step',
+          final_scrap_rate: simOutput.scrap_rate_now,
+          target_scrap: constraints.max_scrap_percent,
+          achievable_floor: simOutput.achievable_scrap_floor,
+          floor_above_target: isFloorAboveTarget,
+          scenario,
+          tower_verdict: verdict,
+          stop_trigger: towerVerdict.trigger,
+          plan_changed: planChanged,
+          machine_switched: machineSwitched,
+          final_machine: currentMachine,
+          final_machine_label: machineLabel(),
+          change_plan_trigger: changePlanTrigger,
+          mitigation_attempts: mitigationAttempts,
+          final_diagnosis: {
+            probable_cause: simOutput.probable_cause,
+            trend: simOutput.trend,
+            energy_status: simOutput.energy_status,
+          },
+        },
+      });
+      break;
+    }
+
     if (towerAction === 'change_plan' && i < steps.length - 1) {
       changePlanTrigger = towerVerdict.trigger;
       const defectShiftedNow = towerVerdict.trigger === 'defect_shift_mismatch';

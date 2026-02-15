@@ -377,6 +377,64 @@ export interface DemoSensorScript {
   alternate?: Record<number, SensorReading>;
 }
 
+function normalizeSensorSide(raw: unknown): Record<number, SensorReading> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+
+  if (Array.isArray(raw)) {
+    const result: Record<number, SensorReading> = {};
+    for (const entry of raw) {
+      if (!entry || typeof entry !== 'object') continue;
+      const e = entry as Record<string, unknown>;
+      const stepIdx = (e.step != null ? Number(e.step) : e.step_index != null ? Number(e.step_index) : null);
+      if (stepIdx == null || isNaN(stepIdx)) continue;
+      const zeroIdx = stepIdx > 0 && stepIdx <= 3 ? stepIdx - 1 : stepIdx;
+      const scrap = (e.scrap ?? e.scrap_rate ?? e.scrap_rate_now) as number | undefined;
+      if (scrap == null) continue;
+      result[zeroIdx] = {
+        scrap_rate_now: Number(scrap),
+        defect_type: (e.defect_type ?? e.defect ?? 'splay_and_bubbles') as string,
+        energy_kwh_per_good_part: Number(e.energy_kwh_per_good_part ?? e.energy ?? e.energy_kwh ?? 0.40),
+        ...(e.achievable_scrap_floor != null ? { achievable_scrap_floor: Number(e.achievable_scrap_floor) } : {}),
+        ...(e.probable_cause != null ? { probable_cause: e.probable_cause as string } : {}),
+        ...(e.trend != null ? { trend: e.trend as 'rising' | 'stable' | 'falling' } : {}),
+        ...(e.energy_status != null ? { energy_status: e.energy_status as 'within_limit' | 'high' | 'critical' } : {}),
+        ...(e.notes != null ? { notes: e.notes as string } : {}),
+      };
+    }
+    return Object.keys(result).length > 0 ? result : undefined;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const result: Record<number, SensorReading> = {};
+  for (const [key, val] of Object.entries(obj)) {
+    const idx = Number(key);
+    if (isNaN(idx) || !val || typeof val !== 'object') continue;
+    const v = val as Record<string, unknown>;
+    const scrap = (v.scrap ?? v.scrap_rate ?? v.scrap_rate_now) as number | undefined;
+    if (scrap == null) continue;
+    result[idx] = {
+      scrap_rate_now: Number(scrap),
+      defect_type: (v.defect_type ?? v.defect ?? 'splay_and_bubbles') as string,
+      energy_kwh_per_good_part: Number(v.energy_kwh_per_good_part ?? v.energy ?? v.energy_kwh ?? 0.40),
+      ...(v.achievable_scrap_floor != null ? { achievable_scrap_floor: Number(v.achievable_scrap_floor) } : {}),
+      ...(v.probable_cause != null ? { probable_cause: v.probable_cause as string } : {}),
+      ...(v.trend != null ? { trend: v.trend as 'rising' | 'stable' | 'falling' } : {}),
+      ...(v.energy_status != null ? { energy_status: v.energy_status as 'within_limit' | 'high' | 'critical' } : {}),
+      ...(v.notes != null ? { notes: v.notes as string } : {}),
+    };
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+export function normalizeSensorScript(raw: unknown): DemoSensorScript | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const primary = normalizeSensorSide(r.primary);
+  const alternate = normalizeSensorSide(r.alternate);
+  if (!primary && !alternate) return undefined;
+  return { ...(primary ? { primary } : {}), ...(alternate ? { alternate } : {}) };
+}
+
 function inferCauseFromDefect(defect: string): string {
   if (!defect || defect === 'none') return 'none';
   if (defect.includes('splay') || defect.includes('bubble')) return 'moisture_instability';
