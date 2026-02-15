@@ -40,6 +40,8 @@ export interface FactorySimInput {
   prior_state: FactorySimOutput | null;
   proposed_action: string;
   machine?: 'primary' | 'alternate';
+  sensor_reading?: SensorReading;
+  energy_limit?: number;
 }
 
 export interface FactorySimOutput {
@@ -358,6 +360,69 @@ const ALT_PRESETS: Record<PresetKey, PresetEntry> = {
   },
 };
 
+export interface SensorReading {
+  scrap_rate_now: number;
+  defect_type: string;
+  energy_kwh_per_good_part: number;
+  achievable_scrap_floor?: number;
+  probable_cause?: string;
+  notes?: string;
+  energy_status?: 'within_limit' | 'high' | 'critical';
+  trend?: 'rising' | 'stable' | 'falling';
+  available_actions?: string[];
+}
+
+export interface DemoSensorScript {
+  primary?: Record<number, SensorReading>;
+  alternate?: Record<number, SensorReading>;
+}
+
+function inferCauseFromDefect(defect: string): string {
+  if (!defect || defect === 'none') return 'none';
+  if (defect.includes('splay') || defect.includes('bubble')) return 'moisture_instability';
+  if (defect.includes('flash') || defect.includes('short_shot') || defect.includes('sink')) return 'tool_wear';
+  return 'unknown';
+}
+
+function inferTrend(currentScrap: number, priorState: FactorySimOutput | null): 'rising' | 'stable' | 'falling' {
+  if (!priorState) return 'stable';
+  const delta = currentScrap - priorState.scrap_rate_now;
+  if (delta > 0.3) return 'rising';
+  if (delta < -0.3) return 'falling';
+  return 'stable';
+}
+
+function inferEnergyStatus(energy: number, energyLimit?: number): 'within_limit' | 'high' | 'critical' {
+  const limit = energyLimit ?? 0.44;
+  if (energy > limit * 1.1) return 'critical';
+  if (energy > limit) return 'high';
+  return 'within_limit';
+}
+
+function applySensorOverride(
+  baseOutput: FactorySimOutput,
+  sensor: SensorReading,
+  priorState: FactorySimOutput | null,
+  energyLimit?: number,
+): FactorySimOutput {
+  const scrap = sensor.scrap_rate_now;
+  const defect = sensor.defect_type;
+  const energy = sensor.energy_kwh_per_good_part;
+
+  return {
+    scrap_rate_now: scrap,
+    defect_type: defect,
+    energy_kwh_per_good_part: energy,
+    achievable_scrap_floor: sensor.achievable_scrap_floor ?? Math.min(scrap, baseOutput.achievable_scrap_floor),
+    probable_cause: sensor.probable_cause ?? inferCauseFromDefect(defect),
+    trend: sensor.trend ?? inferTrend(scrap, priorState),
+    energy_status: sensor.energy_status ?? inferEnergyStatus(energy, energyLimit),
+    notes: sensor.notes ?? `Sensor override: scrap=${scrap}% defect=${defect} energy=${energy}kWh.`,
+    available_actions: sensor.available_actions ?? baseOutput.available_actions,
+    machine_used: baseOutput.machine_used,
+  };
+}
+
 export const ENERGY_THRESHOLDS: Record<string, number> = {
   off_peak: 0.50,
   standard: 0.44,
@@ -372,30 +437,52 @@ export function runFactorySim(input: FactorySimInput): FactorySimOutput {
   const machine = input.machine ?? 'primary';
   const key: PresetKey = `${input.scenario}|${input.step_index}|${input.proposed_action}`;
 
+  let baseOutput: FactorySimOutput;
+
   if (machine === 'alternate') {
     const altPreset = ALT_PRESETS[key];
     if (altPreset) {
-      return { ...altPreset, machine_used: 'alternate' };
+      baseOutput = { ...altPreset, machine_used: 'alternate' };
+    } else {
+      const preset = PRESETS[key];
+      baseOutput = preset
+        ? { ...preset, machine_used: machine }
+        : {
+            scrap_rate_now: input.prior_state?.scrap_rate_now ?? 2.0,
+            defect_type: 'unknown',
+            energy_kwh_per_good_part: 0.40,
+            notes: `No preset for key="${key}" machine="${machine}". Returning fallback state.`,
+            achievable_scrap_floor: input.prior_state?.achievable_scrap_floor ?? 1.0,
+            available_actions: ['continue', 'reduce_speed'],
+            probable_cause: 'unknown',
+            trend: 'stable',
+            energy_status: 'within_limit',
+            machine_used: machine,
+          };
     }
+  } else {
+    const preset = PRESETS[key];
+    baseOutput = preset
+      ? { ...preset, machine_used: machine }
+      : {
+          scrap_rate_now: input.prior_state?.scrap_rate_now ?? 2.0,
+          defect_type: 'unknown',
+          energy_kwh_per_good_part: 0.40,
+          notes: `No preset for key="${key}" machine="${machine}". Returning fallback state.`,
+          achievable_scrap_floor: input.prior_state?.achievable_scrap_floor ?? 1.0,
+          available_actions: ['continue', 'reduce_speed'],
+          probable_cause: 'unknown',
+          trend: 'stable',
+          energy_status: 'within_limit',
+          machine_used: machine,
+        };
   }
 
-  const preset = PRESETS[key];
-  if (preset) {
-    return { ...preset, machine_used: machine };
+  if (input.sensor_reading) {
+    return applySensorOverride(baseOutput, input.sensor_reading, input.prior_state, input.energy_limit);
   }
 
-  return {
-    scrap_rate_now: input.prior_state?.scrap_rate_now ?? 2.0,
-    defect_type: 'unknown',
-    energy_kwh_per_good_part: 0.40,
-    notes: `No preset for key="${key}" machine="${machine}". Returning fallback state.`,
-    achievable_scrap_floor: input.prior_state?.achievable_scrap_floor ?? 1.0,
-    available_actions: ['continue', 'reduce_speed'],
-    probable_cause: 'unknown',
-    trend: 'stable',
-    energy_status: 'within_limit',
-    machine_used: machine,
-  };
+  return baseOutput;
 }
 
 export const DEMO_SCENARIOS = ['normal', 'moisture_high', 'tool_worn'] as const;

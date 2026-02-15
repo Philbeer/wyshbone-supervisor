@@ -863,6 +863,12 @@ class SupervisorService {
     }
 
     try {
+      const rawSensorScript = requestData.demo_sensor_script ?? requestData.sensor_script ?? (constraints as Record<string, unknown>).demo_sensor_script;
+      const demoSensorScript = rawSensorScript && typeof rawSensorScript === 'object' ? rawSensorScript as any : undefined;
+      if (demoSensorScript) {
+        console.log(`[FACTORY_DEMO] Sensor script provided — primary steps: ${Object.keys(demoSensorScript.primary || {}).length}, alternate steps: ${Object.keys(demoSensorScript.alternate || {}).length}`);
+      }
+
       const result = await executeFactoryDemo({
         runId,
         userId: task.user_id,
@@ -870,6 +876,7 @@ class SupervisorService {
         clientRequestId,
         scenario: scenario as any,
         maxScrapPercent: maxScrap,
+        demoSensorScript,
       });
 
       await storage.updateAgentRun(runId, {

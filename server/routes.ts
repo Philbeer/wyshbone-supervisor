@@ -931,10 +931,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const scenario = req.body?.scenario || 'moisture_high';
         const maxScrapPercent = req.body?.max_scrap_percent ?? req.body?.maxScrapPercent ?? 2.0;
         const energyPriceBand = req.body?.energy_price_band || req.body?.energyPriceBand || 'standard';
+        const rawSensorScript = req.body?.demo_sensor_script ?? req.body?.sensor_script;
+        const demoSensorScript = rawSensorScript && typeof rawSensorScript === 'object' ? rawSensorScript : undefined;
         const runId = randomUUID();
         const userId = req.body?.user_id || 'debug-user';
 
-        console.log(`[DEBUG] Running factory demo — scenario=${scenario} max_scrap=${maxScrapPercent}% energy_band=${energyPriceBand}`);
+        console.log(`[DEBUG] Running factory demo — scenario=${scenario} max_scrap=${maxScrapPercent}% energy_band=${energyPriceBand}${demoSensorScript ? ' sensor_script=YES' : ''}`);
 
         const result = await executeFactoryDemo({
           runId,
@@ -942,6 +944,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           scenario,
           maxScrapPercent,
           energyPriceBand,
+          demoSensorScript,
         });
 
         const artefacts = await storage.getArtefactsByRunId(runId);

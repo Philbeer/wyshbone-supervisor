@@ -32,6 +32,8 @@ import {
   type FactorySimInput,
   type FactorySimOutput,
   type DemoScenario,
+  type DemoSensorScript,
+  type SensorReading,
 } from './factory-sim';
 import { createArtefact } from './artefacts';
 import { logAFREvent } from './afr-logger';
@@ -248,6 +250,7 @@ export interface FactoryDemoParams {
   maxScrapPercent?: number;
   energyPriceBand?: string;
   machines?: { primary: MachineProfile; alternate: MachineProfile };
+  demoSensorScript?: DemoSensorScript;
 }
 
 export interface FactoryDemoResult {
@@ -270,14 +273,16 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
     scenario = 'moisture_high',
     maxScrapPercent = 2.0,
     energyPriceBand = 'standard',
+    demoSensorScript,
   } = params;
 
   const scenarioMachines = DEFAULT_MACHINES[scenario] ?? DEFAULT_MACHINES['moisture_high'];
   const machines = params.machines ?? scenarioMachines;
+  const hasSensorScript = demoSensorScript && (demoSensorScript.primary || demoSensorScript.alternate);
 
   const logPrefix = `[FACTORY_DEMO]`;
   const energyLimit = getEnergyLimit(energyPriceBand);
-  console.log(`${logPrefix} Starting demo — scenario=${scenario} max_scrap=${maxScrapPercent}% energy_limit=${energyLimit}kWh primary=${machines.primary.id} alternate=${machines.alternate.id} runId=${runId}`);
+  console.log(`${logPrefix} Starting demo — scenario=${scenario} max_scrap=${maxScrapPercent}% energy_limit=${energyLimit}kWh primary=${machines.primary.id} alternate=${machines.alternate.id} runId=${runId}${hasSensorScript ? ' sensor_script=YES' : ''}`);
 
   const constraints = { max_scrap_percent: maxScrapPercent, max_energy_kwh: energyLimit };
   const steps = buildDemoSteps(scenario);
@@ -301,6 +306,7 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
       steps: steps.map(s => ({ step: s.step_index + 1, label: s.label, action: s.proposed_action })),
       plan_version: 1,
       energy_price_band: energyPriceBand,
+      sensor_script_active: !!hasSensorScript,
       machines: {
         primary: machines.primary,
         alternate: machines.alternate,
@@ -336,6 +342,13 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
 
     console.log(`${logPrefix} Step ${i + 1}/${steps.length}: ${step.label} (action=${action}, machine=${mp.label})`);
 
+    const sensorReading: SensorReading | undefined =
+      demoSensorScript?.[currentMachine]?.[step.step_index] ?? undefined;
+
+    if (sensorReading) {
+      console.log(`${logPrefix} Step ${i + 1}: Sensor override active — scrap=${sensorReading.scrap_rate_now}% defect=${sensorReading.defect_type} energy=${sensorReading.energy_kwh_per_good_part}kWh`);
+    }
+
     const simInput: FactorySimInput = {
       scenario,
       constraints,
@@ -343,6 +356,8 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
       prior_state: priorState,
       proposed_action: action,
       machine: currentMachine,
+      sensor_reading: sensorReading,
+      energy_limit: energyLimit,
     };
 
     const simOutput = runFactorySim(simInput);
@@ -382,6 +397,7 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
         machine_id: mp.id,
         machine_label: mp.label,
         tool_id: mp.tool_id,
+        sensor_override: !!sensorReading,
         diagnosis: {
           probable_cause: simOutput.probable_cause,
           trend: simOutput.trend,
