@@ -16,6 +16,7 @@ import { extractChangePlanDirective, applyLeadgenReplanPolicy, constraintsAreIde
 import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, type ParsedGoal, type StructuredConstraint } from './supervisor/goal-to-constraints';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
 import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation } from './supervisor/delivery-summary';
+import { executeFactoryDemo } from './supervisor/factory-demo';
 
 interface UserContext {
   userId: string;
@@ -532,6 +533,61 @@ class SupervisorService {
       metadata: { taskId: task.id, task_type: task.task_type },
     }).catch(() => {});
 
+    const isFactoryDemo = rawMsg.trim().toLowerCase() === 'run the injection moulding demo';
+
+    if (isFactoryDemo) {
+      const demoResult = await this.executeFactoryDemoTask(task, jobId, clientRequestId);
+      const response = demoResult.summary;
+      const leadIds: string[] = [];
+      const capabilities = ['factory_sim', 'tower_validated'];
+
+      const messageId = randomUUID();
+      const { error: messageError } = await supabase
+        .from('messages')
+        .insert({
+          id: messageId,
+          conversation_id: task.conversation_id,
+          role: 'assistant',
+          content: response,
+          source: 'supervisor',
+          metadata: {
+            supervisor_task_id: task.id,
+            capabilities,
+            lead_ids: leadIds,
+            factory_demo: true,
+            scenario: demoResult.scenario,
+          },
+          created_at: Date.now()
+        })
+        .select()
+        .single();
+
+      if (messageError) {
+        throw new Error(`Failed to write message: ${messageError.message}`);
+      }
+
+      console.log(`✅ Factory demo response posted to conversation ${task.conversation_id}`);
+
+      await supabase
+        .from('supervisor_tasks')
+        .update({
+          status: 'completed',
+          result: { response: response.substring(0, 200), capabilities, factory_demo: true },
+        })
+        .eq('id', task.id);
+
+      logAFREvent({
+        userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
+        clientRequestId,
+        actionTaken: 'task_completed', status: 'success',
+        taskGenerated: `Factory demo completed: ${response.substring(0, 80)}`,
+        runType: 'plan',
+        metadata: { taskId: task.id, task_type: 'RUN_FACTORY_DEMO' },
+      }).catch(() => {});
+
+      return;
+    }
+
     const towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId);
     const response = towerResult.response;
     const leadIds = towerResult.leadIds;
@@ -749,6 +805,70 @@ class SupervisorService {
       console.log(`[RUN_BRIDGE] uiRunId=${uiRunId} supervisorRunId=${supervisorRunId} status=${resp.status}`);
     } catch (e: any) {
       console.error(`[RUN_BRIDGE] uiRunId=${uiRunId} supervisorRunId=${supervisorRunId} NETWORK_ERROR: ${e.message}`);
+    }
+  }
+
+  private async executeFactoryDemoTask(
+    task: SupervisorTask,
+    runId: string,
+    clientRequestId: string,
+  ): Promise<{ summary: string; scenario: string }> {
+    const requestData = task.request_data as unknown as Record<string, unknown>;
+    const scenario = (requestData.scenario as string) || 'moisture_high';
+    const maxScrap = (requestData.max_scrap_percent as number) || 2.0;
+
+    console.log(`[SUPERVISOR] Routing to RUN_FACTORY_DEMO — scenario=${scenario} maxScrap=${maxScrap}%`);
+
+    const nowMs = Date.now();
+    await storage.createAgentRun({
+      id: runId,
+      clientRequestId,
+      userId: task.user_id,
+      conversationId: task.conversation_id,
+      createdAt: nowMs,
+      updatedAt: nowMs,
+      status: 'executing',
+      metadata: {
+        run_type: 'factory_demo',
+        goal: `Injection moulding demo: scenario=${scenario}, max_scrap=${maxScrap}%`,
+        scenario,
+        maxScrapPercent: maxScrap,
+        taskId: task.id,
+      },
+    });
+
+    try {
+      const result = await executeFactoryDemo({
+        runId,
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+        clientRequestId,
+        scenario: scenario as any,
+        maxScrapPercent: maxScrap,
+      });
+
+      await storage.updateAgentRun(runId, {
+        status: result.success ? 'completed' : 'failed',
+        terminalState: result.stoppedByTower ? 'tower_stopped' : 'completed',
+        endedAt: new Date(),
+        metadata: {
+          scenario, maxScrapPercent: maxScrap,
+          stepsCompleted: result.stepsCompleted,
+          stoppedByTower: result.stoppedByTower,
+          planChanged: result.planChanged,
+        },
+      });
+
+      return { summary: result.summary, scenario };
+    } catch (err: any) {
+      console.error(`[FACTORY_DEMO] Error: ${err.message}`);
+      await storage.updateAgentRun(runId, {
+        status: 'failed',
+        terminalState: 'error',
+        error: err.message,
+        endedAt: new Date(),
+      }).catch(() => {});
+      throw err;
     }
   }
 

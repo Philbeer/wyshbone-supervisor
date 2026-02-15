@@ -924,6 +924,43 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     });
 
+    app.post("/api/debug/factory-demo", async (req, res) => {
+      try {
+        const { executeFactoryDemo } = await import('./supervisor/factory-demo');
+        const { randomUUID } = await import('crypto');
+        const scenario = req.body?.scenario || 'moisture_high';
+        const maxScrapPercent = req.body?.max_scrap_percent ?? 2.0;
+        const runId = randomUUID();
+        const userId = req.body?.user_id || 'debug-user';
+
+        console.log(`[DEBUG] Running factory demo — scenario=${scenario} max_scrap=${maxScrapPercent}%`);
+
+        const result = await executeFactoryDemo({
+          runId,
+          userId,
+          scenario,
+          maxScrapPercent,
+        });
+
+        const artefacts = await storage.getArtefactsByRunId(runId);
+
+        res.json({
+          runId,
+          result,
+          artefacts: artefacts.map(a => ({
+            id: a.id,
+            type: a.type,
+            title: a.title,
+            summary: a.summary,
+            createdAt: a.createdAt,
+          })),
+        });
+      } catch (error: any) {
+        console.error("[DEBUG] Factory demo error:", error);
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     app.get("/api/debug/task-queue", async (req, res) => {
       if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
       try {
