@@ -103,6 +103,25 @@ function triggerPlain(trigger: string | null): string {
   return TRIGGER_PLAIN[trigger ?? ''] ?? trigger ?? 'conditions changed';
 }
 
+function detectMachineSwitchFromSteps(steps: StepFact[]): { switched: boolean; fromLabel: string | null; toLabel: string | null; switchedAfterStep: number | null } {
+  for (let i = 1; i < steps.length; i++) {
+    const prev = steps[i - 1];
+    const curr = steps[i];
+    if (prev.machine_used && curr.machine_used && prev.machine_used !== curr.machine_used) {
+      const prevTower = prev.tower_action;
+      if (prevTower === 'change_plan') {
+        return {
+          switched: true,
+          fromLabel: prev.machine_label,
+          toLabel: curr.machine_label,
+          switchedAfterStep: prev.step_index,
+        };
+      }
+    }
+  }
+  return { switched: false, fromLabel: null, toLabel: null, switchedAfterStep: null };
+}
+
 function buildFactoryTldr(bundle: RunFactsBundle): string {
   const goal = bundle.outcome.target_scrap;
   const goalLabel = goal !== null ? `${goal}%` : 'an acceptable level';
@@ -111,8 +130,10 @@ function buildFactoryTldr(bundle: RunFactsBundle): string {
   const stopped = bundle.outcome.stopped_by_tower;
   const planChanged = bundle.outcome.plan_changed;
   const outcome = bundle.outcome.outcome;
-  const machineSwitched = bundle.outcome.machine_switched;
   const finalMachineLabel = bundle.outcome.final_machine_label;
+
+  const switchEvidence = detectMachineSwitchFromSteps(bundle.steps);
+  const machineSwitched = switchEvidence.switched;
 
   const cause = bundle.outcome.final_diagnosis?.probable_cause ?? null;
   const causeName = causePlain(cause);
@@ -124,7 +145,7 @@ function buildFactoryTldr(bundle: RunFactsBundle): string {
   const driftTrigger = driftStep?.tower_trigger ?? changeTrigger;
 
   const primaryLabel = bundle.config.machines?.primary?.label ?? 'Machine 1';
-  const alternateLabel = bundle.config.machines?.alternate?.label ?? 'Machine 2';
+  const alternateLabel = switchEvidence.toLabel ?? bundle.config.machines?.alternate?.label ?? 'Machine 2';
 
   let sentence1 = `You asked the system to run the factory with no more than ${goalLabel} waste.`;
 
@@ -150,7 +171,8 @@ function buildFactoryTldr(bundle: RunFactsBundle): string {
     }
   } else if (planChanged && machineSwitched) {
     const triggerExplanation = triggerPlain(driftTrigger);
-    sentence2 = `The system diagnosed ${causeName} on ${primaryLabel} and noticed ${triggerExplanation}, so it moved production to ${alternateLabel}.`;
+    const switchedFrom = switchEvidence.fromLabel ?? primaryLabel;
+    sentence2 = `The system diagnosed ${causeName} on ${switchedFrom} and noticed ${triggerExplanation}, so it moved production to ${alternateLabel}.`;
     if (outcome === 'success' || outcome === 'completed') {
       sentence3 = finalScrap !== null
         ? `On ${alternateLabel}, waste dropped to ${finalScrap}% and production finished successfully.`
