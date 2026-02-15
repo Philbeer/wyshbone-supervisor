@@ -27,6 +27,7 @@ import {
 import { createArtefact } from './artefacts';
 import { logAFREvent } from './afr-logger';
 import { storage } from '../storage';
+import { generateRunNarrative } from './run-narrative';
 
 interface FactoryTowerVerdict {
   verdict: string;
@@ -394,6 +395,13 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
     runType: 'plan',
     metadata: { scenario, stepsCompleted, stoppedByTower, planChanged },
   }).catch(() => {});
+
+  try {
+    const narrativeResult = await generateRunNarrative({ runId, runType: 'factory_demo', userId, conversationId });
+    console.log(`${logPrefix} Narrative generated (${narrativeResult.narrative.length} chars)`);
+  } catch (err: any) {
+    console.error(`${logPrefix} Narrative generation failed (non-fatal): ${err.message}`);
+  }
 
   return {
     success: !stoppedByTower,

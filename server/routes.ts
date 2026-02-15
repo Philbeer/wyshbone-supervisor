@@ -961,6 +961,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     });
 
+    app.post("/api/debug/run-narrative", async (req, res) => {
+      try {
+        const { generateRunNarrative } = await import('./supervisor/run-narrative');
+        const { runId, run_type } = req.body;
+        if (!runId) return res.status(400).json({ error: 'runId is required' });
+        const runType = run_type || 'factory_demo';
+        const userId = req.body?.user_id || 'debug-user';
+
+        console.log(`[DEBUG] Generating narrative — runId=${runId} type=${runType}`);
+        const result = await generateRunNarrative({ runId, runType, userId });
+        res.json({ runId, narrative: result.narrative, facts_bundle: result.factsBundle });
+      } catch (error: any) {
+        console.error("[DEBUG] Narrative generation error:", error);
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     app.get("/api/debug/task-queue", async (req, res) => {
       if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
       try {
