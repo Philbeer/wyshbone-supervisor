@@ -814,9 +814,20 @@ class SupervisorService {
     clientRequestId: string,
   ): Promise<{ summary: string; scenario: string }> {
     const requestData = task.request_data as unknown as Record<string, unknown>;
-    const scenario = (requestData.scenario as string) || 'moisture_high';
-    const maxScrap = (requestData.max_scrap_percent as number) || 2.0;
 
+    console.log(`[FACTORY_DEMO] Raw request_data keys: ${JSON.stringify(Object.keys(requestData))}`);
+    console.log(`[FACTORY_DEMO] Raw request_data: ${JSON.stringify(requestData).substring(0, 500)}`);
+
+    const constraints = (requestData.constraints || requestData.metadata || {}) as Record<string, unknown>;
+    const rawScenario = requestData.scenario ?? constraints.scenario;
+    const scenario: string = (typeof rawScenario === 'string' ? rawScenario : (typeof rawScenario === 'object' && rawScenario !== null ? (rawScenario as Record<string, unknown>).name as string : undefined)) || 'moisture_high';
+
+    const rawMaxScrap = requestData.max_scrap_percent ?? requestData.max_scrap ?? constraints.max_scrap_percent ?? constraints.max_scrap;
+    const maxScrap = typeof rawMaxScrap === 'number' ? rawMaxScrap
+      : typeof rawMaxScrap === 'string' ? parseFloat(rawMaxScrap) || 2.0
+      : 2.0;
+
+    console.log(`[FACTORY_DEMO] Parsed — scenario=${scenario} (raw=${JSON.stringify(rawScenario)}) maxScrap=${maxScrap}% (raw=${JSON.stringify(rawMaxScrap)}) fallback=${rawMaxScrap === undefined ? 'YES' : 'NO'}`);
     console.log(`[SUPERVISOR] Routing to RUN_FACTORY_DEMO — scenario=${scenario} maxScrap=${maxScrap}%`);
 
     const nowMs = Date.now();
