@@ -874,7 +874,7 @@ class SupervisorService {
 
       await storage.updateAgentRun(runId, {
         status: result.success ? 'completed' : 'failed',
-        terminalState: result.stoppedByTower ? 'tower_stopped' : 'completed',
+        terminalState: result.stoppedByTower ? 'stopped' : 'completed',
         endedAt: new Date(),
         metadata: {
           scenario, maxScrapPercent: maxScrap,
