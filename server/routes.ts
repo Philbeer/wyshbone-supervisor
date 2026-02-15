@@ -971,7 +971,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         console.log(`[DEBUG] Generating narrative — runId=${runId} type=${runType}`);
         const result = await generateRunNarrative({ runId, runType, userId });
-        res.json({ runId, narrative: result.narrative, facts_bundle: result.factsBundle });
+        res.json({ runId, tldr: result.tldr, narrative: result.narrative, facts_bundle: result.factsBundle });
       } catch (error: any) {
         console.error("[DEBUG] Narrative generation error:", error);
         res.status(500).json({ error: error.message });

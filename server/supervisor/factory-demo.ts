@@ -398,6 +398,7 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
 
   try {
     const narrativeResult = await generateRunNarrative({ runId, runType: 'factory_demo', userId, conversationId });
+    console.log(`${logPrefix} TL;DR: ${narrativeResult.tldr}`);
     console.log(`${logPrefix} Narrative generated (${narrativeResult.narrative.length} chars)`);
   } catch (err: any) {
     console.error(`${logPrefix} Narrative generation failed (non-fatal): ${err.message}`);

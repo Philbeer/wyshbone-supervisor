@@ -53,6 +53,71 @@ export interface RunFactsBundle {
   outcome: OutcomeFact;
 }
 
+function buildFactoryTldr(bundle: RunFactsBundle): string {
+  const goal = bundle.outcome.target_scrap;
+  const goalLabel = goal !== null ? `${goal}%` : 'an acceptable level';
+  const finalScrap = bundle.outcome.final_scrap_rate;
+  const lowestPossible = bundle.outcome.achievable_floor;
+  const stopped = bundle.outcome.stopped_by_tower;
+  const planChanged = bundle.outcome.plan_changed;
+  const outcome = bundle.outcome.outcome;
+
+  let sentence1 = `You asked the system to run the factory with no more than ${goalLabel} waste.`;
+
+  let sentence2: string;
+  let sentence3: string | null = null;
+
+  if (stopped) {
+    if (bundle.outcome.stopped_at_step === 0 || bundle.outcome.stopped_at_step === 1) {
+      sentence2 = finalScrap !== null
+        ? `The factory produced ${finalScrap}% waste right away, which was already over the ${goalLabel} goal.`
+        : `The factory immediately produced more waste than allowed.`;
+    } else {
+      sentence2 = finalScrap !== null
+        ? `Waste reached ${finalScrap}% during production and could not be brought down enough.`
+        : `Waste rose during production and could not be reduced enough.`;
+    }
+    if (lowestPossible !== null && goal !== null && lowestPossible > goal) {
+      sentence3 = `The system stopped because even the best possible waste level (${lowestPossible}%) was still above your ${goalLabel} goal.`;
+    } else {
+      sentence3 = `The system stopped the run because the goal could not be met.`;
+    }
+  } else if (planChanged) {
+    sentence2 = finalScrap !== null
+      ? `Waste increased during production, so the system changed its approach.`
+      : `Production conditions changed, so the system adjusted its strategy.`;
+    if (outcome === 'success' || outcome === 'completed') {
+      sentence3 = finalScrap !== null
+        ? `After the change, waste dropped to ${finalScrap}% and production finished successfully.`
+        : `After the change, waste came back within the goal and production continued.`;
+    } else {
+      sentence3 = `Despite the change, the run did not fully meet the goal.`;
+    }
+  } else {
+    if (outcome === 'success' || outcome === 'completed') {
+      sentence2 = finalScrap !== null
+        ? `The factory kept waste at ${finalScrap}% throughout the run, well within the goal.`
+        : `The factory stayed within the waste goal throughout the run.`;
+      sentence3 = `No changes were needed.`;
+    } else {
+      sentence2 = `The run ended without a clear result in the recorded data.`;
+    }
+  }
+
+  const parts = [sentence1, sentence2];
+  if (sentence3) parts.push(sentence3);
+  return parts.join('\n');
+}
+
+function buildTldr(bundle: RunFactsBundle): string {
+  switch (bundle.run_type) {
+    case 'factory_demo':
+      return buildFactoryTldr(bundle);
+    default:
+      return buildFactoryTldr(bundle);
+  }
+}
+
 function extractPayload(artefact: Artefact): Record<string, unknown> {
   return (artefact.payloadJson as Record<string, unknown>) ?? {};
 }
@@ -233,7 +298,7 @@ export interface GenerateNarrativeParams {
   conversationId?: string;
 }
 
-export async function generateRunNarrative(params: GenerateNarrativeParams): Promise<{ factsBundle: RunFactsBundle; narrative: string }> {
+export async function generateRunNarrative(params: GenerateNarrativeParams): Promise<{ factsBundle: RunFactsBundle; narrative: string; tldr: string }> {
   const { runId, runType, userId, conversationId } = params;
   const logPrefix = '[RUN_NARRATIVE]';
 
@@ -245,6 +310,9 @@ export async function generateRunNarrative(params: GenerateNarrativeParams): Pro
   }
 
   const factsBundle = buildFactsBundle(runId, runType, artefacts);
+
+  const tldr = buildTldr(factsBundle);
+  console.log(`${logPrefix} TL;DR generated (${tldr.length} chars)`);
 
   await createArtefact({
     runId, userId, conversationId,
@@ -262,14 +330,15 @@ export async function generateRunNarrative(params: GenerateNarrativeParams): Pro
     runId, userId, conversationId,
     type: 'run_narrative',
     title: `Run Narrative: ${runType}`,
-    summary: `Plain-English narrative for ${runType} run`,
+    summary: tldr,
     payload: {
-      narrative,
+      tldr,
+      full_explanation: narrative,
       facts_bundle: factsBundle,
       generated_at: new Date().toISOString(),
     },
   });
   console.log(`${logPrefix} Narrative artefact written`);
 
-  return { factsBundle, narrative };
+  return { factsBundle, narrative, tldr };
 }
