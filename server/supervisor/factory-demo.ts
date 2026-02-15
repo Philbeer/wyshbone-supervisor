@@ -733,3 +733,170 @@ export async function executeFactoryDemo(params: FactoryDemoParams): Promise<Fac
     summary,
   };
 }
+
+export interface PreviewStepState {
+  step: number;
+  label: string;
+  action: string;
+  machine: 'primary' | 'alternate';
+  machine_label: string;
+  machine_id: string;
+  tool_id: string;
+  scrap_rate_now: number;
+  defect_type: string;
+  probable_cause: string;
+  trend: string;
+  achievable_scrap_floor: number;
+  energy_kwh_per_good_part: number;
+  energy_status: string;
+  sensor_override: boolean;
+  tower_verdict: string;
+  tower_action: string;
+  tower_trigger: string;
+}
+
+export interface FactoryPreviewResult {
+  scenario: string;
+  max_scrap_percent: number;
+  energy_limit: number;
+  energy_price_band: string;
+  sensor_script_active: boolean;
+  machines: {
+    primary: MachineProfile;
+    alternate: MachineProfile;
+  };
+  steps: PreviewStepState[];
+  predicted_outcome: 'success' | 'stopped';
+  predicted_final_machine: string;
+  predicted_machine_switch: boolean;
+  predicted_plan_change: boolean;
+}
+
+export interface FactoryPreviewParams {
+  scenario?: DemoScenario;
+  maxScrapPercent?: number;
+  energyPriceBand?: string;
+  machines?: { primary: MachineProfile; alternate: MachineProfile };
+  demoSensorScript?: DemoSensorScript;
+}
+
+export function previewFactoryDemo(params: FactoryPreviewParams): FactoryPreviewResult {
+  const {
+    scenario = 'moisture_high',
+    maxScrapPercent = 2.0,
+    energyPriceBand = 'standard',
+    demoSensorScript,
+  } = params;
+
+  const scenarioMachines = DEFAULT_MACHINES[scenario] ?? DEFAULT_MACHINES['moisture_high'];
+  const machines = params.machines ?? scenarioMachines;
+  const hasSensorScript = demoSensorScript && (demoSensorScript.primary || demoSensorScript.alternate);
+
+  const energyLimit = getEnergyLimit(energyPriceBand);
+  const constraints = { max_scrap_percent: maxScrapPercent, max_energy_kwh: energyLimit };
+  const steps = buildDemoSteps(scenario);
+
+  let priorState: FactorySimOutput | null = null;
+  let currentMachine: 'primary' | 'alternate' = 'primary';
+  let currentMitigation = steps[2].proposed_action;
+  let machineSwitched = false;
+  let planChanged = false;
+  let stoppedEarly = false;
+  const stepHistory: StepHistory[] = [];
+  const resolvedSteps: PreviewStepState[] = [];
+
+  function mp(): MachineProfile {
+    return currentMachine === 'primary' ? machines.primary : machines.alternate;
+  }
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const action = i === 2 ? currentMitigation : step.proposed_action;
+    const profile = mp();
+
+    const sensorReading: SensorReading | undefined =
+      demoSensorScript?.[currentMachine]?.[step.step_index] ?? undefined;
+
+    const simInput: FactorySimInput = {
+      scenario,
+      constraints,
+      step_index: step.step_index,
+      prior_state: priorState,
+      proposed_action: action,
+      machine: currentMachine,
+      sensor_reading: sensorReading,
+      energy_limit: energyLimit,
+    };
+
+    const simOutput = runFactorySim(simInput);
+    priorState = simOutput;
+
+    const towerVerdict = judgeFactoryStep(step.step_index, simOutput, maxScrapPercent, scenario, stepHistory, energyLimit);
+
+    stepHistory.push({
+      stepIndex: step.step_index,
+      scrap: simOutput.scrap_rate_now,
+      defect: simOutput.defect_type,
+      trend: simOutput.trend,
+      cause: simOutput.probable_cause,
+      energy: simOutput.energy_kwh_per_good_part,
+      energyStatus: simOutput.energy_status,
+      machineUsed: currentMachine,
+    });
+
+    resolvedSteps.push({
+      step: i + 1,
+      label: step.label,
+      action,
+      machine: currentMachine,
+      machine_label: profile.label,
+      machine_id: profile.id,
+      tool_id: profile.tool_id,
+      scrap_rate_now: simOutput.scrap_rate_now,
+      defect_type: simOutput.defect_type,
+      probable_cause: simOutput.probable_cause,
+      trend: simOutput.trend,
+      achievable_scrap_floor: simOutput.achievable_scrap_floor,
+      energy_kwh_per_good_part: simOutput.energy_kwh_per_good_part,
+      energy_status: simOutput.energy_status,
+      sensor_override: !!sensorReading,
+      tower_verdict: towerVerdict.verdict,
+      tower_action: towerVerdict.action,
+      tower_trigger: towerVerdict.trigger,
+    });
+
+    if (towerVerdict.action === 'stop') {
+      stoppedEarly = true;
+      break;
+    }
+
+    if (towerVerdict.action === 'change_plan' && i >= steps.length - 1) {
+      stoppedEarly = true;
+      break;
+    }
+
+    if (towerVerdict.action === 'change_plan' && i < steps.length - 1) {
+      planChanged = true;
+      if (currentMachine === 'primary') {
+        currentMachine = 'alternate';
+        machineSwitched = true;
+      }
+      const selection = selectIntervention(simOutput.probable_cause, currentMitigation, scenario, towerVerdict.trigger === 'defect_shift_mismatch');
+      currentMitigation = selection.intervention;
+    }
+  }
+
+  return {
+    scenario,
+    max_scrap_percent: maxScrapPercent,
+    energy_limit: energyLimit,
+    energy_price_band: energyPriceBand ?? 'standard',
+    sensor_script_active: !!hasSensorScript,
+    machines: { primary: machines.primary, alternate: machines.alternate },
+    steps: resolvedSteps,
+    predicted_outcome: stoppedEarly ? 'stopped' : 'success',
+    predicted_final_machine: currentMachine,
+    predicted_machine_switch: machineSwitched,
+    predicted_plan_change: planChanged,
+  };
+}

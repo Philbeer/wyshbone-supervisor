@@ -924,6 +924,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     });
 
+    app.post("/api/debug/factory-preview", async (req, res) => {
+      try {
+        const { previewFactoryDemo } = await import('./supervisor/factory-demo');
+        const { normalizeSensorScript } = await import('./supervisor/factory-sim');
+        const scenario = req.body?.scenario || 'moisture_high';
+        const maxScrapPercent = req.body?.max_scrap_percent ?? req.body?.maxScrapPercent ?? 2.0;
+        const energyPriceBand = req.body?.energy_price_band || req.body?.energyPriceBand || 'standard';
+        const rawSensorScript = req.body?.demo_sensor_script ?? req.body?.sensor_script;
+        const demoSensorScript = rawSensorScript ? normalizeSensorScript(rawSensorScript) : undefined;
+
+        console.log(`[DEBUG] Factory preview — scenario=${scenario} max_scrap=${maxScrapPercent}% energy_band=${energyPriceBand}${demoSensorScript ? ' sensor_script=YES' : ''}`);
+
+        const result = previewFactoryDemo({
+          scenario,
+          maxScrapPercent,
+          energyPriceBand,
+          demoSensorScript,
+        });
+
+        res.json(result);
+      } catch (err: any) {
+        console.error(`[DEBUG] Factory preview error:`, err.message);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
     app.post("/api/debug/factory-demo", async (req, res) => {
       try {
         const { executeFactoryDemo } = await import('./supervisor/factory-demo');

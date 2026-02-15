@@ -1,7 +1,7 @@
 # Wyshbone Supervisor Suite
 
 ## Overview
-Wyshbone Supervisor is a B2B lead generation system designed for automatic prospect identification and scoring. It provides real-time lead suggestions with contact information via email and an integrated chat, aiming to enhance sales processes and expand market reach. The system focuses on delivering actionable, high-density data and improving workflow efficiency.
+Wyshbone Supervisor is a B2B lead generation system designed for automatic prospect identification and scoring. It provides real-time lead suggestions with contact information via email and an integrated chat. The system aims to enhance sales processes, expand market reach, deliver actionable, high-density data, and improve workflow efficiency.
 
 ## User Preferences
 Preferred communication style: Simple, everyday language.
@@ -9,7 +9,7 @@ Preferred communication style: Simple, everyday language.
 ## System Architecture
 
 ### UI/UX Decisions
-The frontend utilizes React, TypeScript, Vite, and Wouter for development, with styling handled by Tailwind CSS and custom design tokens. UI components are built using `shadcn/ui` (based on Radix UI primitives) in a "New York" style, inspired by Linear's B2B design.
+The frontend uses React, TypeScript, Vite, and Wouter, styled with Tailwind CSS and custom design tokens. UI components are built with `shadcn/ui` (based on Radix UI primitives) in a "New York" style, inspired by Linear's B2B design.
 
 ### Technical Implementations
 - **Frontend**: React with TypeScript, Vite, Wouter, and TanStack Query.
@@ -23,39 +23,21 @@ The frontend utilizes React, TypeScript, Vite, and Wouter for development, with 
 - **Progress Tracking**: Uses an in-memory store for real-time tracking of concurrent plan executions.
 - **Event System**: A Map-based registry per `planId` ensures isolated event streams during concurrent executions.
 - **Deep Research**: A multi-provider research system (OpenAI, Perplexity, Anthropic, Fallback) generates reports based on user queries.
-- **ID Normalization**: `run_id` (from UI or generated UUID) serves as the canonical ID for all artefacts, agent runs, and AFR logging.
+- **ID Normalization**: `run_id` serves as the canonical ID for all artefacts, agent runs, and AFR logging.
 - **Intent Classification**: `LEAD_FIND` intent routes messages with lead-finding verbs, business types, and locations to `SEARCH_PLACES`. `DEEP_RESEARCH` requires explicit keywords.
 - **Plan Execution**: Calls Tower via `judgeArtefact` after every step, with a bounded retry/replan inner loop allowing for various verdicts.
-
-### Feature Specifications
 - **RESTful API**: Manages leads, user context, signals, and plan execution, including endpoints for plan creation, approval, and progress monitoring.
 - **Supervisor APIs**: Executes plans, manages background jobs, and polls deep research runs.
 - **Database Schema**: Supports users, signals, suggested leads, plan executions, and plans.
-- **Artefacts**: Posted for lead generation results and deep research reports.
-- **Delivery Summary Artefact** (Feb 2026): A canonical `delivery_summary` artefact emitted at the end of every Supervisor-orchestrated run (both PASS and STOP outcomes). Captures: `requested_count`, `hard_constraints`, `soft_constraints`, `plan_versions` with changes, `soft_relaxations` with from/to/reason, `delivered_exact` and `delivered_closest` entity lists with per-lead match classification, `shortfall`, `stop_reason`, and `suggested_next_question`. Per-lead classification: "exact" = satisfies all hard constraints + all original soft constraints; "closest" = violates ≥1 constraint. Hard constraint validation via text matching on lead name/address. Soft constraint validation: textual constraints use lead name/address string matching against original "from" value; non-textual constraints (radius, distance) use `found_in_plan_version` to determine if lead was found before relaxation. Builder module: `server/supervisor/delivery-summary.ts`. Integrated into `executeTowerLoopChat` (with accumulatedCandidates and softRelaxations tracking), `handleTowerVerdict` (all 10 terminal paths), and `executePlan` (5 return paths with constraints derived from leadsFilters). No synthetic/fabricated leads; empty arrays when no real candidates exist.
-- **Run Trace Report**: A debug endpoint (`GET /api/debug/run-trace`) provides a JSON diagnostic report for a given run.
-- **Run Narrative System** (Feb 2026): Generates plain-English reports from run artefacts. Module: `server/supervisor/run-narrative.ts`. Builds a facts bundle from plan, factory_state, factory_decision, tower_judgement, and plan_result artefacts, then generates an LLM narrative constrained to only use facts from the bundle. Produces two artefacts: `run_narrative_facts` (raw bundle) and `run_narrative` (with `tldr` and `full_explanation` fields). TL;DR is deterministic (no LLM), 2-3 sentences in plain language avoiding technical terms. Extensible to other run types via `buildFactsBundle` switch. Debug endpoint: `POST /api/debug/run-narrative`.
+- **Artefacts**: Posted for lead generation results and deep research reports, including `delivery_summary` and `run_narrative` artefacts for run outcomes and explanations.
 - **Tower Hard Gate for `SEARCH_PLACES`**: All `SEARCH_PLACES` runs must create a `leads_list` artefact and receive an `ACCEPT` verdict from Tower to emit `run_completed`.
 - **Supervisor-Only Execution**: All execution flows through the Supervisor via `executeTowerLoopChat` or the `supervisor_tasks` queue. No inline execution endpoints exist.
 - **Inline Tower Observation**: After every tool call, a `step_result` artefact is written, Tower judges it, and a `tower_judgement` artefact is written (`observation_only: true`). Tower failures are fatal.
 - **Automated Replan Loop**: If Tower returns `change_plan` on a `leads_list` artefact, the supervisor automatically replans by applying policies (e.g., expanding location, increasing search count) and re-executes the plan, up to a maximum of two plan versions.
-- **Intelligent Replanning**:
-    - Separates `requested_count_user` (user request) from `search_budget_count` (tools fetch).
-    - Accumulates and deduplicates leads across replan versions using `place_id` or `name+address` hash.
-    - Implements a progressive geographic expansion strategy (radius ladder).
-    - Enforces hard constraints (`business_type`, `requested_count`) while allowing relaxation of soft constraints (`location`, `prefix_filter`).
-    - Includes early stopping when the goal is met or no further progress can be made.
-    - Supports a configurable maximum number of replans.
-- **Partial Accumulation Across Replans** (Feb 2026):
-    - Distinguishes between `accumulated_total_unique` (all deduped leads found) and `accumulated_matching` (leads satisfying hard NAME constraints like `NAME_STARTS_WITH`, `NAME_CONTAINS`).
-    - Early stop decisions use `accumulated_matching` count against `requested_count_user`, not total unique count.
-    - Emits `accumulation_update` artefacts after each plan execution showing matching vs total progress.
-    - Tower `leads_list` payloads include `accumulated_total_unique` and `accumulated_matching` for informed judgements.
-    - Final leads artefact and chat response provide honest summaries: "X matching of Y total found".
-    - `perPlanAdded` array tracks per-plan contribution (matching delta and new unique count).
-- **LLM-backed Goal-to-Constraints Parser**: Converts natural language user goals into structured constraints with hard/soft classification using LLMs (OpenAI, Anthropic) and strict JSON schema validation. Handles various constraint types like `COUNT_MIN`, `LOCATION_EQUALS`, `CATEGORY_EQUALS`, `NAME_STARTS_WITH`, `NAME_CONTAINS`, and `MUST_USE_TOOL`.
-- **Factory Simulator Demo** (Feb 2026): A deterministic injection-moulding simulation tool (`FACTORY_SIM`) and demo runner (`RUN_FACTORY_DEMO`). Triggered by exact message "run the injection moulding demo" in chat. Implements a fixed 3-step plan: (1) baseline assessment, (2) production drift detection, (3) mitigation response. Scenarios: `normal`, `moisture_high`, `tool_worn`. Each step writes `factory_state` and `factory_decision` artefacts, followed by a deterministic factory-aware Tower judgement (`tower_judgement` artefact). Supports `CHANGE_PLAN` (switches mitigation strategy) and `STOP` (terminates when `achievable_scrap_floor > max_scrap_percent`). Key rule: `moisture_high` with `max_scrap_percent <= 1%` produces STOP because floor is 1.5%. Files: `server/supervisor/factory-sim.ts` (tool + presets), `server/supervisor/factory-demo.ts` (runner + local judgement), routing in `server/supervisor.ts` (`processChatTask`). Debug endpoint: `POST /api/debug/factory-demo`. Diagnosis fields: `probable_cause` (moisture_instability, tool_wear, none), `trend` (rising/stable/falling), `energy_status` (within_limit/high/critical). Judgement triggers: scrap_above_target, floor_above_target, trend_rising_preemptive (rising 2 steps), defect_shift_mismatch (defect type changed after mitigation), energy_exceeded, energy_critical_stop. Cause-based intervention: moisture→dryer_boost/switch_resin_batch; tool_wear→reduce_speed/increase_clamp_pressure/schedule_tool_refurb/disable_cavities. Energy constraint via `energy_price_band` (off_peak/standard/peak) with per-band kWh limits. Machine switching on CHANGE_PLAN: primary/alternate machine profiles per scenario (e.g. moisture_high→desiccant dryer, tool_worn→fresh tooling). `factory_state` payloads include `machine_used`, `machine_label`, `machine_id`, `tool_id`. Plan v2 artefact includes `machine_used_from`/`machine_used_to`, `machine_label_from`/`machine_label_to`, `machine_id_from`/`machine_id_to`. TL;DR/narrative derive "switched to Machine 2" from step-level evidence only (requires Tower `change_plan` verdict AND consecutive step `machine_used` differs). `detectMachineSwitchFromSteps()` in `run-narrative.ts` enforces provability.
-- **Demo Sensor Scripts** (Feb 2026): User-configurable per-machine, per-step sensor readings that override preset lookup tables. Accepts `demo_sensor_script` with `{ primary?: Record<step_index, SensorReading>, alternate?: Record<step_index, SensorReading> }` where `SensorReading` = `{ scrap_rate_now, defect_type, energy_kwh_per_good_part, achievable_scrap_floor?, probable_cause?, notes?, energy_status?, trend?, available_actions? }`. Override applied inside `runFactorySim()` via `applySensorOverride()` — user-supplied observables replace preset values, derived fields (trend, energy_status, probable_cause) are inferred when not explicitly set. Agent logic (`judgeFactoryStep`) is unchanged; it sees sensor readings as environment truth. The agent cannot see future steps. Enables users to force plan changes, retries, or stops by shaping sensor behaviour. Artefacts include `sensor_override: true` flag when overrides are active; plan artefact includes `sensor_script_active: true`. Accepted via debug endpoint (`POST /api/debug/factory-demo` with `demo_sensor_script` body field) and supervisor task `request_data`. Types defined in `factory-sim.ts`.
+- **Intelligent Replanning**: Separates `requested_count_user` from `search_budget_count`, accumulates and deduplicates leads across replan versions, implements a progressive geographic expansion strategy, enforces hard constraints while allowing relaxation of soft constraints, and includes early stopping.
+- **Partial Accumulation Across Replans**: Distinguishes between `accumulated_total_unique` and `accumulated_matching` leads, using the latter for early stop decisions. Emits `accumulation_update` artefacts and provides honest summaries in final outputs.
+- **LLM-backed Goal-to-Constraints Parser**: Converts natural language user goals into structured constraints with hard/soft classification using LLMs and strict JSON schema validation.
+- **Factory Simulator Demo**: A deterministic injection-moulding simulation tool (`FACTORY_SIM`) and demo runner (`RUN_FACTORY_DEMO`) for testing agent decision-making in a controlled environment, including sensor scripts and a preview/dry-run feature.
 
 ### System Design Choices
 - **IStorage Interface**: Provides an abstraction layer for database operations.
@@ -87,5 +69,5 @@ The frontend utilizes React, TypeScript, Vite, and Wouter for development, with 
 - **Zod**: Runtime schema validation.
 - **Tower Judgement API**: External service for agentic decision-making.
 - **OpenAI API**: Used for deep research.
-- **Perplexity API**: Used for deep research with `llama-3.1-sonar-large-128k-online`.
-- **Anthropic API**: Used for deep research with Claude models.
+- **Perplexity API**: Used for deep research.
+- **Anthropic API**: Used for deep research.
