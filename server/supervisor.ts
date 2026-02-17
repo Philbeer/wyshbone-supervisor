@@ -2189,8 +2189,12 @@ class SupervisorService {
         }
 
         if (newUnique === 0 && !shouldBreakAfterReplan) {
-          console.log(`[REPLAN] Zero new unique leads in ${vLabel} (accumulated matching=${postMatchingCount} total=${accumulatedCandidates.size}/${userRequestedCountFinal}) — further expansion unlikely to help. Stopping replan loop.`);
-          shouldBreakAfterReplan = true;
+          if (replanAction === 'change_plan') {
+            console.log(`[REPLAN] Zero new unique leads in ${vLabel} (accumulated matching=${postMatchingCount} total=${accumulatedCandidates.size}/${userRequestedCountFinal}) — but Tower action=change_plan, continuing replan loop.`);
+          } else {
+            console.log(`[REPLAN] Zero new unique leads in ${vLabel} (accumulated matching=${postMatchingCount} total=${accumulatedCandidates.size}/${userRequestedCountFinal}) — action=${replanAction}, stopping replan loop.`);
+            shouldBreakAfterReplan = true;
+          }
         }
 
         try {
@@ -2272,7 +2276,7 @@ class SupervisorService {
       finalTowerResult = { ...finalTowerResult, shouldStop: false };
     }
 
-    const isHalted = finalVerdict !== 'pass' && (finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'fail');
+    const isHalted = finalVerdict !== 'pass' && finalAction !== 'change_plan' && (finalTowerResult.shouldStop || finalVerdict === 'error');
     if (isHalted) {
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,

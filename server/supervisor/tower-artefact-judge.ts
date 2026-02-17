@@ -215,7 +215,7 @@ export async function judgeArtefact(params: {
     runId,
     conversationId,
     actionTaken: 'tower_judgement',
-    status: judgement.action === 'stop' || judgement.verdict === 'fail' ? 'failed' : 'success',
+    status: judgement.action === 'stop' || judgement.verdict === 'error' || (judgement.verdict === 'fail' && judgement.action !== 'change_plan') ? 'failed' : 'success',
     taskGenerated: `[Tower] ${judgement.verdict}: ${shortReason}`,
     runType: 'plan',
     metadata: {
@@ -229,7 +229,7 @@ export async function judgeArtefact(params: {
 
   console.log(`[TOWER_JUDGE] Verdict: ${judgement.verdict} | Action: ${judgement.action} | Artefact: ${artefact.id}${stubbed ? ' (stub)' : ''}`);
 
-  const shouldStop = judgement.action === 'stop' || judgement.verdict === 'fail';
+  const shouldStop = judgement.action === 'stop' || judgement.verdict === 'error' || (judgement.verdict === 'fail' && judgement.action !== 'change_plan');
 
   return { judgement, shouldStop, stubbed };
 }
