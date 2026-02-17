@@ -1825,7 +1825,7 @@ class SupervisorService {
           tool: 'SEARCH_PLACES',
           tool_args: { query: `${v2.business_type} in ${v2.location} ${v2.country}`, location: v2.location, country: v2.country, maxResults: v2.search_count, target_count: v2.requested_count_user },
           expected_output: `Up to ${v2.search_count} ${v2.business_type} results from Google Places`,
-          ...(v2.prefix_filter ? { post_processing: `Filter names starting with "${v2.prefix_filter}"; Take first ${v2.requested_count} results` } : (v2.requested_count < v2.search_count ? { post_processing: `Take first ${v2.requested_count} results` } : {})),
+          ...(v2.prefix_filter ? { post_processing: `Filter names starting with "${v2.prefix_filter}"; Take first ${displayCount ?? v2.requested_count} results` } : ((displayCount ?? v2.requested_count) < v2.search_count ? { post_processing: `Take first ${displayCount ?? v2.requested_count} results` } : {})),
         },
       ];
 
@@ -1843,7 +1843,7 @@ class SupervisorService {
         constraints: [
           `business_type=${v2.business_type}`,
           `location=${v2.location}`,
-          `count=${v2.requested_count}`,
+          `count=${displayCount ?? v2.requested_count}`,
           ...(v2.prefix_filter ? [`prefix=${v2.prefix_filter}`] : []),
         ],
         steps: replanPlanSteps,
@@ -1853,7 +1853,7 @@ class SupervisorService {
       const replanPlanArtefact = await createArtefact({
         runId: chatRunId,
         type: 'plan',
-        title: artefactTitle(`Plan ${vLabel}:`, v2.requested_count, v2, planVersion),
+        title: artefactTitle(`Plan ${vLabel}:`, displayCount, v2, planVersion),
         summary: `${replanResult.strategy_summary} — re-searching ${v2.business_type} in ${v2.location}`,
         payload: replanPlanPayload,
         userId: task.user_id,
@@ -1978,7 +1978,7 @@ class SupervisorService {
         runId: chatRunId,
         type: 'step_result',
         title: artefactTitle(`Step result (${vLabel}): SEARCH_PLACES –`, replanLeads.length, v2, planVersion),
-        summary: artefactSummary(`Plan ${vLabel}: Found `, replanLeads.length, v2.requested_count, v2, planVersion),
+        summary: artefactSummary(`Plan ${vLabel}: Found `, replanLeads.length, displayCount, v2, planVersion),
         payload: {
           plan_version: planVersion,
           plan_artefact_id: replanPlanArtefact.id,
@@ -2063,7 +2063,7 @@ class SupervisorService {
         runId: chatRunId,
         type: 'leads_list',
         title: artefactTitle(`Leads list ${vLabel}:`, replanLeads.length, v2, planVersion),
-        summary: artefactSummary(`Plan ${vLabel}: `, replanLeads.length, v2.requested_count, v2, planVersion, replanUsedStub ? '(stub fallback)' : undefined),
+        summary: artefactSummary(`Plan ${vLabel}: `, replanLeads.length, displayCount, v2, planVersion, replanUsedStub ? '(stub fallback)' : undefined),
         payload: replanLeadsListPayload,
         userId: task.user_id,
         conversationId,
@@ -2132,7 +2132,7 @@ class SupervisorService {
         runId: chatRunId,
         type: 'tower_judgement',
         title: `Tower Judgement ${vLabel}: ${replanVerdict}`,
-        summary: `${vLabel} Verdict: ${replanVerdict} | Action: ${replanAction} | Delivered: ${replanLeads.length} of ${v2.requested_count}`,
+        summary: `${vLabel} Verdict: ${replanVerdict} | Action: ${replanAction} | Delivered: ${replanLeads.length} of ${displayCount ?? v2.requested_count}`,
         payload: {
           verdict: replanVerdict, action: replanAction,
           reasons: replanTowerResult.judgement.reasons, metrics: replanTowerResult.judgement.metrics,
@@ -2162,7 +2162,7 @@ class SupervisorService {
       finalLeads = replanLeads;
       finalLeadsListArtefact = replanLeadsListArtefact;
       finalTowerResult = replanTowerResult;
-      finalConstraints = { business_type: v2.business_type, location: v2.location, prefix_filter: v2.prefix_filter || null, requested_count: v2.requested_count };
+      finalConstraints = { business_type: v2.business_type, location: v2.location, prefix_filter: v2.prefix_filter || null, requested_count: displayCount };
       businessType = v2.business_type;
       city = v2.location;
       currentConstraints = v2;
