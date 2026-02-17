@@ -988,6 +988,23 @@ class SupervisorService {
     if (!hard_constraints.includes('requested_count')) hard_constraints.push('requested_count');
     console.log(`[TOWER_LOOP_CHAT] Constraint classification — hard: [${hard_constraints.join(', ')}] soft: [${soft_constraints.join(', ')}]`);
 
+    const typedConstraints = structuredConstraints.map(c => ({
+      type: c.type,
+      field: c.field === 'count' ? 'requested_count'
+        : c.field === 'name' && c.type === 'NAME_STARTS_WITH' ? 'prefix_filter'
+        : c.field === 'name' && c.type === 'NAME_CONTAINS' ? 'name_filter'
+        : c.field,
+      value: c.value,
+      hardness: c.hard ? 'hard' as const : 'soft' as const,
+    }));
+    if (!typedConstraints.some(tc => tc.field === 'business_type')) {
+      typedConstraints.push({ type: 'CATEGORY_EQUALS' as const, field: 'business_type', value: businessType!, hardness: 'hard' });
+    }
+    if (!typedConstraints.some(tc => tc.field === 'requested_count') && userRequestedCountFinal !== null) {
+      typedConstraints.push({ type: 'COUNT_MIN' as const, field: 'requested_count', value: userRequestedCountFinal, hardness: 'hard' });
+    }
+    console.log(`[TOWER_LOOP_CHAT] Typed constraints for Tower: ${JSON.stringify(typedConstraints)}`);
+
     const v1Constraints = {
       business_type: businessType,
       location: city,
@@ -1438,6 +1455,27 @@ class SupervisorService {
     console.log(`[TOWER_LOOP_CHAT] [tower_call_started] artefactId=${leadsListArtefact.id}`);
 
     // 9. Call Tower via judgeArtefact (persists tower_judgements row + emits tower_judgement AFR)
+    const v1SuccessCriteria = {
+      mission_type: 'leadgen',
+      target_count: userRequestedCountFinal ?? requestedCount,
+      user_specified_count: userSpecifiedCount,
+      ...(prefixFilter ? { prefix: prefixFilter } : {}),
+      plan_version: 1,
+      hard_constraints,
+      soft_constraints,
+      constraints: typedConstraints,
+      plan_constraints: {
+        business_type: businessType,
+        location: city,
+        country,
+        search_count: searchCount,
+        requested_count: userRequestedCountFinal ?? requestedCount,
+        prefix_filter: prefixFilter || null,
+      },
+      max_replan_versions: 2,
+    };
+    console.log(`[TOWER_PAYLOAD] v1 successCriteria: ${JSON.stringify(v1SuccessCriteria, null, 2)}`);
+
     let towerResult;
     try {
       towerResult = await judgeArtefact({
@@ -1446,24 +1484,7 @@ class SupervisorService {
         goal,
         userId: task.user_id,
         conversationId,
-        successCriteria: {
-          mission_type: 'leadgen',
-          target_count: userRequestedCountFinal ?? requestedCount,
-          user_specified_count: userSpecifiedCount,
-          ...(prefixFilter ? { prefix: prefixFilter } : {}),
-          plan_version: 1,
-          hard_constraints,
-          soft_constraints,
-          plan_constraints: {
-            business_type: businessType,
-            location: city,
-            country,
-            search_count: searchCount,
-            requested_count: userRequestedCountFinal ?? requestedCount,
-            prefix_filter: prefixFilter || null,
-          },
-          max_replan_versions: 2,
-        },
+        successCriteria: v1SuccessCriteria,
       });
     } catch (towerErr: any) {
       const errMsg = towerErr.message || 'Tower call threw an exception';
@@ -2032,6 +2053,11 @@ class SupervisorService {
             plan_version: planVersion,
             hard_constraints,
             soft_constraints,
+            constraints: typedConstraints.map(tc => {
+              if (tc.field === 'location') return { ...tc, value: v2.location };
+              if (tc.field === 'prefix_filter' && !v2.prefix_filter) return { ...tc, value: null, hardness: 'soft' as const };
+              return tc;
+            }).filter(tc => tc.value !== null),
             plan_constraints: {
               business_type: v2.business_type,
               location: v2.location,
