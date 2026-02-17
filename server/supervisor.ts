@@ -2360,6 +2360,11 @@ class SupervisorService {
           .filter(c => finalLeads.some(fl => fl.placeId === c.place_id || fl.name === c.name))
           .map(c => ({ entity_id: c.place_id || c.dedupe_key, name: c.name, address: c.address || '', found_in_plan_version: c.found_in_plan_version }))
       : finalLeads.map(l => ({ entity_id: l.placeId, name: l.name, address: l.address, found_in_plan_version: 1 }));
+    const replanBudgetExhausted = replansUsed >= MAX_REPLANS && finalAction === 'change_plan';
+    const dsVerdict = isHalted ? finalVerdict : (replanBudgetExhausted ? finalVerdict : 'pass');
+    const dsStopReason = isHalted
+      ? `Tower verdict: ${finalVerdict}, action: ${finalAction}`
+      : (replanBudgetExhausted ? `max_replans_exceeded (${replansUsed}/${MAX_REPLANS})` : null);
     await emitDeliverySummary({
       runId: chatRunId,
       userId: task.user_id,
@@ -2371,8 +2376,8 @@ class SupervisorService {
       planVersions: dsPlanVersions,
       softRelaxations: dsSoftRelaxations,
       leads: dsLeads,
-      finalVerdict: isHalted ? finalVerdict : 'pass',
-      stopReason: isHalted ? `Tower verdict: ${finalVerdict}, action: ${finalAction}` : null,
+      finalVerdict: dsVerdict,
+      stopReason: dsStopReason,
     });
 
     const planAdjustmentNote = planVersion > 1 ? ` after ${planVersion} search plan iterations` : '';

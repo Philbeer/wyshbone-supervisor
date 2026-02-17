@@ -216,11 +216,13 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
 
   const exactCount = exact.length;
   const totalCount = exact.length + closest.length;
-  const shortfall = Math.max(0, input.requestedCount - exactCount);
+  const shortfall = Math.max(0, input.requestedCount - totalCount);
 
-  const isStop = input.finalVerdict !== 'pass' && input.finalVerdict !== 'ACCEPT';
+  const hasShortfall = totalCount < input.requestedCount;
+  const verdictIsFailure = input.finalVerdict !== 'pass' && input.finalVerdict !== 'ACCEPT';
+  const isStop = hasShortfall || verdictIsFailure;
   const stopReason = isStop
-    ? (input.stopReason || `Run ended with verdict: ${input.finalVerdict}`)
+    ? (input.stopReason || (hasShortfall ? `Delivered ${totalCount} of ${input.requestedCount} requested` : `Run ended with verdict: ${input.finalVerdict}`))
     : null;
 
   const suggestedNextQuestion = deriveSuggestedNextQuestion(
