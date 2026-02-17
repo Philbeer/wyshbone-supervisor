@@ -1661,6 +1661,50 @@ class SupervisorService {
       console.warn(`[ACCUMULATION] Failed to create accumulation_update artefact (v1): ${accErr.message}`);
     }
 
+    // 12a. Local safety net: if Tower said stop/fail but we have unused replan budget,
+    //      a quantifiable shortfall, and expandable soft constraints → override to change_plan
+    if (finalAction !== 'change_plan' && !usedStub && replansUsed < MAX_REPLANS) {
+      const delivered = finalLeads.length;
+      const target = userRequestedCountFinal ?? requestedCount;
+      const hasShortfall = delivered < target;
+      const locationIsSoft = soft_constraints.includes('location');
+
+      if (hasShortfall && locationIsSoft) {
+        console.log(`[REPLAN_OVERRIDE] Tower returned action=${finalAction} verdict=${finalVerdict}, but shortfall detected (${delivered}/${target}) and location is soft — overriding to change_plan`);
+
+        await logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+          actionTaken: 'replan_override', status: 'pending',
+          taskGenerated: `Supervisor override: Tower ${finalAction}→change_plan (shortfall ${delivered}/${target}, location soft, replans ${replansUsed}/${MAX_REPLANS})`,
+          runType: 'plan',
+          metadata: {
+            original_verdict: finalVerdict,
+            original_action: finalAction,
+            delivered,
+            target,
+            replans_used: replansUsed,
+            max_replans: MAX_REPLANS,
+            soft_constraints,
+            override_reason: 'shortfall_with_expandable_location',
+          },
+        });
+
+        finalAction = 'change_plan';
+        finalTowerResult = {
+          ...finalTowerResult,
+          judgement: {
+            ...finalTowerResult.judgement,
+            action: 'change_plan',
+            gaps: [{ type: 'insufficient_count', severity: 'high', detail: `Delivered ${delivered} of ${target} requested` }],
+            suggested_changes: [
+              { field: 'location', action: 'expand', reason: `Shortfall: ${delivered}/${target} — expanding search radius (location is soft constraint)` },
+            ],
+          },
+          shouldStop: false,
+        };
+      }
+    }
+
     while (finalAction === 'change_plan' && !usedStub) {
       if (replansUsed >= MAX_REPLANS) {
         console.log(`[REPLAN] max_replans_exceeded — replans_used=${replansUsed} MAX_REPLANS=${MAX_REPLANS} plan_version=${planVersion}`);
