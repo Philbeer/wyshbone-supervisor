@@ -46,6 +46,7 @@ expertMode = true
 [userenv]
 
 [userenv.development]
+DEBUG_TOWER_PAYLOAD = "true"
 
 [userenv.shared]
 TOWER_ARTEFACT_JUDGE_STUB = "false"

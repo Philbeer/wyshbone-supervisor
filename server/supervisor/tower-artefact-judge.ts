@@ -72,6 +72,23 @@ async function callTowerJudgeArtefact(
   const endpoint = `${baseUrl}/api/tower/judge-artefact`;
   const apiKey = process.env.TOWER_API_KEY || process.env.EXPORT_KEY || '';
 
+  if (process.env.DEBUG_TOWER_PAYLOAD === 'true') {
+    const sc = (request.successCriteria || {}) as Record<string, unknown>;
+    console.log(`[DEBUG_TOWER_PAYLOAD] Outbound judge-artefact request:`, JSON.stringify({
+      runId: request.runId,
+      artefactId: request.artefactId,
+      artefactType: request.artefactType,
+      target_count: sc.target_count,
+      requested_count: (sc.plan_constraints as any)?.requested_count,
+      constraints: sc.constraints,
+      hard_constraints: sc.hard_constraints,
+      soft_constraints: sc.soft_constraints,
+      prefix: sc.prefix,
+      location: (sc.plan_constraints as any)?.location,
+      plan_version: sc.plan_version,
+    }, null, 2));
+  }
+
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
