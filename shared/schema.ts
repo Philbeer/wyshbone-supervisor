@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, jsonb, real, integer, index, bigint } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, jsonb, real, integer, index, bigint, numeric, uuid } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -220,9 +220,77 @@ export const agentRuns = pgTable("agent_runs", {
   metadata: jsonb("metadata"),
   startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
+  goalId: text("goal_id"),
 });
 
 export const insertAgentRunSchema = createInsertSchema(agentRuns).omit({});
 
 export type InsertAgentRun = z.infer<typeof insertAgentRunSchema>;
 export type AgentRun = typeof agentRuns.$inferSelect;
+
+export const goalLedger = pgTable("goal_ledger", {
+  goalId: text("goal_id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: text("user_id").notNull(),
+  goalText: text("goal_text").notNull(),
+  successCriteria: jsonb("success_criteria").notNull().default({}),
+  status: text("status").notNull().default("ACTIVE"),
+  linkedRunIds: text("linked_run_ids").array().notNull().default(sql`'{}'`),
+  stopReason: jsonb("stop_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index("idx_goal_ledger_user_id").on(table.userId),
+  statusIdx: index("idx_goal_ledger_status").on(table.status),
+}));
+
+export const insertGoalLedgerSchema = createInsertSchema(goalLedger).omit({
+  goalId: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertGoalLedger = z.infer<typeof insertGoalLedgerSchema>;
+export type GoalLedger = typeof goalLedger.$inferSelect;
+
+export const beliefStore = pgTable("belief_store", {
+  beliefId: text("belief_id").primaryKey().default(sql`gen_random_uuid()`),
+  runId: text("run_id").notNull(),
+  goalId: text("goal_id"),
+  claim: text("claim").notNull(),
+  confidence: numeric("confidence", { precision: 3, scale: 2 }).notNull().default("1.00"),
+  evidenceRunIds: text("evidence_run_ids").array().notNull().default(sql`'{}'`),
+  evidence: jsonb("evidence").notNull().default({}),
+  lastUpdated: timestamp("last_updated", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  runIdIdx: index("idx_belief_store_run_id").on(table.runId),
+  goalIdIdx: index("idx_belief_store_goal_id").on(table.goalId),
+}));
+
+export const insertBeliefStoreSchema = createInsertSchema(beliefStore).omit({
+  beliefId: true,
+  lastUpdated: true,
+});
+
+export type InsertBeliefStore = z.infer<typeof insertBeliefStoreSchema>;
+export type BeliefStore = typeof beliefStore.$inferSelect;
+
+export const feedbackEvents = pgTable("feedback_events", {
+  eventId: text("event_id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: text("user_id").notNull(),
+  goalId: text("goal_id").notNull(),
+  runId: text("run_id").notNull(),
+  eventType: text("event_type").notNull(),
+  payload: jsonb("payload").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  goalIdIdx: index("idx_feedback_events_goal_id").on(table.goalId),
+  runIdIdx: index("idx_feedback_events_run_id").on(table.runId),
+}));
+
+export const insertFeedbackEventSchema = createInsertSchema(feedbackEvents).omit({
+  eventId: true,
+  createdAt: true,
+});
+
+export type InsertFeedbackEvent = z.infer<typeof insertFeedbackEventSchema>;
+export type FeedbackEvent = typeof feedbackEvents.$inferSelect;

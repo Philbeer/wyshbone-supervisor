@@ -2517,6 +2517,243 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
   console.log('[DEBUG] Registered: POST /api/afr/rerun-judgement');
 
+  // ============================================================
+  // Demo Orchestrator Endpoints
+  // ============================================================
+
+  app.post('/api/demo/run/:scenario', async (req, res) => {
+    const scenario = req.params.scenario;
+    const userId = getUserId(req);
+    const validScenarios = ['clean_success', 'partial_delivery', 'intelligent_stop'];
+    if (!validScenarios.includes(scenario)) {
+      return res.status(400).json({ ok: false, error: `Invalid scenario. Must be one of: ${validScenarios.join(', ')}` });
+    }
+
+    try {
+      const { buildDeliverySummaryPayload } = await import('./supervisor/delivery-summary');
+      const { writeBeliefs } = await import('./supervisor/belief-writer');
+
+      const runId = `demo_${scenario}_${Date.now()}`;
+      const goalText = scenario === 'clean_success'
+        ? 'Find 5 Italian restaurants in downtown Chicago'
+        : scenario === 'partial_delivery'
+        ? 'Find 10 vegan bakeries in Brooklyn, NY'
+        : 'Find 20 underwater welding shops in Manhattan, NY';
+
+      const goal = await storage.createGoal({
+        userId,
+        goalText,
+        successCriteria: {
+          target_leads: scenario === 'clean_success' ? 5 : scenario === 'partial_delivery' ? 10 : 20,
+          type: scenario === 'clean_success' ? 'Italian restaurant' : scenario === 'partial_delivery' ? 'vegan bakery' : 'underwater welding shop',
+        },
+        status: 'ACTIVE',
+        linkedRunIds: [runId],
+      });
+
+      const makeLead = (i: number, name: string, addr: string) => ({
+        entity_id: `demo_lead_${i}`,
+        name,
+        address: addr,
+      });
+
+      let leads: Array<{ entity_id: string; name: string; address: string }> = [];
+      let finalVerdict: string;
+      let stopReason: string | null = null;
+      let cvlVerifiedExactCount: number | null = null;
+      let cvlUnverifiableCount: number | null = null;
+      let requestedCount: number;
+
+      if (scenario === 'clean_success') {
+        requestedCount = 5;
+        leads = [
+          makeLead(1, 'Trattoria Roma', '123 State St, Chicago, IL'),
+          makeLead(2, 'Piccolo Sogno', '464 N Halsted St, Chicago, IL'),
+          makeLead(3, 'Giordano\'s', '730 N Rush St, Chicago, IL'),
+          makeLead(4, 'Volare Ristorante', '201 E Grand Ave, Chicago, IL'),
+          makeLead(5, 'Osteria Via Stato', '620 N State St, Chicago, IL'),
+        ];
+        finalVerdict = 'pass';
+        cvlVerifiedExactCount = 5;
+        cvlUnverifiableCount = 0;
+      } else if (scenario === 'partial_delivery') {
+        requestedCount = 10;
+        leads = [
+          makeLead(1, 'Peacefood Bakery', '200 Smith St, Brooklyn, NY'),
+          makeLead(2, 'Clementine Bakery', '395 Classon Ave, Brooklyn, NY'),
+          makeLead(3, 'Ovenly', '31 Greenpoint Ave, Brooklyn, NY'),
+          makeLead(4, 'Sun in Bloom', '460 Bergen St, Brooklyn, NY'),
+        ];
+        finalVerdict = 'pass';
+        cvlVerifiedExactCount = 4;
+        cvlUnverifiableCount = 0;
+      } else {
+        requestedCount = 20;
+        leads = [];
+        finalVerdict = 'STOP';
+        stopReason = 'Business category "underwater welding shop" does not exist in target geography. Tower recommends abandoning this goal.';
+        cvlVerifiedExactCount = 0;
+        cvlUnverifiableCount = 0;
+      }
+
+      const summaryPayload = buildDeliverySummaryPayload({
+        runId,
+        userId,
+        originalUserGoal: goalText,
+        requestedCount,
+        hardConstraints: [],
+        softConstraints: [],
+        planVersions: [{ version: 1, changes_made: ['Initial plan'] }],
+        softRelaxations: [],
+        leads,
+        finalVerdict,
+        stopReason,
+        cvlVerifiedExactCount,
+        cvlUnverifiableCount,
+        cvlRequestedCountUser: requestedCount,
+        cvlHardUnverifiable: [],
+      });
+
+      const goalStatus = summaryPayload.status === 'PASS' ? 'COMPLETE'
+        : summaryPayload.status === 'PARTIAL' ? 'PARTIAL'
+        : 'STOPPED';
+      await storage.updateGoalStatus(
+        goal.goalId,
+        goalStatus,
+        summaryPayload.stop_reason ? { reason: summaryPayload.stop_reason } : undefined,
+      );
+
+      await writeBeliefs({
+        runId,
+        goalId: goal.goalId,
+        deliverySummary: summaryPayload,
+      });
+
+      const beliefs = await storage.getBeliefsByGoal(goal.goalId);
+
+      console.log(`[DEMO] Scenario=${scenario} goalId=${goal.goalId} runId=${runId} status=${summaryPayload.status}`);
+
+      return res.json({
+        ok: true,
+        scenario,
+        goal_id: goal.goalId,
+        run_id: runId,
+        delivery_summary: summaryPayload,
+        goal_status: goalStatus,
+        beliefs,
+      });
+    } catch (err: any) {
+      console.error(`[DEMO] Error running scenario ${scenario}: ${err.message}`);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+  console.log('[DEBUG] Registered: POST /api/demo/run/:scenario');
+
+  app.get('/api/demo/goals', async (req, res) => {
+    const userId = getUserId(req);
+    try {
+      const goals = await storage.getGoalsByUser(userId);
+      return res.json({ ok: true, goals });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+  console.log('[DEBUG] Registered: GET /api/demo/goals');
+
+  app.get('/api/demo/goals/:goalId', async (req, res) => {
+    try {
+      const goal = await storage.getGoal(req.params.goalId);
+      if (!goal) return res.status(404).json({ ok: false, error: 'Goal not found' });
+      const beliefs = await storage.getBeliefsByGoal(req.params.goalId);
+      const feedback = await storage.getFeedbackEventsByGoal(req.params.goalId);
+      return res.json({ ok: true, goal, beliefs, feedback });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+  console.log('[DEBUG] Registered: GET /api/demo/goals/:goalId');
+
+  // ============================================================
+  // Feedback Signal Logging Endpoints
+  // ============================================================
+
+  app.post('/api/feedback/accept', async (req, res) => {
+    const { goal_id, run_id, payload } = req.body;
+    const userId = getUserId(req);
+    if (!goal_id || !run_id) return res.status(400).json({ ok: false, error: 'goal_id and run_id are required' });
+    try {
+      const event = await storage.createFeedbackEvent({
+        userId,
+        goalId: goal_id,
+        runId: run_id,
+        eventType: 'accept_result',
+        payload: payload || {},
+      });
+      await storage.updateGoalStatus(goal_id, 'COMPLETE');
+      return res.json({ ok: true, event_id: event.eventId });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  app.post('/api/feedback/retry', async (req, res) => {
+    const { goal_id, run_id, payload } = req.body;
+    const userId = getUserId(req);
+    if (!goal_id || !run_id) return res.status(400).json({ ok: false, error: 'goal_id and run_id are required' });
+    try {
+      const event = await storage.createFeedbackEvent({
+        userId,
+        goalId: goal_id,
+        runId: run_id,
+        eventType: 'retry_goal',
+        payload: payload || {},
+      });
+      await storage.updateGoalStatus(goal_id, 'ACTIVE');
+      return res.json({ ok: true, event_id: event.eventId });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  app.post('/api/feedback/abandon', async (req, res) => {
+    const { goal_id, run_id, payload } = req.body;
+    const userId = getUserId(req);
+    if (!goal_id || !run_id) return res.status(400).json({ ok: false, error: 'goal_id and run_id are required' });
+    try {
+      const event = await storage.createFeedbackEvent({
+        userId,
+        goalId: goal_id,
+        runId: run_id,
+        eventType: 'abandon_goal',
+        payload: payload || {},
+      });
+      await storage.updateGoalStatus(goal_id, 'STOPPED', { reason: 'User abandoned goal', ...(payload || {}) });
+      return res.json({ ok: true, event_id: event.eventId });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  app.post('/api/feedback/export', async (req, res) => {
+    const { goal_id, run_id, payload } = req.body;
+    const userId = getUserId(req);
+    if (!goal_id || !run_id) return res.status(400).json({ ok: false, error: 'goal_id and run_id are required' });
+    try {
+      const event = await storage.createFeedbackEvent({
+        userId,
+        goalId: goal_id,
+        runId: run_id,
+        eventType: 'export_data',
+        payload: payload || {},
+      });
+      return res.json({ ok: true, event_id: event.eventId });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  console.log('[DEBUG] Registered: POST /api/feedback/accept, /api/feedback/retry, /api/feedback/abandon, /api/feedback/export');
+
   const httpServer = createServer(app);
   return httpServer;
 }

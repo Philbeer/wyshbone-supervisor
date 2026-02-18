@@ -11,6 +11,9 @@ import {
   artefacts,
   towerJudgements,
   agentRuns,
+  goalLedger,
+  beliefStore,
+  feedbackEvents,
   type User,
   type InsertUser,
   type SuggestedLead,
@@ -29,6 +32,12 @@ import {
   type InsertTowerJudgement,
   type AgentRun,
   type InsertAgentRun,
+  type GoalLedger,
+  type InsertGoalLedger,
+  type BeliefStore,
+  type InsertBeliefStore,
+  type FeedbackEvent,
+  type InsertFeedbackEvent,
 } from "./schema";
 import { db } from "./db";
 import { eq, desc, isNull, and } from "drizzle-orm";
@@ -81,6 +90,19 @@ export interface IStorage {
   createAgentRun(run: InsertAgentRun): Promise<AgentRun>;
   updateAgentRun(id: string, updates: Partial<InsertAgentRun>): Promise<void>;
   getAgentRuns(userId?: string): Promise<AgentRun[]>;
+  // Goal ledger
+  createGoal(goal: InsertGoalLedger): Promise<GoalLedger>;
+  getGoal(goalId: string): Promise<GoalLedger | undefined>;
+  updateGoalStatus(goalId: string, status: string, stopReason?: Record<string, unknown>): Promise<void>;
+  linkRunToGoal(goalId: string, runId: string): Promise<void>;
+  getGoalsByUser(userId: string): Promise<GoalLedger[]>;
+  // Belief store
+  createBelief(belief: InsertBeliefStore): Promise<BeliefStore>;
+  getBeliefsByRun(runId: string): Promise<BeliefStore[]>;
+  getBeliefsByGoal(goalId: string): Promise<BeliefStore[]>;
+  // Feedback events
+  createFeedbackEvent(event: InsertFeedbackEvent): Promise<FeedbackEvent>;
+  getFeedbackEventsByGoal(goalId: string): Promise<FeedbackEvent[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -519,6 +541,66 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(agentRuns)
       .orderBy(desc(agentRuns.createdAt));
+  }
+
+  async createGoal(goal: InsertGoalLedger): Promise<GoalLedger> {
+    const [result] = await db.insert(goalLedger).values(goal).returning();
+    console.log(`[Storage] Created goal '${goal.goalText}' for user ${goal.userId}`);
+    return result;
+  }
+
+  async getGoal(goalId: string): Promise<GoalLedger | undefined> {
+    const [result] = await db.select().from(goalLedger).where(eq(goalLedger.goalId, goalId)).limit(1);
+    return result || undefined;
+  }
+
+  async updateGoalStatus(goalId: string, status: string, stopReason?: Record<string, unknown>): Promise<void> {
+    const set: Record<string, unknown> = { status, updatedAt: new Date() };
+    if (stopReason !== undefined) set.stopReason = stopReason;
+    await db.update(goalLedger).set(set).where(eq(goalLedger.goalId, goalId));
+    console.log(`[Storage] Updated goal ${goalId} status=${status}`);
+  }
+
+  async linkRunToGoal(goalId: string, runId: string): Promise<void> {
+    const goal = await this.getGoal(goalId);
+    if (!goal) return;
+    const existing = goal.linkedRunIds || [];
+    if (!existing.includes(runId)) {
+      await db.update(goalLedger).set({
+        linkedRunIds: [...existing, runId],
+        updatedAt: new Date(),
+      }).where(eq(goalLedger.goalId, goalId));
+    }
+    await db.update(agentRuns).set({ goalId }).where(eq(agentRuns.id, runId));
+    console.log(`[Storage] Linked run ${runId} to goal ${goalId}`);
+  }
+
+  async getGoalsByUser(userId: string): Promise<GoalLedger[]> {
+    return db.select().from(goalLedger).where(eq(goalLedger.userId, userId)).orderBy(desc(goalLedger.createdAt));
+  }
+
+  async createBelief(belief: InsertBeliefStore): Promise<BeliefStore> {
+    const [result] = await db.insert(beliefStore).values(belief).returning();
+    console.log(`[Storage] Created belief '${belief.claim}' for run ${belief.runId}`);
+    return result;
+  }
+
+  async getBeliefsByRun(runId: string): Promise<BeliefStore[]> {
+    return db.select().from(beliefStore).where(eq(beliefStore.runId, runId)).orderBy(desc(beliefStore.lastUpdated));
+  }
+
+  async getBeliefsByGoal(goalId: string): Promise<BeliefStore[]> {
+    return db.select().from(beliefStore).where(eq(beliefStore.goalId, goalId)).orderBy(desc(beliefStore.lastUpdated));
+  }
+
+  async createFeedbackEvent(event: InsertFeedbackEvent): Promise<FeedbackEvent> {
+    const [result] = await db.insert(feedbackEvents).values(event).returning();
+    console.log(`[Storage] Created feedback event ${event.eventType} for goal ${event.goalId}`);
+    return result;
+  }
+
+  async getFeedbackEventsByGoal(goalId: string): Promise<FeedbackEvent[]> {
+    return db.select().from(feedbackEvents).where(eq(feedbackEvents.goalId, goalId)).orderBy(desc(feedbackEvents.createdAt));
   }
 }
 

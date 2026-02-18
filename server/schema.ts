@@ -27,6 +27,9 @@ export const {
   artefacts,
   towerJudgements,
   agentRuns,
+  goalLedger,
+  beliefStore,
+  feedbackEvents,
   insertUserSchema,
   insertUserSignalSchema,
   insertSuggestedLeadSchema,
@@ -36,6 +39,9 @@ export const {
   insertArtefactSchema,
   insertTowerJudgementSchema,
   insertAgentRunSchema,
+  insertGoalLedgerSchema,
+  insertBeliefStoreSchema,
+  insertFeedbackEventSchema,
 } = schema;
 
 export type {
@@ -57,4 +63,10 @@ export type {
   InsertTowerJudgement,
   AgentRun,
   InsertAgentRun,
+  GoalLedger,
+  InsertGoalLedger,
+  BeliefStore,
+  InsertBeliefStore,
+  FeedbackEvent,
+  InsertFeedbackEvent,
 } from '@shared/schema';

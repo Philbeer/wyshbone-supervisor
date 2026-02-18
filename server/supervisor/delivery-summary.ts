@@ -21,6 +21,14 @@ export interface DeliveredEntity {
   soft_violations: string[];
 }
 
+export type CanonicalVerdict = 'PASS' | 'PARTIAL' | 'STOP';
+
+export interface CvlSummary {
+  verified_exact_count: number;
+  unverifiable_count: number;
+  hard_unverifiable: string[];
+}
+
 export interface DeliverySummaryPayload {
   requested_count: number;
   hard_constraints: string[];
@@ -32,6 +40,9 @@ export interface DeliverySummaryPayload {
   delivered_exact_count: number;
   delivered_total_count: number;
   shortfall: number;
+  status: CanonicalVerdict;
+  tower_verdict: string | null;
+  cvl_summary: CvlSummary | null;
   stop_reason: string | null;
   suggested_next_question: string | null;
   cvl_verified_exact_count: number | null;
@@ -207,6 +218,28 @@ function deriveSuggestedNextQuestion(
   return 'Do you want me to include similar matches?';
 }
 
+function normalizeTowerVerdict(raw: string | undefined | null): string | null {
+  if (!raw) return null;
+  const lower = raw.toLowerCase().trim();
+  const stopVerdicts = ['stop', 'change_plan', 'reject', 'fail', 'blocked'];
+  if (stopVerdicts.includes(lower)) return 'STOP';
+  const passVerdicts = ['pass', 'accept', 'approved', 'good'];
+  if (passVerdicts.includes(lower)) return 'PASS';
+  return raw.toUpperCase();
+}
+
+function deriveCanonicalStatus(
+  verifiedExact: number,
+  requested: number,
+  towerVerdict: string | null,
+  hasHardUnverifiable: boolean,
+): CanonicalVerdict {
+  if (towerVerdict === 'STOP' || hasHardUnverifiable) return 'STOP';
+  if (verifiedExact >= requested && requested > 0) return 'PASS';
+  if (verifiedExact > 0) return 'PARTIAL';
+  return 'STOP';
+}
+
 export function buildDeliverySummaryPayload(input: DeliverySummaryInput): DeliverySummaryPayload {
   const exact: DeliveredEntity[] = [];
   const closest: DeliveredEntity[] = [];
@@ -227,37 +260,35 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
 
   const exactCount = hasCvl ? input.cvlVerifiedExactCount! : rawExactCount;
   const requestedCount = hasCvl
-    ? (input.cvlRequestedCountUser ?? 0)
+    ? (input.cvlRequestedCountUser ?? input.requestedCount)
     : input.requestedCount;
   const shortfall = Math.max(0, requestedCount - exactCount);
 
-  const verdictIsFailure = input.finalVerdict !== 'pass' && input.finalVerdict !== 'ACCEPT';
+  const towerVerdict = normalizeTowerVerdict(input.finalVerdict);
+  const hardUnverifiable = input.cvlHardUnverifiable ?? [];
+  const hasHardUnverifiable = hardUnverifiable.length > 0;
 
-  let isStop: boolean;
-  let stopReason: string | null;
+  const status = deriveCanonicalStatus(exactCount, requestedCount, towerVerdict, hasHardUnverifiable);
 
-  if (hasCvl) {
-    const hasHardUnverifiable = (input.cvlHardUnverifiable ?? []).length > 0;
-    isStop = verdictIsFailure || exactCount < requestedCount || hasHardUnverifiable;
-    if (isStop) {
-      if (input.stopReason) {
-        stopReason = input.stopReason;
-      } else if (hasHardUnverifiable) {
-        stopReason = `Unverifiable hard constraint: ${(input.cvlHardUnverifiable ?? []).join(', ')}`;
-      } else if (exactCount < requestedCount) {
-        stopReason = `CVL verified ${exactCount} of ${requestedCount} requested`;
-      } else {
-        stopReason = `Run ended with verdict: ${input.finalVerdict}`;
-      }
+  const cvlSummary: CvlSummary | null = hasCvl ? {
+    verified_exact_count: exactCount,
+    unverifiable_count: input.cvlUnverifiableCount ?? 0,
+    hard_unverifiable: hardUnverifiable,
+  } : null;
+
+  let stopReason: string | null = null;
+  if (status === 'STOP') {
+    if (input.stopReason) {
+      stopReason = input.stopReason;
+    } else if (hasHardUnverifiable) {
+      stopReason = `Unverifiable hard constraint: ${hardUnverifiable.join(', ')}`;
+    } else if (towerVerdict === 'STOP') {
+      stopReason = `Tower verdict: ${input.finalVerdict}`;
     } else {
-      stopReason = null;
+      stopReason = `Delivered 0 of ${requestedCount} requested`;
     }
-  } else {
-    const hasShortfall = rawTotalCount < input.requestedCount;
-    isStop = hasShortfall || verdictIsFailure;
-    stopReason = isStop
-      ? (input.stopReason || (hasShortfall ? `Delivered ${rawTotalCount} of ${input.requestedCount} requested` : `Run ended with verdict: ${input.finalVerdict}`))
-      : null;
+  } else if (status === 'PARTIAL') {
+    stopReason = input.stopReason || `Verified ${exactCount} of ${requestedCount} requested`;
   }
 
   const suggestedNextQuestion = deriveSuggestedNextQuestion(
@@ -275,8 +306,11 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
     delivered_exact: exact,
     delivered_closest: closest,
     delivered_exact_count: exactCount,
-    delivered_total_count: hasCvl ? rawTotalCount : rawTotalCount,
+    delivered_total_count: rawTotalCount,
     shortfall,
+    status,
+    tower_verdict: towerVerdict,
+    cvl_summary: cvlSummary,
     stop_reason: stopReason,
     suggested_next_question: suggestedNextQuestion,
     cvl_verified_exact_count: hasCvl ? exactCount : null,
@@ -284,19 +318,13 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
   };
 }
 
-export async function emitDeliverySummary(input: DeliverySummaryInput): Promise<void> {
+export async function emitDeliverySummary(input: DeliverySummaryInput): Promise<DeliverySummaryPayload> {
   const payload = buildDeliverySummaryPayload(input);
 
-  const finalVerdictLower = (input.finalVerdict || '').toLowerCase();
-  let verdictLabel: string;
-  if (payload.stop_reason) {
-    verdictLabel = finalVerdictLower === 'change_plan' ? 'NEEDS_VERIFICATION' : 'STOP';
-  } else {
-    verdictLabel = 'PASS';
-  }
-  const title = `Delivery Summary: ${verdictLabel} — ${payload.delivered_exact_count} of ${payload.requested_count} delivered`;
-  const cvlLabel = payload.cvl_verified_exact_count !== null ? ` cvl_verified=${payload.cvl_verified_exact_count}` : '';
-  const summary = `exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} shortfall=${payload.shortfall}${cvlLabel}${payload.stop_reason ? ` stop_reason="${payload.stop_reason}"` : ''}`;
+  const title = `Delivery Summary: ${payload.status} — ${payload.delivered_exact_count} of ${payload.requested_count} delivered`;
+  const cvlLabel = payload.cvl_summary ? ` cvl_verified=${payload.cvl_summary.verified_exact_count}` : '';
+  const towerLabel = payload.tower_verdict ? ` tower=${payload.tower_verdict}` : '';
+  const summary = `status=${payload.status} exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} shortfall=${payload.shortfall}${cvlLabel}${towerLabel}${payload.stop_reason ? ` stop_reason="${payload.stop_reason}"` : ''}`;
 
   try {
     await createArtefact({
@@ -308,8 +336,10 @@ export async function emitDeliverySummary(input: DeliverySummaryInput): Promise<
       userId: input.userId,
       conversationId: input.conversationId,
     });
-    console.log(`[DELIVERY_SUMMARY] runId=${input.runId} exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} total=${payload.delivered_total_count} requested=${payload.requested_count} shortfall=${payload.shortfall} verdict=${verdictLabel}`);
+    console.log(`[DELIVERY_SUMMARY] runId=${input.runId} status=${payload.status} exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} total=${payload.delivered_total_count} requested=${payload.requested_count} shortfall=${payload.shortfall} tower=${payload.tower_verdict || 'none'}`);
   } catch (err: any) {
     console.error(`[DELIVERY_SUMMARY] Failed to emit delivery_summary artefact: ${err.message}`);
   }
+
+  return payload;
 }
