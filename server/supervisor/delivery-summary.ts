@@ -62,6 +62,8 @@ export interface DeliverySummaryInput {
   stopReason?: string | null;
   cvlVerifiedExactCount?: number | null;
   cvlUnverifiableCount?: number | null;
+  cvlRequestedCountUser?: number | null;
+  cvlHardUnverifiable?: string[];
 }
 
 function isNonTextualConstraint(constraintName: string): boolean {
@@ -218,25 +220,54 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
     }
   }
 
-  const exactCount = exact.length;
-  const totalCount = exact.length + closest.length;
-  const shortfall = Math.max(0, input.requestedCount - totalCount);
+  const hasCvl = input.cvlVerifiedExactCount !== undefined && input.cvlVerifiedExactCount !== null;
 
-  const hasShortfall = totalCount < input.requestedCount;
+  const rawExactCount = exact.length;
+  const rawTotalCount = exact.length + closest.length;
+
+  const exactCount = hasCvl ? input.cvlVerifiedExactCount! : rawExactCount;
+  const requestedCount = hasCvl
+    ? (input.cvlRequestedCountUser ?? 0)
+    : input.requestedCount;
+  const shortfall = Math.max(0, requestedCount - exactCount);
+
   const verdictIsFailure = input.finalVerdict !== 'pass' && input.finalVerdict !== 'ACCEPT';
-  const isStop = hasShortfall || verdictIsFailure;
-  const stopReason = isStop
-    ? (input.stopReason || (hasShortfall ? `Delivered ${totalCount} of ${input.requestedCount} requested` : `Run ended with verdict: ${input.finalVerdict}`))
-    : null;
+
+  let isStop: boolean;
+  let stopReason: string | null;
+
+  if (hasCvl) {
+    const hasHardUnverifiable = (input.cvlHardUnverifiable ?? []).length > 0;
+    isStop = verdictIsFailure || exactCount < requestedCount || hasHardUnverifiable;
+    if (isStop) {
+      if (input.stopReason) {
+        stopReason = input.stopReason;
+      } else if (hasHardUnverifiable) {
+        stopReason = `Unverifiable hard constraint: ${(input.cvlHardUnverifiable ?? []).join(', ')}`;
+      } else if (exactCount < requestedCount) {
+        stopReason = `CVL verified ${exactCount} of ${requestedCount} requested`;
+      } else {
+        stopReason = `Run ended with verdict: ${input.finalVerdict}`;
+      }
+    } else {
+      stopReason = null;
+    }
+  } else {
+    const hasShortfall = rawTotalCount < input.requestedCount;
+    isStop = hasShortfall || verdictIsFailure;
+    stopReason = isStop
+      ? (input.stopReason || (hasShortfall ? `Delivered ${rawTotalCount} of ${input.requestedCount} requested` : `Run ended with verdict: ${input.finalVerdict}`))
+      : null;
+  }
 
   const suggestedNextQuestion = deriveSuggestedNextQuestion(
     input.softRelaxations,
     exactCount,
-    input.requestedCount,
+    requestedCount,
   );
 
   return {
-    requested_count: input.requestedCount,
+    requested_count: requestedCount,
     hard_constraints: input.hardConstraints,
     soft_constraints: input.softConstraints,
     plan_versions: input.planVersions,
@@ -244,11 +275,11 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
     delivered_exact: exact,
     delivered_closest: closest,
     delivered_exact_count: exactCount,
-    delivered_total_count: totalCount,
+    delivered_total_count: hasCvl ? rawTotalCount : rawTotalCount,
     shortfall,
     stop_reason: stopReason,
     suggested_next_question: suggestedNextQuestion,
-    cvl_verified_exact_count: input.cvlVerifiedExactCount ?? null,
+    cvl_verified_exact_count: hasCvl ? exactCount : null,
     cvl_unverifiable_count: input.cvlUnverifiableCount ?? null,
   };
 }
@@ -256,8 +287,14 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
 export async function emitDeliverySummary(input: DeliverySummaryInput): Promise<void> {
   const payload = buildDeliverySummaryPayload(input);
 
-  const verdictLabel = payload.stop_reason ? 'STOP' : 'PASS';
-  const title = `Delivery Summary: ${verdictLabel} — ${payload.delivered_total_count} of ${payload.requested_count} delivered`;
+  const finalVerdictLower = (input.finalVerdict || '').toLowerCase();
+  let verdictLabel: string;
+  if (payload.stop_reason) {
+    verdictLabel = finalVerdictLower === 'change_plan' ? 'NEEDS_VERIFICATION' : 'STOP';
+  } else {
+    verdictLabel = 'PASS';
+  }
+  const title = `Delivery Summary: ${verdictLabel} — ${payload.delivered_exact_count} of ${payload.requested_count} delivered`;
   const cvlLabel = payload.cvl_verified_exact_count !== null ? ` cvl_verified=${payload.cvl_verified_exact_count}` : '';
   const summary = `exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} shortfall=${payload.shortfall}${cvlLabel}${payload.stop_reason ? ` stop_reason="${payload.stop_reason}"` : ''}`;
 

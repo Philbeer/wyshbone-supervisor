@@ -2577,10 +2577,16 @@ class SupervisorService {
           .map(c => ({ entity_id: c.place_id || c.dedupe_key, name: c.name, address: c.address || '', found_in_plan_version: c.found_in_plan_version }))
       : finalLeads.map(l => ({ entity_id: l.placeId, name: l.name, address: l.address, found_in_plan_version: 1 }));
     const replanBudgetExhausted = replansUsed >= MAX_REPLANS && finalAction === 'change_plan';
-    const dsVerdict = isHalted ? finalVerdict : (replanBudgetExhausted ? finalVerdict : 'pass');
-    const dsStopReason = isHalted
-      ? `Tower verdict: ${finalVerdict}, action: ${finalAction}`
-      : (replanBudgetExhausted ? `max_replans_exceeded (${replansUsed}/${MAX_REPLANS})` : null);
+    const cvlCorrectedFailure = cvlVerification && (finalVerdict === 'stop' || finalVerdict === 'change_plan');
+    const dsVerdict = cvlCorrectedFailure ? finalVerdict : (isHalted ? finalVerdict : (replanBudgetExhausted ? finalVerdict : 'pass'));
+    const dsHardUnverifiable = cvlVerification?.summary?.unverifiable_hard_constraints ?? [];
+    const dsStopReason = cvlCorrectedFailure
+      ? (dsHardUnverifiable.length > 0
+        ? `Unverifiable hard constraint: ${dsHardUnverifiable.map(u => u.value).join(', ')}; verdict=${finalVerdict}, action=${finalAction}`
+        : `CVL verdict: ${finalVerdict}, action: ${finalAction}`)
+      : (isHalted
+        ? `Tower verdict: ${finalVerdict}, action: ${finalAction}`
+        : (replanBudgetExhausted ? `max_replans_exceeded (${replansUsed}/${MAX_REPLANS})` : null));
     await emitDeliverySummary({
       runId: chatRunId,
       userId: task.user_id,
@@ -2596,6 +2602,8 @@ class SupervisorService {
       stopReason: dsStopReason,
       cvlVerifiedExactCount: cvlVerifiedExactCount,
       cvlUnverifiableCount: cvlVerification?.summary?.unverifiable_count ?? null,
+      cvlRequestedCountUser: cvlVerification?.summary?.requested_count_user ?? null,
+      cvlHardUnverifiable: dsHardUnverifiable.map(u => u.value),
     });
 
     const planAdjustmentNote = planVersion > 1 ? ` after ${planVersion} search plan iterations` : '';
