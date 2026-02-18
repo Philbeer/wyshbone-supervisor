@@ -1018,6 +1018,16 @@ class SupervisorService {
         conversationId,
       });
       console.log(`[CVL] constraints_extracted artefact id=${ceArtefact.id} constraints=${structuredConstraints.length}`);
+      const ceTitle = `Constraints extracted: ${structuredConstraints.length} constraints`;
+      const ceSummary = `mission_type=lead_finder | ${structuredConstraints.filter(c => c.hard).length} hard, ${structuredConstraints.filter(c => !c.hard).length} soft | requested_count_user=${userRequestedCountFinal ?? 'any'}`;
+      await this.postArtefactToUI({
+        runId: chatRunId,
+        clientRequestId,
+        type: 'constraints_extracted',
+        payload: { ...cvlConstraintsPayload as unknown as Record<string, unknown>, title: ceTitle, summary: ceSummary },
+        userId: task.user_id,
+        conversationId,
+      }).catch((e: any) => console.warn(`[CVL] postArtefactToUI constraints_extracted failed (non-fatal): ${e.message}`));
     } catch (ceErr: any) {
       console.warn(`[CVL] Failed to emit constraints_extracted (non-fatal): ${ceErr.message}`);
     }
@@ -1034,6 +1044,16 @@ class SupervisorService {
         conversationId,
       });
       console.log(`[CVL] constraint_capability_check artefact id=${ccArtefact.id} verifiable=${cvlCapabilityPayload.verifiable_count} blocking_hard=${cvlCapabilityPayload.blocking_hard_constraints.length}`);
+      const ccTitle = `Capability check: ${cvlCapabilityPayload.verifiable_count} verifiable, ${cvlCapabilityPayload.unverifiable_count} unverifiable`;
+      const ccSummary = `${cvlCapabilityPayload.verifiable_count}/${cvlCapabilityPayload.total_constraints} verifiable | blocking_hard: [${cvlCapabilityPayload.blocking_hard_constraints.join(', ')}]`;
+      await this.postArtefactToUI({
+        runId: chatRunId,
+        clientRequestId,
+        type: 'constraint_capability_check',
+        payload: { ...cvlCapabilityPayload as unknown as Record<string, unknown>, title: ccTitle, summary: ccSummary },
+        userId: task.user_id,
+        conversationId,
+      }).catch((e: any) => console.warn(`[CVL] postArtefactToUI constraint_capability_check failed (non-fatal): ${e.message}`));
     } catch (ccErr: any) {
       console.warn(`[CVL] Failed to emit constraint_capability_check (non-fatal): ${ccErr.message}`);
     }
@@ -2337,29 +2357,64 @@ class SupervisorService {
         }
       }
 
+      const lvTitle = `Lead verification: ${cvlVerification.leadVerifications.length} leads checked, ${cvlVerification.verified_exact_count} verified exact`;
+      const lvSummary = `${cvlVerification.leadVerifications.filter(lv => lv.all_hard_satisfied).length} all_hard_satisfied | ${cvlVerification.verified_exact_count} verified_exact of ${cvlVerification.leadVerifications.length} checked`;
+      const aggregatedLvPayload = {
+        title: lvTitle,
+        summary: lvSummary,
+        leads_checked: cvlVerification.leadVerifications.length,
+        verified_exact_count: cvlVerification.verified_exact_count,
+        verifications: cvlVerification.leadVerifications.map(lv => ({
+          lead_name: lv.lead_name,
+          verified_exact: lv.verified_exact,
+          all_hard_satisfied: lv.all_hard_satisfied,
+          constraint_checks: lv.constraint_checks,
+        })),
+      };
+      await this.postArtefactToUI({
+        runId: chatRunId,
+        clientRequestId,
+        type: 'lead_verification',
+        payload: aggregatedLvPayload as unknown as Record<string, unknown>,
+        userId: task.user_id,
+        conversationId,
+      }).catch((e: any) => console.warn(`[CVL] postArtefactToUI lead_verification (aggregated) failed (non-fatal): ${e.message}`));
+
       if (cvlVerification.evidenceItems.length > 0) {
+        const evTitle = `Verification evidence: ${cvlVerification.evidenceItems.length} items`;
+        const evSummary = `${cvlVerification.evidenceItems.length} evidence items across ${finalLeads.length} leads`;
+        const evidencePayload = { title: evTitle, summary: evSummary, evidence: cvlVerification.evidenceItems } as unknown as Record<string, unknown>;
         try {
           await createArtefact({
             runId: chatRunId,
             type: 'verification_evidence',
-            title: `Verification evidence: ${cvlVerification.evidenceItems.length} items`,
-            summary: `${cvlVerification.evidenceItems.length} evidence items across ${finalLeads.length} leads`,
-            payload: { evidence: cvlVerification.evidenceItems } as unknown as Record<string, unknown>,
+            title: evTitle,
+            summary: evSummary,
+            payload: evidencePayload,
             userId: task.user_id,
             conversationId,
           });
         } catch (evErr: any) {
           console.warn(`[CVL] Failed to emit verification_evidence (non-fatal): ${evErr.message}`);
         }
+        await this.postArtefactToUI({
+          runId: chatRunId,
+          clientRequestId,
+          type: 'verification_evidence',
+          payload: evidencePayload,
+          userId: task.user_id,
+          conversationId,
+        }).catch((e: any) => console.warn(`[CVL] postArtefactToUI verification_evidence failed (non-fatal): ${e.message}`));
       }
 
       const vs = cvlVerification.summary;
+      const vsSummaryStr = `verified_exact=${vs.verified_exact_count} | checked=${vs.candidates_checked} | requested=${vs.requested_count_user ?? 'any'} | unverifiable_constraints=${vs.unverifiable_count}`;
       try {
         await createArtefact({
           runId: chatRunId,
           type: 'verification_summary',
           title: `Verification summary: ${vs.verified_exact_count} verified exact of ${vs.candidates_checked} checked`,
-          summary: `verified_exact=${vs.verified_exact_count} | checked=${vs.candidates_checked} | requested=${vs.requested_count_user ?? 'any'} | unverifiable_constraints=${vs.unverifiable_count}`,
+          summary: vsSummaryStr,
           payload: vs as unknown as Record<string, unknown>,
           userId: task.user_id,
           conversationId,
@@ -2368,6 +2423,15 @@ class SupervisorService {
       } catch (vsErr: any) {
         console.warn(`[CVL] Failed to emit verification_summary (non-fatal): ${vsErr.message}`);
       }
+      const vsTitle = `Verification summary: ${vs.verified_exact_count} verified exact of ${vs.candidates_checked} checked`;
+      await this.postArtefactToUI({
+        runId: chatRunId,
+        clientRequestId,
+        type: 'verification_summary',
+        payload: { ...vs as unknown as Record<string, unknown>, title: vsTitle, summary: vsSummaryStr },
+        userId: task.user_id,
+        conversationId,
+      }).catch((e: any) => console.warn(`[CVL] postArtefactToUI verification_summary failed (non-fatal): ${e.message}`));
 
       console.log(`[CVL] Verification pass complete: ${vs.verified_exact_count} verified exact out of ${vs.candidates_checked} leads checked`);
     } catch (cvlErr: any) {
