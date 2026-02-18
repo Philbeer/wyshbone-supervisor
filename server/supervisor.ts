@@ -2425,22 +2425,25 @@ class SupervisorService {
       }
 
       const vs = cvlVerification.summary;
-      const vsSummaryStr = `verified_exact=${vs.verified_exact_count} | checked=${vs.candidates_checked} | requested=${vs.requested_count_user ?? 'any'} | unverifiable_constraints=${vs.unverifiable_count}`;
+      const hardUnverifiableLabel = vs.unverifiable_hard_constraints.length > 0
+        ? ` | hard_unverifiable=${vs.unverifiable_hard_constraints.map(u => u.value).join(',')}`
+        : '';
+      const vsSummaryStr = `verified_exact=${vs.verified_exact_count} | checked=${vs.candidates_checked} | requested=${vs.requested_count_user ?? 'any'} | unverifiable_constraints=${vs.unverifiable_count} | hard_unknown=${vs.hard_unknown_count}${hardUnverifiableLabel}`;
       try {
         await createArtefact({
           runId: chatRunId,
           type: 'verification_summary',
-          title: `Verification summary: ${vs.verified_exact_count} verified exact of ${vs.candidates_checked} checked`,
+          title: `Verification summary: ${vs.verified_exact_count} verified exact of ${vs.candidates_checked} checked${vs.hard_unknown_count > 0 ? ` (${vs.hard_unknown_count} hard-unknown)` : ''}`,
           summary: vsSummaryStr,
           payload: vs as unknown as Record<string, unknown>,
           userId: task.user_id,
           conversationId,
         });
-        console.log(`[CVL] verification_summary: verified_exact=${vs.verified_exact_count} checked=${vs.candidates_checked} requested=${vs.requested_count_user}`);
+        console.log(`[CVL] verification_summary: verified_exact=${vs.verified_exact_count} checked=${vs.candidates_checked} requested=${vs.requested_count_user} hard_unknown=${vs.hard_unknown_count} unverifiable_hard=${vs.unverifiable_hard_constraints.length}`);
       } catch (vsErr: any) {
         console.warn(`[CVL] Failed to emit verification_summary (non-fatal): ${vsErr.message}`);
       }
-      const vsTitle = `Verification summary: ${vs.verified_exact_count} verified exact of ${vs.candidates_checked} checked`;
+      const vsTitle = `Verification summary: ${vs.verified_exact_count} verified exact of ${vs.candidates_checked} checked${vs.hard_unknown_count > 0 ? ` (${vs.hard_unknown_count} hard-unknown)` : ''}`;
       await this.postArtefactToUI({
         runId: chatRunId,
         clientRequestId,
@@ -2455,14 +2458,27 @@ class SupervisorService {
       console.warn(`[CVL] Verification pass failed (non-fatal, continuing with unverified counts): ${cvlErr.message}`);
     }
 
-    if (cvlVerification && userRequestedCountFinal !== null) {
+    if (cvlVerification) {
       const vCount = cvlVerification.verified_exact_count;
-      if (vCount >= userRequestedCountFinal && finalVerdict !== 'pass') {
-        console.log(`[CVL_OVERRIDE] verified_exact_count (${vCount}) >= requested (${userRequestedCountFinal}); overriding finalVerdict from "${finalVerdict}" to "pass"`);
-        finalVerdict = 'pass';
-        finalAction = 'accept';
-      } else if (vCount < userRequestedCountFinal && finalVerdict === 'pass') {
-        console.log(`[CVL_OVERRIDE] verified_exact_count (${vCount}) < requested (${userRequestedCountFinal}); Tower said pass but CVL says insufficient verified leads — keeping verdict as pass with CVL warning`);
+      const hasHardUnverifiable = cvlVerification.summary.unverifiable_hard_constraints.length > 0;
+      const hardUnverifiableNames = cvlVerification.summary.unverifiable_hard_constraints.map(u => `"${u.value}"`).join(', ');
+
+      if (hasHardUnverifiable && finalVerdict === 'pass') {
+        console.log(`[CVL_OVERRIDE] Tower said pass but ${cvlVerification.summary.unverifiable_hard_constraints.length} hard constraint(s) unverifiable (${hardUnverifiableNames}); verified_exact_count=${vCount} — downgrading verdict to "stop" (hard constraints cannot be verified)`);
+        finalVerdict = 'stop';
+        finalAction = 'stop';
+      } else if (hasHardUnverifiable && finalVerdict !== 'pass') {
+        console.log(`[CVL_OVERRIDE] Hard unverifiable constraints (${hardUnverifiableNames}); verified_exact_count=${vCount} — verdict stays "${finalVerdict}"`);
+      } else if (userRequestedCountFinal !== null) {
+        if (vCount >= userRequestedCountFinal && finalVerdict !== 'pass') {
+          console.log(`[CVL_OVERRIDE] verified_exact_count (${vCount}) >= requested (${userRequestedCountFinal}), no hard unverifiable; overriding finalVerdict from "${finalVerdict}" to "pass"`);
+          finalVerdict = 'pass';
+          finalAction = 'accept';
+        } else if (vCount < userRequestedCountFinal && finalVerdict === 'pass') {
+          console.log(`[CVL_OVERRIDE] verified_exact_count (${vCount}) < requested (${userRequestedCountFinal}); Tower said pass but CVL says insufficient verified leads — downgrading to "stop"`);
+          finalVerdict = 'stop';
+          finalAction = 'stop';
+        }
       }
     }
 
@@ -2586,9 +2602,23 @@ class SupervisorService {
     const matchingNote = hasNameConstraints && totalMatchingLeads !== totalUniqueLeads
       ? ` (${totalMatchingLeads} matching your name criteria out of ${totalUniqueLeads} total found)`
       : '';
-    const chatResponse = isHalted
-      ? `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}, but the results didn't fully meet quality criteria (Tower verdict: ${finalVerdict}). You can still view what was found in your results. Would you like me to try a different search?`
-      : `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}, validated by our quality system. View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
+
+    const cvlHardUnverifiable = cvlVerification?.summary?.unverifiable_hard_constraints ?? [];
+    const cvlUnverifiableNote = cvlHardUnverifiable.length > 0
+      ? ` However, I couldn't verify ${cvlHardUnverifiable.map(u => `"${u.value}"`).join(', ')} from the search data alone — you'd need to check venue websites to confirm which ones actually have ${cvlHardUnverifiable.map(u => u.value).join('/')}.`
+      : '';
+
+    const cvlRan = cvlVerification !== null;
+    let chatResponse: string;
+    if (isHalted) {
+      chatResponse = cvlHardUnverifiable.length > 0
+        ? `I found ${finalLeads.length} ${finalConstraints.business_type} in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}, but I can't confirm which ones have ${cvlHardUnverifiable.map(u => u.value).join('/')} — that information isn't available in search results. Would you like me to check their websites, or would you like just the list of ${finalConstraints.business_type} without the ${cvlHardUnverifiable.map(u => u.value).join('/')} filter?`
+        : `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}, but the results didn't fully meet quality criteria (Tower verdict: ${finalVerdict}). You can still view what was found in your results. Would you like me to try a different search?`;
+    } else if (cvlRan) {
+      chatResponse = `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}, validated by our quality system.${cvlUnverifiableNote} View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
+    } else {
+      chatResponse = `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}. View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
+    }
 
     console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub}`);
 

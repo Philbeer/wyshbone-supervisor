@@ -74,7 +74,7 @@ CONSTRAINT TYPES and how to detect them:
 - NAME_STARTS_WITH: when user says "starting with X" or "beginning with X" → { id: "c_name_prefix", type: "NAME_STARTS_WITH", field: "name", operator: "starts_with", value: "X", hard: false, rationale: "..." }
 - NAME_CONTAINS: when user says "with the word X in the name" or "called X" or "named X" → { id: "c_name_contains", type: "NAME_CONTAINS", field: "name", operator: "contains_word", value: "X", hard: false, rationale: "..." }. Only for BUSINESS NAME matching, not venue attributes.
 - MUST_USE_TOOL: when user says "using google places" → { id: "c_tool", type: "MUST_USE_TOOL", field: "tool", operator: "=", value: "GOOGLE_PLACES", hard: false, rationale: "..." }
-- HAS_ATTRIBUTE: when user wants venues with a specific feature/amenity → { id: "c_attr_<short_name>", type: "HAS_ATTRIBUTE", field: "attribute", operator: "has", value: "<attribute>", hard: false, rationale: "..." }. Examples: "beer garden", "outdoor seating", "live music", "parking", "wheelchair accessible". Always default soft unless user says "must have".
+- HAS_ATTRIBUTE: when user wants venues with a specific feature/amenity → { id: "c_attr_<short_name>", type: "HAS_ATTRIBUTE", field: "attribute", operator: "has", value: "<attribute>", hard: true, rationale: "..." }. Examples: "beer garden", "outdoor seating", "live music", "parking", "wheelchair accessible". Default HARD because the user explicitly asked for this feature. Only set soft (hard: false) if user uses hedging language like "preferably", "if possible", "ideally", "optionally", "nice to have".
 
 CRITICAL RULE — Attribute vs Name distinction:
 - "pubs with a beer garden" → HAS_ATTRIBUTE (beer garden is a venue feature, NOT a name)
@@ -85,9 +85,12 @@ CRITICAL RULE — Attribute vs Name distinction:
 
 HARD vs SOFT rules:
 - If user uses words like "must", "only", "exactly", "strict", "strictly", "do not relax", "hard constraint" → mark that constraint as hard: true
-- Default hard: COUNT_MIN (always hard), CATEGORY_EQUALS (always hard)
-- Default soft: LOCATION_EQUALS, LOCATION_NEAR, NAME_STARTS_WITH, NAME_CONTAINS, MUST_USE_TOOL, HAS_ATTRIBUTE
-- Override: if user says "must be in london only" → LOCATION_EQUALS becomes hard. If user says "must have a beer garden" → HAS_ATTRIBUTE becomes hard.
+- Default hard: COUNT_MIN (always hard), CATEGORY_EQUALS (always hard), HAS_ATTRIBUTE (hard because user explicitly asked for this feature)
+- Default soft: LOCATION_EQUALS, LOCATION_NEAR, NAME_STARTS_WITH, NAME_CONTAINS, MUST_USE_TOOL
+- HAS_ATTRIBUTE becomes soft ONLY if user uses hedging language: "preferably with", "if possible", "ideally", "optionally", "nice to have", "bonus if"
+- Override: if user says "must be in london only" → LOCATION_EQUALS becomes hard.
+- "find pubs that have a beer garden" → HAS_ATTRIBUTE hard: true (user stated it as a requirement)
+- "find pubs, preferably with a beer garden" → HAS_ATTRIBUTE hard: false (user hedged)
 
 SUCCESS_CRITERIA:
 - required_constraints: IDs of all hard constraints
@@ -262,8 +265,10 @@ function regexFallback(rawGoal: string): ParsedGoal {
 
   if (attributeFilter) {
     const shortName = attributeFilter.replace(/\s+/g, '_').toLowerCase();
-    const isHard = hasHardSignal && new RegExp(`must\\s+have\\s+.*${attributeFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(msg);
-    const c: StructuredConstraint = { id: `c_attr_${shortName}`, type: 'HAS_ATTRIBUTE', field: 'attribute', operator: 'has', value: attributeFilter, hard: isHard, rationale: `User wants venues with "${attributeFilter}"` };
+    const hedgingPattern = /\b(preferably|if\s+possible|ideally|optionally|nice\s+to\s+have|bonus\s+if)\b/i;
+    const isSoft = hedgingPattern.test(msg);
+    const isHard = !isSoft;
+    const c: StructuredConstraint = { id: `c_attr_${shortName}`, type: 'HAS_ATTRIBUTE', field: 'attribute', operator: 'has', value: attributeFilter, hard: isHard, rationale: isHard ? `User requires venues with "${attributeFilter}"` : `User prefers venues with "${attributeFilter}" (hedging language detected)` };
     constraints.push(c);
     if (isHard) requiredIds.push(c.id); else optionalIds.push(c.id);
   }

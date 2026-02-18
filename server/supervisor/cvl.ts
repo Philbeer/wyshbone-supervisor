@@ -87,6 +87,14 @@ export interface VerificationEvidence {
   snippet: string;
 }
 
+export interface UnverifiableHardConstraint {
+  constraint_id: string;
+  constraint_type: string;
+  value: string;
+  reason: string;
+  suggested_action: string;
+}
+
 export interface VerificationSummaryPayload {
   mission_type: 'lead_finder';
   requested_count_user: number | null;
@@ -94,6 +102,9 @@ export interface VerificationSummaryPayload {
   verified_exact_count: number;
   verified_total_count: number;
   unverifiable_count: number;
+  hard_unknown_count: number;
+  unverifiable_hard_constraints: UnverifiableHardConstraint[];
+  suggested_next_action: string | null;
   constraint_results: Array<{
     constraint_id: string;
     constraint_type: string;
@@ -294,10 +305,35 @@ export function verifyLeads(
   }
 
   const verified_exact_count = leadVerifications.filter(lv => lv.verified_exact).length;
+  const capCheck = buildCapabilityCheck(constraints);
   const unverifiable_constraints = constraints.filter(c => {
-    const cap = buildCapabilityCheck([c]);
-    return cap.unverifiable_count > 0;
+    const entry = capCheck.capabilities.find(cap => cap.constraint_id === c.id);
+    return entry ? !entry.verifiable : false;
   });
+
+  const unverifiableHardConstraints: UnverifiableHardConstraint[] = unverifiable_constraints
+    .filter(c => c.hard)
+    .map(c => {
+      const entry = capCheck.capabilities.find(cap => cap.constraint_id === c.id);
+      return {
+        constraint_id: c.id,
+        constraint_type: c.type,
+        value: typeof c.value === 'string' ? c.value : String(c.value),
+        reason: entry?.reason || 'Cannot be verified with current tools',
+        suggested_action: `Verify "${typeof c.value === 'string' ? c.value : c.id}" via venue websites or manual check`,
+      };
+    });
+
+  const hardUnknownCount = leadVerifications.reduce((count, lv) => {
+    const hasHardUnknown = lv.constraint_checks.some(
+      cc => cc.hard && cc.status === 'unknown'
+    );
+    return count + (hasHardUnknown ? 1 : 0);
+  }, 0);
+
+  const suggestedNextAction = unverifiableHardConstraints.length > 0
+    ? `${unverifiableHardConstraints.length} hard constraint(s) cannot be verified from search data alone: ${unverifiableHardConstraints.map(u => `"${u.value}"`).join(', ')}. Suggested: Verify via venue websites or manual check.`
+    : null;
 
   const constraint_results = constraints.map(c => {
     const agg = constraintAgg.get(c.id) || { passing: 0, failing: 0, unknown: 0 };
@@ -325,6 +361,9 @@ export function verifyLeads(
     verified_exact_count,
     verified_total_count: leads.length,
     unverifiable_count: unverifiable_constraints.length,
+    hard_unknown_count: hardUnknownCount,
+    unverifiable_hard_constraints: unverifiableHardConstraints,
+    suggested_next_action: suggestedNextAction,
     constraint_results,
     budget: {
       search_budget_count: searchBudgetCount,
