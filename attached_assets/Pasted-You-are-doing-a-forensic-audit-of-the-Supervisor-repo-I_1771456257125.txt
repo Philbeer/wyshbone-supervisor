@@ -1,0 +1,90 @@
+You are doing a forensic audit of the Supervisor repo. I suspect some changes may have been applied incorrectly (Replit local DB vs Supabase) and I need a complete, extremely detailed rundown of the current agent loop and persistence. Do NOT implement anything. Read only, analyze only.
+
+Objectives
+
+Produce a precise list of what has changed recently:
+
+Files modified, created, deleted
+
+Any new tables/migrations added (goal_ledger, belief_store, feedback_events)
+
+Any demo endpoints or demo orchestrator routes added or removed
+
+Any changes to delivery_summary generation and how status is computed
+
+Explain the full end-to-end agent loop in detail, from Supervisor’s perspective:
+
+Input: what arrives from UI (/api/chat delegation or supervisor_tasks)
+
+Planning: plan creation, steps, tool execution
+
+Artefacts: what gets written, where, and when (Supabase artefacts table)
+
+CVL: how verification is run, what artefacts it writes (verification_summary/evidence)
+
+Tower: how Tower is called, what verdict schemas are used, what is persisted, what triggers replanning
+
+Accumulation: how partial results are accumulated across plan versions
+
+Halting: stop conditions (max replans, constraint impossible) and how STOP is recorded
+
+Delivery summary: exact rules and fields (PASS/PARTIAL/STOP), including stop_reason and cvl_verified counts
+
+Confirm DB correctness:
+
+100% Supabase Postgres, no Replit local DB writes
+
+List all env vars used for DB connection (DATABASE_URL, SUPABASE_DATABASE_URL, etc.)
+
+Confirm which one is actually used at runtime
+
+Identify any tooling (drizzle push, migrations) that may have targeted the wrong DB
+
+Provide a “DB sanity check” SQL query set I can run in Supabase to confirm the correct tables are being written
+
+Required outputs (be extremely detailed)
+A) Git / diff report:
+
+Branch name
+
+Last 10 commits
+
+git status
+
+Changed files summary
+
+B) Current schema summary:
+
+Tables used by the loop: artefacts, agent_runs, tower_judgements or tower_verdicts, plan_executions, agent_memory, plus new tables if present
+
+For each table: purpose, key columns, how it relates to run_id / goal_id / crid
+
+C) Flow diagram (text) for Supervisor loop:
+supervisor_task -> run -> plan v1 -> step -> artefacts -> tower judge -> replan -> CVL -> delivery_summary -> completion message back to UI
+Name the actual key files/functions.
+
+D) Risk list:
+
+Anything that could cause mismatched run correlation (run_id vs client_request_id)
+
+Anything that could cause delivery_summary to lie or be computed from raw counts
+
+Any path where CVL is not run but status is still computed
+
+Any path where Tower verdict mapping is inconsistent
+
+E) Recommendation:
+
+If unwanted demo endpoints or fake behaviour exists, list exactly what to remove
+
+If wrong DB risk exists, propose the minimal production-grade assertion to prevent it (fail fast if Supabase URL missing)
+
+Constraints
+
+DO NOT change code
+
+Do not implement anything
+
+Just report current reality with maximum detail and exact file references
+
+Return the report in markdown with headings and bullet points.
