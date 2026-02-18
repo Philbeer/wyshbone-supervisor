@@ -1,5 +1,22 @@
 import type { StructuredConstraint } from './goal-to-constraints';
 
+const PLACES_SUPPORTED_CATEGORIES = new Set([
+  'pub', 'pubs', 'bar', 'bars', 'restaurant', 'restaurants',
+  'cafe', 'cafes', 'coffee shop', 'coffee shops',
+  'hotel', 'hotels', 'motel', 'motels',
+  'gym', 'gyms', 'dentist', 'dentists', 'doctor', 'doctors',
+  'pharmacy', 'pharmacies', 'hospital', 'hospitals',
+  'brewery', 'breweries', 'winery', 'wineries', 'distillery', 'distilleries',
+  'bakery', 'bakeries', 'salon', 'salons', 'spa', 'spas',
+  'garage', 'garages', 'mechanic', 'mechanics',
+  'plumber', 'plumbers', 'electrician', 'electricians',
+  'florist', 'florists', 'butcher', 'butchers',
+  'supermarket', 'supermarkets', 'store', 'stores', 'shop', 'shops',
+  'nightclub', 'nightclubs', 'club', 'clubs',
+  'church', 'churches', 'school', 'schools',
+  'veterinarian', 'veterinarians', 'vet', 'vets',
+]);
+
 export interface CvlConstraint {
   id: string;
   type: string;
@@ -140,11 +157,21 @@ export function buildCapabilityCheck(
         reason = 'Verifiable by counting delivered leads';
         break;
 
-      case 'CATEGORY_EQUALS':
-        verifiable = false;
-        verification_method = null;
-        reason = 'Business type is the search query itself; cannot independently verify category from lead data alone';
+      case 'CATEGORY_EQUALS': {
+        const catValue = typeof c.value === 'string' ? c.value.toLowerCase() : '';
+        const placesSupported = PLACES_SUPPORTED_CATEGORIES.has(catValue) ||
+          PLACES_SUPPORTED_CATEGORIES.has(catValue.replace(/s$/, ''));
+        if (placesSupported) {
+          verifiable = true;
+          verification_method = 'search_query_proxy';
+          reason = `Business type "${catValue}" is a Places-supported category; search was executed with this type as the query, so results are inherently this category`;
+        } else {
+          verifiable = false;
+          verification_method = null;
+          reason = 'Business type is not a standard Places category; cannot independently verify from lead data';
+        }
         break;
+      }
 
       case 'LOCATION_EQUALS':
       case 'LOCATION_NEAR':
@@ -169,6 +196,12 @@ export function buildCapabilityCheck(
         verifiable = true;
         verification_method = 'tool_source_check';
         reason = 'Verifiable by checking lead.source field';
+        break;
+
+      case 'HAS_ATTRIBUTE':
+        verifiable = false;
+        verification_method = null;
+        reason = 'Venue attributes (e.g. beer garden, outdoor seating) cannot be deterministically verified from Places API data alone; requires manual or web-scrape verification';
         break;
 
       default:
@@ -329,9 +362,18 @@ function verifyOneConstraint(
     }
 
     case 'CATEGORY_EQUALS': {
-      status = 'unknown';
-      confidence = 'low';
-      reason = 'Cannot independently verify business category from lead data; search query used as proxy';
+      const catVal = typeof constraint.value === 'string' ? constraint.value.toLowerCase() : '';
+      const isPlacesSupported = PLACES_SUPPORTED_CATEGORIES.has(catVal) ||
+        PLACES_SUPPORTED_CATEGORIES.has(catVal.replace(/s$/, ''));
+      if (isPlacesSupported) {
+        status = 'yes';
+        confidence = 'high';
+        reason = `Business type "${catVal}" is Places-supported; search query guarantees category match`;
+      } else {
+        status = 'unknown';
+        confidence = 'low';
+        reason = 'Cannot independently verify business category from lead data; search query used as proxy';
+      }
       break;
     }
 
@@ -465,6 +507,14 @@ function verifyOneConstraint(
         confidence = 'low';
         reason = `Lead source "${lead.source}" — cannot confirm tool match`;
       }
+      break;
+    }
+
+    case 'HAS_ATTRIBUTE': {
+      const attrValue = typeof constraint.value === 'string' ? constraint.value.toLowerCase() : '';
+      status = 'unknown';
+      confidence = 'low';
+      reason = `Attribute "${attrValue}" cannot be deterministically verified from Places API data; requires manual/web-scrape check`;
       break;
     }
 

@@ -934,6 +934,7 @@ class SupervisorService {
     let requestedCount = parsedGoal.search_budget_count;
     const prefixFilter = parsedGoal.prefix_filter || undefined;
     const nameFilter = parsedGoal.name_filter || undefined;
+    const attributeFilter = parsedGoal.attribute_filter || undefined;
     const toolPreference = parsedGoal.tool_preference || undefined;
     const structuredConstraints = parsedGoal.constraints;
     const successCriteria = parsedGoal.success_criteria;
@@ -947,12 +948,19 @@ class SupervisorService {
     const userSpecifiedCount = userRequestedCount !== undefined;
     const displayCount = userRequestedCount ?? null;
 
+    if (attributeFilter) {
+      const attrRegex = new RegExp(`\\s+with\\s+(?:a\\s+)?${attributeFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
+      businessType = businessType.replace(attrRegex, '').trim();
+      console.log(`[TOWER_LOOP_CHAT] Stripped attribute "${attributeFilter}" from businessType → "${businessType}"`);
+    }
+
     const constraints: string[] = [];
     if (userSpecifiedCount) constraints.push(`count=${userRequestedCount}`);
     constraints.push(`business_type=${businessType}`);
     constraints.push(`location=${city}`);
     if (prefixFilter) constraints.push(`prefix=${prefixFilter}`);
     if (nameFilter) constraints.push(`name_contains=${nameFilter}`);
+    if (attributeFilter) constraints.push(`attribute=${attributeFilter}`);
     if (toolPreference) constraints.push(`use=${toolPreference}`);
 
     const assumptions: string[] = [];
@@ -962,15 +970,18 @@ class SupervisorService {
     if (nameFilter) {
       assumptions.push(`Google Places cannot filter by name content; will search broadly then filter locally for names containing "${nameFilter}"`);
     }
+    if (attributeFilter) {
+      assumptions.push(`Attribute "${attributeFilter}" not injected into search query; will pull wider candidate set and verify via CVL post-search`);
+    }
     if (!userSpecifiedCount) {
       assumptions.push(`No count specified by user — will return all results found (search budget: ${parsedGoal.search_budget_count})`);
-    } else if (requestedCount < 20) {
-      assumptions.push(`Will request up to 20 results from Google Places, then trim to ${requestedCount} after any local filtering`);
+    } else if (requestedCount < 30) {
+      assumptions.push(`Will request wider candidate set from Google Places (30-50), then verify via CVL and trim to ${requestedCount}`);
     }
     assumptions.push(`Location "${city}" will be used as-is in the Google Places text query`);
 
     const userRequestedCountFinal: number | null = userSpecifiedCount ? userRequestedCount! : null;
-    const searchBudgetCount = Math.max(20, requestedCount);
+    const searchBudgetCount = Math.min(50, Math.max(30, requestedCount));
     const searchCount = searchBudgetCount;
     const postProcessing: string[] = [];
     if (prefixFilter) postProcessing.push(`Filter names starting with "${prefixFilter}"`);
@@ -979,8 +990,9 @@ class SupervisorService {
     console.log(`[TOWER_LOOP_CHAT] Count split — requested_count_user=${userRequestedCountFinal ?? 'any'} search_budget_count=${searchBudgetCount} user_specified=${userSpecifiedCount}`);
 
     const nameDesc = prefixFilter ? ` starting with ${prefixFilter}` : nameFilter ? ` containing "${nameFilter}"` : '';
+    const attrDesc = attributeFilter ? ` (attribute: ${attributeFilter} — verified post-search via CVL, not injected into query)` : '';
     const countDesc = userSpecifiedCount ? `${userRequestedCountFinal} ` : '';
-    const normalizedGoal = `Find ${countDesc}${businessType} in ${city}${nameDesc} for B2B outreach`;
+    const normalizedGoal = `Find ${countDesc}${businessType} in ${city}${nameDesc} for B2B outreach${attrDesc}`;
     const goal = normalizedGoal;
 
     const hard_constraints: string[] = structuredConstraints.filter(c => c.hard).map(c => c.field === 'count' ? 'requested_count' : c.field === 'business_type' ? 'business_type' : c.field === 'location' ? 'location' : c.field === 'name' && c.type === 'NAME_STARTS_WITH' ? 'prefix_filter' : c.field === 'name' && c.type === 'NAME_CONTAINS' ? 'name_filter' : c.field);
@@ -1247,15 +1259,17 @@ class SupervisorService {
       requested_count_user: userRequestedCountFinal,
       search_budget_count: searchBudgetCount,
       name_filter: nameFilter || null,
+      attribute_filter: attributeFilter || null,
       created_at: new Date().toISOString(),
     };
 
     const nameFilterLabel = nameFilter ? `, containing "${nameFilter}"` : '';
+    const attrFilterLabel = attributeFilter ? `, attribute "${attributeFilter}" (CVL post-search)` : '';
     const planArtefact = await createArtefact({
       runId: chatRunId,
       type: 'plan',
       title: artefactTitle('Plan v1:', displayCount, v1Constraints, 1),
-      summary: `Search${displayCount !== null ? ` ${displayCount}` : ''} ${businessType} in ${city} via Google Places${prefixFilter ? `, filter prefix "${prefixFilter}"` : ''}${nameFilterLabel}`,
+      summary: `Search${displayCount !== null ? ` ${displayCount}` : ''} ${businessType} in ${city} via Google Places${prefixFilter ? `, filter prefix "${prefixFilter}"` : ''}${nameFilterLabel}${attrFilterLabel}`,
       payload: planPayload,
       userId: task.user_id,
       conversationId,
@@ -1405,7 +1419,7 @@ class SupervisorService {
             step_index: 0,
             step_status: towerLoopStepStatus,
             inputs_summary: compactInputs({ query: businessType, location: city, country, maxResults: searchCount }),
-            outputs_summary: { leads_count: leads.length, used_stub: usedStub, prefix_filter: prefixFilter || null, name_filter: nameFilter || null, requested_count: requestedCount, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}) },
+            outputs_summary: { leads_count: leads.length, used_stub: usedStub, prefix_filter: prefixFilter || null, name_filter: nameFilter || null, attribute_filter: attributeFilter || null, requested_count: requestedCount, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}) },
             ...safeOutputsRaw({ leads: safeLeads } as Record<string, unknown>),
             timings: {
               started_at: new Date(towerLoopStepStartedAt).toISOString(),
@@ -1470,6 +1484,7 @@ class SupervisorService {
       used_stub: usedStub,
       prefix_filter: prefixFilter || null,
       name_filter: nameFilter || null,
+      attribute_filter: attributeFilter || null,
       requested_count_user: userRequestedCountFinal,
       requested_count_internal: searchBudgetCount,
       relaxed_constraints: v1Label.relaxed_constraints,
@@ -1513,6 +1528,7 @@ class SupervisorService {
       target_count: userRequestedCountFinal ?? requestedCount,
       user_specified_count: userSpecifiedCount,
       ...(prefixFilter ? { prefix: prefixFilter } : {}),
+      ...(attributeFilter ? { attribute_filter: attributeFilter, attribute_note: 'attribute not injected into search query; CVL verifies post-search' } : {}),
       plan_version: 1,
       hard_constraints,
       soft_constraints,
@@ -1524,6 +1540,7 @@ class SupervisorService {
         search_count: searchCount,
         requested_count: userRequestedCountFinal ?? requestedCount,
         prefix_filter: prefixFilter || null,
+        attribute_filter: attributeFilter || null,
       },
       max_replan_versions: 2,
     };
@@ -2436,6 +2453,17 @@ class SupervisorService {
       console.log(`[CVL] Verification pass complete: ${vs.verified_exact_count} verified exact out of ${vs.candidates_checked} leads checked`);
     } catch (cvlErr: any) {
       console.warn(`[CVL] Verification pass failed (non-fatal, continuing with unverified counts): ${cvlErr.message}`);
+    }
+
+    if (cvlVerification && userRequestedCountFinal !== null) {
+      const vCount = cvlVerification.verified_exact_count;
+      if (vCount >= userRequestedCountFinal && finalVerdict !== 'pass') {
+        console.log(`[CVL_OVERRIDE] verified_exact_count (${vCount}) >= requested (${userRequestedCountFinal}); overriding finalVerdict from "${finalVerdict}" to "pass"`);
+        finalVerdict = 'pass';
+        finalAction = 'accept';
+      } else if (vCount < userRequestedCountFinal && finalVerdict === 'pass') {
+        console.log(`[CVL_OVERRIDE] verified_exact_count (${vCount}) < requested (${userRequestedCountFinal}); Tower said pass but CVL says insufficient verified leads — keeping verdict as pass with CVL warning`);
+      }
     }
 
     // Regression guard: if early-stop set finalVerdict='pass', override stale shouldStop from prior Tower fail

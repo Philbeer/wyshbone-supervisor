@@ -8,6 +8,7 @@ export const CONSTRAINT_TYPES = [
   'NAME_STARTS_WITH',
   'NAME_CONTAINS',
   'MUST_USE_TOOL',
+  'HAS_ATTRIBUTE',
 ] as const;
 
 export type ConstraintType = typeof CONSTRAINT_TYPES[number];
@@ -41,6 +42,7 @@ export const ParsedGoalSchema = z.object({
   country: z.string().default('UK'),
   prefix_filter: z.string().nullable().default(null),
   name_filter: z.string().nullable().default(null),
+  attribute_filter: z.string().nullable().default(null),
   tool_preference: z.string().nullable().default(null),
   constraints: z.array(StructuredConstraintSchema),
   success_criteria: SuccessCriteriaSchema,
@@ -53,12 +55,13 @@ const SYSTEM_PROMPT = `You are a goal parser for a B2B lead generation system. P
 You must return a JSON object with these fields:
 - original_goal: the verbatim user input
 - requested_count_user: the number the user explicitly asked for (number or null if not specified). Do NOT invent a count — if the user says "find pubs in london" without a number, set this to null.
-- search_budget_count: always max(20, requested_count_user or 20) — this is how many we actually fetch from the API
-- business_type: the type of business (e.g. "pubs", "dentists", "restaurants")
+- search_budget_count: always max(30, requested_count_user * 3 or 30), capped at 50 — we pull a wider candidate set for post-search verification
+- business_type: the CORE type of business ONLY (e.g. "pubs", "dentists", "restaurants"). NEVER include attribute qualifiers here. "pubs with beer garden" → business_type="pubs", attribute_filter="beer garden". "restaurants with outdoor seating" → business_type="restaurants", attribute_filter="outdoor seating".
 - location: the location (e.g. "arundel", "london")
 - country: country code or name, default "UK"
 - prefix_filter: if user wants names starting with a specific letter/prefix (string or null)
-- name_filter: if user wants names containing a specific word (string or null)
+- name_filter: if user wants names containing a specific word IN THE BUSINESS NAME (string or null). Only use this for explicit name-matching requests like "with the word swan in the name".
+- attribute_filter: if user wants businesses with a specific feature/attribute/amenity (string or null). Use this for venue features like "beer garden", "outdoor seating", "live music", "parking", "rooftop bar", "pool table", "function room" etc. These are NOT name filters — they describe what the venue HAS, not what it is called.
 - tool_preference: if user specifies a tool like "google places" (string or null)
 - constraints: array of typed constraint objects
 - success_criteria: object defining what counts as success
@@ -67,16 +70,24 @@ CONSTRAINT TYPES and how to detect them:
 - COUNT_MIN: when user says "find N" → { id: "c_count", type: "COUNT_MIN", field: "count", operator: ">=", value: N, hard: true, rationale: "User requested N results" }
 - LOCATION_EQUALS: when user says "in <place>" → { id: "c_location", type: "LOCATION_EQUALS", field: "location", operator: "=", value: "<place>", hard: false, rationale: "..." }
 - LOCATION_NEAR: when user says "near <place>" or "within X km" → { id: "c_location", type: "LOCATION_NEAR", field: "location", operator: "within_km", value: { center: "<place>", km: N }, hard: false, rationale: "..." }
-- CATEGORY_EQUALS: the business type → { id: "c_category", type: "CATEGORY_EQUALS", field: "business_type", operator: "=", value: "<type>", hard: true, rationale: "..." }
+- CATEGORY_EQUALS: the CORE business type ONLY → { id: "c_category", type: "CATEGORY_EQUALS", field: "business_type", operator: "=", value: "<core type>", hard: true, rationale: "..." }. The value must be the clean business type without attribute qualifiers.
 - NAME_STARTS_WITH: when user says "starting with X" or "beginning with X" → { id: "c_name_prefix", type: "NAME_STARTS_WITH", field: "name", operator: "starts_with", value: "X", hard: false, rationale: "..." }
-- NAME_CONTAINS: when user says "with the word X in the name" or "containing X" or "called X" or "named X" → { id: "c_name_contains", type: "NAME_CONTAINS", field: "name", operator: "contains_word", value: "X", hard: false, rationale: "..." }
+- NAME_CONTAINS: when user says "with the word X in the name" or "called X" or "named X" → { id: "c_name_contains", type: "NAME_CONTAINS", field: "name", operator: "contains_word", value: "X", hard: false, rationale: "..." }. Only for BUSINESS NAME matching, not venue attributes.
 - MUST_USE_TOOL: when user says "using google places" → { id: "c_tool", type: "MUST_USE_TOOL", field: "tool", operator: "=", value: "GOOGLE_PLACES", hard: false, rationale: "..." }
+- HAS_ATTRIBUTE: when user wants venues with a specific feature/amenity → { id: "c_attr_<short_name>", type: "HAS_ATTRIBUTE", field: "attribute", operator: "has", value: "<attribute>", hard: false, rationale: "..." }. Examples: "beer garden", "outdoor seating", "live music", "parking", "wheelchair accessible". Always default soft unless user says "must have".
+
+CRITICAL RULE — Attribute vs Name distinction:
+- "pubs with a beer garden" → HAS_ATTRIBUTE (beer garden is a venue feature, NOT a name)
+- "pubs with the word swan in the name" → NAME_CONTAINS (swan is in the business name)
+- "restaurants with outdoor seating" → HAS_ATTRIBUTE (outdoor seating is a venue feature)
+- "restaurants called The Swan" → NAME_CONTAINS (The Swan is a name)
+- NEVER put attribute qualifiers into business_type. business_type must be ONLY the core category.
 
 HARD vs SOFT rules:
 - If user uses words like "must", "only", "exactly", "strict", "strictly", "do not relax", "hard constraint" → mark that constraint as hard: true
 - Default hard: COUNT_MIN (always hard), CATEGORY_EQUALS (always hard)
-- Default soft: LOCATION_EQUALS, LOCATION_NEAR, NAME_STARTS_WITH, NAME_CONTAINS, MUST_USE_TOOL
-- Override: if user says "must be in london only" → LOCATION_EQUALS becomes hard
+- Default soft: LOCATION_EQUALS, LOCATION_NEAR, NAME_STARTS_WITH, NAME_CONTAINS, MUST_USE_TOOL, HAS_ATTRIBUTE
+- Override: if user says "must be in london only" → LOCATION_EQUALS becomes hard. If user says "must have a beer garden" → HAS_ATTRIBUTE becomes hard.
 
 SUCCESS_CRITERIA:
 - required_constraints: IDs of all hard constraints
@@ -86,7 +97,13 @@ SUCCESS_CRITERIA:
 IMPORTANT: Parse the EXACT intent. For "find 4 pubs in arundel with the word swan in the name", you must:
 - Set name_filter to "swan"
 - Include a NAME_CONTAINS constraint with value "swan"
-- Do NOT confuse "with the word X in the name" with a prefix filter
+- Do NOT confuse "with the word X in the name" with a prefix filter or attribute
+
+For "find 7 pubs in chichester with a beer garden", you must:
+- Set business_type to "pubs" (NOT "pubs with beer garden")
+- Set attribute_filter to "beer garden"
+- Include a HAS_ATTRIBUTE constraint with value "beer garden"
+- Do NOT set name_filter (beer garden is not a name)
 
 Return ONLY valid JSON. No markdown, no explanation.`;
 
@@ -185,10 +202,20 @@ function regexFallback(rawGoal: string): ParsedGoal {
     nameFilter = nameContainsMatch[1];
   }
 
+  const attrMatch = msg.match(/\bwith\s+(?:a\s+)?(?!the\s+word|the\s+name)(beer\s+garden|outdoor\s+seating|live\s+music|parking|rooftop|pool\s+table|function\s+room|wheelchair|garden|terrace|patio|wifi|karaoke)\b/i);
+  let attributeFilter: string | null = null;
+  if (attrMatch) {
+    attributeFilter = attrMatch[1].trim();
+  }
+
   const toolMatch = msg.match(/\b(?:with|using)\s+(google\s+places?\s+search|google\s+places?|google\s+maps?)\b/i);
   if (toolMatch) toolPreference = 'GOOGLE_PLACES';
 
-  const searchBudgetCount = Math.max(20, requestedCountUser || 20);
+  const searchBudgetCount = Math.min(50, Math.max(30, (requestedCountUser || 10) * 3));
+
+  if (attributeFilter) {
+    businessType = businessType.replace(new RegExp(`\\s+with\\s+(?:a\\s+)?${attributeFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i'), '').trim();
+  }
 
   const hardKeywords = /\b(must|only|exactly|strict|strictly|do\s+not\s+relax)\b/i;
   const hasHardSignal = hardKeywords.test(msg);
@@ -233,6 +260,14 @@ function regexFallback(rawGoal: string): ParsedGoal {
     if (isHard) requiredIds.push(c.id); else optionalIds.push(c.id);
   }
 
+  if (attributeFilter) {
+    const shortName = attributeFilter.replace(/\s+/g, '_').toLowerCase();
+    const isHard = hasHardSignal && new RegExp(`must\\s+have\\s+.*${attributeFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(msg);
+    const c: StructuredConstraint = { id: `c_attr_${shortName}`, type: 'HAS_ATTRIBUTE', field: 'attribute', operator: 'has', value: attributeFilter, hard: isHard, rationale: `User wants venues with "${attributeFilter}"` };
+    constraints.push(c);
+    if (isHard) requiredIds.push(c.id); else optionalIds.push(c.id);
+  }
+
   return {
     original_goal: rawGoal,
     requested_count_user: requestedCountUser,
@@ -242,6 +277,7 @@ function regexFallback(rawGoal: string): ParsedGoal {
     country,
     prefix_filter: prefixFilter,
     name_filter: nameFilter,
+    attribute_filter: attributeFilter,
     tool_preference: toolPreference,
     constraints,
     success_criteria: {
