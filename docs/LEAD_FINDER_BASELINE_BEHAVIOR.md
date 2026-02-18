@@ -497,3 +497,81 @@ Two execution path implementations exist in the codebase:
 2. **`plan-executor.ts`** — Step-by-step executor with `MAX_RETRIES=2` and `MAX_PLAN_VERSIONS=2` constants. Supports multi-step plans (SEARCH_PLACES, ENRICH_LEADS, SCORE_LEADS) in its type definitions.
 
 The active Lead-Finder chat path (`executeTowerLoopChat`) in `supervisor.ts` implements its own inline version that draws on both: it uses `RADIUS_LADDER_KM` and `AccumulatedCandidate` from `agent-loop.ts`, and the replan policy from `replan-policy.ts`. It does **not** call `agent-loop.ts` or `plan-executor.ts` directly for the tower-loop-chat flow.
+
+---
+
+## 16. Constraint Verification Layer (CVL) V1
+
+CVL is an additive-only layer injected into the Lead-Finder flow at two points. It does **not** modify any existing replan loop logic, Tower integration, or terminal state decisions. All CVL operations are wrapped in try/catch and are non-fatal.
+
+### 16a. Module: `server/supervisor/cvl.ts`
+
+Exports three functions:
+
+1. **`buildConstraintsExtractedPayload(userGoal, requestedCount, constraints)`** — Packages the parsed constraints into a structured payload for artefact emission.
+
+2. **`buildCapabilityCheck(constraints)`** — Evaluates each constraint for verifiability given current tools. Returns counts of verifiable vs. unverifiable constraints, confidence levels, and identifies blocking hard constraints that cannot be verified.
+
+3. **`verifyLeads(leads, constraints, requestedCount, searchBudget, totalUnique)`** — Performs deterministic per-lead verification against all constraints. Returns:
+   - Per-lead verification results (`leadVerifications`) with constraint check statuses (`yes`, `no`, `unknown`)
+   - Evidence items for auditing
+   - A summary with `verified_exact_count` (leads passing all hard constraints)
+
+### 16b. Verifiability by Constraint Type
+
+| Constraint Type | Verifiable | Confidence | Method |
+|---|---|---|---|
+| `COUNT_MIN` | Yes | high | Compare delivered count against minimum |
+| `NAME_STARTS_WITH` | Yes | high | Case-insensitive prefix check on lead name |
+| `NAME_CONTAINS` | Yes | high | Case-insensitive substring check on lead name |
+| `LOCATION_EQUALS` | Yes | medium | Case-insensitive substring check on lead address |
+| `LOCATION_NEAR` | Partial | low | Address substring check (true proximity requires geocoding) |
+| `MUST_USE_TOOL` | Yes | high | Tool usage is controlled by the system |
+| `CATEGORY_EQUALS` | No | low | No category field available on lead data |
+
+### 16c. Injection Point 1: Post-Parse, Pre-Execution (lines ~1012–1042)
+
+After `parseGoalToConstraints()` produces `structuredConstraints` and before the v1 plan artefact is created:
+
+1. **`constraints_extracted`** artefact — Records all parsed constraints with their types, values, and hard/soft classification.
+2. **`constraint_capability_check`** artefact — Records which constraints are verifiable, which are not, and identifies any blocking hard constraints.
+
+### 16d. Injection Point 2: Post-Final-Lead-Assembly, Pre-Terminal-State (lines ~2308–2377)
+
+After `finalLeads` is assembled and trimmed, but before the early-stop override and terminal state logic:
+
+1. **`lead_verification`** artefacts (one per lead) — Each lead's constraint checks with `yes`/`no`/`unknown` status, confidence level, and whether `all_hard_satisfied`.
+2. **`verification_evidence`** artefact — Aggregated evidence items across all leads.
+3. **`verification_summary`** artefact — Overall summary: `verified_exact_count`, `candidates_checked`, `requested_count_user`, `unverifiable_count`.
+
+### 16e. Downstream Effects
+
+- **`tower_judgement` UI payload** — Now includes `verified_exact_count` field (number or null).
+- **`delivery_summary` artefact** — Now includes `cvl_verified_exact_count` and `cvl_unverifiable_count` fields, and the summary string includes a `cvl_verified=N` label when available.
+
+### 16f. Artefact Emission Sequence (Updated)
+
+The full artefact emission order with CVL additions:
+
+```
+constraints_extracted          ← CVL (new)
+constraint_capability_check    ← CVL (new)
+plan (v1)
+step_result (per tool call)
+tower_judgement (observation_only, per step)
+leads_list
+tower_judgement (final)
+  [replan loop if change_plan]
+  plan (v2+)
+  step_result (per tool call)
+  tower_judgement (observation_only, per step)
+  leads_list (updated)
+  tower_judgement (final)
+lead_verification (per lead)   ← CVL (new)
+verification_evidence          ← CVL (new)
+verification_summary           ← CVL (new)
+tower_judgement (UI)
+leads (UI)
+delivery_summary
+run_narrative
+```

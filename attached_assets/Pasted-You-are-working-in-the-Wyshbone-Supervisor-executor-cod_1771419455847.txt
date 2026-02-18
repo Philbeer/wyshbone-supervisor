@@ -1,0 +1,109 @@
+You are working in the Wyshbone Supervisor/executor codebase (Lead-Finder flow documented in docs/LEAD_FINDER_BASELINE_BEHAVIOR.md).
+
+Goal: implement CVL V1 as additive artefacts, without rewriting the existing replan loop.
+
+Constraints (non-negotiable)
+
+Do NOT remove or redesign the existing Lead-Finder execution flow.
+
+Do NOT add “beer garden” hacks. CVL must be generic.
+
+CVL must emit artefacts so Tower and UI can judge/render truthfully.
+
+Phase 1 assumes no new external tools. If an attribute is not verifiable, record that and force honesty.
+
+Implement (additive changes only)
+A) Constraint extraction → emit constraints_extracted
+
+At the earliest point after intent parsing / goal normalization (before plan v1 execution), produce a structured constraint list:
+
+COUNT_MIN / LOCATION / BUSINESS_TYPE always extracted if present
+
+ATTRIBUTE constraints extracted when user says “with X”, “that have X”, “dog friendly”, etc.
+
+Hardness default hard unless phrased soft (“preferably”, “if possible”, “ideally”).
+
+Emit artefact:
+
+type: constraints_extracted
+
+payload must include: mission_type=lead_finder, requested_count_user, constraints[] with stable ids.
+
+B) Capability check → emit constraint_capability_check
+
+For each constraint, determine verifiable with current tools:
+
+For Phase 1, treat:
+
+NAME_* constraints verifiable via lead.name
+
+LOCATION verifiable only if lead has address/geometry to compare (if not, mark unknown/verifiable=false)
+
+ATTRIBUTE verifiable=false (unless you already have a deterministic source in current system; don’t invent one)
+
+Emit artefact:
+
+type: constraint_capability_check
+
+include blocking_hard_constraints list for hard+unverifiable.
+
+C) Verification pass (Phase 1 limited) → emit verification_summary, lead_verification, verification_evidence
+
+Add a verification step that evaluates constraints against what you already have:
+
+NAME_* against lead.name (yes/no)
+
+LOCATION:
+
+if lead has an address string or structured components, compare to requested location (basic contains match is acceptable for V1; record confidence low/med/high)
+
+else status=unknown
+
+ATTRIBUTE: status=unknown with reason “Unverifiable with current tools” (Phase 1)
+
+Emit:
+
+lead_verification with per-lead constraint_checks including evidence_ids
+
+verification_evidence for any “yes” checks you can support (e.g., address snippet)
+
+verification_summary:
+
+requested_count_user
+
+verified_exact_count = number of leads that satisfy all hard constraints with status yes
+
+constraint_results[] with status yes/no/unknown
+
+candidates_checked + budget counters (even if trivial)
+
+D) Delivered count discipline (stop trusting naked numbers)
+
+Currently downstream may set delivered_matching_accumulated and Tower trusts it.
+For CVL V1:
+
+compute verified_exact_count deterministically from leads + checks
+
+ensure this value is what Tower receives for decisioning (through payload or artefact reference)
+
+E) Delivery summary honesty
+
+Update delivery_summary generation so it:
+
+reports “verified_exact_count vs requested_count_user”
+
+lists constraints + status
+
+if STOP/CHANGE_PLAN, includes explicit stop_reason tied to the blocking constraint_id
+
+Non-goals (do not touch)
+
+Do not add website scraping tools in Phase 1
+
+Do not expand tool registry
+
+Do not redesign replan policy; only feed it better facts if needed
+
+Do not remove local safety overrides (Tower unreachable branch) — but ensure they also respect verified counts
+
+Deliverable: CVL artefacts emitted in the normal Lead-Finder run so UI can render and Tower can judge.

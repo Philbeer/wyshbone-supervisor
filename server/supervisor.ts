@@ -18,6 +18,7 @@ import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandid
 import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation } from './supervisor/delivery-summary';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
+import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput } from './supervisor/cvl';
 
 interface UserContext {
   userId: string;
@@ -1004,6 +1005,38 @@ class SupervisorService {
       typedConstraints.push({ type: 'COUNT_MIN' as const, field: 'requested_count', value: userRequestedCountFinal, hardness: 'hard' });
     }
     console.log(`[TOWER_LOOP_CHAT] Typed constraints for Tower: ${JSON.stringify(typedConstraints)}`);
+
+    const cvlConstraintsPayload = buildConstraintsExtractedPayload(originalUserGoal, userRequestedCountFinal, structuredConstraints);
+    try {
+      const ceArtefact = await createArtefact({
+        runId: chatRunId,
+        type: 'constraints_extracted',
+        title: `Constraints extracted: ${structuredConstraints.length} constraints`,
+        summary: `mission_type=lead_finder | ${structuredConstraints.filter(c => c.hard).length} hard, ${structuredConstraints.filter(c => !c.hard).length} soft | requested_count_user=${userRequestedCountFinal ?? 'any'}`,
+        payload: cvlConstraintsPayload as unknown as Record<string, unknown>,
+        userId: task.user_id,
+        conversationId,
+      });
+      console.log(`[CVL] constraints_extracted artefact id=${ceArtefact.id} constraints=${structuredConstraints.length}`);
+    } catch (ceErr: any) {
+      console.warn(`[CVL] Failed to emit constraints_extracted (non-fatal): ${ceErr.message}`);
+    }
+
+    const cvlCapabilityPayload = buildCapabilityCheck(structuredConstraints);
+    try {
+      const ccArtefact = await createArtefact({
+        runId: chatRunId,
+        type: 'constraint_capability_check',
+        title: `Capability check: ${cvlCapabilityPayload.verifiable_count} verifiable, ${cvlCapabilityPayload.unverifiable_count} unverifiable`,
+        summary: `${cvlCapabilityPayload.verifiable_count}/${cvlCapabilityPayload.total_constraints} verifiable | blocking_hard: [${cvlCapabilityPayload.blocking_hard_constraints.join(', ')}]`,
+        payload: cvlCapabilityPayload as unknown as Record<string, unknown>,
+        userId: task.user_id,
+        conversationId,
+      });
+      console.log(`[CVL] constraint_capability_check artefact id=${ccArtefact.id} verifiable=${cvlCapabilityPayload.verifiable_count} blocking_hard=${cvlCapabilityPayload.blocking_hard_constraints.length}`);
+    } catch (ccErr: any) {
+      console.warn(`[CVL] Failed to emit constraint_capability_check (non-fatal): ${ccErr.message}`);
+    }
 
     const v1Constraints = {
       business_type: businessType,
@@ -2269,6 +2302,78 @@ class SupervisorService {
       console.log(`[TOWER_LOOP_CHAT] Built union leads list: ${trimmedUnion.length} matching (from ${totalUniqueLeads} unique, ${totalMatchingLeads} matching accumulated across ${replansUsed + 1} plans)`);
     }
 
+    let cvlVerification: CvlVerificationOutput | null = null;
+    try {
+      const cvlLeads: VerifiableLead[] = finalLeads.map(l => ({
+        name: l.name,
+        address: l.address,
+        phone: l.phone,
+        website: l.website,
+        placeId: l.placeId,
+        source: l.source,
+      }));
+
+      cvlVerification = verifyLeads(
+        cvlLeads,
+        structuredConstraints,
+        userRequestedCountFinal,
+        searchBudgetCount,
+        totalUniqueLeads,
+      );
+
+      for (const lv of cvlVerification.leadVerifications) {
+        try {
+          await createArtefact({
+            runId: chatRunId,
+            type: 'lead_verification',
+            title: `Lead verification: ${lv.lead_name} — ${lv.verified_exact ? 'exact' : 'partial'}`,
+            summary: `${lv.constraint_checks.filter(c => c.status === 'yes').length} yes, ${lv.constraint_checks.filter(c => c.status === 'no').length} no, ${lv.constraint_checks.filter(c => c.status === 'unknown').length} unknown | all_hard_satisfied=${lv.all_hard_satisfied}`,
+            payload: lv as unknown as Record<string, unknown>,
+            userId: task.user_id,
+            conversationId,
+          });
+        } catch (lvErr: any) {
+          console.warn(`[CVL] Failed to emit lead_verification for "${lv.lead_name}" (non-fatal): ${lvErr.message}`);
+        }
+      }
+
+      if (cvlVerification.evidenceItems.length > 0) {
+        try {
+          await createArtefact({
+            runId: chatRunId,
+            type: 'verification_evidence',
+            title: `Verification evidence: ${cvlVerification.evidenceItems.length} items`,
+            summary: `${cvlVerification.evidenceItems.length} evidence items across ${finalLeads.length} leads`,
+            payload: { evidence: cvlVerification.evidenceItems } as unknown as Record<string, unknown>,
+            userId: task.user_id,
+            conversationId,
+          });
+        } catch (evErr: any) {
+          console.warn(`[CVL] Failed to emit verification_evidence (non-fatal): ${evErr.message}`);
+        }
+      }
+
+      const vs = cvlVerification.summary;
+      try {
+        await createArtefact({
+          runId: chatRunId,
+          type: 'verification_summary',
+          title: `Verification summary: ${vs.verified_exact_count} verified exact of ${vs.candidates_checked} checked`,
+          summary: `verified_exact=${vs.verified_exact_count} | checked=${vs.candidates_checked} | requested=${vs.requested_count_user ?? 'any'} | unverifiable_constraints=${vs.unverifiable_count}`,
+          payload: vs as unknown as Record<string, unknown>,
+          userId: task.user_id,
+          conversationId,
+        });
+        console.log(`[CVL] verification_summary: verified_exact=${vs.verified_exact_count} checked=${vs.candidates_checked} requested=${vs.requested_count_user}`);
+      } catch (vsErr: any) {
+        console.warn(`[CVL] Failed to emit verification_summary (non-fatal): ${vsErr.message}`);
+      }
+
+      console.log(`[CVL] Verification pass complete: ${vs.verified_exact_count} verified exact out of ${vs.candidates_checked} leads checked`);
+    } catch (cvlErr: any) {
+      console.warn(`[CVL] Verification pass failed (non-fatal, continuing with unverified counts): ${cvlErr.message}`);
+    }
+
     // Regression guard: if early-stop set finalVerdict='pass', override stale shouldStop from prior Tower fail
     const earlyStopOverride = finalVerdict === 'pass' && finalTowerResult.shouldStop;
     if (earlyStopOverride) {
@@ -2301,6 +2406,8 @@ class SupervisorService {
       await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: false, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal' } : {}) } });
     }
 
+    const cvlVerifiedExactCount = cvlVerification?.verified_exact_count ?? null;
+
     await this.postArtefactToUI({
       runId: chatRunId,
       clientRequestId,
@@ -2314,6 +2421,7 @@ class SupervisorService {
         requested: userRequestedCountFinal,
         accumulated_unique: totalUniqueLeads,
         accumulated_matching: totalMatchingLeads,
+        verified_exact_count: cvlVerifiedExactCount,
         artefact_id: finalLeadsListArtefact.id,
         used_stub: usedStub,
         stubbed: finalTowerResult.stubbed,
@@ -2378,6 +2486,8 @@ class SupervisorService {
       leads: dsLeads,
       finalVerdict: dsVerdict,
       stopReason: dsStopReason,
+      cvlVerifiedExactCount: cvlVerifiedExactCount,
+      cvlUnverifiableCount: cvlVerification?.summary?.unverifiable_count ?? null,
     });
 
     const planAdjustmentNote = planVersion > 1 ? ` after ${planVersion} search plan iterations` : '';

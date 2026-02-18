@@ -34,6 +34,8 @@ export interface DeliverySummaryPayload {
   shortfall: number;
   stop_reason: string | null;
   suggested_next_question: string | null;
+  cvl_verified_exact_count: number | null;
+  cvl_unverifiable_count: number | null;
 }
 
 export interface DeliverySummaryLeadInput {
@@ -58,6 +60,8 @@ export interface DeliverySummaryInput {
   leads: DeliverySummaryLeadInput[];
   finalVerdict: string;
   stopReason?: string | null;
+  cvlVerifiedExactCount?: number | null;
+  cvlUnverifiableCount?: number | null;
 }
 
 function isNonTextualConstraint(constraintName: string): boolean {
@@ -244,6 +248,8 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
     shortfall,
     stop_reason: stopReason,
     suggested_next_question: suggestedNextQuestion,
+    cvl_verified_exact_count: input.cvlVerifiedExactCount ?? null,
+    cvl_unverifiable_count: input.cvlUnverifiableCount ?? null,
   };
 }
 
@@ -252,7 +258,8 @@ export async function emitDeliverySummary(input: DeliverySummaryInput): Promise<
 
   const verdictLabel = payload.stop_reason ? 'STOP' : 'PASS';
   const title = `Delivery Summary: ${verdictLabel} — ${payload.delivered_total_count} of ${payload.requested_count} delivered`;
-  const summary = `exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} shortfall=${payload.shortfall}${payload.stop_reason ? ` stop_reason="${payload.stop_reason}"` : ''}`;
+  const cvlLabel = payload.cvl_verified_exact_count !== null ? ` cvl_verified=${payload.cvl_verified_exact_count}` : '';
+  const summary = `exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} shortfall=${payload.shortfall}${cvlLabel}${payload.stop_reason ? ` stop_reason="${payload.stop_reason}"` : ''}`;
 
   try {
     await createArtefact({
