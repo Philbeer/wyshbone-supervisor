@@ -25,7 +25,26 @@ const REALISTIC_HEADERS: Record<string, string> = {
   "Upgrade-Insecure-Requests": "1",
 };
 
-const BOT_BLOCK_STATUSES = new Set([401, 403, 429, 503]);
+const BOT_BLOCK_STATUSES = new Set([403, 429, 503]);
+
+const CHALLENGE_SIGNALS = [
+  "just a moment",
+  "checking your browser",
+  "verify you are human",
+  "please wait while we verify",
+  "access denied",
+  "attention required",
+  "enable javascript and cookies",
+  "cloudflare",
+  "ddos protection",
+  "ray id",
+  "cf-browser-verification",
+  "challenge-platform",
+  "managed-challenge",
+  "hcaptcha",
+  "recaptcha",
+  "turnstile",
+];
 
 const PAGE_HINT_PATHS: Record<string, string[]> = {
   home: ["/"],
@@ -67,6 +86,37 @@ interface WebVisitOutput {
   site_summary: string;
   site_language: string;
   crawl: CrawlStats;
+}
+
+interface FetchStageDetails {
+  status?: number;
+  reason: string;
+  exception?: string;
+  content_type?: string;
+}
+
+interface PlaywrightStageDetails {
+  attempted: boolean;
+  reason: string;
+  exception?: string;
+  challenge_detected?: boolean;
+  challenge_signals?: string[];
+}
+
+interface FetchResult {
+  ok: boolean;
+  html?: string;
+  status?: number;
+  error?: string;
+  redirectedUrl?: string;
+  blocked?: boolean;
+  retryable?: boolean;
+  method?: "fetch" | "playwright";
+  errorCode?: string;
+  stageDetails?: {
+    fetch_stage: FetchStageDetails;
+    playwright_stage?: PlaywrightStageDetails;
+  };
 }
 
 function normalizeUrl(raw: string): string {
@@ -177,19 +227,25 @@ function cleanHtml(html: string, pageUrl: string): { text: string; title: string
   return { text, title, links, lang };
 }
 
-interface FetchResult {
-  ok: boolean;
-  html?: string;
-  status?: number;
-  error?: string;
-  redirectedUrl?: string;
-  blocked?: boolean;
-  retryable?: boolean;
-  method?: "fetch" | "playwright";
-}
-
 function isNonHtmlContentType(ct: string): boolean {
   return !ct.includes("text/html") && !ct.includes("application/xhtml");
+}
+
+function detectChallengeSignals(html: string): string[] {
+  const lower = html.toLowerCase();
+  return CHALLENGE_SIGNALS.filter((sig) => lower.includes(sig));
+}
+
+function isChallengePage(html: string): { detected: boolean; signals: string[] } {
+  const signals = detectChallengeSignals(html);
+  if (signals.length >= 2) return { detected: true, signals };
+  if (html.length < 5_000 && signals.length >= 1) return { detected: true, signals };
+  return { detected: false, signals };
+}
+
+function exceptionMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
 }
 
 async function fetchPage(url: string): Promise<FetchResult> {
@@ -197,8 +253,7 @@ async function fetchPage(url: string): Promise<FetchResult> {
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   let needsPlaywrightFallback = false;
-  let wasBotBlocked = false;
-  let fetchErrorMsg = "";
+  let fetchStage: FetchStageDetails = { reason: "pending" };
   let fetchStatus: number | undefined;
 
   try {
@@ -211,59 +266,126 @@ async function fetchPage(url: string): Promise<FetchResult> {
     clearTimeout(timer);
 
     const contentType = res.headers.get("content-type") || "";
+    fetchStatus = res.status;
 
     if (BOT_BLOCK_STATUSES.has(res.status)) {
       needsPlaywrightFallback = true;
-      wasBotBlocked = true;
-      fetchErrorMsg = `HTTP ${res.status} (likely bot block)`;
-      fetchStatus = res.status;
+      fetchStage = {
+        status: res.status,
+        reason: `bot_block_status_${res.status}`,
+      };
     } else if (!res.ok) {
-      return { ok: false, status: res.status, error: `HTTP ${res.status}`, blocked: false, retryable: res.status >= 500 };
+      fetchStage = { status: res.status, reason: `http_error_${res.status}` };
+      return {
+        ok: false,
+        status: res.status,
+        error: `HTTP ${res.status}`,
+        blocked: false,
+        retryable: res.status >= 500,
+        stageDetails: { fetch_stage: fetchStage },
+      };
     } else if (isNonHtmlContentType(contentType)) {
       needsPlaywrightFallback = true;
-      wasBotBlocked = false;
-      fetchErrorMsg = `Non-HTML content type: ${contentType}`;
+      fetchStage = {
+        status: res.status,
+        reason: "non_html_content_type",
+        content_type: contentType,
+      };
     } else {
       const buf = await res.arrayBuffer();
       if (buf.byteLength > MAX_BODY_BYTES) {
-        return { ok: false, error: `Response too large (${buf.byteLength} bytes)`, blocked: false, retryable: false };
+        fetchStage = { status: res.status, reason: "response_too_large" };
+        return {
+          ok: false,
+          error: `Response too large (${buf.byteLength} bytes)`,
+          blocked: false,
+          retryable: false,
+          stageDetails: { fetch_stage: fetchStage },
+        };
       }
 
       const html = new TextDecoder("utf-8").decode(buf);
-      const redirectedUrl = res.url !== url ? res.url : undefined;
-      return { ok: true, html, status: res.status, redirectedUrl, method: "fetch" };
+
+      const challenge = isChallengePage(html);
+      if (challenge.detected) {
+        needsPlaywrightFallback = true;
+        fetchStage = {
+          status: res.status,
+          reason: "challenge_page_detected",
+        };
+      } else {
+        const redirectedUrl = res.url !== url ? res.url : undefined;
+        return { ok: true, html, status: res.status, redirectedUrl, method: "fetch" };
+      }
     }
   } catch (err: unknown) {
     clearTimeout(timer);
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = exceptionMessage(err);
+    const isTimeout = msg.includes("abort");
     needsPlaywrightFallback = true;
-    wasBotBlocked = false;
-    fetchErrorMsg = msg.includes("abort") ? `Timeout after ${FETCH_TIMEOUT_MS}ms` : msg;
-  }
-
-  if (needsPlaywrightFallback) {
-    console.log(`[WEB_VISIT] Fetch failed for ${url} (${fetchErrorMsg}), attempting Playwright fallback…`);
-    const pwResult = await fetchWithPlaywright(url);
-    if (pwResult.ok) {
-      return pwResult;
-    }
-    return {
-      ok: false,
-      status: fetchStatus,
-      error: `Fetch: ${fetchErrorMsg}; Playwright fallback: ${pwResult.error}`,
-      blocked: wasBotBlocked,
-      retryable: true,
+    fetchStage = {
+      reason: isTimeout ? "timeout" : "network_error",
+      exception: isTimeout ? `Timeout after ${FETCH_TIMEOUT_MS}ms` : msg,
     };
   }
 
-  return { ok: false, error: fetchErrorMsg, blocked: wasBotBlocked, retryable: true, status: fetchStatus };
+  if (!needsPlaywrightFallback) {
+    return {
+      ok: false,
+      error: fetchStage.reason,
+      blocked: false,
+      retryable: true,
+      status: fetchStatus,
+      stageDetails: { fetch_stage: fetchStage },
+    };
+  }
+
+  const isBotBlock = BOT_BLOCK_STATUSES.has(fetchStatus ?? 0) || fetchStage.reason === "challenge_page_detected";
+
+  console.log(`[WEB_VISIT] Fetch failed for ${url} (${fetchStage.reason}), attempting Playwright fallback…`);
+
+  let pw: any = null;
+  try {
+    pw = await import("playwright");
+  } catch (importErr: unknown) {
+    const importMsg = exceptionMessage(importErr);
+    const missingDep = importMsg.includes("Cannot find module")
+      ? "playwright package not installed"
+      : importMsg.includes("browserType.launch")
+        ? "Chromium browser binary not found — run `npx playwright install chromium`"
+        : importMsg;
+
+    const pwStage: PlaywrightStageDetails = {
+      attempted: false,
+      reason: "import_failed",
+      exception: missingDep,
+    };
+
+    return {
+      ok: false,
+      status: fetchStatus,
+      error: `Fetch: ${fetchStage.exception ?? fetchStage.reason}; Playwright unavailable: ${missingDep}`,
+      errorCode: "PLAYWRIGHT_UNAVAILABLE",
+      blocked: isBotBlock,
+      retryable: true,
+      stageDetails: { fetch_stage: fetchStage, playwright_stage: pwStage },
+    };
+  }
+
+  const pwResult = await runPlaywright(pw, url, fetchStage, fetchStatus, isBotBlock);
+  return pwResult;
 }
 
-async function fetchWithPlaywright(url: string): Promise<FetchResult> {
-  let browser: import("playwright").Browser | null = null;
+async function runPlaywright(
+  pw: any,
+  url: string,
+  fetchStage: FetchStageDetails,
+  fetchStatus: number | undefined,
+  fetchWasBotBlock: boolean,
+): Promise<FetchResult> {
+  let browser: any = null;
   try {
-    const { chromium } = await import("playwright");
-    browser = await chromium.launch({
+    browser = await pw.chromium.launch({
       headless: true,
       args: [
         "--no-sandbox",
@@ -291,15 +413,44 @@ async function fetchWithPlaywright(url: string): Promise<FetchResult> {
 
     await page.waitForTimeout(2000);
 
-    const html = await page.content();
-    const finalUrl = page.url();
+    const html: string = await page.content();
+    const finalUrl: string = page.url();
 
     await context.close();
     await browser.close();
     browser = null;
 
     if (!html || html.length < 100) {
-      return { ok: false, error: "Playwright returned empty or minimal content", blocked: false, retryable: true };
+      const pwStage: PlaywrightStageDetails = {
+        attempted: true,
+        reason: "empty_or_minimal_content",
+      };
+      return {
+        ok: false,
+        status: fetchStatus,
+        error: `Fetch: ${fetchStage.exception ?? fetchStage.reason}; Playwright: empty or minimal content`,
+        blocked: fetchWasBotBlock,
+        retryable: true,
+        stageDetails: { fetch_stage: fetchStage, playwright_stage: pwStage },
+      };
+    }
+
+    const challenge = isChallengePage(html);
+    if (challenge.detected) {
+      const pwStage: PlaywrightStageDetails = {
+        attempted: true,
+        reason: "challenge_page_persisted",
+        challenge_detected: true,
+        challenge_signals: challenge.signals,
+      };
+      return {
+        ok: false,
+        status: fetchStatus,
+        error: `Fetch: ${fetchStage.exception ?? fetchStage.reason}; Playwright: challenge page persisted (${challenge.signals.join(", ")})`,
+        blocked: true,
+        retryable: true,
+        stageDetails: { fetch_stage: fetchStage, playwright_stage: pwStage },
+      };
     }
 
     return {
@@ -311,10 +462,38 @@ async function fetchWithPlaywright(url: string): Promise<FetchResult> {
     };
   } catch (err: unknown) {
     if (browser) {
-      try { await browser.close(); } catch { /* ignore cleanup errors */ }
+      try { await browser.close(); } catch { /* ignore cleanup */ }
     }
-    const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: msg, blocked: false, retryable: true };
+    const msg = exceptionMessage(err);
+
+    const isBrowserMissing = msg.includes("Executable doesn't exist") || msg.includes("browserType.launch");
+
+    const pwStage: PlaywrightStageDetails = {
+      attempted: true,
+      reason: isBrowserMissing ? "chromium_not_installed" : "runtime_error",
+      exception: msg,
+    };
+
+    if (isBrowserMissing) {
+      return {
+        ok: false,
+        status: fetchStatus,
+        error: `Fetch: ${fetchStage.exception ?? fetchStage.reason}; Playwright: Chromium not installed — run \`npx playwright install chromium\``,
+        errorCode: "PLAYWRIGHT_UNAVAILABLE",
+        blocked: fetchWasBotBlock,
+        retryable: true,
+        stageDetails: { fetch_stage: fetchStage, playwright_stage: pwStage },
+      };
+    }
+
+    return {
+      ok: false,
+      status: fetchStatus,
+      error: `Fetch: ${fetchStage.exception ?? fetchStage.reason}; Playwright: ${msg}`,
+      blocked: fetchWasBotBlock,
+      retryable: true,
+      stageDetails: { fetch_stage: fetchStage, playwright_stage: pwStage },
+    };
   }
 }
 
@@ -372,12 +551,22 @@ export async function executeWebVisit(
       httpFailures++;
       if (result.blocked) wasBlocked = true;
       if (result.retryable) isRetryable = true;
+
+      const errorCode = result.errorCode ?? (result.blocked ? "BLOCKED" : "FETCH_FAILED");
+      const errorDetails: Record<string, unknown> = { url: targetUrl, status: result.status };
+      if (result.stageDetails) {
+        errorDetails.fetch_stage = result.stageDetails.fetch_stage;
+        if (result.stageDetails.playwright_stage) {
+          errorDetails.playwright_stage = result.stageDetails.playwright_stage;
+        }
+      }
+
       errors.push(
         buildToolError(
-          result.blocked ? "BLOCKED" : "FETCH_FAILED",
+          errorCode,
           `${targetUrl}: ${result.error}`,
           result.retryable ?? false,
-          { url: targetUrl, status: result.status },
+          errorDetails,
         ),
       );
       return;

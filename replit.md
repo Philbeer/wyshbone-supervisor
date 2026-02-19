@@ -125,3 +125,4 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Anthropic API**: Used for deep research.
 - **Brave Search API**: Used by the `WEB_SEARCH` tool for web searches.
 - **cheerio**: Used for HTML parsing by the `WEB_VISIT` tool.
+- **Playwright**: Headless Chromium fallback for bot-blocked sites. Requires system dependencies: glib, nss, nspr, at-spi2-atk, cups, libdrm, dbus, expat, xorg.libxcb, xorg.libX11, xorg.libXcomposite, xorg.libXdamage, xorg.libXext, xorg.libXfixes, xorg.libXrandr, libxkbcommon, pango, cairo, alsa-lib, mesa, libgbm.

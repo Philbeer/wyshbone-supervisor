@@ -4,6 +4,7 @@ hidden = [".config", ".git", "generated-icon.png", "node_modules", "dist"]
 
 [nix]
 channel = "stable-25_05"
+packages = ["glib", "nss", "nspr", "at-spi2-atk", "cups", "libdrm", "dbus", "expat", "xorg.libxcb", "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes", "xorg.libXrandr", "libxkbcommon", "pango", "cairo", "alsa-lib", "mesa", "libgbm"]
 
 [deployment]
 deploymentTarget = "vm"
