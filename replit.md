@@ -63,6 +63,36 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Bypass Detector**: Detects runs that bypass the Supervisor.
 - **Manual Request Judgement**: Allows manual triggering of Tower judgment for a given run.
 
+## Supervisor Tools
+
+### ToolResult Contract
+- Shared types in `shared/tool-result.ts` and helpers in `shared/tool-result-helpers.ts`.
+- All tools return `ToolResultEnvelope` with evidence-backed claims; structured errors only (never throw raw exceptions).
+
+### WEB_VISIT Tool (Feb 2026)
+- **Tool**: `WEB_VISIT` v1.0 — deterministic website crawler in `server/supervisor/web-visit.ts`.
+- **Registry**: Registered in `server/supervisor/tool-registry.ts` as category `utility`.
+- **Execution**: Wired into `server/supervisor/action-executor.ts` with `web_visit_pages` artefact persistence.
+
+### CONTACT_EXTRACT Tool (Feb 2026)
+- **Tool**: `CONTACT_EXTRACT` v1.0 — deterministic contact detail extractor in `server/supervisor/contact-extract.ts`.
+- **Registry**: Category `enrich`. Artefact type: `contact_extract`.
+
+### WEB_SEARCH Tool (Feb 2026)
+- **Tool**: `WEB_SEARCH` v1.0 — strict, auditable web search fallback in `server/supervisor/web-search.ts`.
+- **Registry**: Category `utility`. Artefact type: `web_search_results`.
+- Uses Brave Search API (`BRAVE_SEARCH_API_KEY`). Disambiguation: `best_guess_official_url` only set with 2+ match signals.
+
+### LEAD_ENRICH Tool (Feb 2026)
+- **Tool**: `LEAD_ENRICH` v1.0 — deterministic lead pack builder in `server/supervisor/lead-enrich.ts`.
+- **Registry**: Category `enrich`. Artefact type: `lead_pack`.
+- Assembles identity, contacts, and signals from Places + WEB_VISIT + CONTACT_EXTRACT. No LLM inference.
+
+### ASK_LEAD_QUESTION Tool (Feb 2026)
+- **Tool**: `ASK_LEAD_QUESTION` v1.0 — evidence-backed question answerer in `server/supervisor/ask-lead-question.ts`.
+- **Registry**: Category `enrich`. Artefact type: `ask_lead_question_result`.
+- Orchestrates WEB_VISIT (direct) and WEB_SEARCH + WEB_VISIT (fallback) to answer user-specified lead questions. Extracts facts via keyword matching. Verdict: answered / unknown / needs_manual_check.
+
 ## External Dependencies
 
 - **Supabase**: Used for user profiles, conversations, facts, monitors, deep research runs, integrations, user signals, goal ledger, belief store, and feedback events.

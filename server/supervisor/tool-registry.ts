@@ -178,6 +178,20 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
       ask_lead_question_result: { type: 'object', description: 'Optional Q&A result for additional context' },
     },
   },
+  {
+    id: 'ASK_LEAD_QUESTION',
+    label: 'Lead Question Answerer',
+    description: 'Answer a user-specified lead question using evidence-backed sources. Orchestrates WEB_VISIT and WEB_SEARCH to gather facts.',
+    enabled: true,
+    category: 'enrich',
+    paramsSchema: {
+      lead: { type: 'object', description: 'Lead object with business_name, town?, address?, website?, phone?', required: true },
+      intent_question: { type: 'string', description: 'The question to answer about the lead', required: true },
+      evidence_query: { type: 'string', description: 'Search query to find evidence', required: true },
+      search_budget: { type: 'number', description: 'Max web searches allowed (0-5)', default: 3 },
+      visit_budget: { type: 'number', description: 'Max website visits allowed (0-5)', default: 3 },
+    },
+  },
 ];
 
 const registry = new Map<string, ToolDefinition>();

@@ -1,7 +1,7 @@
 /**
  * Action Executor - Single execution spine for Supervisor
  * 
- * Supports SEARCH_PLACES, ENRICH_LEADS, SCORE_LEADS, EVALUATE_RESULTS, WEB_VISIT, CONTACT_EXTRACT, WEB_SEARCH, LEAD_ENRICH.
+ * Supports SEARCH_PLACES, ENRICH_LEADS, SCORE_LEADS, EVALUATE_RESULTS, WEB_VISIT, CONTACT_EXTRACT, WEB_SEARCH, LEAD_ENRICH, ASK_LEAD_QUESTION.
  * Uses native Google Places API directly (no UI tool endpoint dependency).
  */
 
@@ -15,6 +15,8 @@ import { executeWebSearch } from './web-search';
 import type { WebSearchInput } from './web-search';
 import { executeLeadEnrich } from './lead-enrich';
 import type { LeadEnrichInput } from './lead-enrich';
+import { executeAskLeadQuestion } from './ask-lead-question';
+import type { AskLeadQuestionInput } from './ask-lead-question';
 import { createArtefact } from './artefacts';
 import { isToolEnabled, checkRoutingRules, checkIntentGate } from './tool-registry';
 import { logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './afr-logger';
@@ -191,6 +193,10 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
 
       case 'LEAD_ENRICH':
         result = await executeLeadEnrichAction(toolArgs, userId, runId, conversationId);
+        break;
+
+      case 'ASK_LEAD_QUESTION':
+        result = await executeAskLeadQuestionAction(toolArgs, userId, runId, conversationId);
         break;
 
       default:
@@ -640,6 +646,68 @@ async function executeLeadEnrichAction(
   return {
     success: true,
     summary: `Lead pack built for "${entityName}" — confidence: ${Math.round(confidence * 100)}%`,
+    data: { envelope },
+  };
+}
+
+async function executeAskLeadQuestionAction(
+  args: Record<string, unknown>,
+  userId: string,
+  runId?: string,
+  conversationId?: string,
+): Promise<ActionResult> {
+  const leadRaw = args.lead && typeof args.lead === 'object' ? args.lead as Record<string, unknown> : null;
+  if (!leadRaw || typeof leadRaw.business_name !== 'string') {
+    return { success: false, summary: 'ASK_LEAD_QUESTION requires a lead object with business_name', error: 'Missing lead.business_name' };
+  }
+
+  const intentQuestion = typeof args.intent_question === 'string' ? args.intent_question.trim() : '';
+  const evidenceQuery = typeof args.evidence_query === 'string' ? args.evidence_query.trim() : '';
+  if (!intentQuestion || !evidenceQuery) {
+    return { success: false, summary: 'ASK_LEAD_QUESTION requires intent_question and evidence_query', error: 'Missing question fields' };
+  }
+
+  const input: AskLeadQuestionInput = {
+    lead: {
+      business_name: leadRaw.business_name as string,
+      town: typeof leadRaw.town === 'string' ? leadRaw.town : undefined,
+      address: typeof leadRaw.address === 'string' ? leadRaw.address : undefined,
+      website: typeof leadRaw.website === 'string' ? leadRaw.website : undefined,
+      phone: typeof leadRaw.phone === 'string' ? leadRaw.phone : undefined,
+    },
+    intent_question: intentQuestion,
+    evidence_query: evidenceQuery,
+    search_budget: Number(args.search_budget) || 3,
+    visit_budget: Number(args.visit_budget) || 3,
+  };
+
+  const envelope = await executeAskLeadQuestion(input, runId || `ask-${Date.now()}`, undefined);
+
+  const answer = (envelope.outputs as any)?.answer;
+  const verdict = answer?.verdict ?? 'unknown';
+  const factsCount = answer?.key_facts?.length ?? 0;
+  const budgetUsed = (envelope.outputs as any)?.budget_used;
+
+  if (runId) {
+    try {
+      await createArtefact({
+        runId,
+        type: 'ask_lead_question_result',
+        title: `ASK_LEAD_QUESTION: "${intentQuestion}" for ${input.lead.business_name}`,
+        summary: `Verdict: ${verdict}, ${factsCount} fact(s) found (${budgetUsed?.searches_used ?? 0} searches, ${budgetUsed?.visits_used ?? 0} visits)`,
+        payload: envelope as unknown as Record<string, unknown>,
+        userId,
+        conversationId,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[ACTION_EXECUTOR] Failed to write ask_lead_question_result artefact: ${msg}`);
+    }
+  }
+
+  return {
+    success: verdict !== 'unknown',
+    summary: `Q: "${intentQuestion}" for ${input.lead.business_name} — ${verdict} (${factsCount} fact(s))`,
     data: { envelope },
   };
 }
