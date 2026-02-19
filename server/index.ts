@@ -183,7 +183,12 @@ app.use((req, res, next) => {
   }, () => {
     log(`serving on http://${host}:${port}`);
 
-    // Startup verification: confirm tools-schema alias state + git commit
+    if (process.env.ALLOW_PROOF_TOOLS === 'true' && process.env.NODE_ENV !== 'production') {
+      console.log('[STARTUP] ⚠ PROOF TOOLS ENABLED — dev-only flag ALLOW_PROOF_TOOLS is set');
+    } else if (process.env.ALLOW_PROOF_TOOLS === 'true' && process.env.NODE_ENV === 'production') {
+      console.warn('[STARTUP] ALLOW_PROOF_TOOLS is set but NODE_ENV=production — proof tools remain DISABLED');
+    }
+
     import('child_process').then(({ execSync }) => {
       try {
         const gitHash = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim();

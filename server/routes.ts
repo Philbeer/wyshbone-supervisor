@@ -676,64 +676,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     });
 
-    // Debug endpoint - simulate Tower v1 verdict for a given runId
-    // Allows testing Agent Loop reactions without making real Tower calls
-    app.post("/api/debug/simulate-tower-verdict", async (req, res) => {
-      const { setSimulatedVerdict, getRunState, getAllRunStates } = await import('./supervisor/agent-loop');
-
-      const { runId, verdict, delivered, requested, gaps, confidence, rationale } = req.body;
-
-      if (!runId) {
-        return res.status(400).json({
-          ok: false,
-          error: 'runId is required',
-          activeRuns: getAllRunStates().map(s => ({
-            runId: s.runId,
-            status: s.status,
-            planVersion: s.planVersion,
-            retryCount: s.retryCount,
-          })),
-        });
-      }
-
-      const validVerdicts = ['ACCEPT', 'RETRY', 'CHANGE_PLAN', 'STOP'];
-      const v = (verdict || 'RETRY').toUpperCase();
-      if (!validVerdicts.includes(v)) {
-        return res.status(400).json({
-          ok: false,
-          error: `Invalid verdict. Must be one of: ${validVerdicts.join(', ')}`,
-        });
-      }
-
-      const simulatedVerdict = {
-        verdict: v as 'ACCEPT' | 'RETRY' | 'CHANGE_PLAN' | 'STOP',
-        delivered: delivered ?? 2,
-        requested: requested ?? 10,
-        gaps: gaps || ['insufficient_results'],
-        confidence: confidence ?? 40,
-        rationale: rationale || `Simulated ${v} verdict for testing`,
-      };
-
-      setSimulatedVerdict(runId, simulatedVerdict);
-
-      const state = getRunState(runId);
-
-      console.log(`[DEBUG] simulate-tower-verdict: set verdict=${v} for runId=${runId}`);
-
-      return res.json({
-        ok: true,
-        runId,
-        simulatedVerdict,
-        currentRunState: state ? {
-          status: state.status,
-          planVersion: state.planVersion,
-          retryCount: state.retryCount,
-          lastToolArgs: state.lastToolArgs,
-        } : null,
-        message: `Verdict ${v} queued for runId=${runId}. It will be consumed on the next Tower judgement call for this run.`,
-      });
-    });
-
     // Debug endpoint - list all active agent loop run states
     app.get("/api/debug/agent-loop-states", async (_req, res) => {
       const { getAllRunStates } = await import('./supervisor/agent-loop');

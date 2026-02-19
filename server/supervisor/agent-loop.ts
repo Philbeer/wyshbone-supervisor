@@ -141,23 +141,6 @@ export function initRunState(
   return state;
 }
 
-export function setSimulatedVerdict(runId: string, verdict: TowerVerdictV1): void {
-  const state = runStates.get(runId);
-  if (state) {
-    state.lastVerdict = verdict;
-  }
-  simulatedVerdicts.set(runId, verdict);
-}
-
-const simulatedVerdicts = new Map<string, TowerVerdictV1>();
-
-export function getSimulatedVerdict(runId: string): TowerVerdictV1 | undefined {
-  return simulatedVerdicts.get(runId);
-}
-
-export function clearSimulatedVerdict(runId: string): void {
-  simulatedVerdicts.delete(runId);
-}
 
 function getTowerBaseUrl(): string | null {
   const raw = process.env.TOWER_BASE_URL || process.env.TOWER_URL;
@@ -171,15 +154,6 @@ export async function callTowerJudgeV1(
   artefactPayload: Record<string, unknown>,
   runId: string,
 ): Promise<TowerVerdictV1> {
-  const simulated = simulatedVerdicts.get(runId);
-  if (simulated) {
-    console.log(`[AGENT_LOOP] Using simulated verdict for runId=${runId}: ${simulated.verdict}`);
-    console.log(`[TOWER_TELEMETRY] tower_call_started runId=${runId} mode=simulated`);
-    console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=${simulated.verdict} mode=simulated`);
-    simulatedVerdicts.delete(runId);
-    return simulated;
-  }
-
   if (process.env.TOWER_ARTEFACT_JUDGE_STUB === 'true') {
     const leadsCount = (artefactPayload.leads_count as number) ??
       (artefactPayload.delivered_count as number) ??

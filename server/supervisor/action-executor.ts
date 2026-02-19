@@ -73,9 +73,7 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
 
   const queryStr = String(toolArgs.query || toolArgs.prompt || '');
 
-  const isProofTool = toolName === 'SEARCH_PLACES_PROOF';
-
-  if (!isProofTool && !isToolEnabled(toolName)) {
+  if (!isToolEnabled(toolName)) {
     const reason = 'tool is disabled in registry';
     console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="${reason}"`);
     recordRejection(tracker, toolName, reason);
@@ -104,11 +102,7 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
     };
   }
 
-  if (isProofTool) {
-    recordUsed(tracker, toolName);
-  }
-
-  const intentGate = !isProofTool ? checkIntentGate(toolName, queryStr) : { allowed: true };
+  const intentGate = checkIntentGate(toolName, queryStr);
   if (!intentGate.allowed) {
     const reason = intentGate.reason || 'intent gate failed';
     console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="${reason}"`);
@@ -130,7 +124,7 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
     }).then(result => ({ ...result, replannedTool: 'SEARCH_PLACES' }));
   }
 
-  const routing = !isProofTool ? checkRoutingRules(toolName, queryStr) : { allowed: true };
+  const routing = checkRoutingRules(toolName, queryStr);
   if (!routing.allowed) {
     const reason = routing.reason || 'routing rule failed';
     console.warn(`[ACTION_EXECUTOR] REJECTED tool=${toolName} reason="${reason}"`);
@@ -174,10 +168,6 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
         result = await executeEvaluateResults(toolArgs, userId);
         break;
 
-      case 'SEARCH_PLACES_PROOF':
-        result = await executeSearchPlacesProof(toolArgs, userId);
-        break;
-      
       default:
         console.warn(`[ACTION_EXECUTOR] Unsupported tool: ${toolName}`);
         return {
@@ -363,47 +353,6 @@ async function executeEvaluateResults(
       totalSearched,
       totalEnriched,
       totalScored,
-    },
-  };
-}
-
-async function executeSearchPlacesProof(
-  args: Record<string, unknown>,
-  _userId: string
-): Promise<ActionResult> {
-  const query = (args.query as string) || 'pubs';
-  const location = (args.location as string) || 'London';
-  const country = (args.country as string) || 'UK';
-  const targetCount = args.target_count != null ? Number(args.target_count) : null;
-
-  console.log(`[ACTION_EXECUTOR] SEARCH_PLACES_PROOF: ${query} in ${location}, ${country} (target=${targetCount ?? 'unspecified'}) — deterministic stub, no Google calls`);
-
-  const venueNames = [
-    'The Red Lion', 'The Lamb and Flag', 'Ye Olde Cheshire Cheese',
-    'The Churchill Arms', 'The Prospect of Whitby', 'The Eagle',
-    'The Anchor', 'The George Inn', 'The Spaniards Inn', 'The Flask',
-    'The Holly Bush', 'The Dove', 'The Grapes', 'The Mayflower', 'The Ten Bells',
-  ];
-
-  const count = Math.min(Math.max(targetCount ?? 12, 10), 15);
-  const places = venueNames.slice(0, count).map((name, i) => ({
-    name,
-    formatted_address: `${10 + i} High Street, ${location}, ${country}`,
-    place_id: `proof_place_${i + 1}`,
-    phone: `+44 20 7946 0${String(100 + i)}`,
-    website: `https://www.${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.co.uk`,
-    types: ['pub', 'bar', 'establishment'],
-    source: 'SEARCH_PLACES_PROOF',
-  }));
-
-  return {
-    success: true,
-    summary: `[PROOF] Found ${places.length} places for "${query}" in ${location}, ${country}${targetCount != null ? ` (target: ${targetCount})` : ''} (deterministic stub — no Google API)`,
-    data: {
-      places,
-      count: places.length,
-      delivered_count: places.length,
-      target_count: targetCount,
     },
   };
 }
