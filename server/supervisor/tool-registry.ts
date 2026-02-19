@@ -141,6 +141,17 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
       same_domain_only: { type: 'boolean', description: 'Only crawl pages on the same domain', default: true },
     },
   },
+  {
+    id: 'CONTACT_EXTRACT',
+    label: 'Contact Extractor',
+    description: 'Extract literal contact details (emails, phones, social links) and explicitly stated people from cleaned website pages.',
+    enabled: true,
+    category: 'enrich',
+    paramsSchema: {
+      pages: { type: 'array', description: 'Array of {url, text_clean} page objects from WEB_VISIT output', required: true },
+      entity_name: { type: 'string', description: 'Business name for context (optional)' },
+    },
+  },
 ];
 
 const registry = new Map<string, ToolDefinition>();

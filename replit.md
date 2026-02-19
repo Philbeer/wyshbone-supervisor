@@ -89,6 +89,12 @@ The frontend uses React, TypeScript, Vite, and Wouter, styled with Tailwind CSS 
 - **Execution**: Wired into `server/supervisor/action-executor.ts` with `web_visit_pages` artefact persistence (full `ToolResultEnvelope` as payload).
 - **Behaviour**: Tries hinted pages first (home/contact/about/events/menu), then discovered links. Hard cap on `max_pages` (1-10). Aggressive HTML cleaning (strips nav, footer, cookie banners). Cross-domain redirects marked with `[CROSS-DOMAIN]`. Structured errors for blocked/failed fetches. Uses `cheerio` for HTML parsing.
 
+### CONTACT_EXTRACT Tool (Feb 2026)
+- **Tool**: `CONTACT_EXTRACT` v1.0 — deterministic contact detail extractor in `server/supervisor/contact-extract.ts`.
+- **Registry**: Registered in `server/supervisor/tool-registry.ts` as category `enrich`.
+- **Execution**: Wired into `server/supervisor/action-executor.ts` with `contact_extract` artefact persistence (full `ToolResultEnvelope` as payload).
+- **Behaviour**: Extracts emails (regex + mailto), phones (regex + tel), social links (Facebook, Instagram, X, LinkedIn), contact/form page URLs, and people (name + role co-occurrence). Evidence attached for every extracted item. No guessing or role inference — people only extracted when name and role appear together in text.
+
 ## Recent Changes
 - **Feb 2026 — CVL Override Halt Fix**: Fixed `isHalted` condition in `server/supervisor.ts` to detect CVL override from pass→stop. Previously, runs with hard-unverifiable `HAS_ATTRIBUTE` constraints (e.g., "beer garden") were not treated as halted because `finalTowerResult.shouldStop` remained false after CVL downgraded the verdict. Added `finalVerdict === 'stop'` to the halt condition.
 - **Feb 2026 — Agent Run Error Handling**: Added try/catch around `executeTowerLoopChat` in `processChatTask` to mark `agent_runs` as `status='failed'` when unhandled exceptions occur. Previously, exceptions left agent_runs stuck at `status='executing'` indefinitely.

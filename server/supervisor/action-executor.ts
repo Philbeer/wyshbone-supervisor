@@ -1,7 +1,7 @@
 /**
  * Action Executor - Single execution spine for Supervisor
  * 
- * Supports SEARCH_PLACES, ENRICH_LEADS, SCORE_LEADS, EVALUATE_RESULTS, WEB_VISIT.
+ * Supports SEARCH_PLACES, ENRICH_LEADS, SCORE_LEADS, EVALUATE_RESULTS, WEB_VISIT, CONTACT_EXTRACT.
  * Uses native Google Places API directly (no UI tool endpoint dependency).
  */
 
@@ -9,6 +9,8 @@ import type { PlanStep } from './types/plan';
 import { searchPlaces } from './google-places';
 import { executeWebVisit } from './web-visit';
 import type { WebVisitInput } from './web-visit';
+import { executeContactExtract } from './contact-extract';
+import type { ContactExtractInput } from './contact-extract';
 import { createArtefact } from './artefacts';
 import { isToolEnabled, checkRoutingRules, checkIntentGate } from './tool-registry';
 import { logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './afr-logger';
@@ -173,6 +175,10 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
 
       case 'WEB_VISIT':
         result = await executeWebVisitAction(toolArgs, userId, runId, conversationId);
+        break;
+
+      case 'CONTACT_EXTRACT':
+        result = await executeContactExtractAction(toolArgs, userId, runId, conversationId);
         break;
 
       default:
@@ -448,6 +454,59 @@ async function executeWebVisitAction(
     success: true,
     summary: `Crawled ${pageCount} page(s) from ${input.url}` +
       (crawl?.http_failures_count ? ` (${crawl.http_failures_count} failures)` : ''),
+    data: { envelope },
+  };
+}
+
+async function executeContactExtractAction(
+  args: Record<string, unknown>,
+  userId: string,
+  runId?: string,
+  conversationId?: string,
+): Promise<ActionResult> {
+  const rawPages = Array.isArray(args.pages) ? args.pages : [];
+  const pages = rawPages
+    .filter((p: any) => p && typeof p.url === 'string' && typeof p.text_clean === 'string')
+    .map((p: any) => ({ url: p.url as string, text_clean: p.text_clean as string }));
+
+  if (pages.length === 0) {
+    return { success: false, summary: 'CONTACT_EXTRACT requires pages with url and text_clean', error: 'No valid pages provided' };
+  }
+
+  const input: ContactExtractInput = {
+    pages,
+    entity_name: typeof args.entity_name === 'string' ? args.entity_name : null,
+  };
+
+  const envelope = executeContactExtract(input, runId || `contact-${Date.now()}`, undefined);
+
+  const contacts = (envelope.outputs as any)?.contacts;
+  const people = (envelope.outputs as any)?.people;
+  const emailCount = contacts?.emails?.length ?? 0;
+  const phoneCount = contacts?.phones?.length ?? 0;
+  const peopleCount = people?.length ?? 0;
+
+  if (runId) {
+    try {
+      await createArtefact({
+        runId,
+        type: 'contact_extract',
+        title: `CONTACT_EXTRACT: ${emailCount} emails, ${phoneCount} phones, ${peopleCount} people`,
+        summary: `Extracted ${emailCount} email(s), ${phoneCount} phone(s), ${peopleCount} person(s) from ${pages.length} page(s)`,
+        payload: envelope as unknown as Record<string, unknown>,
+        userId,
+        conversationId,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[ACTION_EXECUTOR] Failed to write contact_extract artefact: ${msg}`);
+    }
+  }
+
+  const totalFound = emailCount + phoneCount + peopleCount;
+  return {
+    success: true,
+    summary: `Extracted ${emailCount} email(s), ${phoneCount} phone(s), ${peopleCount} person(s)`,
     data: { envelope },
   };
 }
