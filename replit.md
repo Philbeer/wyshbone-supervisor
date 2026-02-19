@@ -78,6 +78,11 @@ The frontend uses React, TypeScript, Vite, and Wouter, styled with Tailwind CSS 
 - **Perplexity API**: Used for deep research.
 - **Anthropic API**: Used for deep research.
 
+### ToolResult Contract (Feb 2026)
+- **Shared types** in `shared/tool-result.ts`: `ToolResultEnvelope`, `EvidenceItem`, `ToolError`, `EvidencedValue`, `UnknownValue` with Zod schemas for runtime validation.
+- **Shared helpers** in `shared/tool-result-helpers.ts`: `buildToolResult()`, `addEvidence()`, `evidencedValue()`, `unknownValue()`, `buildToolError()`. Re-exported from `server/utils/tool-result-helpers.ts` for convenience.
+- Foundation work only — no existing tool behaviour was modified.
+
 ## Recent Changes
 - **Feb 2026 — CVL Override Halt Fix**: Fixed `isHalted` condition in `server/supervisor.ts` to detect CVL override from pass→stop. Previously, runs with hard-unverifiable `HAS_ATTRIBUTE` constraints (e.g., "beer garden") were not treated as halted because `finalTowerResult.shouldStop` remained false after CVL downgraded the verdict. Added `finalVerdict === 'stop'` to the halt condition.
 - **Feb 2026 — Agent Run Error Handling**: Added try/catch around `executeTowerLoopChat` in `processChatTask` to mark `agent_runs` as `status='failed'` when unhandled exceptions occur. Previously, exceptions left agent_runs stuck at `status='executing'` indefinitely.
