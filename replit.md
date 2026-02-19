@@ -73,6 +73,9 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Tool**: `WEB_VISIT` v1.0 — deterministic website crawler in `server/supervisor/web-visit.ts`.
 - **Registry**: Registered in `server/supervisor/tool-registry.ts` as category `utility`.
 - **Execution**: Wired into `server/supervisor/action-executor.ts` with `web_visit_pages` artefact persistence.
+- **Realistic Headers**: Uses Chrome-like User-Agent, Sec-Fetch-*, Accept-Language headers to avoid bot detection.
+- **Playwright Fallback**: On bot-block status (401/403/429/503), non-HTML response, or network error, falls back to headless Chromium via Playwright. Evidence tagged `[via Playwright]` when fallback is used. Requires `playwright` package and Chromium browser installed.
+- **Timeout**: 15s for fetch, 20s for Playwright fallback.
 
 ### CONTACT_EXTRACT Tool (Feb 2026)
 - **Tool**: `CONTACT_EXTRACT` v1.0 — deterministic contact detail extractor in `server/supervisor/contact-extract.ts`.

@@ -5,8 +5,27 @@ import type { ToolResultEnvelope, EvidenceItem } from "@shared/tool-result";
 const TOOL_NAME = "WEB_VISIT";
 const TOOL_VERSION = "1.0";
 
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 15_000;
+const PLAYWRIGHT_TIMEOUT_MS = 20_000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+
+const REALISTIC_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  "Cache-Control": "no-cache",
+  Pragma: "no-cache",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+};
+
+const BOT_BLOCK_STATUSES = new Set([401, 403, 429, 503]);
 
 const PAGE_HINT_PATHS: Record<string, string[]> = {
   home: ["/"],
@@ -158,60 +177,144 @@ function cleanHtml(html: string, pageUrl: string): { text: string; title: string
   return { text, title, links, lang };
 }
 
-async function fetchPage(url: string): Promise<{ ok: boolean; html?: string; status?: number; error?: string; redirectedUrl?: string; blocked?: boolean; retryable?: boolean }> {
+interface FetchResult {
+  ok: boolean;
+  html?: string;
+  status?: number;
+  error?: string;
+  redirectedUrl?: string;
+  blocked?: boolean;
+  retryable?: boolean;
+  method?: "fetch" | "playwright";
+}
+
+function isNonHtmlContentType(ct: string): boolean {
+  return !ct.includes("text/html") && !ct.includes("application/xhtml");
+}
+
+async function fetchPage(url: string): Promise<FetchResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  let needsPlaywrightFallback = false;
+  let wasBotBlocked = false;
+  let fetchErrorMsg = "";
+  let fetchStatus: number | undefined;
 
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; WyshboneCrawler/1.0; +https://wyshbone.com/bot)",
-        Accept: "text/html,application/xhtml+xml",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
+      headers: REALISTIC_HEADERS,
       redirect: "follow",
     });
 
     clearTimeout(timer);
 
-    if (res.status === 403 || res.status === 401) {
-      return { ok: false, status: res.status, error: `HTTP ${res.status}`, blocked: true, retryable: false };
-    }
-    if (res.status === 429) {
-      return { ok: false, status: res.status, error: "Rate limited (429)", blocked: true, retryable: true };
-    }
-    if (res.status >= 500) {
-      return { ok: false, status: res.status, error: `Server error (${res.status})`, blocked: false, retryable: true };
-    }
-    if (!res.ok) {
-      return { ok: false, status: res.status, error: `HTTP ${res.status}`, blocked: false, retryable: false };
-    }
-
     const contentType = res.headers.get("content-type") || "";
-    if (!contentType.includes("text/html") && !contentType.includes("application/xhtml")) {
-      return { ok: false, error: `Non-HTML content type: ${contentType}`, blocked: false, retryable: false };
+
+    if (BOT_BLOCK_STATUSES.has(res.status)) {
+      needsPlaywrightFallback = true;
+      wasBotBlocked = true;
+      fetchErrorMsg = `HTTP ${res.status} (likely bot block)`;
+      fetchStatus = res.status;
+    } else if (!res.ok) {
+      return { ok: false, status: res.status, error: `HTTP ${res.status}`, blocked: false, retryable: res.status >= 500 };
+    } else if (isNonHtmlContentType(contentType)) {
+      needsPlaywrightFallback = true;
+      wasBotBlocked = false;
+      fetchErrorMsg = `Non-HTML content type: ${contentType}`;
+    } else {
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength > MAX_BODY_BYTES) {
+        return { ok: false, error: `Response too large (${buf.byteLength} bytes)`, blocked: false, retryable: false };
+      }
+
+      const html = new TextDecoder("utf-8").decode(buf);
+      const redirectedUrl = res.url !== url ? res.url : undefined;
+      return { ok: true, html, status: res.status, redirectedUrl, method: "fetch" };
     }
-
-    const buf = await res.arrayBuffer();
-    if (buf.byteLength > MAX_BODY_BYTES) {
-      return { ok: false, error: `Response too large (${buf.byteLength} bytes)`, blocked: false, retryable: false };
-    }
-
-    const html = new TextDecoder("utf-8").decode(buf);
-    const redirectedUrl = res.url !== url ? res.url : undefined;
-
-    return { ok: true, html, status: res.status, redirectedUrl };
   } catch (err: unknown) {
     clearTimeout(timer);
     const msg = err instanceof Error ? err.message : String(err);
-    const isAbort = msg.includes("abort");
+    needsPlaywrightFallback = true;
+    wasBotBlocked = false;
+    fetchErrorMsg = msg.includes("abort") ? `Timeout after ${FETCH_TIMEOUT_MS}ms` : msg;
+  }
+
+  if (needsPlaywrightFallback) {
+    console.log(`[WEB_VISIT] Fetch failed for ${url} (${fetchErrorMsg}), attempting Playwright fallback…`);
+    const pwResult = await fetchWithPlaywright(url);
+    if (pwResult.ok) {
+      return pwResult;
+    }
     return {
       ok: false,
-      error: isAbort ? `Timeout after ${FETCH_TIMEOUT_MS}ms` : msg,
-      blocked: false,
-      retryable: isAbort,
+      status: fetchStatus,
+      error: `Fetch: ${fetchErrorMsg}; Playwright fallback: ${pwResult.error}`,
+      blocked: wasBotBlocked,
+      retryable: true,
     };
+  }
+
+  return { ok: false, error: fetchErrorMsg, blocked: wasBotBlocked, retryable: true, status: fetchStatus };
+}
+
+async function fetchWithPlaywright(url: string): Promise<FetchResult> {
+  let browser: import("playwright").Browser | null = null;
+  try {
+    const { chromium } = await import("playwright");
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--single-process",
+      ],
+    });
+
+    const context = await browser.newContext({
+      userAgent: REALISTIC_HEADERS["User-Agent"],
+      locale: "en-US",
+      extraHTTPHeaders: {
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+
+    const page = await context.newPage();
+
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: PLAYWRIGHT_TIMEOUT_MS,
+    });
+
+    await page.waitForTimeout(2000);
+
+    const html = await page.content();
+    const finalUrl = page.url();
+
+    await context.close();
+    await browser.close();
+    browser = null;
+
+    if (!html || html.length < 100) {
+      return { ok: false, error: "Playwright returned empty or minimal content", blocked: false, retryable: true };
+    }
+
+    return {
+      ok: true,
+      html,
+      status: 200,
+      redirectedUrl: finalUrl !== url ? finalUrl : undefined,
+      method: "playwright",
+    };
+  } catch (err: unknown) {
+    if (browser) {
+      try { await browser.close(); } catch { /* ignore cleanup errors */ }
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg, blocked: false, retryable: true };
   }
 }
 
@@ -281,6 +384,7 @@ export async function executeWebVisit(
     }
 
     const actualUrl = result.redirectedUrl || targetUrl;
+    const fetchMethod = result.method || "fetch";
     const crossDomain = !isSameDomain(baseUrl, actualUrl);
 
     if (crossDomain && sameDomainOnly) {
@@ -318,13 +422,17 @@ export async function executeWebVisit(
 
     pages.push(pageEntry);
 
+    const quoteSnippet = cleaned.title
+      ? `Page title: "${cleaned.title}"`
+      : cleaned.text.substring(0, 120).trim() || `Crawled page at ${actualUrl}`;
+
     evidence.push({
       source_type: "website",
       source_url: actualUrl,
       captured_at: new Date().toISOString(),
-      quote: cleaned.title
-        ? `Page title: "${cleaned.title}"`
-        : `Crawled page at ${actualUrl}`,
+      quote: fetchMethod === "playwright"
+        ? `[via Playwright] ${quoteSnippet}`
+        : quoteSnippet,
       field_supported: `pages[${pages.length - 1}]`,
     });
 
