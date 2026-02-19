@@ -16,6 +16,7 @@ import { extractChangePlanDirective, applyLeadgenReplanPolicy, constraintsAreIde
 import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, type ParsedGoal, type StructuredConstraint } from './supervisor/goal-to-constraints';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
 import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation } from './supervisor/delivery-summary';
+import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput } from './supervisor/cvl';
@@ -1233,6 +1234,23 @@ class SupervisorService {
       }
     }
 
+    let goalId: string | null = null;
+    try {
+      const constraintsSummary = `requested_count=${userRequestedCountFinal ?? 'any'}, business_type=${businessType}, location=${city}${prefixFilter ? `, prefix=${prefixFilter}` : ''}${nameFilter ? `, name_contains=${nameFilter}` : ''}${attributeFilter ? `, attribute=${attributeFilter}` : ''}`;
+      const goalRow = await storage.createGoal({
+        userId: task.user_id,
+        goalText: originalUserGoal,
+        successCriteria: { requested_count_user: userRequestedCountFinal, constraints_summary: constraintsSummary },
+        status: 'ACTIVE',
+        linkedRunIds: [chatRunId],
+      });
+      goalId = goalRow.goalId;
+      await storage.updateAgentRun(chatRunId, { goalId });
+      console.log(`[TOWER_LOOP_CHAT] [goal_created] goalId=${goalId} linked to runId=${chatRunId}`);
+    } catch (goalErr: any) {
+      console.error(`[TOWER_LOOP_CHAT] Failed to create goal (non-fatal): ${goalErr.message}`);
+    }
+
     // 2. Create Plan v1 artefact BEFORE any tool execution
     const planSteps = [
       {
@@ -1604,7 +1622,7 @@ class SupervisorService {
 
       await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: 'error', error: errMsg, leads_count: leads.length } });
 
-      await emitDeliverySummary({
+      const errorDsInput = {
         runId: chatRunId,
         userId: task.user_id,
         conversationId,
@@ -1612,12 +1630,23 @@ class SupervisorService {
         requestedCount: userRequestedCountFinal ?? requestedCount,
         hardConstraints: hard_constraints,
         softConstraints: soft_constraints,
-        planVersions: [{ version: 1, changes_made: ['Initial plan'] }],
-        softRelaxations: [],
+        planVersions: [{ version: 1, changes_made: ['Initial plan'] }] as PlanVersionEntry[],
+        softRelaxations: [] as SoftRelaxation[],
         leads: leads.map(l => ({ entity_id: l.placeId, name: l.name, address: l.address })),
         finalVerdict: 'error',
         stopReason: `Tower error: ${errMsg}`,
-      });
+      };
+      const errorDsPayload = await emitDeliverySummary(errorDsInput);
+
+      if (goalId) {
+        try {
+          await storage.updateGoalStatus(goalId, 'STOPPED', { tower_error: errMsg });
+          console.log(`[TOWER_LOOP_CHAT] [goal_updated] goalId=${goalId} status=STOPPED`);
+        } catch (gErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to update goal status (non-fatal): ${gErr.message}`); }
+      }
+      try {
+        await writeBeliefs({ runId: chatRunId, goalId, deliverySummary: errorDsPayload });
+      } catch (bErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to write beliefs (non-fatal): ${bErr.message}`); }
 
       const errorResponse = `I found ${leads.length} ${businessType!} prospects in ${city}, but Tower validation was unavailable. You can still view the results in your [dashboard](/leads).`;
       console.log(`[TOWER_LOOP_CHAT] [complete] leads=${leads.length} verdict=error (Tower unavailable)`);
@@ -2587,7 +2616,7 @@ class SupervisorService {
       : (isHalted
         ? `Tower verdict: ${finalVerdict}, action: ${finalAction}`
         : (replanBudgetExhausted ? `max_replans_exceeded (${replansUsed}/${MAX_REPLANS})` : null));
-    await emitDeliverySummary({
+    const mainDsInput = {
       runId: chatRunId,
       userId: task.user_id,
       conversationId,
@@ -2604,7 +2633,22 @@ class SupervisorService {
       cvlUnverifiableCount: cvlVerification?.summary?.unverifiable_count ?? null,
       cvlRequestedCountUser: cvlVerification?.summary?.requested_count_user ?? null,
       cvlHardUnverifiable: dsHardUnverifiable.map(u => u.value),
-    });
+    };
+    const mainDsPayload = await emitDeliverySummary(mainDsInput);
+
+    if (goalId) {
+      try {
+        const goalStatus = mainDsPayload.status === 'PASS' ? 'COMPLETE'
+          : mainDsPayload.status === 'PARTIAL' ? 'PARTIAL'
+          : 'STOPPED';
+        const goalStopReason = goalStatus === 'STOPPED' ? { stop_reason: mainDsPayload.stop_reason, tower_verdict: mainDsPayload.tower_verdict } : undefined;
+        await storage.updateGoalStatus(goalId, goalStatus, goalStopReason);
+        console.log(`[TOWER_LOOP_CHAT] [goal_updated] goalId=${goalId} status=${goalStatus}`);
+      } catch (gErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to update goal status (non-fatal): ${gErr.message}`); }
+    }
+    try {
+      await writeBeliefs({ runId: chatRunId, goalId, deliverySummary: mainDsPayload });
+    } catch (bErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to write beliefs (non-fatal): ${bErr.message}`); }
 
     const planAdjustmentNote = planVersion > 1 ? ` after ${planVersion} search plan iterations` : '';
     const matchingNote = hasNameConstraints && totalMatchingLeads !== totalUniqueLeads

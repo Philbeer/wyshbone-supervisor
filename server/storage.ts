@@ -513,6 +513,7 @@ export class DatabaseStorage implements IStorage {
     errorDetails?: Record<string, unknown> | null;
     metadata?: Record<string, unknown> | null;
     endedAt?: Date | null;
+    goalId?: string | null;
   }): Promise<void> {
     const setClause: Record<string, unknown> = {};
     if (updates.status !== undefined) setClause.status = updates.status;
@@ -521,6 +522,7 @@ export class DatabaseStorage implements IStorage {
     if (updates.errorDetails !== undefined) setClause.errorDetails = updates.errorDetails;
     if (updates.metadata !== undefined) setClause.metadata = updates.metadata;
     if (updates.endedAt !== undefined) setClause.endedAt = updates.endedAt;
+    if (updates.goalId !== undefined) setClause.goalId = updates.goalId;
 
     await db
       .update(agentRuns)
