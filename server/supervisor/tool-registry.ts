@@ -152,6 +152,32 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
       entity_name: { type: 'string', description: 'Business name for context (optional)' },
     },
   },
+  {
+    id: 'WEB_SEARCH',
+    label: 'Web Search',
+    description: 'Strict, auditable web search fallback for when Places or websites are missing. Includes disambiguation logic for official URL detection.',
+    enabled: true,
+    category: 'utility',
+    paramsSchema: {
+      query: { type: 'string', description: 'Search query', required: true },
+      location_hint: { type: 'string', description: 'Location to narrow search results' },
+      entity_name: { type: 'string', description: 'Business name for disambiguation signals' },
+      limit: { type: 'number', description: 'Max results to return (1-10)', default: 5 },
+    },
+  },
+  {
+    id: 'LEAD_ENRICH',
+    label: 'Lead Pack Builder',
+    description: 'Deterministic lead pack builder that assembles identity, contacts, and signals from Places, WEB_VISIT, and CONTACT_EXTRACT outputs without LLM inference.',
+    enabled: true,
+    category: 'enrich',
+    paramsSchema: {
+      places_lead: { type: 'object', description: 'Places API result for the lead' },
+      web_visit_pages: { type: 'array', description: 'Crawled page objects with url and text_clean' },
+      contact_extract: { type: 'object', description: 'CONTACT_EXTRACT output (contacts + people)' },
+      ask_lead_question_result: { type: 'object', description: 'Optional Q&A result for additional context' },
+    },
+  },
 ];
 
 const registry = new Map<string, ToolDefinition>();

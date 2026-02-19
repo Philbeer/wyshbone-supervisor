@@ -1,7 +1,7 @@
 /**
  * Action Executor - Single execution spine for Supervisor
  * 
- * Supports SEARCH_PLACES, ENRICH_LEADS, SCORE_LEADS, EVALUATE_RESULTS, WEB_VISIT, CONTACT_EXTRACT.
+ * Supports SEARCH_PLACES, ENRICH_LEADS, SCORE_LEADS, EVALUATE_RESULTS, WEB_VISIT, CONTACT_EXTRACT, WEB_SEARCH, LEAD_ENRICH.
  * Uses native Google Places API directly (no UI tool endpoint dependency).
  */
 
@@ -11,6 +11,10 @@ import { executeWebVisit } from './web-visit';
 import type { WebVisitInput } from './web-visit';
 import { executeContactExtract } from './contact-extract';
 import type { ContactExtractInput } from './contact-extract';
+import { executeWebSearch } from './web-search';
+import type { WebSearchInput } from './web-search';
+import { executeLeadEnrich } from './lead-enrich';
+import type { LeadEnrichInput } from './lead-enrich';
 import { createArtefact } from './artefacts';
 import { isToolEnabled, checkRoutingRules, checkIntentGate } from './tool-registry';
 import { logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './afr-logger';
@@ -179,6 +183,14 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
 
       case 'CONTACT_EXTRACT':
         result = await executeContactExtractAction(toolArgs, userId, runId, conversationId);
+        break;
+
+      case 'WEB_SEARCH':
+        result = await executeWebSearchAction(toolArgs, userId, runId, conversationId);
+        break;
+
+      case 'LEAD_ENRICH':
+        result = await executeLeadEnrichAction(toolArgs, userId, runId, conversationId);
         break;
 
       default:
@@ -507,6 +519,127 @@ async function executeContactExtractAction(
   return {
     success: true,
     summary: `Extracted ${emailCount} email(s), ${phoneCount} phone(s), ${peopleCount} person(s)`,
+    data: { envelope },
+  };
+}
+
+async function executeWebSearchAction(
+  args: Record<string, unknown>,
+  userId: string,
+  runId?: string,
+  conversationId?: string,
+): Promise<ActionResult> {
+  const query = typeof args.query === 'string' ? args.query.trim() : '';
+  if (!query) {
+    return { success: false, summary: 'WEB_SEARCH requires a query parameter', error: 'Missing query' };
+  }
+
+  const input: WebSearchInput = {
+    query,
+    location_hint: typeof args.location_hint === 'string' ? args.location_hint : null,
+    entity_name: typeof args.entity_name === 'string' ? args.entity_name : null,
+    limit: Number(args.limit) || 5,
+  };
+
+  const envelope = await executeWebSearch(input, runId || `websearch-${Date.now()}`, undefined);
+
+  const results = (envelope.outputs as any)?.results ?? [];
+  const bestGuess = (envelope.outputs as any)?.best_guess_official_url;
+
+  if (runId) {
+    try {
+      await createArtefact({
+        runId,
+        type: 'web_search_results',
+        title: `WEB_SEARCH: "${query}" (${results.length} results)`,
+        summary: bestGuess
+          ? `Found ${results.length} result(s), best guess URL: ${bestGuess}`
+          : `Found ${results.length} result(s), no confident official URL`,
+        payload: envelope as unknown as Record<string, unknown>,
+        userId,
+        conversationId,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[ACTION_EXECUTOR] Failed to write web_search_results artefact: ${msg}`);
+    }
+  }
+
+  if (results.length === 0) {
+    const errMsg = envelope.errors?.map(e => e.message).join('; ') || 'No results found';
+    return {
+      success: false,
+      summary: `WEB_SEARCH returned no results for "${query}": ${errMsg}`,
+      error: errMsg,
+      data: { envelope },
+    };
+  }
+
+  return {
+    success: true,
+    summary: `Found ${results.length} result(s) for "${query}"` +
+      (bestGuess ? ` — best guess: ${bestGuess}` : ''),
+    data: { envelope },
+  };
+}
+
+async function executeLeadEnrichAction(
+  args: Record<string, unknown>,
+  userId: string,
+  runId?: string,
+  conversationId?: string,
+): Promise<ActionResult> {
+  const input: LeadEnrichInput = {
+    places_lead: args.places_lead && typeof args.places_lead === 'object'
+      ? args.places_lead as LeadEnrichInput['places_lead']
+      : null,
+    web_visit_pages: Array.isArray(args.web_visit_pages)
+      ? (args.web_visit_pages as any[])
+          .filter((p: any) => p && typeof p.url === 'string' && typeof p.text_clean === 'string')
+          .map((p: any) => ({ url: p.url as string, text_clean: p.text_clean as string, page_type: p.page_type as string | undefined }))
+      : null,
+    contact_extract: args.contact_extract && typeof args.contact_extract === 'object'
+      ? args.contact_extract as LeadEnrichInput['contact_extract']
+      : null,
+    ask_lead_question_result: args.ask_lead_question_result && typeof args.ask_lead_question_result === 'object'
+      ? args.ask_lead_question_result as LeadEnrichInput['ask_lead_question_result']
+      : null,
+  };
+
+  if (!input.places_lead && (!input.web_visit_pages || input.web_visit_pages.length === 0) && !input.contact_extract) {
+    return {
+      success: false,
+      summary: 'LEAD_ENRICH requires at least one data source (places_lead, web_visit_pages, or contact_extract)',
+      error: 'No data sources provided',
+    };
+  }
+
+  const envelope = executeLeadEnrich(input, runId || `enrich-${Date.now()}`, undefined);
+
+  const identity = (envelope.outputs as any)?.identity;
+  const confidence = (envelope.outputs as any)?.confidence ?? 0;
+  const entityName = identity?.name ?? 'Unknown';
+
+  if (runId) {
+    try {
+      await createArtefact({
+        runId,
+        type: 'lead_pack',
+        title: `LEAD_ENRICH: ${entityName}`,
+        summary: `Lead pack for "${entityName}" — confidence: ${Math.round(confidence * 100)}%`,
+        payload: envelope as unknown as Record<string, unknown>,
+        userId,
+        conversationId,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[ACTION_EXECUTOR] Failed to write lead_pack artefact: ${msg}`);
+    }
+  }
+
+  return {
+    success: true,
+    summary: `Lead pack built for "${entityName}" — confidence: ${Math.round(confidence * 100)}%`,
     data: { envelope },
   };
 }
