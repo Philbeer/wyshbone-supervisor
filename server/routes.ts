@@ -1209,6 +1209,115 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/dev/explain-run", handleExplainRun);
   console.log('[DEBUG] Registered: POST /api/dev/explain-run');
 
+  // TEMP DEV TEST HARNESS
+  // Used only for tool verification
+  // Remove after tools are validated
+  if (process.env.NODE_ENV === 'development') {
+    const { executeWebVisit } = await import('./supervisor/web-visit');
+    const { executeContactExtract } = await import('./supervisor/contact-extract');
+    const { executeWebSearch } = await import('./supervisor/web-search');
+    const { executeAskLeadQuestion } = await import('./supervisor/ask-lead-question');
+    const { executeLeadEnrich } = await import('./supervisor/lead-enrich');
+
+    const SUPPORTED_TOOLS = ['WEB_VISIT', 'CONTACT_EXTRACT', 'WEB_SEARCH', 'ASK_LEAD_QUESTION', 'LEAD_ENRICH'] as const;
+    type SupportedTool = typeof SUPPORTED_TOOLS[number];
+
+    app.post("/dev/run-tool", async (req, res) => {
+      try {
+        const { tool, run_id, goal_id, inputs } = req.body || {};
+
+        if (!tool || typeof tool !== 'string') {
+          return res.status(400).json({ error: 'tool is required' });
+        }
+        if (!SUPPORTED_TOOLS.includes(tool as SupportedTool)) {
+          return res.status(400).json({ error: `tool must be one of: ${SUPPORTED_TOOLS.join(', ')}` });
+        }
+        if (!run_id || typeof run_id !== 'string') {
+          return res.status(400).json({ error: 'run_id is required' });
+        }
+        if (!inputs || typeof inputs !== 'object') {
+          return res.status(400).json({ error: 'inputs is required and must be an object' });
+        }
+
+        let envelope: unknown;
+
+        switch (tool as SupportedTool) {
+          case 'WEB_VISIT':
+            envelope = await executeWebVisit(
+              {
+                url: inputs.url,
+                max_pages: inputs.max_pages ?? 3,
+                page_hints: inputs.page_hints,
+                same_domain_only: inputs.same_domain_only,
+              },
+              run_id,
+              goal_id,
+            );
+            break;
+
+          case 'CONTACT_EXTRACT':
+            envelope = executeContactExtract(
+              {
+                pages: inputs.pages ?? [],
+                entity_name: inputs.entity_name ?? null,
+              },
+              run_id,
+              goal_id,
+            );
+            break;
+
+          case 'WEB_SEARCH':
+            envelope = await executeWebSearch(
+              {
+                query: inputs.query,
+                location_hint: inputs.location_hint ?? null,
+                entity_name: inputs.entity_name ?? null,
+                limit: inputs.limit ?? 5,
+              },
+              run_id,
+              goal_id,
+            );
+            break;
+
+          case 'ASK_LEAD_QUESTION':
+            envelope = await executeAskLeadQuestion(
+              {
+                lead: inputs.lead,
+                intent_question: inputs.intent_question,
+                evidence_query: inputs.evidence_query,
+                search_budget: inputs.search_budget ?? 3,
+                visit_budget: inputs.visit_budget ?? 3,
+              },
+              run_id,
+              goal_id,
+            );
+            break;
+
+          case 'LEAD_ENRICH':
+            envelope = executeLeadEnrich(
+              {
+                places_lead: inputs.places_lead ?? null,
+                web_visit_pages: inputs.web_visit_pages ?? null,
+                contact_extract: inputs.contact_extract ?? null,
+                ask_lead_question_result: inputs.ask_lead_question_result ?? null,
+              },
+              run_id,
+              goal_id,
+            );
+            break;
+        }
+
+        res.json(envelope);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[DEV_RUN_TOOL] Error: ${msg}`);
+        res.status(500).json({ error: msg });
+      }
+    });
+
+    console.log('[DEV] Registered: POST /dev/run-tool (tool test harness)');
+  }
+
   // Get user context (profile, facts, messages, etc.)
   app.get("/api/user/context", async (req, res) => {
     try {
