@@ -591,7 +591,21 @@ class SupervisorService {
       return;
     }
 
-    const towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId);
+    let towerResult: { response: string; leadIds: string[] };
+    try {
+      towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId);
+    } catch (execErr: any) {
+      console.error(`[TOWER_LOOP_CHAT] executeTowerLoopChat failed for runId=${jobId}: ${execErr.message}`);
+      await storage.updateAgentRun(jobId, {
+        status: 'failed',
+        terminalState: 'error',
+        error: execErr.message,
+        endedAt: new Date(),
+      }).catch((updateErr: any) => {
+        console.warn(`[TOWER_LOOP_CHAT] Failed to mark agent_run as failed (run may not exist yet): ${updateErr.message}`);
+      });
+      throw execErr;
+    }
     const response = towerResult.response;
     const leadIds = towerResult.leadIds;
     const capabilities = ['lead_generation', 'tower_validated'];
@@ -2518,7 +2532,11 @@ class SupervisorService {
       finalTowerResult = { ...finalTowerResult, shouldStop: false };
     }
 
-    const isHalted = finalVerdict !== 'pass' && finalAction !== 'change_plan' && (finalTowerResult.shouldStop || finalVerdict === 'error');
+    const isCvlOverrideStop = finalVerdict === 'stop' && !finalTowerResult.shouldStop;
+    const isHalted = finalVerdict !== 'pass' && finalAction !== 'change_plan' && (finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'stop');
+    if (isCvlOverrideStop) {
+      console.log(`[TOWER_LOOP_CHAT] CVL override detected: Tower passed but CVL downgraded to stop (hard-unverifiable constraints). isHalted=${isHalted}`);
+    }
     if (isHalted) {
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,

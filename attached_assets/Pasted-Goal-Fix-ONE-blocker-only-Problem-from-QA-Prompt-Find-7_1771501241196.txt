@@ -1,0 +1,95 @@
+Goal: Fix ONE blocker only.
+
+Problem (from QA):
+Prompt: “Find 7 pubs in Chichester that have a beer garden”
+Expected: Intelligent STOP (hard-unverifiable constraint), with delivery_summary + tower_judgement + verification_summary persisted, and UI shows structured results.
+Actual: agent_runs.status=failed, 0 artefacts persisted, chat shows only “Done”.
+
+Scope (strict):
+
+Fix ONLY the hard-unverifiable STOP path failure.
+
+Do NOT change UI rendering, do NOT add any new tools, do NOT add any demo/proof code, do NOT refactor unrelated files.
+
+No new background workers, completion handlers, or evaluators anywhere.
+
+Keep behaviour unchanged for all existing passing tests (eg “Find 5 pubs in Chichester” PASS and “Arundel swan” STOP).
+
+What to do (investigate then patch):
+
+Reproduce locally (or in dev) using the exact prompt above.
+
+Capture run_id and check why the run becomes failed.
+
+Find the first thrown error or early return that prevents artefact persistence.
+
+Identify where the system decides “hard-unverifiable”.
+
+Confirm “beer garden” is classified as a hard constraint that is NOT verifiable via current CVL evidence sources.
+
+Ensure the constraint capability check marks it as “hard_unverifiable” (or equivalent field) rather than crashing.
+
+Ensure the run does NOT fail. It must complete with STOP.
+
+If a constraint is hard-unverifiable, that must be a normal terminal outcome, not an exception.
+
+The system must still emit and persist:
+
+constraints_extracted (if present)
+
+constraint_capability_check (if present)
+
+verification_summary (even if verified_exact=0 and hard_unknown>0)
+
+tower_judgement (action=stop, verdict=stop, reasons include hard-unverifiable constraint)
+
+delivery_summary (status=STOP, shortfall=requested, stop_reason mentions beer garden is unverifiable, cvl_summary included)
+
+Make artefact persistence “best-effort”, not all-or-nothing.
+
+If any later stage fails, earlier artefacts should still exist.
+
+Specifically: do not allow a formatting/narrative step to prevent persisting delivery_summary and tower_judgement.
+
+Add minimal guardrails and logging ONLY around this failure.
+
+If the run is about to be marked failed, capture the error reason into an artefact (eg run_error) and still attempt to emit delivery_summary STOP if constraints are hard-unverifiable.
+
+Keep logging concise.
+
+Acceptance tests (must pass):
+A) “Find 7 pubs in Chichester that have a beer garden”
+
+agent_runs.status must be completed (not failed)
+
+delivery_summary exists with:
+
+status=STOP
+
+requested_count=7
+
+delivered_exact_count=0
+
+shortfall=7
+
+cvl_summary.verified_exact_count=0
+
+stop_reason explicitly states beer garden is hard-unverifiable (unknown/needs_manual)
+
+tower_judgement exists, reasons do NOT claim success.
+
+B) Regression checks (do not break):
+
+“Find 5 pubs in Chichester” remains PASS and renders structured results
+
+“Find 4 pubs in Arundel with swan in the name” remains STOP with max_replans_exceeded and correct shortfall
+
+Deliverables:
+
+Identify root cause in 1–2 sentences.
+
+Provide full file rewrites for ONLY the files that must change.
+
+Keep changes minimal and surgical.
+
+Show before/after behaviour for acceptance test A (what artefacts are now persisted and what fields they contain).
