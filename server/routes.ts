@@ -1222,7 +1222,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const SUPPORTED_TOOLS = ['WEB_VISIT', 'CONTACT_EXTRACT', 'WEB_SEARCH', 'ASK_LEAD_QUESTION', 'LEAD_ENRICH'] as const;
     type SupportedTool = typeof SUPPORTED_TOOLS[number];
 
-    app.post("/dev/run-tool", async (req, res) => {
+    app.get("/api/dev/ping", (_req, res) => {
+      res.json({ ok: true, node_env: process.env.NODE_ENV ?? null });
+    });
+
+    app.post("/api/dev/run-tool", async (req, res) => {
       try {
         const { tool, run_id, goal_id, inputs } = req.body || {};
 
@@ -1315,7 +1319,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     });
 
-    console.log('[DEV] Registered: POST /dev/run-tool (tool test harness)');
+    console.log('[DEV] Registered: GET /api/dev/ping');
+    console.log('[DEV] Registered: POST /api/dev/run-tool (tool test harness)');
   }
 
   // Get user context (profile, facts, messages, etc.)
