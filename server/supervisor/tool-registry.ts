@@ -128,6 +128,19 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
       goalDescription: { type: 'string', description: 'Goal for evaluation context' },
     },
   },
+  {
+    id: 'WEB_VISIT',
+    label: 'Website Crawler',
+    description: 'Deterministic website crawler that fetches, cleans, and extracts text from web pages. Tries hinted page types first.',
+    enabled: true,
+    category: 'utility',
+    paramsSchema: {
+      url: { type: 'string', description: 'Starting URL to crawl', required: true },
+      max_pages: { type: 'number', description: 'Hard cap on pages to fetch (1-10)', required: true },
+      page_hints: { type: 'array', description: 'Page types to try first: home, contact, about, events, menu' },
+      same_domain_only: { type: 'boolean', description: 'Only crawl pages on the same domain', default: true },
+    },
+  },
 ];
 
 const registry = new Map<string, ToolDefinition>();

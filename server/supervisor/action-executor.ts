@@ -1,12 +1,15 @@
 /**
  * Action Executor - Single execution spine for Supervisor
  * 
- * Supports SEARCH_PLACES, ENRICH_LEADS, SCORE_LEADS, EVALUATE_RESULTS.
+ * Supports SEARCH_PLACES, ENRICH_LEADS, SCORE_LEADS, EVALUATE_RESULTS, WEB_VISIT.
  * Uses native Google Places API directly (no UI tool endpoint dependency).
  */
 
 import type { PlanStep } from './types/plan';
 import { searchPlaces } from './google-places';
+import { executeWebVisit } from './web-visit';
+import type { WebVisitInput } from './web-visit';
+import { createArtefact } from './artefacts';
 import { isToolEnabled, checkRoutingRules, checkIntentGate } from './tool-registry';
 import { logToolCallStarted, logToolCallCompleted, logToolCallFailed } from './afr-logger';
 
@@ -166,6 +169,10 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
 
       case 'EVALUATE_RESULTS':
         result = await executeEvaluateResults(toolArgs, userId);
+        break;
+
+      case 'WEB_VISIT':
+        result = await executeWebVisitAction(toolArgs, userId, runId, conversationId);
         break;
 
       default:
@@ -386,4 +393,61 @@ export async function executeStep(
     conversationId,
     clientRequestId,
   });
+}
+
+async function executeWebVisitAction(
+  args: Record<string, unknown>,
+  userId: string,
+  runId?: string,
+  conversationId?: string,
+): Promise<ActionResult> {
+  const input: WebVisitInput = {
+    url: String(args.url || ''),
+    max_pages: Number(args.max_pages) || 3,
+    page_hints: Array.isArray(args.page_hints) ? args.page_hints as string[] : undefined,
+    same_domain_only: args.same_domain_only !== false,
+  };
+
+  if (!input.url) {
+    return { success: false, summary: 'WEB_VISIT requires a url parameter', error: 'Missing url' };
+  }
+
+  const envelope = await executeWebVisit(input, runId || `webvisit-${Date.now()}`, undefined);
+
+  const crawl = (envelope.outputs as any)?.crawl;
+  const pageCount = (envelope.outputs as any)?.pages?.length ?? 0;
+
+  if (runId) {
+    try {
+      await createArtefact({
+        runId,
+        type: 'web_visit_pages',
+        title: `WEB_VISIT: ${input.url} (${pageCount} pages)`,
+        summary: (envelope.outputs as any)?.site_summary || `Crawled ${pageCount} page(s)`,
+        payload: envelope as unknown as Record<string, unknown>,
+        userId,
+        conversationId,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[ACTION_EXECUTOR] Failed to write web_visit_pages artefact: ${msg}`);
+    }
+  }
+
+  if (pageCount === 0) {
+    const errMsg = envelope.errors?.map(e => e.message).join('; ') || 'No pages fetched';
+    return {
+      success: false,
+      summary: `WEB_VISIT failed for ${input.url}: ${errMsg}`,
+      error: errMsg,
+      data: { envelope },
+    };
+  }
+
+  return {
+    success: true,
+    summary: `Crawled ${pageCount} page(s) from ${input.url}` +
+      (crawl?.http_failures_count ? ` (${crawl.http_failures_count} failures)` : ''),
+    data: { envelope },
+  };
 }
