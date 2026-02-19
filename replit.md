@@ -77,3 +77,7 @@ The frontend uses React, TypeScript, Vite, and Wouter, styled with Tailwind CSS 
 - **OpenAI API**: Used for deep research.
 - **Perplexity API**: Used for deep research.
 - **Anthropic API**: Used for deep research.
+
+## Recent Changes
+- **Feb 2026 — CVL Override Halt Fix**: Fixed `isHalted` condition in `server/supervisor.ts` to detect CVL override from pass→stop. Previously, runs with hard-unverifiable `HAS_ATTRIBUTE` constraints (e.g., "beer garden") were not treated as halted because `finalTowerResult.shouldStop` remained false after CVL downgraded the verdict. Added `finalVerdict === 'stop'` to the halt condition.
+- **Feb 2026 — Agent Run Error Handling**: Added try/catch around `executeTowerLoopChat` in `processChatTask` to mark `agent_runs` as `status='failed'` when unhandled exceptions occur. Previously, exceptions left agent_runs stuck at `status='executing'` indefinitely.
