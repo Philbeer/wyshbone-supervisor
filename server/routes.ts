@@ -1212,7 +1212,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // TEMP DEV TEST HARNESS
   // Used only for tool verification
   // Remove after tools are validated
-  if (process.env.NODE_ENV === 'development') {
+  if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
     const { executeWebVisit } = await import('./supervisor/web-visit');
     const { executeContactExtract } = await import('./supervisor/contact-extract');
     const { executeWebSearch } = await import('./supervisor/web-search');
