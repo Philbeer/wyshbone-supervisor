@@ -93,6 +93,15 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Registry**: Category `enrich`. Artefact type: `ask_lead_question_result`.
 - Orchestrates WEB_VISIT (direct) and WEB_SEARCH + WEB_VISIT (fallback) to answer user-specified lead questions. Extracts facts via keyword matching. Verdict: answered / unknown / needs_manual_check.
 
+### Tool Planning Policy (Feb 2026)
+- **Module**: `server/supervisor/tool-planning-policy.ts` — deterministic tool ordering rules.
+- **Primary path**: Google Places → WEB_VISIT → CONTACT_EXTRACT → LEAD_ENRICH (when website exists).
+- **Fallback path**: Google Places → WEB_SEARCH → WEB_VISIT → CONTACT_EXTRACT → LEAD_ENRICH (when website missing/unreachable).
+- **Special**: ASK_LEAD_QUESTION (budgeted) when user asks non-Places attributes.
+- **Never rules**: Never override Places website unless disambiguation passes (2+ signals). Never guess when uncertain.
+- **Artefact**: `tool_plan_explainer` — structured steps only, no narrative prose.
+- **Helpers**: `buildToolPlan`, `validateToolOrder`, `mayOverridePlacesWebsite`, `persistToolPlanExplainer`.
+
 ## External Dependencies
 
 - **Supabase**: Used for user profiles, conversations, facts, monitors, deep research runs, integrations, user signals, goal ledger, belief store, and feedback events.

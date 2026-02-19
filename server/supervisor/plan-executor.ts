@@ -34,6 +34,7 @@ import {
 import { createArtefact } from './artefacts';
 import { emitDeliverySummary } from './delivery-summary';
 import { judgeArtefact } from './tower-artefact-judge';
+import { buildToolPlan, persistToolPlanExplainer, type LeadContext } from './tool-planning-policy';
 
 const MAX_RETRIES_PER_STEP = 2;
 const MAX_PLAN_VERSIONS = 2;
@@ -461,6 +462,19 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   const shouldJudge = !skipJudgement;
 
   try {
+    const firstStepArgs = steps[0]?.toolArgs || toolMetadata?.toolArgs || {};
+    const leadCtx: LeadContext = {
+      business_name: typeof firstStepArgs.query === 'string' ? firstStepArgs.query : goal,
+      website: typeof firstStepArgs.website === 'string' ? firstStepArgs.website : null,
+      phone: typeof firstStepArgs.phone === 'string' ? firstStepArgs.phone : null,
+      address: typeof firstStepArgs.location === 'string' ? firstStepArgs.location : null,
+      town: typeof firstStepArgs.location === 'string' ? firstStepArgs.location : null,
+    };
+    const toolPlan = buildToolPlan(leadCtx);
+    persistToolPlanExplainer(toolPlan, runId, userId, conversationId).catch((err) => {
+      console.error(`[PLAN_EXECUTOR] tool_plan_explainer write failed: ${err}`);
+    });
+
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
       const stepType = step.toolName || toolMetadata?.toolName || 'UNKNOWN';

@@ -1,0 +1,134 @@
+SUPERVISOR DEV PROMPT
+Create Temporary Tool Test Harness (/dev/run-tool)
+
+Paste into CC / Cursor
+
+You are modifying the Wyshbone-Supervisor backend.
+This change adds a temporary, dev-only test harness to allow direct invocation of tools for verification.
+This is NOT product logic and must be clearly marked as temporary.
+
+Goal
+
+Create a single dev-only endpoint that allows us to:
+
+Invoke one tool at a time directly
+
+Pass explicit inputs
+
+Receive a ToolResultEnvelope
+
+Allow the tool to write artefacts normally
+
+Test tools without chat, planning, or agent orchestration
+
+This endpoint exists only to verify tool correctness.
+
+Endpoint Specification
+
+Route
+
+POST /dev/run-tool
+
+
+Availability
+
+Must only be enabled when NODE_ENV === "development"
+
+If called in any other environment, return HTTP 404
+
+Request Body
+{
+  tool: "WEB_VISIT" | "CONTACT_EXTRACT" | "WEB_SEARCH",
+  run_id: string,
+  goal_id?: string,
+  inputs: object
+}
+
+Behaviour (STRICT)
+
+Validate request body
+
+tool is required and must be one of the supported tools
+
+run_id is required
+
+inputs is required
+
+Switch on tool:
+
+"WEB_VISIT" → invoke WEB_VISIT tool directly
+
+"CONTACT_EXTRACT" → invoke CONTACT_EXTRACT tool directly
+
+"WEB_SEARCH" → invoke WEB_SEARCH tool directly
+
+Call the tool exactly as Supervisor would internally
+
+Do NOT invoke planning
+
+Do NOT invoke other tools
+
+Do NOT infer or modify inputs
+
+Let the tool:
+
+Build a ToolResultEnvelope
+
+Write its artefact normally (with run_id)
+
+Return the ToolResultEnvelope JSON as the HTTP response
+
+Rules (NON-NEGOTIABLE)
+
+❌ Do NOT add orchestration
+
+❌ Do NOT add retries
+
+❌ Do NOT add UI glue
+
+❌ Do NOT call other tools
+
+❌ Do NOT invent defaults
+
+❌ Do NOT log sensitive data
+
+This endpoint must be a thin passthrough only.
+
+Safety & Cleanup Guards
+
+Add a comment at the route definition:
+
+// TEMP DEV TEST HARNESS
+// Used only for tool verification
+// Remove after tools are validated
+
+
+Keep all logic in a single file if possible
+
+Do not expose this endpoint to production
+
+Deliverable
+
+Full file rewrites for any files touched
+
+The endpoint must compile and run
+
+No other behaviour changes in Supervisor
+
+After completion
+
+Do not wire this endpoint into:
+
+Chat
+
+UI
+
+Planning
+
+Agent loop
+
+It is only for:
+
+Manual testing
+
+Claude Chrome testing
