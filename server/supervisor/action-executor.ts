@@ -610,12 +610,19 @@ async function executeLeadEnrichAction(
     ask_lead_question_result: args.ask_lead_question_result && typeof args.ask_lead_question_result === 'object'
       ? args.ask_lead_question_result as LeadEnrichInput['ask_lead_question_result']
       : null,
+    web_search: args.web_search && typeof args.web_search === 'object'
+      ? args.web_search as LeadEnrichInput['web_search']
+      : null,
   };
 
-  if (!input.places_lead && (!input.web_visit_pages || input.web_visit_pages.length === 0) && !input.contact_extract) {
+  const hasWebSearch = input.web_search && (
+    (Array.isArray(input.web_search.results) && input.web_search.results.length > 0) ||
+    (input.web_search.outputs && Array.isArray(input.web_search.outputs.results) && input.web_search.outputs.results.length > 0)
+  );
+  if (!input.places_lead && (!input.web_visit_pages || input.web_visit_pages.length === 0) && !input.contact_extract && !hasWebSearch) {
     return {
       success: false,
-      summary: 'LEAD_ENRICH requires at least one data source (places_lead, web_visit_pages, or contact_extract)',
+      summary: 'LEAD_ENRICH requires at least one data source (places_lead, web_visit_pages, contact_extract, or web_search)',
       error: 'No data sources provided',
     };
   }

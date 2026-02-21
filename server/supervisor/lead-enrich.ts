@@ -102,6 +102,12 @@ export interface LeadEnrichInput {
     answer: string;
     source_url?: string;
   } | null;
+  web_search?: {
+    results?: { url: string; title?: string; snippet?: string }[];
+    outputs?: {
+      results?: { url: string; title?: string; snippet?: string }[];
+    };
+  } | null;
 }
 
 const SOURCE_PRIORITY = ["places", "official_site", "directory", "social"];
@@ -203,6 +209,33 @@ function detectSignalFromTypes(
   return null;
 }
 
+const UK_PHONE_RE = /(?:\+44\s?|0)\d[\d\s]{8,12}\d/g;
+const INTL_PHONE_RE = /\+\d[\d\s\-]{7,15}\d/g;
+const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+
+function extractPhonesFromText(text: string): string[] {
+  const ukMatches = text.match(UK_PHONE_RE) ?? [];
+  const intlMatches = text.match(INTL_PHONE_RE) ?? [];
+  const all = [...ukMatches, ...intlMatches];
+  const normalised = all.map((p) => p.replace(/[\s\-]/g, ""));
+  return Array.from(new Set(normalised));
+}
+
+function extractEmailsFromText(text: string): string[] {
+  const matches = text.match(EMAIL_RE) ?? [];
+  const lowered = matches.map((e) => e.toLowerCase());
+  return Array.from(new Set(lowered));
+}
+
+function getWebSearchResults(
+  ws: LeadEnrichInput["web_search"],
+): { url: string; title?: string; snippet?: string }[] {
+  if (!ws) return [];
+  if (Array.isArray(ws.results) && ws.results.length > 0) return ws.results;
+  if (ws.outputs && Array.isArray(ws.outputs.results) && ws.outputs.results.length > 0) return ws.outputs.results;
+  return [];
+}
+
 export function executeLeadEnrich(
   input: LeadEnrichInput,
   runId: string,
@@ -213,15 +246,16 @@ export function executeLeadEnrich(
   const contactData = input.contact_extract;
   const qlResult = input.ask_lead_question_result;
 
-  if (!place && pages.length === 0 && !contactData) {
+  const wsResults = getWebSearchResults(input.web_search);
+  if (!place && pages.length === 0 && !contactData && wsResults.length === 0) {
     return buildToolResult({
       tool_name: TOOL_NAME,
       tool_version: TOOL_VERSION,
       run_id: runId,
       goal_id: goalId,
-      inputs: { has_places: false, has_pages: false, has_contacts: false },
+      inputs: { has_places: false, has_pages: false, has_contacts: false, has_web_search: false },
       outputs: {},
-      errors: [buildToolError("NO_DATA", "At least one data source (places_lead, web_visit_pages, or contact_extract) is required", false)],
+      errors: [buildToolError("NO_DATA", "At least one data source (places_lead, web_visit_pages, contact_extract, or web_search) is required", false)],
     });
   }
 
@@ -441,7 +475,6 @@ export function executeLeadEnrich(
   }
 
   if (place?.phone) {
-    const existingPhone = phoneMap.get(place.phone);
     const placesUrl = `https://maps.google.com/?cid=${place.place_id ?? "unknown"}`;
     const ev: EvidenceItem = {
       source_type: "places",
@@ -452,6 +485,57 @@ export function executeLeadEnrich(
     };
     evidence.push(ev);
     trackContactEntry(phoneMap, place.phone, ev, placesUrl, true);
+  }
+
+  const searchResults = getWebSearchResults(input.web_search);
+  if (searchResults.length > 0) {
+    const phonesAlreadyHaveOfficialOrExtracted = Array.from(phoneMap.values()).some((t) => t.onOfficialSite);
+    const emailsAlreadyHaveOfficialOrExtracted = Array.from(emailMap.values()).some((t) => t.onOfficialSite);
+
+    for (const result of searchResults) {
+      if (!result.url || !result.snippet) continue;
+      const textToScan = `${result.title ?? ""} ${result.snippet}`;
+      const phones = extractPhonesFromText(textToScan);
+      const emails = extractEmailsFromText(textToScan);
+      const now = new Date().toISOString();
+
+      for (const phone of phones) {
+        if (phonesAlreadyHaveOfficialOrExtracted && phoneMap.has(phone) && phoneMap.get(phone)!.onOfficialSite) continue;
+        const snippetFragment = result.snippet!.length > 200 ? result.snippet!.substring(0, 200) + "…" : result.snippet!;
+        const ev: EvidenceItem = {
+          source_type: "search_result",
+          source_url: result.url,
+          captured_at: now,
+          quote: `Phone "${phone}" found in search snippet: ${snippetFragment}`,
+          field_supported: "contacts.phones",
+        };
+        evidence.push(ev);
+        trackContactEntry(phoneMap, phone, ev, result.url, false);
+      }
+
+      for (const email of emails) {
+        if (emailsAlreadyHaveOfficialOrExtracted && emailMap.has(email) && emailMap.get(email)!.onOfficialSite) continue;
+        const snippetFragment = result.snippet!.length > 200 ? result.snippet!.substring(0, 200) + "…" : result.snippet!;
+        const ev: EvidenceItem = {
+          source_type: "search_result",
+          source_url: result.url,
+          captured_at: now,
+          quote: `Email "${email}" found in search snippet: ${snippetFragment}`,
+          field_supported: "contacts.emails",
+        };
+        evidence.push(ev);
+        trackContactEntry(emailMap, email, ev, result.url, false);
+      }
+    }
+
+    if (searchResults.length > 0 && !usedSources.includes("directory")) {
+      usedSources.push("directory");
+    }
+    const phonesFromSearch = Array.from(phoneMap.values()).filter((t) => t.nonOfficialWebDomains.size > 0).length;
+    const emailsFromSearch = Array.from(emailMap.values()).filter((t) => t.nonOfficialWebDomains.size > 0).length;
+    if (phonesFromSearch > 0 || emailsFromSearch > 0) {
+      notes.push(`Extracted ${phonesFromSearch} phone(s), ${emailsFromSearch} email(s) from ${searchResults.length} web search snippet(s)`);
+    }
   }
 
   for (const [value, data] of Array.from(emailMap.entries())) {
