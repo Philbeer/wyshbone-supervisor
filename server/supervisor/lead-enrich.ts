@@ -492,6 +492,39 @@ export function executeLeadEnrich(
   if (eventsResult.evidence) evidence.push(eventsResult.evidence);
   if (bookingResult.evidence) evidence.push(bookingResult.evidence);
 
+  const signalEntries: [string, SignalValue][] = [
+    ["live_music", signals.live_music],
+    ["food", signals.food],
+    ["events", signals.events],
+    ["booking", signals.booking],
+  ];
+  for (const [name, sig] of signalEntries) {
+    if ("reason" in sig && sig.value === null) {
+      const label = name.replace(/_/g, " ");
+      if (pages.length === 0 && !place) {
+        notes.push(`${label}: unknown — no website or Places data available to check`);
+      } else if (pages.length === 0) {
+        notes.push(`${label}: unknown — no website pages were crawled (site may be missing or blocked)`);
+      } else {
+        notes.push(`${label}: unknown — no matching evidence found in ${pages.length} crawled page(s)`);
+      }
+    }
+  }
+
+  const sourceLabels: Record<string, string> = {
+    places: "Google Places",
+    official_site: "official website (via crawl)",
+    directory: "third-party directories / search results",
+    social: "social media profiles",
+  };
+  const orderedSources = SOURCE_PRIORITY.filter((s) => usedSources.includes(s));
+  if (orderedSources.length > 0) {
+    const readable = orderedSources.map((s) => sourceLabels[s] ?? s).join(", then ");
+    notes.push(`Sources used (priority order): ${readable}`);
+  } else {
+    notes.push("Sources used: none — no data sources were available");
+  }
+
   if (qlResult) {
     notes.push(`Q: ${qlResult.question} → A: ${qlResult.answer}`);
     if (qlResult.source_url) {

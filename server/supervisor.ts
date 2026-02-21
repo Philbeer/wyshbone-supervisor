@@ -63,6 +63,7 @@ class SupervisorService {
   private timeoutId?: NodeJS.Timeout;
   private batchSize: number = 50; // Process up to 50 signals per poll
   private missingTableWarned: boolean = false;
+  private nonNumericIdWarned: boolean = false;
   private startupRecoveryDone: boolean = false;
   private static readonly STALE_TASK_TIMEOUT_MS = 90 * 1000; // 90 seconds (was 5 min — too long for stuck tasks)
   private static readonly MAX_RECOVERY_ATTEMPTS = 3;
@@ -159,10 +160,17 @@ class SupervisorService {
       if (signalTime > checkpointTime) {
         return true;
       } else if (signalTime === checkpointTime) {
-        // Numeric comparison for bigint IDs
-        const signalId = BigInt(signal.id);
-        const checkpointId = BigInt(checkpoint.id);
-        return signalId > checkpointId;
+        const sid = String(signal.id);
+        const cid = String(checkpoint.id);
+        const bothNumeric = /^[0-9]+$/.test(sid) && /^[0-9]+$/.test(cid);
+        if (!bothNumeric) {
+          if (!this.nonNumericIdWarned) {
+            this.nonNumericIdWarned = true;
+            console.log(`[SUPERVISOR] Signal IDs are non-numeric (UUID); using string comparison for cursor. signal.id=${sid}, checkpoint.id=${cid}`);
+          }
+          return sid > cid;
+        }
+        return BigInt(sid) > BigInt(cid);
       }
       return false;
     });
