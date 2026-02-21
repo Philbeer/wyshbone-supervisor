@@ -2012,9 +2012,241 @@ class SupervisorService {
       console.warn(`[ACCUMULATION] Failed to create accumulation_update artefact (v1): ${accErr.message}`);
     }
 
+    // 12a-pre. Attribute-verification gate
+    //   If a HARD HAS_ATTRIBUTE constraint exists that CVL cannot verify from Places data,
+    //   and we have candidate leads, run WEB_SEARCH + optional WEB_VISIT per lead to attempt
+    //   attribute verification before wasting replans on quantity expansion.
+    let attributeVerificationAttempted = false;
+    let attributeVerificationStopped = false;
+    const hardAttributeConstraints = structuredConstraints.filter(
+      c => c.type === 'HAS_ATTRIBUTE' && c.hard
+    );
+    const hasHardAttribute = hardAttributeConstraints.length > 0;
+
+    if (hasHardAttribute && finalLeads.length > 0 && !usedStub) {
+      attributeVerificationAttempted = true;
+      const attrValues = hardAttributeConstraints.map(c => typeof c.value === 'string' ? c.value : String(c.value));
+      const attrLabel = attrValues.join(', ');
+      console.log(`[ATTR_VERIFY] Hard attribute constraint(s) detected: ${attrLabel} — running attribute verification for ${finalLeads.length} candidate(s)`);
+
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'attribute_verification_started', status: 'pending',
+        taskGenerated: `Attribute verification: checking ${attrLabel} for ${finalLeads.length} candidates`,
+        runType: 'plan',
+        metadata: { attributes: attrValues, candidates: finalLeads.length },
+      });
+
+      const attrVerificationResults: Array<{
+        lead_name: string;
+        lead_place_id: string;
+        attribute: string;
+        search_query: string;
+        web_search_success: boolean;
+        url_visited: string | null;
+        web_visit_success: boolean;
+        snippets: string[];
+        attribute_found: boolean;
+        evidence_strength: 'strong' | 'weak' | 'none';
+      }> = [];
+
+      for (const lead of finalLeads) {
+        for (const attrValue of attrValues) {
+          const searchQuery = `${lead.name} ${city} ${attrValue}`;
+          let webSearchSuccess = false;
+          let urlVisited: string | null = null;
+          let webVisitSuccess = false;
+          const snippets: string[] = [];
+          let attributeFound = false;
+          let evidenceStrength: 'strong' | 'weak' | 'none' = 'none';
+
+          try {
+            const wsResult = await executeAction({
+              toolName: 'WEB_SEARCH',
+              toolArgs: { query: searchQuery, entity_name: lead.name, location_hint: city, limit: 5 },
+              userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
+            });
+
+            if (wsResult.success && wsResult.data) {
+              webSearchSuccess = true;
+              const wsOutputs = (wsResult.data?.envelope as any)?.outputs;
+              const results = wsOutputs?.results || [];
+              const attrLower = attrValue.toLowerCase();
+
+              for (const r of results) {
+                const title = (r.title || '').toLowerCase();
+                const description = (r.description || '').toLowerCase();
+                if (title.includes(attrLower) || description.includes(attrLower)) {
+                  snippets.push(`${r.title}: ${r.description}`.slice(0, 300));
+                  if (!urlVisited && r.url) urlVisited = r.url;
+                }
+              }
+
+              if (snippets.length > 0) {
+                evidenceStrength = 'weak';
+                attributeFound = true;
+              }
+            }
+          } catch (wsErr: any) {
+            console.warn(`[ATTR_VERIFY] WEB_SEARCH failed for "${lead.name}" + "${attrValue}" (non-fatal): ${wsErr.message}`);
+          }
+
+          if (urlVisited && snippets.length > 0) {
+            try {
+              const wvResult = await executeAction({
+                toolName: 'WEB_VISIT',
+                toolArgs: { url: urlVisited, max_pages: 1, same_domain_only: true },
+                userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
+              });
+
+              if (wvResult.success && wvResult.data) {
+                webVisitSuccess = true;
+                const pages = (wvResult.data?.envelope as any)?.outputs?.pages || [];
+                const attrLower = attrValue.toLowerCase();
+                for (const page of pages) {
+                  const text = (page.cleaned_text || '').toLowerCase();
+                  if (text.includes(attrLower)) {
+                    evidenceStrength = 'strong';
+                    const idx = text.indexOf(attrLower);
+                    const contextStart = Math.max(0, idx - 100);
+                    const contextEnd = Math.min(text.length, idx + attrLower.length + 100);
+                    snippets.push(`[page] ...${text.slice(contextStart, contextEnd)}...`);
+                    break;
+                  }
+                }
+              }
+            } catch (wvErr: any) {
+              console.warn(`[ATTR_VERIFY] WEB_VISIT failed for "${lead.name}" url=${urlVisited} (non-fatal): ${wvErr.message}`);
+            }
+          }
+
+          attrVerificationResults.push({
+            lead_name: lead.name,
+            lead_place_id: lead.placeId,
+            attribute: attrValue,
+            search_query: searchQuery,
+            web_search_success: webSearchSuccess,
+            url_visited: urlVisited,
+            web_visit_success: webVisitSuccess,
+            snippets,
+            attribute_found: attributeFound,
+            evidence_strength: evidenceStrength,
+          });
+
+          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": found=${attributeFound} strength=${evidenceStrength} snippets=${snippets.length}`);
+        }
+      }
+
+      const totalVerified = attrVerificationResults.filter(r => r.attribute_found).length;
+      const totalChecked = attrVerificationResults.length;
+      const strongEvidence = attrVerificationResults.filter(r => r.evidence_strength === 'strong').length;
+      const leadsWithAttr = new Set(attrVerificationResults.filter(r => r.attribute_found).map(r => r.lead_place_id)).size;
+
+      const attrVerifArtefact = await createArtefact({
+        runId: chatRunId,
+        type: 'attribute_verification',
+        title: `Attribute verification: ${totalVerified}/${totalChecked} checks found evidence for "${attrLabel}"`,
+        summary: `${leadsWithAttr} of ${finalLeads.length} leads show evidence of "${attrLabel}" (${strongEvidence} strong, ${totalVerified - strongEvidence} weak)`,
+        payload: {
+          run_id: chatRunId,
+          attributes_checked: attrValues,
+          candidates_checked: finalLeads.length,
+          total_checks: totalChecked,
+          checks_with_evidence: totalVerified,
+          strong_evidence: strongEvidence,
+          leads_with_attribute: leadsWithAttr,
+          results: attrVerificationResults,
+        },
+        userId: task.user_id,
+        conversationId,
+      });
+      console.log(`[ATTR_VERIFY] artefact id=${attrVerifArtefact.id} — ${leadsWithAttr}/${finalLeads.length} leads verified, ${strongEvidence} strong evidence`);
+
+      try {
+        const attrTowerObs = await judgeArtefact({
+          artefact: attrVerifArtefact,
+          runId: chatRunId,
+          goal,
+          userId: task.user_id,
+          conversationId,
+        });
+
+        await createArtefact({
+          runId: chatRunId,
+          type: 'tower_judgement',
+          title: `Tower Judgement: ${attrTowerObs.judgement.verdict} (attribute verification)`,
+          summary: `Attribute verification verdict=${attrTowerObs.judgement.verdict} action=${attrTowerObs.judgement.action} | ${leadsWithAttr}/${finalLeads.length} leads with "${attrLabel}"`,
+          payload: {
+            verdict: attrTowerObs.judgement.verdict,
+            action: attrTowerObs.judgement.action,
+            reasons: attrTowerObs.judgement.reasons,
+            metrics: attrTowerObs.judgement.metrics,
+            judged_artefact_id: attrVerifArtefact.id,
+            stubbed: attrTowerObs.stubbed,
+            phase: 'attribute_verification',
+          },
+          userId: task.user_id,
+          conversationId,
+        });
+        console.log(`[ATTR_VERIFY] Tower verdict=${attrTowerObs.judgement.verdict} action=${attrTowerObs.judgement.action}`);
+
+        await logAFREvent({
+          userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+          actionTaken: 'attribute_verification_completed', status: 'success',
+          taskGenerated: `Attribute verification: ${leadsWithAttr}/${finalLeads.length} leads verified for "${attrLabel}" — Tower verdict: ${attrTowerObs.judgement.verdict}`,
+          runType: 'plan',
+          metadata: {
+            attributes: attrValues,
+            leads_with_attribute: leadsWithAttr,
+            total_leads: finalLeads.length,
+            strong_evidence: strongEvidence,
+            tower_verdict: attrTowerObs.judgement.verdict,
+            tower_action: attrTowerObs.judgement.action,
+          },
+        });
+      } catch (attrTowerErr: any) {
+        console.warn(`[ATTR_VERIFY] Tower judgement failed (non-fatal): ${attrTowerErr.message}`);
+      }
+
+      if (leadsWithAttr === 0 || totalVerified === 0) {
+        console.log(`[ATTR_VERIFY] No leads verified for hard attribute "${attrLabel}" — terminating with UNVERIFIABLE_HARD_CONSTRAINT`);
+        attributeVerificationStopped = true;
+
+        const terminalArtefact = await createArtefact({
+          runId: chatRunId,
+          type: 'terminal',
+          title: `Run halted: unverifiable hard constraint "${attrLabel}"`,
+          summary: `Attribute verification found 0/${finalLeads.length} leads with "${attrLabel}". Hard constraint cannot be satisfied — stopping before quantity replans.`,
+          payload: {
+            reason: 'unverifiable_hard_constraint',
+            attribute: attrLabel,
+            original_user_goal: originalUserGoal,
+            candidates_checked: finalLeads.length,
+            leads_with_attribute: 0,
+            verification_artefact_id: attrVerifArtefact.id,
+          },
+          userId: task.user_id,
+          conversationId,
+        });
+        console.log(`[ATTR_VERIFY] Terminal artefact id=${terminalArtefact.id}`);
+
+        finalVerdict = 'stop';
+        finalAction = 'stop';
+        finalTowerResult = {
+          ...finalTowerResult,
+          shouldStop: true,
+          judgement: {
+            ...finalTowerResult.judgement,
+            verdict: 'stop',
+            action: 'stop',
+          },
+        };
+      }
+    }
+
     // 12a. Local safety net: if Tower said stop/fail but we have unused replan budget,
     //      a quantifiable shortfall, and expandable soft constraints → override to change_plan
-    if (finalAction !== 'change_plan' && !usedStub && replansUsed < MAX_REPLANS) {
+    if (!attributeVerificationStopped && finalAction !== 'change_plan' && !usedStub && replansUsed < MAX_REPLANS) {
       const delivered = finalLeads.length;
       const target = userRequestedCountFinal ?? requestedCount;
       const hasShortfall = delivered < target;
@@ -2056,7 +2288,7 @@ class SupervisorService {
       }
     }
 
-    while (finalAction === 'change_plan' && !usedStub) {
+    while (finalAction === 'change_plan' && !usedStub && !attributeVerificationStopped) {
       if (replansUsed >= MAX_REPLANS) {
         console.log(`[REPLAN] max_replans_exceeded — replans_used=${replansUsed} MAX_REPLANS=${MAX_REPLANS} plan_version=${planVersion}`);
 
@@ -2902,16 +3134,19 @@ class SupervisorService {
       console.log(`[TOWER_LOOP_CHAT] CVL override detected: Tower passed but CVL downgraded to stop (hard-unverifiable constraints). isHalted=${isHalted}`);
     }
     if (isHalted) {
+      const haltReason = attributeVerificationStopped ? 'unverifiable_hard_constraint' : undefined;
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'run_halted', status: 'failed',
-        taskGenerated: `Tower loop chat halted: verdict=${finalVerdict} action=${finalAction} plan_version=${planVersion}`,
+        taskGenerated: attributeVerificationStopped
+          ? `Run halted: unverifiable hard constraint — attribute verification found no evidence. verdict=${finalVerdict}`
+          : `Tower loop chat halted: verdict=${finalVerdict} action=${finalAction} plan_version=${planVersion}`,
         runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed, ...(haltReason ? { halt_reason: haltReason } : {}) },
       });
-      console.log(`[TOWER_LOOP_CHAT] [run_halted] verdict=${finalVerdict} plan_version=${planVersion} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads}`);
+      console.log(`[TOWER_LOOP_CHAT] [run_halted] verdict=${finalVerdict} plan_version=${planVersion} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads}${haltReason ? ` halt_reason=${haltReason}` : ''}`);
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: true, plan_version: planVersion, replans_used: replansUsed } });
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: true, plan_version: planVersion, replans_used: replansUsed, ...(haltReason ? { halt_reason: haltReason } : {}) } });
     } else {
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
