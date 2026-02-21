@@ -213,11 +213,19 @@ const UK_PHONE_RE = /(?:\+44\s?|0)\d[\d\s]{8,12}\d/g;
 const INTL_PHONE_RE = /\+\d[\d\s\-]{7,15}\d/g;
 const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
 
+function normalisePhone(raw: string): string {
+  let digits = raw.replace(/[\s\-]/g, "");
+  if (digits.startsWith("+44")) {
+    digits = "0" + digits.substring(3);
+  }
+  return digits;
+}
+
 function extractPhonesFromText(text: string): string[] {
   const ukMatches = text.match(UK_PHONE_RE) ?? [];
   const intlMatches = text.match(INTL_PHONE_RE) ?? [];
   const all = [...ukMatches, ...intlMatches];
-  const normalised = all.map((p) => p.replace(/[\s\-]/g, ""));
+  const normalised = all.map(normalisePhone);
   return Array.from(new Set(normalised));
 }
 
@@ -548,7 +556,7 @@ export function executeLeadEnrich(
     }
   }
 
-  notes.push(`web_search_phone_candidates: ${wsPhoneCandidates}, web_search_phone_selected: ${wsPhoneSelected}`);
+  notes.push(`web_search_phone_hits=${wsPhoneCandidates}, web_search_phone_selected=${wsPhoneSelected}`);
 
   for (const [value, data] of Array.from(emailMap.entries())) {
     contacts.emails.push(buildContactEntry(value, data));

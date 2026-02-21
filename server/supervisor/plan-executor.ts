@@ -454,6 +454,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   const leadsMap = new Map<string, Record<string, unknown>>();
   const leadsFilters: Record<string, string> = {};
   const toolTracker = createRunToolTracker();
+  const accumulatedStepData: Record<string, Record<string, unknown>> = {};
 
   const successCriteria: TowerSuccessCriteria = { ...LEADGEN_SUCCESS_DEFAULTS };
   const runSummary = createRunSummary();
@@ -481,6 +482,25 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       const isSearchPlaces = stepType === 'SEARCH_PLACES';
 
       let currentStepArgs = step.toolArgs || toolMetadata?.toolArgs || {};
+
+      if (stepType === 'LEAD_ENRICH') {
+        const merged = { ...currentStepArgs };
+        if (accumulatedStepData['WEB_SEARCH'] && !merged.web_search) {
+          merged.web_search = accumulatedStepData['WEB_SEARCH'];
+        }
+        if (accumulatedStepData['SEARCH_PLACES'] && !merged.places_lead) {
+          merged.places_lead = accumulatedStepData['SEARCH_PLACES'];
+        }
+        if (accumulatedStepData['WEB_VISIT'] && !merged.web_visit_pages) {
+          merged.web_visit_pages = accumulatedStepData['WEB_VISIT'];
+        }
+        if (accumulatedStepData['CONTACT_EXTRACT'] && !merged.contact_extract) {
+          merged.contact_extract = accumulatedStepData['CONTACT_EXTRACT'];
+        }
+        currentStepArgs = merged;
+        console.log(`[PLAN_EXECUTOR] LEAD_ENRICH injected accumulated data: web_search=${!!merged.web_search} places_lead=${!!merged.places_lead} web_visit_pages=${!!merged.web_visit_pages} contact_extract=${!!merged.contact_extract}`);
+      }
+
       let stepRetryCount = 0;
       let stepCompleted = false;
 
@@ -682,6 +702,36 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           ?? 0;
 
         updateRunSummary(runSummary, { success: true, leadsFound, costUnits: 0.25, validLeads: leadsFound });
+
+        if (result.data) {
+          if (stepType === 'WEB_SEARCH') {
+            const env = (result.data as any).envelope;
+            if (env?.outputs?.results || env?.results) {
+              accumulatedStepData['WEB_SEARCH'] = {
+                results: env.outputs?.results ?? env.results ?? [],
+                outputs: env.outputs ?? {},
+              };
+              console.log(`[PLAN_EXECUTOR] Accumulated WEB_SEARCH results (${((env.outputs?.results ?? env.results) || []).length} items)`);
+            }
+          } else if (stepType === 'SEARCH_PLACES') {
+            const places = (result.data as any).places;
+            if (Array.isArray(places) && places.length > 0) {
+              accumulatedStepData['SEARCH_PLACES'] = places[0];
+            }
+          } else if (stepType === 'WEB_VISIT') {
+            const env = (result.data as any).envelope;
+            const pages = env?.outputs?.pages ?? [];
+            if (Array.isArray(pages) && pages.length > 0) {
+              (accumulatedStepData as any)['WEB_VISIT'] = pages;
+            }
+          } else if (stepType === 'CONTACT_EXTRACT') {
+            const env = (result.data as any).envelope;
+            const contacts = env?.outputs?.contacts ?? env?.outputs ?? null;
+            if (contacts) {
+              accumulatedStepData['CONTACT_EXTRACT'] = contacts;
+            }
+          }
+        }
 
         console.log(`[PLAN_EXECUTOR] Step ${i + 1} execution succeeded: ${result.summary}`);
 

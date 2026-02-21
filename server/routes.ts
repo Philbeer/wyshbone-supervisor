@@ -1304,6 +1304,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 web_visit_pages: inputs.web_visit_pages ?? null,
                 contact_extract: inputs.contact_extract ?? null,
                 ask_lead_question_result: inputs.ask_lead_question_result ?? null,
+                web_search: inputs.web_search ?? null,
               },
               run_id,
               goal_id,
