@@ -17,9 +17,16 @@ interface LeadIdentity {
   phone?: string;
 }
 
+interface ContactEntry {
+  value: string;
+  verified: boolean;
+  evidence: EvidenceItem[];
+  source_type: "official_site" | "places" | "directory" | "unknown";
+}
+
 interface LeadContacts {
-  emails: string[];
-  phones: string[];
+  emails: ContactEntry[];
+  phones: ContactEntry[];
   social?: {
     facebook?: string;
     instagram?: string;
@@ -121,6 +128,23 @@ const BOOKING_KEYWORDS = [
   "book a table", "book online", "opentable", "resdiary",
   "designmynight",
 ];
+
+function normaliseDomain(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return u.hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return raw.toLowerCase();
+  }
+}
+
+function isOfficialSitePage(
+  pageUrl: string,
+  officialWebsite: string | undefined,
+): boolean {
+  if (!officialWebsite) return false;
+  return normaliseDomain(pageUrl) === normaliseDomain(officialWebsite);
+}
 
 function detectSignal(
   keywords: string[],
@@ -282,6 +306,54 @@ export function executeLeadEnrich(
     notes.push(`${pages.length} page(s) crawled from website`);
   }
 
+  const officialWebsite = place?.website;
+
+  interface ContactTracking {
+    evidenceItems: EvidenceItem[];
+    nonOfficialWebDomains: Set<string>;
+    onOfficialSite: boolean;
+    fromPlaces: boolean;
+  }
+
+  const emailMap = new Map<string, ContactTracking>();
+  const phoneMap = new Map<string, ContactTracking>();
+
+  function trackContactEntry(
+    map: Map<string, ContactTracking>,
+    value: string,
+    ev: EvidenceItem,
+    sourceUrl: string,
+    isPlacesSource: boolean,
+  ) {
+    if (!map.has(value)) {
+      map.set(value, { evidenceItems: [], nonOfficialWebDomains: new Set(), onOfficialSite: false, fromPlaces: false });
+    }
+    const entry = map.get(value)!;
+    entry.evidenceItems.push(ev);
+
+    if (isPlacesSource) {
+      entry.fromPlaces = true;
+    } else if (isOfficialSitePage(sourceUrl, officialWebsite)) {
+      entry.onOfficialSite = true;
+    } else {
+      entry.nonOfficialWebDomains.add(normaliseDomain(sourceUrl));
+    }
+  }
+
+  function buildContactEntry(
+    value: string,
+    data: ContactTracking,
+  ): ContactEntry {
+    if (data.onOfficialSite) {
+      return { value, verified: true, evidence: data.evidenceItems, source_type: "official_site" };
+    }
+    if (data.nonOfficialWebDomains.size >= 2) {
+      return { value, verified: true, evidence: data.evidenceItems, source_type: "directory" };
+    }
+    const sourceType = data.fromPlaces ? "places" as const : "unknown" as const;
+    return { value, verified: false, evidence: data.evidenceItems, source_type: sourceType };
+  }
+
   const contacts: LeadContacts = {
     emails: [],
     phones: [],
@@ -291,28 +363,31 @@ export function executeLeadEnrich(
     usedSources.push("directory");
     const c = contactData.contacts;
     if (c.emails?.length) {
-      contacts.emails = [...c.emails];
       for (const email of c.emails) {
-        evidence.push({
+        const sourceUrl = c.contact_page_url ?? pages[0]?.url ?? "unknown";
+        const ev: EvidenceItem = {
           source_type: "website",
-          source_url: c.contact_page_url ?? pages[0]?.url ?? "unknown",
+          source_url: sourceUrl,
           captured_at: new Date().toISOString(),
           quote: `Email: ${email}`,
           field_supported: "contacts.emails",
-        });
+        };
+        evidence.push(ev);
+        trackContactEntry(emailMap, email, ev, sourceUrl, false);
       }
     }
     if (c.phones?.length) {
-      contacts.phones = [...c.phones];
       const phoneSource = c.contact_page_url ?? pages[0]?.url ?? "unknown";
       for (const phone of c.phones) {
-        evidence.push({
+        const ev: EvidenceItem = {
           source_type: "website",
           source_url: phoneSource,
           captured_at: new Date().toISOString(),
           quote: `Phone: ${phone}`,
           field_supported: "contacts.phones",
-        });
+        };
+        evidence.push(ev);
+        trackContactEntry(phoneMap, phone, ev, phoneSource, false);
       }
     }
     if (c.social && Object.keys(c.social).length > 0) {
@@ -365,15 +440,25 @@ export function executeLeadEnrich(
     }
   }
 
-  if (place?.phone && !contacts.phones.includes(place.phone)) {
-    contacts.phones.unshift(place.phone);
-    evidence.push({
+  if (place?.phone) {
+    const existingPhone = phoneMap.get(place.phone);
+    const placesUrl = `https://maps.google.com/?cid=${place.place_id ?? "unknown"}`;
+    const ev: EvidenceItem = {
       source_type: "places",
-      source_url: `https://maps.google.com/?cid=${place.place_id ?? "unknown"}`,
+      source_url: placesUrl,
       captured_at: new Date().toISOString(),
       quote: `Phone from Places: ${place.phone}`,
       field_supported: "contacts.phones",
-    });
+    };
+    evidence.push(ev);
+    trackContactEntry(phoneMap, place.phone, ev, placesUrl, true);
+  }
+
+  for (const [value, data] of Array.from(emailMap.entries())) {
+    contacts.emails.push(buildContactEntry(value, data));
+  }
+  for (const [value, data] of Array.from(phoneMap.entries())) {
+    contacts.phones.push(buildContactEntry(value, data));
   }
 
   const placeTypes = place?.types ?? [];
