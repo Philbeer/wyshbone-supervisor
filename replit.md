@@ -97,6 +97,17 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Registry**: Category `enrich`. Artefact type: `ask_lead_question_result`.
 - Orchestrates WEB_VISIT (direct) and WEB_SEARCH + WEB_VISIT (fallback) to answer user-specified lead questions. Extracts facts via keyword matching. Verdict: answered / unknown / needs_manual_check.
 
+### Attribute Verification Gate (Feb 2026)
+- **Module**: Inline in `server/supervisor.ts` within `executeTowerLoopChat`.
+- **Trigger**: Fires after v1 SEARCH_PLACES + Tower judgement + accumulation, before safety-net override and replan loop.
+- **Condition**: Only when hard `HAS_ATTRIBUTE` constraints exist (e.g., "live music", "beer garden") and leads were found.
+- **Flow**: Runs WEB_SEARCH per lead per attribute → optional WEB_VISIT on strongest URL → writes `attribute_verification` artefact → submits to Tower.
+- **Evidence strength**: `strong` (WEB_VISIT confirms), `weak` (WEB_SEARCH snippet only), `none`.
+- **Early termination**: If zero leads show evidence → `unverifiable_hard_constraint` stop reason, skips replan loop entirely.
+- **Guards**: Safety-net override and replan loop both gated by `!attributeVerificationStopped`.
+- **Non-regression**: Pure Places-only queries (no HAS_ATTRIBUTE) bypass the gate entirely.
+- **Artefact types**: `attribute_verification`, terminal artefact with `reason: unverifiable_hard_constraint`.
+
 ### Tool Planning Policy (Feb 2026)
 - **Module**: `server/supervisor/tool-planning-policy.ts` — deterministic tool ordering rules.
 - **Primary path**: Google Places → WEB_VISIT → CONTACT_EXTRACT → LEAD_ENRICH (when website exists).
