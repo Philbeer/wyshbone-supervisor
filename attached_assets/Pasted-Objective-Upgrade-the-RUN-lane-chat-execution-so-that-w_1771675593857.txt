@@ -1,0 +1,97 @@
+Objective
+Upgrade the RUN lane chat execution so that when a supervisor_task is processed, the Supervisor can execute multi tool plans using the existing plan executor / action executor pipeline, instead of only SEARCH_PLACES inside executeTowerLoopChat().
+
+Hard constraints
+
+Do NOT change the UI.
+
+Do NOT change the chat vs non-chat fork in /api/chat.
+
+Do NOT remove existing leadgen behaviour. Preserve it as Template A.
+
+Do NOT introduce a freeform LLM planner that invents steps. Tool selection must be deterministic based on parsed constraints and CVL capability.
+
+Use the existing tool implementations (WEB_SEARCH, WEB_VISIT, ASK_LEAD_QUESTION, CONTACT_EXTRACT, LEAD_ENRICH) as they are today.
+
+Tower remains judge-only; Supervisor must enforce Tower outcomes in the RUN lane loop.
+
+Current reality to respect (from code)
+
+Supervisor polls supervisor_tasks and dispatches to processChatTask().
+
+executeTowerLoopChat() currently parses constraints and runs SEARCH_PLACES only, with replans.
+
+Multi tool sequences exist via plan-executor.ts (POST /api/supervisor/execute-plan) and its action executor.
+
+Deliverable
+Make executeTowerLoopChat() build a plan and execute it using the plan executor in-process (import and call), producing the same artefacts the UI already renders. Implement 3 deterministic plan templates:
+
+Template A (Places-only list search)
+
+Use when constraints are satisfiable by Places (location, category/type, name contains/starts, count).
+Steps: SEARCH_PLACES
+
+Template C (Ask lead question)
+
+Use when the user message is a direct question about a single known business (phone/email/owner/opening times/booking link etc).
+Steps: WEB_SEARCH -> WEB_VISIT (official site preferred) -> ASK_LEAD_QUESTION
+Must return: ask_lead_question_result + evidence, with verdict answered|unknown|needs_manual_check and capped confidence.
+
+Template B (Places + attribute verification)
+
+Use when CVL capability check marks an attribute constraint as not verifiable by Places (eg live music, quiz night, dog friendly).
+Steps: SEARCH_PLACES (candidate budget > requested) -> WEB_SEARCH per top N candidates -> optional WEB_VISIT for best sources -> write verification_summary/evidence -> filter results
+For HARD attributes: only verified_exact count qualifies, unknown does NOT count.
+For SOFT attributes: unknown may be included but must be labeled.
+
+Planning policy
+Add a new module, eg server/supervisor/chat-planning-policy.ts, that:
+
+takes parsed constraints + capability check output + user message
+
+chooses template A/B/C deterministically
+
+returns a Plan object (the same shape used by the plan executor)
+
+sets budgets: candidate_budget, max_candidates_to_verify, max_web_visits_total
+
+Execution
+
+Refactor executeTowerLoopChat() to:
+
+parse constraints + capability check (existing)
+
+build Plan v1 via chat-planning-policy
+
+execute plan via plan executor (call the executor function directly, do not HTTP call yourself)
+
+after each step, write step_result artefact and call Tower judge-artefact
+
+enforce Tower outcomes: ACCEPT continues, CHANGE_PLAN triggers replan v2 within MAX_REPLANS, STOP terminates run with truthful delivery_summary
+
+Preserve existing radius/query replan logic but adapt it to template-specific replans:
+
+Template A: expand radius / broaden query
+
+Template B: increase candidate budget or verification budget
+
+Template C: increase evidence gathering (search terms, extra sources) but respect budgets
+
+Truth alignment rule
+If Tower STOPs due to unverifiable HARD attribute or evidence failure, delivery_summary must show STOP/FAIL and must not claim PASS based on raw leads_list count.
+
+Acceptance tests
+
+“Find 4 pubs in Arundel with swan in the name” routes to Template A and still works.
+
+“For The Dolphin Inn in Chichester, what is the phone number and where did you find it? If you can’t verify it, say unknown.” routes to Template C and produces ask_lead_question_result with evidence.
+
+“Find 4 pubs in Arundel with swan in the name that do live music.” routes to Template B and attempts verification; if unverifiable it must stop or mark unknown correctly without overclaiming.
+
+Output required from you
+
+Implement the code changes.
+
+Show the exact files modified and a short summary of what changed.
+
+Ensure TypeScript builds/tests pass.
