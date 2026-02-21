@@ -432,7 +432,7 @@ export function executeLeadEnrich(
   confidenceScore += verifiedSignalCount * 0.05;
   confidenceScore = Math.min(1, confidenceScore);
 
-  const outputs: LeadPackOutput = {
+  const leadPack: LeadPackOutput = {
     identity,
     contacts,
     signals,
@@ -453,7 +453,7 @@ export function executeLeadEnrich(
       has_question: !!qlResult,
       entity_name: place?.name ?? null,
     },
-    outputs: outputs as unknown as Record<string, unknown>,
+    outputs: { lead_pack: leadPack } as unknown as Record<string, unknown>,
     evidence,
     confidence: confidenceScore,
   });

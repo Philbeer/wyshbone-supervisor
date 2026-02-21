@@ -622,8 +622,8 @@ async function executeLeadEnrichAction(
 
   const envelope = executeLeadEnrich(input, runId || `enrich-${Date.now()}`, undefined);
 
-  const identity = (envelope.outputs as any)?.identity;
-  const confidence = (envelope.outputs as any)?.confidence ?? 0;
+  const identity = (envelope.outputs as any)?.lead_pack?.identity;
+  const confidence = (envelope.outputs as any)?.lead_pack?.confidence ?? 0;
   const entityName = identity?.name ?? 'Unknown';
 
   if (runId) {
