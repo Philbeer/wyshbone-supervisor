@@ -347,6 +347,7 @@ export function executeLeadEnrich(
     nonOfficialWebDomains: Set<string>;
     onOfficialSite: boolean;
     fromPlaces: boolean;
+    fromWebSearch: boolean;
   }
 
   const emailMap = new Map<string, ContactTracking>();
@@ -360,7 +361,7 @@ export function executeLeadEnrich(
     isPlacesSource: boolean,
   ) {
     if (!map.has(value)) {
-      map.set(value, { evidenceItems: [], nonOfficialWebDomains: new Set(), onOfficialSite: false, fromPlaces: false });
+      map.set(value, { evidenceItems: [], nonOfficialWebDomains: new Set(), onOfficialSite: false, fromPlaces: false, fromWebSearch: false });
     }
     const entry = map.get(value)!;
     entry.evidenceItems.push(ev);
@@ -383,6 +384,9 @@ export function executeLeadEnrich(
     }
     if (data.nonOfficialWebDomains.size >= 2) {
       return { value, verified: true, evidence: data.evidenceItems, source_type: "directory" };
+    }
+    if (data.fromWebSearch) {
+      return { value, verified: false, evidence: data.evidenceItems, source_type: "directory" };
     }
     const sourceType = data.fromPlaces ? "places" as const : "unknown" as const;
     return { value, verified: false, evidence: data.evidenceItems, source_type: sourceType };
@@ -488,55 +492,63 @@ export function executeLeadEnrich(
   }
 
   const searchResults = getWebSearchResults(input.web_search);
+  let wsPhoneCandidates = 0;
+  let wsPhoneSelected = 0;
   if (searchResults.length > 0) {
-    const phonesAlreadyHaveOfficialOrExtracted = Array.from(phoneMap.values()).some((t) => t.onOfficialSite);
-    const emailsAlreadyHaveOfficialOrExtracted = Array.from(emailMap.values()).some((t) => t.onOfficialSite);
+    if (!usedSources.includes("directory")) {
+      usedSources.push("directory");
+    }
 
     for (const result of searchResults) {
-      if (!result.url || !result.snippet) continue;
-      const textToScan = `${result.title ?? ""} ${result.snippet}`;
+      const snippet = result.snippet ?? "";
+      const title = result.title ?? "";
+      if (!result.url || (!snippet && !title)) continue;
+      const textToScan = `${title} ${snippet}`;
       const phones = extractPhonesFromText(textToScan);
       const emails = extractEmailsFromText(textToScan);
       const now = new Date().toISOString();
 
+      wsPhoneCandidates += phones.length;
+
       for (const phone of phones) {
-        if (phonesAlreadyHaveOfficialOrExtracted && phoneMap.has(phone) && phoneMap.get(phone)!.onOfficialSite) continue;
-        const snippetFragment = result.snippet!.length > 200 ? result.snippet!.substring(0, 200) + "…" : result.snippet!;
+        if (phoneMap.has(phone) && phoneMap.get(phone)!.onOfficialSite) continue;
+        const snippetFragment = snippet.length > 200 ? snippet.substring(0, 200) + "…" : snippet;
         const ev: EvidenceItem = {
           source_type: "search_result",
           source_url: result.url,
           captured_at: now,
-          quote: `Phone "${phone}" found in search snippet: ${snippetFragment}`,
+          quote: `Phone "${phone}" in snippet: ${snippetFragment}`,
           field_supported: "contacts.phones",
         };
         evidence.push(ev);
         trackContactEntry(phoneMap, phone, ev, result.url, false);
+        phoneMap.get(phone)!.fromWebSearch = true;
       }
 
       for (const email of emails) {
-        if (emailsAlreadyHaveOfficialOrExtracted && emailMap.has(email) && emailMap.get(email)!.onOfficialSite) continue;
-        const snippetFragment = result.snippet!.length > 200 ? result.snippet!.substring(0, 200) + "…" : result.snippet!;
+        if (emailMap.has(email) && emailMap.get(email)!.onOfficialSite) continue;
+        const snippetFragment = snippet.length > 200 ? snippet.substring(0, 200) + "…" : snippet;
         const ev: EvidenceItem = {
           source_type: "search_result",
           source_url: result.url,
           captured_at: now,
-          quote: `Email "${email}" found in search snippet: ${snippetFragment}`,
+          quote: `Email "${email}" in snippet: ${snippetFragment}`,
           field_supported: "contacts.emails",
         };
         evidence.push(ev);
         trackContactEntry(emailMap, email, ev, result.url, false);
+        emailMap.get(email)!.fromWebSearch = true;
       }
     }
 
-    if (searchResults.length > 0 && !usedSources.includes("directory")) {
-      usedSources.push("directory");
-    }
-    const phonesFromSearch = Array.from(phoneMap.values()).filter((t) => t.nonOfficialWebDomains.size > 0).length;
-    const emailsFromSearch = Array.from(emailMap.values()).filter((t) => t.nonOfficialWebDomains.size > 0).length;
-    if (phonesFromSearch > 0 || emailsFromSearch > 0) {
-      notes.push(`Extracted ${phonesFromSearch} phone(s), ${emailsFromSearch} email(s) from ${searchResults.length} web search snippet(s)`);
+    wsPhoneSelected = Array.from(phoneMap.values()).filter((t) => t.fromWebSearch).length;
+    const emailsFromSearch = Array.from(emailMap.values()).filter((t) => t.fromWebSearch).length;
+    if (wsPhoneSelected > 0 || emailsFromSearch > 0) {
+      notes.push(`Extracted ${wsPhoneSelected} phone(s), ${emailsFromSearch} email(s) from ${searchResults.length} web search snippet(s)`);
     }
   }
+
+  notes.push(`web_search_phone_candidates: ${wsPhoneCandidates}, web_search_phone_selected: ${wsPhoneSelected}`);
 
   for (const [value, data] of Array.from(emailMap.entries())) {
     contacts.emails.push(buildContactEntry(value, data));
@@ -653,6 +665,8 @@ export function executeLeadEnrich(
       has_pages: pages.length > 0,
       has_contacts: !!contactData,
       has_question: !!qlResult,
+      has_web_search: searchResults.length > 0,
+      web_search_result_count: searchResults.length,
       entity_name: place?.name ?? null,
     },
     outputs: { lead_pack: leadPack } as unknown as Record<string, unknown>,
