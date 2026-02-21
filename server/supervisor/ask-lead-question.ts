@@ -100,9 +100,19 @@ function extractRelevantFacts(
   return facts;
 }
 
+function normaliseUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return u.hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return raw.toLowerCase();
+  }
+}
+
 function determineVerdict(
   facts: KeyFact[],
   pages: CollectedPage[],
+  leadWebsite?: string,
 ): { verdict: "answered" | "unknown" | "needs_manual_check"; confidence: number } {
   if (facts.length === 0 && pages.length === 0) {
     return { verdict: "unknown", confidence: 0 };
@@ -112,15 +122,28 @@ function determineVerdict(
     return { verdict: "needs_manual_check", confidence: 0.2 };
   }
 
-  if (facts.length === 1) {
-    return { verdict: "answered", confidence: 0.5 };
+  const DEFAULT_CAP = 0.85;
+  const ELEVATED_CAP = 0.95;
+
+  const base = facts.length === 1 ? 0.5 : 0.5 + facts.length * 0.1;
+
+  const officialDomain = leadWebsite ? normaliseUrl(leadWebsite) : null;
+
+  let hasIndependentCorroboration = false;
+  if (officialDomain !== null && facts.length >= 2) {
+    const hasOfficialFact = facts.some(
+      (f) => normaliseUrl(f.evidence_url) === officialDomain,
+    );
+    const hasNonOfficialFact = facts.some(
+      (f) => normaliseUrl(f.evidence_url) !== officialDomain,
+    );
+    hasIndependentCorroboration = hasOfficialFact && hasNonOfficialFact;
   }
 
-  if (facts.length >= 2) {
-    return { verdict: "answered", confidence: Math.min(1, 0.5 + facts.length * 0.1) };
-  }
+  const cap = hasIndependentCorroboration ? ELEVATED_CAP : DEFAULT_CAP;
+  const confidence = Math.min(cap, base);
 
-  return { verdict: "unknown", confidence: 0 };
+  return { verdict: "answered", confidence };
 }
 
 function buildAnswerText(
@@ -319,7 +342,7 @@ export async function executeAskLeadQuestion(
   }
 
   const allFacts = extractRelevantFacts(collectedPages, intentQuestion, evidenceQuery);
-  const { verdict, confidence } = determineVerdict(allFacts, collectedPages);
+  const { verdict, confidence } = determineVerdict(allFacts, collectedPages, lead.website);
 
   for (const fact of allFacts) {
     evidence.push({
