@@ -26,6 +26,7 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **ID Normalization**: `run_id` serves as the canonical ID for all artefacts.
 - **Intent Classification**: `LEAD_FIND` intent routes messages with lead-finding verbs, business types, and locations to `SEARCH_PLACES`. `DEEP_RESEARCH` requires explicit keywords.
 - **Plan Execution**: Calls Tower via `judgeArtefact` after every step, with a bounded retry/replan inner loop allowing for various verdicts.
+- **Two-Phase Multi-Tool Execution**: `executeTowerLoopChat` uses a two-phase approach: (1) Discovery phase runs SEARCH_PLACES via `executeAction`; (2) Enrichment phase builds a tool plan from actual lead data using `buildToolPlan`, then executes WEB_VISIT → CONTACT_EXTRACT → LEAD_ENRICH for leads with websites, with WEB_SEARCH fallback for leads without websites. Enrichment limited to `ENRICHMENT_BATCH_SIZE` (default 5) leads. Stable lead indices (`_idx`) ensure consistent data keying across phases. Replan loop applies the same two-phase pattern.
 - **RESTful API**: Manages leads, user context, signals, and plan execution, including endpoints for plan creation, approval, and progress monitoring.
 - **Supervisor APIs**: Executes plans, manages background jobs, and polls deep research runs.
 - **Database Schema**: Supports users, signals, suggested leads, plan executions, and plans.
