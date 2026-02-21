@@ -41,7 +41,8 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Partial Accumulation Across Replans**: Distinguishes between `accumulated_total_unique` and `accumulated_matching` leads, using the latter for early stop decisions.
 - **LLM-backed Goal-to-Constraints Parser**: Converts natural language user goals into structured constraints with hard/soft classification using LLMs and strict JSON schema validation.
 - **Factory Simulator Demo**: A deterministic injection-moulding simulation tool for testing agent decision-making.
-- **Canonical Delivery Summary**: `delivery_summary` now emits a canonical `status` field (PASS/PARTIAL/STOP) derived from Tower verdict + CVL verified counts.
+- **Canonical Delivery Summary**: `delivery_summary` now emits a canonical `status` field (PASS/PARTIAL/STOP) derived from Tower verdict + CVL verified counts. `delivery_summary` is the sole authoritative user-facing output for RUN lane lead-finder missions.
+- **Supervisor Message Guard**: RUN lane lead-finder runs write only a neutral `"Run complete. Results are available."` message to the chat transcript. A `sanitizeSupervisorMessage()` regression guard blocks any count-claiming text (e.g., "found 2 pubs") from reaching the messages table. Factory demo messages are not affected.
 - **Goal Ledger + Belief Store + Feedback Events**: New Supabase tables track user goals, store beliefs derived from failures, and log user feedback actions.
 - **Feedback Signal Logging**: Endpoints for accepting, retrying, abandoning goals, and logging export events.
 - **ToolResult Contract**: Shared types and helpers for tool results, evidence, and errors for consistent data exchange between tools and the supervisor.
