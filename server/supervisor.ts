@@ -22,6 +22,18 @@ import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput } from './supervisor/cvl';
 
+const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
+
+const SUPERVISOR_COUNT_CLAIM_RE = /\b(found|delivered|discovered|located|identified)\b.*?\b\d+\b/i;
+
+function sanitizeSupervisorMessage(msg: string): string {
+  if (SUPERVISOR_COUNT_CLAIM_RE.test(msg)) {
+    console.warn(`[SUPERVISOR_MSG_GUARD] Blocked count-claiming message: "${msg.substring(0, 120)}…"`);
+    return SUPERVISOR_NEUTRAL_MESSAGE;
+  }
+  return msg;
+}
+
 interface UserContext {
   userId: string;
   accountId?: string; // SUP-012: Account ID for multi-account isolation
@@ -615,7 +627,7 @@ class SupervisorService {
       });
       throw execErr;
     }
-    const response = towerResult.response;
+    const response = sanitizeSupervisorMessage(towerResult.response);
     const leadIds = towerResult.leadIds;
     const capabilities = ['lead_generation', 'tower_validated'];
 
@@ -631,7 +643,8 @@ class SupervisorService {
         metadata: {
           supervisor_task_id: task.id,
           capabilities,
-          lead_ids: leadIds
+          lead_ids: leadIds,
+          run_lane: true,
         },
         created_at: Date.now()
       })
@@ -1900,9 +1913,8 @@ class SupervisorService {
         await writeBeliefs({ runId: chatRunId, goalId, deliverySummary: errorDsPayload });
       } catch (bErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to write beliefs (non-fatal): ${bErr.message}`); }
 
-      const errorResponse = `I found ${leads.length} ${businessType!} prospects in ${city}, but Tower validation was unavailable. You can still view the results in your [dashboard](/leads).`;
       console.log(`[TOWER_LOOP_CHAT] [complete] leads=${leads.length} verdict=error (Tower unavailable)`);
-      return { response: errorResponse, leadIds: createdLeadIds };
+      return { response: SUPERVISOR_NEUTRAL_MESSAGE, leadIds: createdLeadIds };
     }
 
     const verdict = towerResult.judgement.verdict;
@@ -3267,27 +3279,7 @@ class SupervisorService {
       await writeBeliefs({ runId: chatRunId, goalId, deliverySummary: mainDsPayload });
     } catch (bErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to write beliefs (non-fatal): ${bErr.message}`); }
 
-    const planAdjustmentNote = planVersion > 1 ? ` after ${planVersion} search plan iterations` : '';
-    const matchingNote = hasNameConstraints && totalMatchingLeads !== totalUniqueLeads
-      ? ` (${totalMatchingLeads} matching your name criteria out of ${totalUniqueLeads} total found)`
-      : '';
-
-    const cvlHardUnverifiable = cvlVerification?.summary?.unverifiable_hard_constraints ?? [];
-    const cvlUnverifiableNote = cvlHardUnverifiable.length > 0
-      ? ` However, I couldn't verify ${cvlHardUnverifiable.map(u => `"${u.value}"`).join(', ')} from the search data alone — you'd need to check venue websites to confirm which ones actually have ${cvlHardUnverifiable.map(u => u.value).join('/')}.`
-      : '';
-
-    const cvlRan = cvlVerification !== null;
-    let chatResponse: string;
-    if (isHalted) {
-      chatResponse = cvlHardUnverifiable.length > 0
-        ? `I found ${finalLeads.length} ${finalConstraints.business_type} in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}, but I can't confirm which ones have ${cvlHardUnverifiable.map(u => u.value).join('/')} — that information isn't available in search results. Would you like me to check their websites, or would you like just the list of ${finalConstraints.business_type} without the ${cvlHardUnverifiable.map(u => u.value).join('/')} filter?`
-        : `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}, but the results didn't fully meet quality criteria (Tower verdict: ${finalVerdict}). You can still view what was found in your results. Would you like me to try a different search?`;
-    } else if (cvlRan) {
-      chatResponse = `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}, validated by our quality system.${cvlUnverifiableNote} View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
-    } else {
-      chatResponse = `I found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalAnnotations}${planAdjustmentNote}${matchingNote}. View your results in the [dashboard](/leads) to see detailed profiles and contact information.`;
-    }
+    const chatResponse = SUPERVISOR_NEUTRAL_MESSAGE;
 
     console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub}`);
 
