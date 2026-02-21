@@ -8,9 +8,10 @@ import { logAFREvent, logMissionReceived, logRunCompleted, logRouterDecision, lo
 import { createResearchProvider } from './supervisor/research-provider';
 import { createArtefact } from './supervisor/artefacts';
 import { initRunState, handleTowerVerdict, getRunState } from './supervisor/agent-loop';
-import { executeAction, type ActionResult as LoopActionResult } from './supervisor/action-executor';
+import { executeAction, createRunToolTracker, type ActionResult as LoopActionResult } from './supervisor/action-executor';
 import { generateJobId } from './supervisor/jobs';
 import { redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-executor';
+import { buildToolPlan, persistToolPlanExplainer, getOrderedToolNames, type LeadContext, type ToolStepId, type ToolPlanExplainer } from './supervisor/tool-planning-policy';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
 import { extractChangePlanDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, type PlanV2Constraints } from './supervisor/replan-policy';
 import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, type ParsedGoal, type StructuredConstraint } from './supervisor/goal-to-constraints';
@@ -1273,12 +1274,15 @@ class SupervisorService {
       console.error(`[TOWER_LOOP_CHAT] Failed to create goal (non-fatal): ${goalErr.message}`);
     }
 
-    // 2. Create Plan v1 artefact BEFORE any tool execution
-    const planSteps = [
+    // 2. Create initial discovery plan artefact (SEARCH_PLACES only; enrichment plan built after discovery)
+    const toolTracker = createRunToolTracker();
+
+    const discoveryPlanSteps = [
       {
         step_index: 0,
         step_id: 'search_places_v1',
         tool: 'SEARCH_PLACES',
+        phase: 'discovery',
         tool_args: { query: `${businessType} in ${city} ${country}`, location: city, country, maxResults: searchCount, target_count: userRequestedCountFinal },
         expected_output: `Up to ${searchCount} ${businessType} results from Google Places`,
         ...(postProcessing.length > 0 ? { post_processing: postProcessing.join('; ') } : {}),
@@ -1295,7 +1299,8 @@ class SupervisorService {
       structured_constraints: structuredConstraints,
       success_criteria: successCriteria,
       assumptions,
-      steps: planSteps,
+      steps: discoveryPlanSteps,
+      enrichment_deferred: true,
       requested_count_user: userRequestedCountFinal,
       search_budget_count: searchBudgetCount,
       name_filter: nameFilter || null,
@@ -1309,17 +1314,17 @@ class SupervisorService {
       runId: chatRunId,
       type: 'plan',
       title: artefactTitle('Plan v1:', displayCount, v1Constraints, 1),
-      summary: `Search${displayCount !== null ? ` ${displayCount}` : ''} ${businessType} in ${city} via Google Places${prefixFilter ? `, filter prefix "${prefixFilter}"` : ''}${nameFilterLabel}${attrFilterLabel}`,
+      summary: `Discovery: SEARCH_PLACES | ${businessType} in ${city}${prefixFilter ? `, prefix "${prefixFilter}"` : ''}${nameFilterLabel}${attrFilterLabel} (enrichment planned after discovery)`,
       payload: planPayload,
       userId: task.user_id,
       conversationId,
     });
-    console.log(`[TOWER_LOOP_CHAT] [plan_created] Plan v1 artefact id=${planArtefact.id}`);
+    console.log(`[TOWER_LOOP_CHAT] [plan_created] Plan v1 artefact id=${planArtefact.id} (discovery phase, enrichment deferred)`);
 
     await logAFREvent({
       userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
       actionTaken: 'artefact_created', status: 'success',
-      taskGenerated: `Plan v1 artefact created`,
+      taskGenerated: `Plan v1 artefact created (discovery phase)`,
       runType: 'plan',
       metadata: { artefactId: planArtefact.id, artefactType: 'plan', original_user_goal: originalUserGoal },
     });
@@ -1334,17 +1339,17 @@ class SupervisorService {
     });
     console.log(`[TOWER_LOOP_CHAT] [plan_execution_started] original_goal="${originalUserGoal}" normalized="${normalizedGoal}"`);
 
-    // 4. AFR: step_started
+    // 4. AFR: step_started (SEARCH_PLACES — step 1)
     await logAFREvent({
       userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
       actionTaken: 'step_started', status: 'pending',
-      taskGenerated: `Step 1/1: SEARCH_PLACES — ${businessType} in ${city}`,
+      taskGenerated: `Step 1: SEARCH_PLACES — ${businessType} in ${city}`,
       runType: 'plan',
       metadata: { step: 1, total_steps: 1, tool: 'SEARCH_PLACES', query: businessType, location: city },
     });
     console.log(`[TOWER_LOOP_CHAT] [step_started] step=1 tool=SEARCH_PLACES`);
 
-    // 4. Execute SEARCH_PLACES (Google Places) with stub fallback
+    // 4a. Execute SEARCH_PLACES via action-executor with stub fallback
     let leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string; source: string }> = [];
     let usedStub = false;
     const createdLeadIds: string[] = [];
@@ -1352,19 +1357,29 @@ class SupervisorService {
     let towerLoopStepError: string | undefined;
 
     try {
-      const businesses = await this.searchGooglePlaces(businessType, city, country, searchCount);
-      if (businesses && businesses.length > 0) {
-        for (const biz of businesses) {
+      const searchResult = await executeAction({
+        toolName: 'SEARCH_PLACES',
+        toolArgs: { query: businessType, location: city, country, maxResults: searchCount, target_count: userRequestedCountFinal },
+        userId: task.user_id,
+        tracker: toolTracker,
+        runId: chatRunId,
+        conversationId,
+        clientRequestId,
+      });
+
+      if (searchResult.success && searchResult.data?.places && Array.isArray(searchResult.data.places)) {
+        const places = searchResult.data.places as any[];
+        for (const p of places) {
           leads.push({
-            name: biz.displayName?.text || 'Unknown Business',
-            address: biz.formattedAddress || `${city}, ${country}`,
-            phone: biz.nationalPhoneNumber || biz.internationalPhoneNumber || null,
-            website: biz.websiteUri || null,
-            placeId: biz.id || '',
+            name: p.name || p.displayName?.text || 'Unknown Business',
+            address: p.formatted_address || p.formattedAddress || `${city}, ${country}`,
+            phone: p.phone || p.nationalPhoneNumber || p.internationalPhoneNumber || null,
+            website: p.website || p.websiteUri || null,
+            placeId: p.place_id || p.id || '',
             source: 'google_places',
           });
         }
-        console.log(`[TOWER_LOOP_CHAT] Google Places returned ${leads.length} results`);
+        console.log(`[TOWER_LOOP_CHAT] SEARCH_PLACES (via action-executor) returned ${leads.length} results`);
 
         if (prefixFilter) {
           const before = leads.length;
@@ -1383,12 +1398,13 @@ class SupervisorService {
           console.log(`[TOWER_LOOP_CHAT] Trimmed to requested count: ${leads.length}`);
         }
       } else {
-        console.log(`[TOWER_LOOP_CHAT] Google Places returned 0 results — using stub leads`);
+        console.log(`[TOWER_LOOP_CHAT] SEARCH_PLACES returned 0 results or failed — using stub leads`);
+        if (searchResult.error) towerLoopStepError = searchResult.error;
         leads = this.generateStubLeads(businessType, city, country);
         usedStub = true;
       }
     } catch (placesErr: any) {
-      console.warn(`[TOWER_LOOP_CHAT] Google Places failed (${placesErr.message}) — falling back to stub leads`);
+      console.warn(`[TOWER_LOOP_CHAT] SEARCH_PLACES failed (${placesErr.message}) — falling back to stub leads`);
       towerLoopStepError = placesErr.message;
       leads = this.generateStubLeads(businessType, city, country);
       usedStub = true;
@@ -1418,22 +1434,22 @@ class SupervisorService {
       }
     }
 
-    // 5. AFR: step_completed
+    // 5. AFR: step_completed (SEARCH_PLACES)
     await logAFREvent({
       userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
       actionTaken: 'step_completed', status: 'success',
-      taskGenerated: `Step 1/1 completed: ${leads.length} leads found${usedStub ? ' (stub fallback)' : ''}`,
+      taskGenerated: `Step 1 (discovery) completed: ${leads.length} leads found${usedStub ? ' (stub fallback)' : ''}`,
       runType: 'plan',
       metadata: { step: 1, tool: 'SEARCH_PLACES', leads_count: leads.length, used_stub: usedStub },
     });
-    console.log(`[TOWER_LOOP_CHAT] [step_completed] leads=${leads.length} stub=${usedStub}`);
+    console.log(`[TOWER_LOOP_CHAT] [step_completed] step=1 (discovery) leads=${leads.length} stub=${usedStub}`);
 
-    // 5b. step_result artefact (tower loop chat) — unconditional
+    // 5b. step_result artefact for SEARCH_PLACES — unconditional
     {
       const towerLoopStepFinishedAt = Date.now();
       const towerLoopStepStatus = towerLoopStepError ? 'fail' : 'success';
       const towerLoopStepSummary = towerLoopStepError
-        ? `fail – Google Places error: ${towerLoopStepError} (stub fallback used, ${leads.length} leads)`
+        ? `fail – SEARCH_PLACES error: ${towerLoopStepError} (stub fallback used, ${leads.length} leads)`
         : `success – ${leads.length} leads found for "${businessType}" in ${city}`;
       const safeLeads = leads.map(l => ({ name: l.name, address: l.address, placeId: l.placeId, source: l.source }));
       let towerLoopStepArtefact: Awaited<ReturnType<typeof createArtefact>> | undefined;
@@ -1470,13 +1486,12 @@ class SupervisorService {
           userId: task.user_id,
           conversationId,
         });
-        console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=chat_tower_loop_search_places status=${towerLoopStepStatus}`);
+        console.log(`[STEP_ARTEFACT] runId=${chatRunId} step=search_places status=${towerLoopStepStatus}`);
       } catch (stepArtErr: any) {
-        console.warn(`[STEP_ARTEFACT] FAILED to create step_result for tower_loop_chat (non-fatal): ${stepArtErr.message}`);
+        console.warn(`[STEP_ARTEFACT] FAILED to create step_result for SEARCH_PLACES (non-fatal): ${stepArtErr.message}`);
         console.warn(`[STEP_ARTEFACT] runId=${chatRunId} — Tower observation will be SKIPPED because step_result artefact failed`);
       }
 
-      // Step-level judgement (observation only)
       if (towerLoopStepArtefact) {
         try {
           const obsResult = await judgeArtefact({
@@ -1486,7 +1501,7 @@ class SupervisorService {
           await createArtefact({
             runId: chatRunId,
             type: 'tower_judgement',
-            title: `Tower Judgement: ${obsResult.judgement.verdict} (tower loop chat)`,
+            title: `Tower Judgement: ${obsResult.judgement.verdict} (SEARCH_PLACES)`,
             summary: `Observation: ${obsResult.judgement.verdict} | ${obsResult.judgement.action} | SEARCH_PLACES`,
             payload: {
               verdict: obsResult.judgement.verdict, action: obsResult.judgement.action,
@@ -1496,14 +1511,229 @@ class SupervisorService {
             },
             userId: task.user_id, conversationId,
           });
-          console.log(`[STEP_OBSERVATION] step=tower_loop_chat verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only, no branching)`);
+          console.log(`[STEP_OBSERVATION] step=SEARCH_PLACES verdict=${obsResult.judgement.verdict} action=${obsResult.judgement.action} (observation only)`);
         } catch (obsErr: any) {
-          console.warn(`[STEP_OBSERVATION] Tower observation failed for tower loop chat (continuing): ${obsErr.message}`);
-          console.warn(`[STEP_OBSERVATION] runId=${chatRunId} stepArtefactId=${towerLoopStepArtefact.id} — observation artefact NOT created`);
+          console.warn(`[STEP_OBSERVATION] Tower observation failed for SEARCH_PLACES (continuing): ${obsErr.message}`);
         }
       } else {
         console.warn(`[STEP_OBSERVATION] runId=${chatRunId} SKIPPED — no step_result artefact available to judge`);
       }
+    }
+
+    // 5c. Build enrichment plan AFTER discovery using actual lead data, then execute
+    const accumulatedStepData: Record<string, Record<string, unknown>> = {};
+    if (!usedStub && leads.length > 0) {
+      const enrichmentBatchSize = Math.min(leads.length, parseInt(process.env.ENRICHMENT_BATCH_SIZE || '5', 10));
+      const leadsWithWebsites = leads.filter(l => l.website);
+      const leadsWithoutWebsites = leads.filter(l => !l.website);
+
+      const representativeLeadCtx: LeadContext = {
+        business_name: businessType,
+        address: city,
+        town: city,
+        ...(leadsWithWebsites.length > 0 ? { website: leadsWithWebsites[0].website! } : {}),
+      };
+      const enrichToolPlan = buildToolPlan(representativeLeadCtx);
+      const enrichOrderedTools = getOrderedToolNames(enrichToolPlan);
+      const enrichSteps = enrichToolPlan.steps.filter(s => s.tool !== 'SEARCH_PLACES');
+
+      persistToolPlanExplainer(enrichToolPlan, chatRunId, task.user_id, conversationId).catch((err: any) => {
+        console.error(`[TOWER_LOOP_CHAT] tool_plan_explainer write failed: ${err.message}`);
+      });
+
+      if (enrichSteps.length > 0) {
+        await createArtefact({
+          runId: chatRunId,
+          type: 'plan_update',
+          title: `Plan v1 enrichment: ${enrichToolPlan.selected_path}`,
+          summary: `Enrichment plan built from ${leads.length} discovered leads (${leadsWithWebsites.length} with websites): ${enrichOrderedTools.filter(t => t !== 'SEARCH_PLACES').join(' → ')}`,
+          payload: {
+            plan_version: 1,
+            tool_plan_path: enrichToolPlan.selected_path,
+            rules_applied: enrichToolPlan.rules_applied,
+            enrichment_steps: enrichSteps.map((s, idx) => ({ step_index: idx + 1, tool: s.tool, phase: s.phase, condition: s.condition, depends_on: s.depends_on, reason: s.reason })),
+            leads_with_websites: leadsWithWebsites.length,
+            leads_without_websites: leadsWithoutWebsites.length,
+            batch_size: enrichmentBatchSize,
+          },
+          userId: task.user_id, conversationId,
+        }).catch((err: any) => console.warn(`[ENRICHMENT] plan_update artefact failed: ${err.message}`));
+
+        console.log(`[ENRICHMENT] Starting enrichment (${enrichToolPlan.selected_path}): ${enrichSteps.map(s => s.tool).join(' → ')} for up to ${enrichmentBatchSize} leads`);
+
+        const indexedLeads = leads.map((l, idx) => ({ ...l, _idx: idx }));
+        const hasWebSearchStep = enrichSteps.some(s => s.tool === 'WEB_SEARCH');
+        const webSearchFallbackUsed: number[] = [];
+        if (hasWebSearchStep && leadsWithoutWebsites.length > 0) {
+          const fallbackLeads = indexedLeads.filter(l => !l.website).slice(0, enrichmentBatchSize);
+          console.log(`[ENRICHMENT] ${leadsWithoutWebsites.length} leads without websites — using WEB_SEARCH fallback for ${fallbackLeads.length} leads`);
+          for (const il of fallbackLeads) {
+            try {
+              const wsResult = await executeAction({
+                toolName: 'WEB_SEARCH',
+                toolArgs: { query: `${il.name} ${city} contact`, entity_name: il.name, location_hint: city, limit: 5 },
+                userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
+              });
+              if (wsResult.success && wsResult.data) {
+                accumulatedStepData[`WEB_SEARCH_${il._idx}`] = wsResult.data;
+                webSearchFallbackUsed.push(il._idx);
+                const bestUrl = (wsResult.data?.envelope as any)?.outputs?.best_guess_official_url;
+                if (bestUrl) {
+                  il.website = bestUrl;
+                  leads[il._idx].website = bestUrl;
+                  console.log(`[ENRICHMENT] WEB_SEARCH found website for "${il.name}": ${bestUrl}`);
+                }
+              }
+            } catch (wsErr: any) {
+              console.warn(`[ENRICHMENT] WEB_SEARCH failed for "${il.name}" (non-fatal): ${wsErr.message}`);
+            }
+          }
+        }
+
+        const enrichablePath = leadsWithWebsites.length > 0 ? 'primary' : (webSearchFallbackUsed.length > 0 ? 'fallback' : 'mixed');
+        if (enrichablePath !== enrichToolPlan.selected_path) {
+          console.log(`[ENRICHMENT] Plan path adjusted: declared=${enrichToolPlan.selected_path}, actual=${enrichablePath} (${leadsWithWebsites.length} primary, ${webSearchFallbackUsed.length} fallback)`);
+        }
+
+        const enrichableLeads = indexedLeads.filter(l => l.website).slice(0, enrichmentBatchSize);
+        for (let eli = 0; eli < enrichableLeads.length; eli++) {
+          const lead = enrichableLeads[eli];
+          const leadIdx = lead._idx;
+          console.log(`[ENRICHMENT] Enriching lead ${eli + 1}/${enrichableLeads.length}: "${lead.name}" (${lead.website})`);
+
+          for (const planStep of enrichSteps) {
+            const tool = planStep.tool;
+            if (tool === 'WEB_SEARCH') continue;
+
+            if (planStep.depends_on && planStep.depends_on.length > 0) {
+              const enrichmentDeps = planStep.depends_on.filter(dep => dep !== 'SEARCH_PLACES');
+              if (enrichmentDeps.length > 0) {
+                const depsMet = enrichmentDeps.every(dep => accumulatedStepData[`${dep}_${leadIdx}`]);
+                if (!depsMet) {
+                  console.log(`[ENRICHMENT] Skipping ${tool} for "${lead.name}" — dependencies not met: ${enrichmentDeps.join(', ')}`);
+                  continue;
+                }
+              }
+            }
+
+            const globalStepIdx = 1 + enrichSteps.indexOf(planStep);
+            const enrichStepStartedAt = Date.now();
+
+            await logAFREvent({
+              userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+              actionTaken: 'step_started', status: 'pending',
+              taskGenerated: `Enrichment: ${tool} for "${lead.name}" (${planStep.phase})`,
+              runType: 'plan',
+              metadata: { tool, lead_name: lead.name, lead_index: leadIdx, phase: planStep.phase },
+            });
+
+            let enrichToolArgs: Record<string, unknown> = {};
+            if (tool === 'WEB_VISIT') {
+              enrichToolArgs = { url: lead.website!, max_pages: 3, same_domain_only: true };
+            } else if (tool === 'CONTACT_EXTRACT') {
+              const webVisitData = accumulatedStepData[`WEB_VISIT_${leadIdx}`];
+              const pages = (webVisitData?.envelope as any)?.outputs?.pages || [];
+              enrichToolArgs = { pages, entity_name: lead.name };
+            } else if (tool === 'LEAD_ENRICH') {
+              enrichToolArgs = {
+                places_lead: { name: lead.name, address: lead.address, phone: lead.phone, website: lead.website, place_id: lead.placeId },
+                web_visit_pages: (accumulatedStepData[`WEB_VISIT_${leadIdx}`]?.envelope as any)?.outputs?.pages || null,
+                contact_extract: (accumulatedStepData[`CONTACT_EXTRACT_${leadIdx}`]?.envelope as any)?.outputs || null,
+                web_search: accumulatedStepData[`WEB_SEARCH_${leadIdx}`]?.envelope || null,
+              };
+            } else if (tool === 'ASK_LEAD_QUESTION') {
+              continue;
+            }
+
+            try {
+              const enrichResult = await executeAction({
+                toolName: tool,
+                toolArgs: enrichToolArgs,
+                userId: task.user_id,
+                tracker: toolTracker,
+                runId: chatRunId,
+                conversationId,
+                clientRequestId,
+              });
+
+              if (enrichResult.success && enrichResult.data) {
+                accumulatedStepData[`${tool}_${leadIdx}`] = enrichResult.data;
+
+                if (tool === 'LEAD_ENRICH') {
+                  const leadPack = (enrichResult.data?.envelope as any)?.outputs?.lead_pack;
+                  if (leadPack?.identity) {
+                    if (leadPack.identity.phone && !lead.phone) lead.phone = leadPack.identity.phone;
+                    if (leadPack.identity.website && !lead.website) lead.website = leadPack.identity.website;
+                  }
+                }
+              }
+
+              const enrichStepFinishedAt = Date.now();
+              try {
+                const enrichStepArtefact = await createArtefact({
+                  runId: chatRunId,
+                  type: 'step_result',
+                  title: `Step result: ${tool} – "${lead.name}"`,
+                  summary: `${enrichResult.success ? 'success' : 'fail'} – ${enrichResult.summary}`,
+                  payload: {
+                    run_id: chatRunId, plan_version: 1, plan_artefact_id: planArtefact.id,
+                    step_id: `${tool.toLowerCase()}_lead_${leadIdx}`,
+                    step_title: `${tool} – ${lead.name}`, step_type: tool, step_index: globalStepIdx,
+                    step_status: enrichResult.success ? 'success' : 'fail',
+                    phase: planStep.phase, condition: planStep.condition, depends_on: planStep.depends_on,
+                    inputs_summary: compactInputs(enrichToolArgs),
+                    outputs_summary: { success: enrichResult.success, summary: enrichResult.summary },
+                    timings: { started_at: new Date(enrichStepStartedAt).toISOString(), finished_at: new Date(enrichStepFinishedAt).toISOString(), duration_ms: enrichStepFinishedAt - enrichStepStartedAt },
+                  },
+                  userId: task.user_id, conversationId,
+                });
+
+                if (enrichStepArtefact) {
+                  try {
+                    const enrichObs = await judgeArtefact({ artefact: enrichStepArtefact, runId: chatRunId, goal, userId: task.user_id, conversationId });
+                    await createArtefact({
+                      runId: chatRunId, type: 'tower_judgement',
+                      title: `Tower Judgement: ${enrichObs.judgement.verdict} (${tool})`,
+                      summary: `Observation: ${enrichObs.judgement.verdict} | ${enrichObs.judgement.action} | ${tool} for "${lead.name}"`,
+                      payload: { verdict: enrichObs.judgement.verdict, action: enrichObs.judgement.action, reasons: enrichObs.judgement.reasons, metrics: enrichObs.judgement.metrics, step_index: globalStepIdx, step_label: `${tool} – ${lead.name}`, judged_artefact_id: enrichStepArtefact.id, stubbed: enrichObs.stubbed, observation_only: true },
+                      userId: task.user_id, conversationId,
+                    });
+                    console.log(`[ENRICHMENT] [observation] ${tool} for "${lead.name}" verdict=${enrichObs.judgement.verdict}`);
+                  } catch (enrichObsErr: any) {
+                    console.warn(`[ENRICHMENT] Tower observation failed for ${tool} "${lead.name}" (continuing): ${enrichObsErr.message}`);
+                  }
+                }
+              } catch (enrichArtErr: any) {
+                console.warn(`[ENRICHMENT] step_result artefact failed for ${tool} "${lead.name}" (non-fatal): ${enrichArtErr.message}`);
+              }
+
+              await logAFREvent({
+                userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+                actionTaken: 'step_completed', status: enrichResult.success ? 'success' : 'failed',
+                taskGenerated: `Enrichment ${tool} for "${lead.name}": ${enrichResult.summary}`,
+                runType: 'plan',
+                metadata: { tool, lead_name: lead.name, success: enrichResult.success, phase: planStep.phase },
+              });
+              console.log(`[ENRICHMENT] [step_completed] ${tool} for "${lead.name}" success=${enrichResult.success}`);
+            } catch (enrichErr: any) {
+              console.warn(`[ENRICHMENT] ${tool} failed for "${lead.name}" (non-fatal, continuing): ${enrichErr.message}`);
+              await logAFREvent({
+                userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+                actionTaken: 'step_completed', status: 'failed',
+                taskGenerated: `Enrichment ${tool} for "${lead.name}" failed: ${enrichErr.message}`,
+                runType: 'plan',
+                metadata: { tool, lead_name: lead.name, error: enrichErr.message },
+              });
+            }
+          }
+        }
+
+        console.log(`[ENRICHMENT] Enrichment phase complete: ${enrichableLeads.length} leads enriched, tools_used=${toolTracker.tools_used.join(',')}`);
+      } else {
+        console.log(`[ENRICHMENT] No enrichment steps in plan (path: ${enrichToolPlan.selected_path})`);
+      }
+    } else if (!usedStub) {
+      console.log(`[ENRICHMENT] Skipping enrichment: no leads found`);
     }
 
     // 6. Create leads_list artefact (persisted to DB)
@@ -1939,16 +2169,24 @@ class SupervisorService {
       }
       dsPlanVersions.push({ version: planVersion, changes_made: dsChanges.length > 0 ? dsChanges : [replanResult.strategy_summary] });
 
-      const replanPlanSteps = [
-        {
-          step_index: 0,
-          step_id: `search_places_${vLabel}`,
-          tool: 'SEARCH_PLACES',
-          tool_args: { query: `${v2.business_type} in ${v2.location} ${v2.country}`, location: v2.location, country: v2.country, maxResults: v2.search_count, target_count: v2.requested_count_user },
-          expected_output: `Up to ${v2.search_count} ${v2.business_type} results from Google Places`,
-          ...(v2.prefix_filter ? { post_processing: `Filter names starting with "${v2.prefix_filter}"; Take first ${displayCount ?? v2.requested_count} results` } : ((displayCount ?? v2.requested_count) < v2.search_count ? { post_processing: `Take first ${displayCount ?? v2.requested_count} results` } : {})),
-        },
-      ];
+      const replanToolPlan = buildToolPlan({ business_name: v2.business_type, address: v2.location, town: v2.location });
+      const replanOrderedTools = getOrderedToolNames(replanToolPlan);
+      const replanPlanSteps = replanToolPlan.steps.map((s, idx) => ({
+        step_index: idx,
+        step_id: `${s.tool.toLowerCase()}_${vLabel}`,
+        tool: s.tool,
+        phase: s.phase,
+        condition: s.condition,
+        reason: s.reason,
+        depends_on: s.depends_on,
+        tool_args: s.tool === 'SEARCH_PLACES'
+          ? { query: `${v2.business_type} in ${v2.location} ${v2.country}`, location: v2.location, country: v2.country, maxResults: v2.search_count, target_count: v2.requested_count_user }
+          : {},
+        expected_output: s.tool === 'SEARCH_PLACES'
+          ? `Up to ${v2.search_count} ${v2.business_type} results from Google Places`
+          : `${s.tool} output for lead enrichment`,
+        ...(s.tool === 'SEARCH_PLACES' && v2.prefix_filter ? { post_processing: `Filter names starting with "${v2.prefix_filter}"; Take first ${displayCount ?? v2.requested_count} results` } : {}),
+      }));
 
       const replanPlanPayload = {
         run_id: chatRunId,
@@ -1961,6 +2199,7 @@ class SupervisorService {
         prior_verdict: { verdict: finalVerdict, action: finalAction, gaps: directive.gaps, suggested_changes: directive.suggested_changes },
         adjustments_applied: replanResult.adjustments_applied,
         strategy_summary: replanResult.strategy_summary,
+        tool_plan_path: replanToolPlan.selected_path,
         constraints: [
           `business_type=${v2.business_type}`,
           `location=${v2.location}`,
@@ -1975,38 +2214,38 @@ class SupervisorService {
         runId: chatRunId,
         type: 'plan',
         title: artefactTitle(`Plan ${vLabel}:`, displayCount, v2, planVersion),
-        summary: `${replanResult.strategy_summary} — re-searching ${v2.business_type} in ${v2.location}`,
+        summary: `${replanPlanSteps.length}-step plan (${replanToolPlan.selected_path}): ${replanOrderedTools.join(' → ')} | ${replanResult.strategy_summary}`,
         payload: replanPlanPayload,
         userId: task.user_id,
         conversationId,
       });
-      console.log(`[REPLAN] Plan ${vLabel} artefact id=${replanPlanArtefact.id}`);
+      console.log(`[REPLAN] Plan ${vLabel} artefact id=${replanPlanArtefact.id} steps=${replanPlanSteps.length} path=${replanToolPlan.selected_path}`);
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'artefact_created', status: 'success',
-        taskGenerated: `Plan ${vLabel} artefact created`,
+        taskGenerated: `Plan ${vLabel} artefact created (${replanPlanSteps.length} steps)`,
         runType: 'plan',
-        metadata: { artefactId: replanPlanArtefact.id, artefactType: 'plan', plan_version: planVersion, strategy: replanResult.strategy_summary },
+        metadata: { artefactId: replanPlanArtefact.id, artefactType: 'plan', plan_version: planVersion, strategy: replanResult.strategy_summary, tool_plan_path: replanToolPlan.selected_path },
       });
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'plan_execution_started', status: 'pending',
-        taskGenerated: `Executing Plan ${vLabel}: ${replanResult.strategy_summary}`,
+        taskGenerated: `Executing Plan ${vLabel} (${replanPlanSteps.length} steps): ${replanResult.strategy_summary}`,
         runType: 'plan',
-        metadata: { plan_version: planVersion, strategy: replanResult.strategy_summary, planArtefactId: replanPlanArtefact.id },
+        metadata: { plan_version: planVersion, strategy: replanResult.strategy_summary, planArtefactId: replanPlanArtefact.id, tools: replanOrderedTools },
       });
-      console.log(`[REPLAN] [plan_execution_started] plan_version=${planVersion} strategy="${replanResult.strategy_summary}"`);
+      console.log(`[REPLAN] [plan_execution_started] plan_version=${planVersion} steps=${replanPlanSteps.length} strategy="${replanResult.strategy_summary}"`);
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'step_started', status: 'pending',
-        taskGenerated: `Step 1/1 (${vLabel}): SEARCH_PLACES — ${v2.business_type} in ${v2.location}`,
+        taskGenerated: `Step 1/${replanPlanSteps.length} (${vLabel}): SEARCH_PLACES — ${v2.business_type} in ${v2.location}`,
         runType: 'plan',
-        metadata: { step: 1, total_steps: 1, tool: 'SEARCH_PLACES', query: v2.business_type, location: v2.location, plan_version: planVersion },
+        metadata: { step: 1, total_steps: replanPlanSteps.length, tool: 'SEARCH_PLACES', query: v2.business_type, location: v2.location, plan_version: planVersion },
       });
-      console.log(`[REPLAN] [step_started] step=1 tool=SEARCH_PLACES (${vLabel})`);
+      console.log(`[REPLAN] [step_started] step=1/${replanPlanSteps.length} tool=SEARCH_PLACES (${vLabel})`);
 
       let replanLeads: typeof leads = [];
       let replanUsedStub = false;
@@ -2014,19 +2253,29 @@ class SupervisorService {
       let replanStepError: string | undefined;
 
       try {
-        const replanBusinesses = await this.searchGooglePlaces(v2.business_type, v2.location, v2.country, v2.search_count);
-        if (replanBusinesses && replanBusinesses.length > 0) {
-          for (const biz of replanBusinesses) {
+        const replanSearchResult = await executeAction({
+          toolName: 'SEARCH_PLACES',
+          toolArgs: { query: v2.business_type, location: v2.location, country: v2.country, maxResults: v2.search_count, target_count: v2.requested_count_user },
+          userId: task.user_id,
+          tracker: toolTracker,
+          runId: chatRunId,
+          conversationId,
+          clientRequestId,
+        });
+
+        if (replanSearchResult.success && replanSearchResult.data?.places && Array.isArray(replanSearchResult.data.places)) {
+          const places = replanSearchResult.data.places as any[];
+          for (const p of places) {
             replanLeads.push({
-              name: biz.displayName?.text || 'Unknown Business',
-              address: biz.formattedAddress || `${v2.location}, ${v2.country}`,
-              phone: biz.nationalPhoneNumber || biz.internationalPhoneNumber || null,
-              website: biz.websiteUri || null,
-              placeId: biz.id || '',
+              name: p.name || p.displayName?.text || 'Unknown Business',
+              address: p.formatted_address || p.formattedAddress || `${v2.location}, ${v2.country}`,
+              phone: p.phone || p.nationalPhoneNumber || p.internationalPhoneNumber || null,
+              website: p.website || p.websiteUri || null,
+              placeId: p.place_id || p.id || '',
               source: 'google_places',
             });
           }
-          console.log(`[REPLAN] Google Places ${vLabel} returned ${replanLeads.length} results`);
+          console.log(`[REPLAN] SEARCH_PLACES ${vLabel} returned ${replanLeads.length} results`);
 
           if (v2.prefix_filter) {
             const before = replanLeads.length;
@@ -2045,10 +2294,11 @@ class SupervisorService {
             console.log(`[REPLAN] Trimmed to search budget: ${replanLeads.length}`);
           }
         } else {
-          console.log(`[REPLAN] Google Places ${vLabel} returned 0 results`);
+          console.log(`[REPLAN] SEARCH_PLACES ${vLabel} returned 0 results`);
+          if (replanSearchResult.error) replanStepError = replanSearchResult.error;
         }
       } catch (replanErr: any) {
-        console.warn(`[REPLAN] Google Places ${vLabel} failed: ${replanErr.message}`);
+        console.warn(`[REPLAN] SEARCH_PLACES ${vLabel} failed: ${replanErr.message}`);
         replanStepError = replanErr.message;
       }
 
@@ -2145,6 +2395,112 @@ class SupervisorService {
           console.log(`[REPLAN] [step_observation] verdict=${replanObsResult.judgement.verdict} (${vLabel}, observation only)`);
         } catch (obsErr: any) {
           console.warn(`[REPLAN] Tower observation ${vLabel} failed (continuing): ${obsErr.message}`);
+        }
+      }
+
+      // Replan enrichment phase: build tool plan from actual replan lead data, then execute
+      const replanAccumulatedStepData: Record<string, Record<string, unknown>> = {};
+      if (!replanUsedStub && replanLeads.length > 0) {
+        const replanEnrichBatchSize = Math.min(replanLeads.length, parseInt(process.env.ENRICHMENT_BATCH_SIZE || '5', 10));
+        const replanLeadsWithWebsites = replanLeads.filter(l => l.website);
+        const replanLeadsNoWebsites = replanLeads.filter(l => !l.website);
+
+        const replanLeadCtx: LeadContext = {
+          business_name: v2.business_type,
+          address: v2.location,
+          town: v2.location,
+          ...(replanLeadsWithWebsites.length > 0 ? { website: replanLeadsWithWebsites[0].website! } : {}),
+        };
+        const replanEnrichPlan = buildToolPlan(replanLeadCtx);
+        const replanEnrichSteps = replanEnrichPlan.steps.filter(s => s.tool !== 'SEARCH_PLACES');
+
+        if (replanEnrichSteps.length > 0) {
+          console.log(`[REPLAN_ENRICH] Starting enrichment (${replanEnrichPlan.selected_path}): ${replanEnrichSteps.map(s => s.tool).join(' → ')} (${vLabel})`);
+
+          if (replanLeadsWithWebsites.length === 0 && replanEnrichSteps.some(s => s.tool === 'WEB_SEARCH')) {
+            const fallbackLeads = replanLeadsNoWebsites.slice(0, replanEnrichBatchSize);
+            for (let li = 0; li < fallbackLeads.length; li++) {
+              const lead = fallbackLeads[li];
+              try {
+                const wsResult = await executeAction({
+                  toolName: 'WEB_SEARCH',
+                  toolArgs: { query: `${lead.name} ${v2.location} contact`, entity_name: lead.name, location_hint: v2.location, limit: 5 },
+                  userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
+                });
+                if (wsResult.success && wsResult.data) {
+                  replanAccumulatedStepData[`WEB_SEARCH_${li}`] = wsResult.data;
+                  const bestUrl = (wsResult.data?.envelope as any)?.outputs?.best_guess_official_url;
+                  if (bestUrl) { lead.website = bestUrl; }
+                }
+              } catch (wsErr: any) {
+                console.warn(`[REPLAN_ENRICH] WEB_SEARCH failed for "${lead.name}": ${wsErr.message}`);
+              }
+            }
+          }
+
+          const replanEnrichableLeads = replanLeads.filter(l => l.website).slice(0, replanEnrichBatchSize);
+          for (let li = 0; li < replanEnrichableLeads.length; li++) {
+            const lead = replanEnrichableLeads[li];
+            console.log(`[REPLAN_ENRICH] Enriching lead ${li + 1}/${replanEnrichableLeads.length}: "${lead.name}"`);
+
+            for (const planStep of replanEnrichSteps) {
+              const tool = planStep.tool;
+              if (tool === 'WEB_SEARCH') continue;
+
+              if (planStep.depends_on && planStep.depends_on.length > 0) {
+                const enrichDeps = planStep.depends_on.filter(dep => dep !== 'SEARCH_PLACES');
+                if (enrichDeps.length > 0) {
+                  const depsMet = enrichDeps.every(dep => replanAccumulatedStepData[`${dep}_${li}`]);
+                  if (!depsMet) {
+                    console.log(`[REPLAN_ENRICH] Skipping ${tool} for "${lead.name}" — deps not met`);
+                    continue;
+                  }
+                }
+              }
+
+              let enrichToolArgs: Record<string, unknown> = {};
+              if (tool === 'WEB_VISIT') {
+                enrichToolArgs = { url: lead.website!, max_pages: 3, same_domain_only: true };
+              } else if (tool === 'CONTACT_EXTRACT') {
+                const webVisitData = replanAccumulatedStepData[`WEB_VISIT_${li}`];
+                const pages = (webVisitData?.envelope as any)?.outputs?.pages || [];
+                enrichToolArgs = { pages, entity_name: lead.name };
+              } else if (tool === 'LEAD_ENRICH') {
+                enrichToolArgs = {
+                  places_lead: { name: lead.name, address: lead.address, phone: lead.phone, website: lead.website, place_id: lead.placeId },
+                  web_visit_pages: (replanAccumulatedStepData[`WEB_VISIT_${li}`]?.envelope as any)?.outputs?.pages || null,
+                  contact_extract: (replanAccumulatedStepData[`CONTACT_EXTRACT_${li}`]?.envelope as any)?.outputs || null,
+                  web_search: replanAccumulatedStepData[`WEB_SEARCH_${li}`]?.envelope || null,
+                };
+              } else if (tool === 'ASK_LEAD_QUESTION') {
+                continue;
+              }
+
+              try {
+                const enrichResult = await executeAction({
+                  toolName: tool,
+                  toolArgs: enrichToolArgs,
+                  userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
+                });
+
+                if (enrichResult.success && enrichResult.data) {
+                  replanAccumulatedStepData[`${tool}_${li}`] = enrichResult.data;
+                  if (tool === 'LEAD_ENRICH') {
+                    const leadPack = (enrichResult.data?.envelope as any)?.outputs?.lead_pack;
+                    if (leadPack?.identity) {
+                      if (leadPack.identity.phone && !lead.phone) lead.phone = leadPack.identity.phone;
+                      if (leadPack.identity.website && !lead.website) lead.website = leadPack.identity.website;
+                    }
+                  }
+                }
+
+                console.log(`[REPLAN_ENRICH] ${tool} for "${lead.name}" success=${enrichResult.success}`);
+              } catch (enrichErr: any) {
+                console.warn(`[REPLAN_ENRICH] ${tool} failed for "${lead.name}": ${enrichErr.message}`);
+              }
+            }
+          }
+          console.log(`[REPLAN_ENRICH] Enrichment complete: ${replanEnrichableLeads.length} leads enriched (${vLabel})`);
         }
       }
 
