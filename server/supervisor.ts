@@ -583,7 +583,7 @@ class SupervisorService {
             factory_demo: true,
             scenario: demoResult.scenario,
           },
-          created_at: new Date().toISOString(),
+          created_at: Date.now(),
         })
         .select()
         .single();
@@ -669,7 +669,7 @@ class SupervisorService {
           ...(towerResult.leads.length > 0 ? { leads: towerResult.leads } : {}),
           ...(runFailed ? { run_failed: true, failure_reason: failureReason } : {}),
         },
-        created_at: new Date().toISOString(),
+        created_at: Date.now(),
       })
       .select()
       .single();
