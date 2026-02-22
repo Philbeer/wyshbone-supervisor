@@ -21,7 +21,7 @@ import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput } from './supervisor/cvl';
-import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, GLOBAL_DEFAULT_BUNDLE, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
+import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 
@@ -1112,14 +1112,16 @@ class SupervisorService {
     const runStartTime = Date.now();
     let runToolCallCount = 0;
     let MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '5', 10);
+    let policyApplicationWritten = false;
+    const policyInput = {
+      request: originalUserGoal,
+      vertical: businessType,
+      location: city,
+      constraintBucket: hard_constraints,
+      userValue: userRequestedCountFinal ?? undefined,
+    };
     try {
-      policyResult = await applyPolicy({
-        request: originalUserGoal,
-        vertical: businessType,
-        location: city,
-        constraintBucket: hard_constraints,
-        userValue: userRequestedCountFinal ?? undefined,
-      });
+      policyResult = await applyPolicy(policyInput);
 
       const ep = policyResult.executionParams;
       if (ep.searchBudgetCount !== searchBudgetCount) {
@@ -1132,13 +1134,9 @@ class SupervisorService {
         MAX_REPLANS = ep.maxReplans;
       }
 
-      await persistPolicyApplication(chatRunId, {
-        request: originalUserGoal,
-        vertical: businessType,
-        location: city,
-        constraintBucket: hard_constraints,
-        userValue: userRequestedCountFinal ?? undefined,
-      }, policyResult);
+      await persistPolicyApplication(chatRunId, policyInput, policyResult);
+      policyApplicationWritten = true;
+      console.log(`[LEARNING_LAYER] policy_applications row written for run_id=${chatRunId} scope=${policyResult.scopeKey}`);
 
       await writeDecisionLog({
         runId: chatRunId,
@@ -3366,6 +3364,65 @@ class SupervisorService {
       );
     } catch (outcomeErr: any) {
       console.warn(`[LEARNING_LAYER] outcome_log or policy version write failed (non-fatal): ${outcomeErr.message}`);
+    }
+
+    const finalScopeKey = policyResult?.scopeKey ?? `${businessType.toLowerCase()}::${city.toLowerCase()}::default`;
+    const finalSnapshot = policyResult?.snapshot ?? buildApplicationSnapshot(
+      finalScopeKey,
+      GLOBAL_DEFAULT_BUNDLE,
+      0,
+      ['Fallback: applyPolicy failed, default bundle used.'],
+    );
+
+    if (!policyApplicationWritten) {
+      try {
+        const fallbackBundle = structuredClone(GLOBAL_DEFAULT_BUNDLE);
+        const fallbackExecParams = deriveExecutionParams(fallbackBundle);
+        const fallbackResult: PolicyApplicationResult = {
+          scopeKey: finalScopeKey,
+          policyVersionId: null,
+          policyVersion: 0,
+          bundle: fallbackBundle,
+          executionParams: fallbackExecParams,
+          snapshot: finalSnapshot,
+          applied: false,
+          rationale: 'Fallback: applyPolicy failed earlier, writing default policy_applications row at end of run.',
+          constraints: {
+            radiusKm: fallbackBundle.policies.radius_policy_v1.max_cap_km,
+            enrichmentBatchSize: fallbackBundle.policies.enrichment_policy_v1.enrichment_batch_size,
+            stopThresholdZero: fallbackBundle.policies.stop_policy_v1.stop_when_verified_exact_is_zero_after_enrichment,
+            stopThresholdMin: 1,
+            maxPlanVersions: fallbackBundle.policies.stop_policy_v1.max_replans,
+            searchBudgetCount: fallbackBundle.policies.stop_policy_v1.search_budget_count,
+          },
+        };
+        await persistPolicyApplication(chatRunId, policyInput, fallbackResult);
+        policyApplicationWritten = true;
+        console.log(`[LEARNING_LAYER] Fallback policy_applications row written for run_id=${chatRunId}`);
+      } catch (fbErr: any) {
+        console.error(`[LEARNING_LAYER] Fallback policy_applications write FAILED for run_id=${chatRunId}: ${fbErr.message}`);
+      }
+    }
+
+    try {
+      await createArtefact({
+        runId: chatRunId,
+        type: 'policy_application_snapshot',
+        title: `Policy Application Snapshot: ${finalScopeKey}`,
+        summary: `run_id=${chatRunId} scope=${finalScopeKey} versions=${JSON.stringify(finalSnapshot.applied_versions)} written=${policyApplicationWritten}`,
+        payload: {
+          run_id: chatRunId,
+          scope_key: finalScopeKey,
+          applied_versions: finalSnapshot.applied_versions,
+          why_short: finalSnapshot.why_short,
+          written_to_db: policyApplicationWritten,
+        },
+        userId: task.user_id,
+        conversationId,
+      });
+      console.log(`[LEARNING_LAYER] policy_application_snapshot artefact emitted for run_id=${chatRunId}`);
+    } catch (snapErr: any) {
+      console.error(`[LEARNING_LAYER] policy_application_snapshot artefact FAILED for run_id=${chatRunId}: ${snapErr.message}`);
     }
 
     console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub}`);

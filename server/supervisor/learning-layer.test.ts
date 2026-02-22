@@ -291,4 +291,96 @@ describe('Learning Layer', () => {
       expect(typeof persistPolicyApplication).toBe('function');
     });
   });
+
+  describe('persistPolicyApplication run_id linkage', () => {
+    it('persistPolicyApplication passes run_id to storage and snapshot contains scope_key', async () => {
+      const { persistPolicyApplication, applyPolicy, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE } = await import('./learning-layer');
+
+      const testRunId = `test_run_${Date.now()}`;
+      const scopeKey = 'pubs::london::business_type';
+      const bundle = structuredClone(GLOBAL_DEFAULT_BUNDLE);
+      const snapshot = buildApplicationSnapshot(scopeKey, bundle, 0, ['test write']);
+      const execParams = deriveExecutionParams(bundle);
+
+      const mockResult = {
+        scopeKey,
+        policyVersionId: null,
+        policyVersion: 0,
+        bundle,
+        executionParams: execParams,
+        snapshot,
+        applied: false,
+        rationale: 'test',
+        constraints: {
+          radiusKm: bundle.policies.radius_policy_v1.max_cap_km,
+          enrichmentBatchSize: bundle.policies.enrichment_policy_v1.enrichment_batch_size,
+          stopThresholdZero: bundle.policies.stop_policy_v1.stop_when_verified_exact_is_zero_after_enrichment,
+          stopThresholdMin: 1,
+          maxPlanVersions: bundle.policies.stop_policy_v1.max_replans,
+          searchBudgetCount: bundle.policies.stop_policy_v1.search_budget_count,
+        },
+      };
+
+      const mockInput = {
+        request: 'find pubs in london',
+        vertical: 'pubs',
+        location: 'london',
+        constraintBucket: ['business_type'],
+      };
+
+      const pa = await persistPolicyApplication(testRunId, mockInput, mockResult);
+
+      expect(pa).toBeDefined();
+      expect(pa.runId).toBe(testRunId);
+      expect(pa.scopeKey).toBe(scopeKey);
+
+      const appliedPolicies = pa.appliedPolicies as Record<string, unknown>;
+      expect(appliedPolicies).toBeDefined();
+      expect((appliedPolicies as any).scope_key).toBe(scopeKey);
+      expect((appliedPolicies as any).applied_versions).toBeDefined();
+      expect((appliedPolicies as any).why_short).toBeDefined();
+    });
+
+    it('run_id in policy_applications matches the run_id used for artefacts (explain last run)', async () => {
+      const { persistPolicyApplication, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE } = await import('./learning-layer');
+      const { storage } = await import('../storage');
+
+      const sharedRunId = `shared_run_${Date.now()}`;
+      const scopeKey = 'cafes::paris::business_type';
+      const bundle = structuredClone(GLOBAL_DEFAULT_BUNDLE);
+      const snapshot = buildApplicationSnapshot(scopeKey, bundle, 0, ['verify id match']);
+      const execParams = deriveExecutionParams(bundle);
+
+      const result = {
+        scopeKey,
+        policyVersionId: null,
+        policyVersion: 0,
+        bundle,
+        executionParams: execParams,
+        snapshot,
+        applied: false,
+        rationale: 'test id match',
+        constraints: {
+          radiusKm: bundle.policies.radius_policy_v1.max_cap_km,
+          enrichmentBatchSize: bundle.policies.enrichment_policy_v1.enrichment_batch_size,
+          stopThresholdZero: bundle.policies.stop_policy_v1.stop_when_verified_exact_is_zero_after_enrichment,
+          stopThresholdMin: 1,
+          maxPlanVersions: bundle.policies.stop_policy_v1.max_replans,
+          searchBudgetCount: bundle.policies.stop_policy_v1.search_budget_count,
+        },
+      };
+
+      await persistPolicyApplication(sharedRunId, {
+        request: 'find cafes in paris',
+        vertical: 'cafes',
+        location: 'paris',
+        constraintBucket: ['business_type'],
+      }, result);
+
+      const rows = await storage.getPolicyApplicationsByRun(sharedRunId);
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      expect(rows[0].runId).toBe(sharedRunId);
+      expect(rows[0].scopeKey).toBe(scopeKey);
+    });
+  });
 });
