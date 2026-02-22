@@ -16,7 +16,7 @@ import { judgeArtefact } from './supervisor/tower-artefact-judge';
 import { extractChangePlanDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, type PlanV2Constraints } from './supervisor/replan-policy';
 import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, type ParsedGoal, type StructuredConstraint } from './supervisor/goal-to-constraints';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
-import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation } from './supervisor/delivery-summary';
+import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type DeliverySummaryPayload } from './supervisor/delivery-summary';
 import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
@@ -615,7 +615,7 @@ class SupervisorService {
       return;
     }
 
-    let towerResult: { response: string; leadIds: string[] };
+    let towerResult: { response: string; leadIds: string[]; deliverySummary: DeliverySummaryPayload | null; towerVerdict: string | null; leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string }> };
     let runFailed = false;
     let failureReason = '';
     try {
@@ -635,6 +635,9 @@ class SupervisorService {
       towerResult = {
         response: `The search encountered an issue and could not complete. You can view partial results if any are available.`,
         leadIds: [],
+        deliverySummary: null,
+        towerVerdict: 'error',
+        leads: [],
       };
     }
     const response = sanitizeSupervisorMessage(towerResult.response);
@@ -642,6 +645,8 @@ class SupervisorService {
     const capabilities = runFailed
       ? ['lead_generation', 'run_failed']
       : ['lead_generation', 'tower_validated'];
+
+    const dsStatus = towerResult.deliverySummary?.status ?? (runFailed ? 'STOP' : 'PASS');
 
     const messageId = randomUUID();
     const { data: newMessage, error: messageError } = await supabase
@@ -658,6 +663,10 @@ class SupervisorService {
           capabilities,
           lead_ids: leadIds,
           run_lane: true,
+          status: dsStatus,
+          ...(towerResult.deliverySummary ? { deliverySummary: towerResult.deliverySummary } : {}),
+          ...(towerResult.towerVerdict ? { towerVerdict: towerResult.towerVerdict } : {}),
+          ...(towerResult.leads.length > 0 ? { leads: towerResult.leads } : {}),
           ...(runFailed ? { run_failed: true, failure_reason: failureReason } : {}),
         },
         created_at: new Date().toISOString(),
@@ -974,7 +983,7 @@ class SupervisorService {
     userContext: UserContext,
     chatRunId: string,
     clientRequestId: string,
-  ): Promise<{ response: string; leadIds: string[] }> {
+  ): Promise<{ response: string; leadIds: string[]; deliverySummary: DeliverySummaryPayload | null; towerVerdict: string | null; leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string }> }> {
     const conversationId = task.conversation_id;
     const requestData = task.request_data;
     const rawMsg = (requestData.user_message || '') as string;
@@ -1981,7 +1990,13 @@ class SupervisorService {
       } catch (bErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to write beliefs (non-fatal): ${bErr.message}`); }
 
       console.log(`[TOWER_LOOP_CHAT] [complete] leads=${leads.length} verdict=error (Tower unavailable)`);
-      return { response: SUPERVISOR_NEUTRAL_MESSAGE, leadIds: createdLeadIds };
+      return {
+        response: SUPERVISOR_NEUTRAL_MESSAGE,
+        leadIds: createdLeadIds,
+        deliverySummary: errorDsPayload,
+        towerVerdict: 'error',
+        leads: leads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website, placeId: l.placeId })),
+      };
     }
 
     const verdict = towerResult.judgement.verdict;
@@ -3444,7 +3459,13 @@ class SupervisorService {
 
     console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub}`);
 
-    return { response: chatResponse, leadIds: createdLeadIds };
+    return {
+      response: chatResponse,
+      leadIds: createdLeadIds,
+      deliverySummary: mainDsPayload,
+      towerVerdict: finalVerdict,
+      leads: finalLeads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website, placeId: l.placeId })),
+    };
   }
 
   private generateStubLeads(businessType: string, city: string, country: string): Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string; source: string }> {
