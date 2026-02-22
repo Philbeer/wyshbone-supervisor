@@ -14,6 +14,9 @@ import {
   goalLedger,
   beliefStore,
   feedbackEvents,
+  telemetryEvents,
+  policyVersions,
+  policyApplications,
   type User,
   type InsertUser,
   type SuggestedLead,
@@ -38,6 +41,12 @@ import {
   type InsertBeliefStore,
   type FeedbackEvent,
   type InsertFeedbackEvent,
+  type TelemetryEvent,
+  type InsertTelemetryEvent,
+  type PolicyVersion,
+  type InsertPolicyVersion,
+  type PolicyApplication,
+  type InsertPolicyApplication,
 } from "./schema";
 import { db } from "./db";
 import { eq, desc, isNull, and } from "drizzle-orm";
@@ -103,6 +112,15 @@ export interface IStorage {
   // Feedback events
   createFeedbackEvent(event: InsertFeedbackEvent): Promise<FeedbackEvent>;
   getFeedbackEventsByGoal(goalId: string): Promise<FeedbackEvent[]>;
+  // Telemetry events
+  createTelemetryEvent(event: InsertTelemetryEvent): Promise<TelemetryEvent>;
+  getTelemetryEventsByRun(runId: string): Promise<TelemetryEvent[]>;
+  // Policy versions
+  createPolicyVersion(pv: InsertPolicyVersion): Promise<PolicyVersion>;
+  getLatestPolicyVersion(scopeKey: string): Promise<PolicyVersion | undefined>;
+  // Policy applications
+  createPolicyApplication(pa: InsertPolicyApplication): Promise<PolicyApplication>;
+  getPolicyApplicationsByRun(runId: string): Promise<PolicyApplication[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -603,6 +621,42 @@ export class DatabaseStorage implements IStorage {
 
   async getFeedbackEventsByGoal(goalId: string): Promise<FeedbackEvent[]> {
     return db.select().from(feedbackEvents).where(eq(feedbackEvents.goalId, goalId)).orderBy(desc(feedbackEvents.createdAt));
+  }
+
+  async createTelemetryEvent(event: InsertTelemetryEvent): Promise<TelemetryEvent> {
+    const [result] = await db.insert(telemetryEvents).values(event).returning();
+    console.log(`[Storage] Created telemetry event ${event.eventType} for run ${event.runId}`);
+    return result;
+  }
+
+  async getTelemetryEventsByRun(runId: string): Promise<TelemetryEvent[]> {
+    return db.select().from(telemetryEvents).where(eq(telemetryEvents.runId, runId)).orderBy(desc(telemetryEvents.createdAt));
+  }
+
+  async createPolicyVersion(pv: InsertPolicyVersion): Promise<PolicyVersion> {
+    const [result] = await db.insert(policyVersions).values(pv).returning();
+    console.log(`[Storage] Created policy version v${pv.version} for scope ${pv.scopeKey}`);
+    return result;
+  }
+
+  async getLatestPolicyVersion(scopeKey: string): Promise<PolicyVersion | undefined> {
+    const [result] = await db
+      .select()
+      .from(policyVersions)
+      .where(eq(policyVersions.scopeKey, scopeKey))
+      .orderBy(desc(policyVersions.version))
+      .limit(1);
+    return result || undefined;
+  }
+
+  async createPolicyApplication(pa: InsertPolicyApplication): Promise<PolicyApplication> {
+    const [result] = await db.insert(policyApplications).values(pa).returning();
+    console.log(`[Storage] Created policy application for run ${pa.runId} scope ${pa.scopeKey}`);
+    return result;
+  }
+
+  async getPolicyApplicationsByRun(runId: string): Promise<PolicyApplication[]> {
+    return db.select().from(policyApplications).where(eq(policyApplications.runId, runId)).orderBy(desc(policyApplications.createdAt));
   }
 }
 

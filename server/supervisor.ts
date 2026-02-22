@@ -21,6 +21,7 @@ import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput } from './supervisor/cvl';
+import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, type PolicyApplicationResult, type PolicyConstraints } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 
@@ -1018,8 +1019,8 @@ class SupervisorService {
     assumptions.push(`Location "${city}" will be used as-is in the Google Places text query`);
 
     const userRequestedCountFinal: number | null = userSpecifiedCount ? userRequestedCount! : null;
-    const searchBudgetCount = Math.min(50, Math.max(30, requestedCount));
-    const searchCount = searchBudgetCount;
+    let searchBudgetCount = Math.min(50, Math.max(30, requestedCount));
+    let searchCount = searchBudgetCount;
     const postProcessing: string[] = [];
     if (prefixFilter) postProcessing.push(`Filter names starting with "${prefixFilter}"`);
     if (nameFilter) postProcessing.push(`Filter names containing "${nameFilter}"`);
@@ -1107,6 +1108,60 @@ class SupervisorService {
       console.warn(`[CVL] Failed to emit constraint_capability_check (non-fatal): ${ccErr.message}`);
     }
 
+    let policyResult: PolicyApplicationResult | null = null;
+    const runStartTime = Date.now();
+    let runToolCallCount = 0;
+    try {
+      policyResult = await applyPolicy({
+        request: originalUserGoal,
+        vertical: businessType,
+        location: city,
+        constraintBucket: hard_constraints,
+        userValue: userRequestedCountFinal ?? undefined,
+      });
+
+      if (policyResult.applied) {
+        const pc = policyResult.constraints;
+        if (pc.searchBudgetCount !== searchBudgetCount) {
+          console.log(`[LEARNING_LAYER] Overriding searchBudgetCount: ${searchBudgetCount} → ${pc.searchBudgetCount}`);
+          searchBudgetCount = pc.searchBudgetCount;
+          searchCount = pc.searchBudgetCount;
+        }
+        if (pc.maxPlanVersions !== MAX_REPLANS) {
+          console.log(`[LEARNING_LAYER] Overriding MAX_REPLANS: ${MAX_REPLANS} → ${pc.maxPlanVersions}`);
+          MAX_REPLANS = pc.maxPlanVersions;
+        }
+      }
+
+      await persistPolicyApplication(chatRunId, {
+        request: originalUserGoal,
+        vertical: businessType,
+        location: city,
+        constraintBucket: hard_constraints,
+        userValue: userRequestedCountFinal ?? undefined,
+      }, policyResult);
+
+      await writeDecisionLog({
+        runId: chatRunId,
+        userId: task.user_id,
+        conversationId,
+        scopeKey: policyResult.scopeKey,
+        policyVersion: policyResult.policyVersion,
+        policyApplied: policyResult.applied,
+        chosenRadiusKm: policyResult.constraints.radiusKm,
+        chosenEnrichmentBatch: policyResult.constraints.enrichmentBatchSize,
+        chosenSearchBudget: policyResult.constraints.searchBudgetCount,
+        stopThresholds: { zero: policyResult.constraints.stopThresholdZero, min: policyResult.constraints.stopThresholdMin },
+        maxPlanVersions: policyResult.constraints.maxPlanVersions,
+        inputVertical: businessType,
+        inputLocation: city,
+        constraintBucket: hard_constraints,
+        rationale: policyResult.rationale,
+      });
+    } catch (policyErr: any) {
+      console.warn(`[LEARNING_LAYER] Policy application failed (non-fatal, using defaults): ${policyErr.message}`);
+    }
+
     const v1Constraints = {
       business_type: businessType,
       location: city,
@@ -1180,7 +1235,7 @@ class SupervisorService {
       return s;
     }
 
-    const MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '5', 10);
+    let MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '5', 10);
     const accumulatedCandidates = new Map<string, AccumulatedCandidate>();
 
     const hasHardNameConstraints = structuredConstraints.some(c => (c.type === 'NAME_STARTS_WITH' || c.type === 'NAME_CONTAINS') && c.hard);
@@ -1380,6 +1435,7 @@ class SupervisorService {
         clientRequestId,
       });
 
+      runToolCallCount++;
       if (searchResult.success && searchResult.data?.places && Array.isArray(searchResult.data.places)) {
         const places = searchResult.data.places as any[];
         for (const p of places) {
@@ -1536,7 +1592,8 @@ class SupervisorService {
     // 5c. Build enrichment plan AFTER discovery using actual lead data, then execute
     const accumulatedStepData: Record<string, Record<string, unknown>> = {};
     if (!usedStub && leads.length > 0) {
-      const enrichmentBatchSize = Math.min(leads.length, parseInt(process.env.ENRICHMENT_BATCH_SIZE || '5', 10));
+      const policyEnrichBatch = policyResult?.applied ? policyResult.constraints.enrichmentBatchSize : parseInt(process.env.ENRICHMENT_BATCH_SIZE || '5', 10);
+      const enrichmentBatchSize = Math.min(leads.length, policyEnrichBatch);
       const leadsWithWebsites = leads.filter(l => l.website);
       const leadsWithoutWebsites = leads.filter(l => !l.website);
 
@@ -2507,6 +2564,7 @@ class SupervisorService {
           clientRequestId,
         });
 
+        runToolCallCount++;
         if (replanSearchResult.success && replanSearchResult.data?.places && Array.isArray(replanSearchResult.data.places)) {
           const places = replanSearchResult.data.places as any[];
           for (const p of places) {
@@ -3280,6 +3338,43 @@ class SupervisorService {
     } catch (bErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to write beliefs (non-fatal): ${bErr.message}`); }
 
     const chatResponse = SUPERVISOR_NEUTRAL_MESSAGE;
+
+    try {
+      const runDuration = Date.now() - runStartTime;
+      const outcomeScopeKey = policyResult?.scopeKey ?? `${businessType.toLowerCase()}::${city.toLowerCase()}::default`;
+      await writeOutcomeLog({
+        runId: chatRunId,
+        userId: task.user_id,
+        conversationId,
+        deliveredCount: mainDsPayload.delivered_total_count,
+        requestedCount: mainDsPayload.requested_count,
+        verifiedExact: mainDsPayload.delivered_exact_count,
+        verifiedClosest: mainDsPayload.delivered_closest.length,
+        stopReason: mainDsPayload.stop_reason,
+        toolCalls: runToolCallCount,
+        costEstimate: runToolCallCount * 0.02,
+        durationMs: runDuration,
+        planVersionsUsed: planVersion,
+        scopeKey: outcomeScopeKey,
+      });
+
+      const policyConstraintsUsed: PolicyConstraints = policyResult?.constraints ?? {
+        radiusKm: 0, enrichmentBatchSize: 5, stopThresholdZero: false,
+        stopThresholdMin: 1, maxPlanVersions: 2, searchBudgetCount: 30,
+      };
+      await writeOutcomePolicyVersion(
+        outcomeScopeKey,
+        policyResult?.policyVersion ?? 0,
+        policyConstraintsUsed,
+        {
+          deliveredCount: mainDsPayload.delivered_total_count,
+          requestedCount: mainDsPayload.requested_count,
+          stopReason: mainDsPayload.stop_reason,
+        },
+      );
+    } catch (outcomeErr: any) {
+      console.warn(`[LEARNING_LAYER] outcome_log or policy version write failed (non-fatal): ${outcomeErr.message}`);
+    }
 
     console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub}`);
 

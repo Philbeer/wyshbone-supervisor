@@ -294,3 +294,64 @@ export const insertFeedbackEventSchema = createInsertSchema(feedbackEvents).omit
 
 export type InsertFeedbackEvent = z.infer<typeof insertFeedbackEventSchema>;
 export type FeedbackEvent = typeof feedbackEvents.$inferSelect;
+
+export const telemetryEvents = pgTable("telemetry_events", {
+  id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+  runId: text("run_id").notNull(),
+  eventType: text("event_type").notNull(),
+  payload: jsonb("payload").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  runIdIdx: index("idx_telemetry_events_run_id").on(table.runId),
+  eventTypeIdx: index("idx_telemetry_events_event_type").on(table.eventType),
+}));
+
+export const insertTelemetryEventSchema = createInsertSchema(telemetryEvents).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertTelemetryEvent = z.infer<typeof insertTelemetryEventSchema>;
+export type TelemetryEvent = typeof telemetryEvents.$inferSelect;
+
+export const policyVersions = pgTable("policy_versions", {
+  id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+  scopeKey: text("scope_key").notNull(),
+  version: integer("version").notNull().default(1),
+  policyData: jsonb("policy_data").notNull(),
+  source: text("source").notNull().default("outcome_feedback"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  scopeKeyIdx: index("idx_policy_versions_scope_key").on(table.scopeKey),
+  scopeKeyVersionIdx: index("idx_policy_versions_scope_version").on(table.scopeKey, table.version),
+}));
+
+export const insertPolicyVersionSchema = createInsertSchema(policyVersions).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertPolicyVersion = z.infer<typeof insertPolicyVersionSchema>;
+export type PolicyVersion = typeof policyVersions.$inferSelect;
+
+export const policyApplications = pgTable("policy_applications", {
+  id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+  runId: text("run_id").notNull(),
+  scopeKey: text("scope_key").notNull(),
+  policyVersionId: text("policy_version_id"),
+  appliedPolicies: jsonb("applied_policies").notNull(),
+  inputSnapshot: jsonb("input_snapshot").notNull(),
+  outputConstraints: jsonb("output_constraints").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  runIdIdx: index("idx_policy_applications_run_id").on(table.runId),
+  scopeKeyIdx: index("idx_policy_applications_scope_key").on(table.scopeKey),
+}));
+
+export const insertPolicyApplicationSchema = createInsertSchema(policyApplications).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertPolicyApplication = z.infer<typeof insertPolicyApplicationSchema>;
+export type PolicyApplication = typeof policyApplications.$inferSelect;

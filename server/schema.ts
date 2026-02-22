@@ -42,6 +42,12 @@ export const {
   insertGoalLedgerSchema,
   insertBeliefStoreSchema,
   insertFeedbackEventSchema,
+  telemetryEvents,
+  policyVersions,
+  policyApplications,
+  insertTelemetryEventSchema,
+  insertPolicyVersionSchema,
+  insertPolicyApplicationSchema,
 } = schema;
 
 export type {
@@ -69,4 +75,10 @@ export type {
   InsertBeliefStore,
   FeedbackEvent,
   InsertFeedbackEvent,
+  TelemetryEvent,
+  InsertTelemetryEvent,
+  PolicyVersion,
+  InsertPolicyVersion,
+  PolicyApplication,
+  InsertPolicyApplication,
 } from '@shared/schema';

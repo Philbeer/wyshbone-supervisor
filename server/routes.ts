@@ -2655,6 +2655,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   console.log('[DEBUG] Registered: POST /api/feedback/accept, /api/feedback/retry, /api/feedback/abandon, /api/feedback/export');
 
+  app.post('/api/telemetry', async (req, res) => {
+    const { run_id, event_type, payload } = req.body;
+    if (!run_id || !event_type) {
+      return res.status(400).json({ ok: false, error: 'run_id and event_type are required' });
+    }
+    try {
+      const existingRun = await storage.getArtefactsByRunId(run_id);
+      const agentRuns = await storage.getAgentRuns();
+      const runExists = agentRuns.some(r => r.id === run_id) || existingRun.length > 0;
+      if (!runExists) {
+        return res.status(404).json({ ok: false, error: `run_id ${run_id} not found` });
+      }
+      const event = await storage.createTelemetryEvent({
+        runId: run_id,
+        eventType: event_type,
+        payload: payload || {},
+      });
+      return res.json({ ok: true, event_id: event.id });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  console.log('[DEBUG] Registered: POST /api/telemetry');
+
   const httpServer = createServer(app);
   return httpServer;
 }

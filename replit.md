@@ -109,6 +109,16 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Non-regression**: Pure Places-only queries (no HAS_ATTRIBUTE) bypass the gate entirely.
 - **Artefact types**: `attribute_verification`, terminal artefact with `reason: unverifiable_hard_constraint`.
 
+### Learning Layer v1 (Feb 2026)
+- **Module**: `server/supervisor/learning-layer.ts` — deterministic policy engine for pre-plan constraint application.
+- **Tables**: `telemetry_events`, `policy_versions`, `policy_applications` (migration: `003_learning_layer_tables.sql`).
+- **Scope Key**: `deriveScopeKey(vertical, location, constraintBucket)` → deterministic composite key for policy lookup.
+- **Policy Application**: `applyPolicy` runs before plan creation in `executeTowerLoopChat`. Merges stored policy constraints (radiusKm, enrichmentBatchSize, stopThresholds, maxPlanVersions, searchBudgetCount) over defaults.
+- **Artefact types**: `decision_log` (records chosen policy values and key parameters), `outcome_log` (delivered/requested counts, verified metrics, stop reason, tool calls, cost, duration).
+- **Policy Feedback Loop**: After each run, `writeOutcomePolicyVersion` writes a new `policy_versions` row with adjustments based on outcome fill-rate. Second run with same scope applies the stored policy.
+- **Telemetry**: `POST /api/telemetry` accepts `{ run_id, event_type, payload }`, validates run_id exists, writes to `telemetry_events`.
+- **Tests**: `server/supervisor/learning-layer.test.ts` — scope key derivation, policy merge, plan parameter alteration.
+
 ### Tool Planning Policy (Feb 2026)
 - **Module**: `server/supervisor/tool-planning-policy.ts` — deterministic tool ordering rules.
 - **Primary path**: Google Places → WEB_VISIT → CONTACT_EXTRACT → LEAD_ENRICH (when website exists).
