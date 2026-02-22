@@ -1685,8 +1685,9 @@ class SupervisorService {
         }
 
         const enrichableLeads = indexedLeads.filter(l => l.website).slice(0, enrichmentBatchSize);
-        for (let eli = 0; eli < enrichableLeads.length; eli++) {
-          const lead = enrichableLeads[eli];
+        const ENRICH_CONCURRENCY = 3;
+
+        const enrichOneLead = async (lead: typeof enrichableLeads[0], eli: number) => {
           const leadIdx = lead._idx;
           console.log(`[ENRICHMENT] Enriching lead ${eli + 1}/${enrichableLeads.length}: "${lead.name}" (${lead.website})`);
 
@@ -1815,6 +1816,13 @@ class SupervisorService {
               });
             }
           }
+        };
+
+        console.log(`[ENRICHMENT] Processing ${enrichableLeads.length} leads with concurrency=${ENRICH_CONCURRENCY}`);
+        for (let batchStart = 0; batchStart < enrichableLeads.length; batchStart += ENRICH_CONCURRENCY) {
+          const batch = enrichableLeads.slice(batchStart, batchStart + ENRICH_CONCURRENCY);
+          console.log(`[ENRICHMENT] Batch ${Math.floor(batchStart / ENRICH_CONCURRENCY) + 1}: leads ${batchStart + 1}–${batchStart + batch.length} of ${enrichableLeads.length}`);
+          await Promise.allSettled(batch.map((lead, i) => enrichOneLead(lead, batchStart + i)));
         }
 
         console.log(`[ENRICHMENT] Enrichment phase complete: ${enrichableLeads.length} leads enriched, tools_used=${toolTracker.tools_used.join(',')}`);
@@ -2766,8 +2774,9 @@ class SupervisorService {
           }
 
           const replanEnrichableLeads = replanLeads.filter(l => l.website).slice(0, replanEnrichBatchSize);
-          for (let li = 0; li < replanEnrichableLeads.length; li++) {
-            const lead = replanEnrichableLeads[li];
+          const REPLAN_ENRICH_CONCURRENCY = 3;
+
+          const replanEnrichOneLead = async (lead: typeof replanEnrichableLeads[0], li: number) => {
             console.log(`[REPLAN_ENRICH] Enriching lead ${li + 1}/${replanEnrichableLeads.length}: "${lead.name}"`);
 
             for (const planStep of replanEnrichSteps) {
@@ -2826,6 +2835,12 @@ class SupervisorService {
                 console.warn(`[REPLAN_ENRICH] ${tool} failed for "${lead.name}": ${enrichErr.message}`);
               }
             }
+          };
+
+          console.log(`[REPLAN_ENRICH] Processing ${replanEnrichableLeads.length} leads with concurrency=${REPLAN_ENRICH_CONCURRENCY}`);
+          for (let batchStart = 0; batchStart < replanEnrichableLeads.length; batchStart += REPLAN_ENRICH_CONCURRENCY) {
+            const batch = replanEnrichableLeads.slice(batchStart, batchStart + REPLAN_ENRICH_CONCURRENCY);
+            await Promise.allSettled(batch.map((lead, i) => replanEnrichOneLead(lead, batchStart + i)));
           }
           console.log(`[REPLAN_ENRICH] Enrichment complete: ${replanEnrichableLeads.length} leads enriched (${vLabel})`);
         }
