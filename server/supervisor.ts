@@ -21,7 +21,7 @@ import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput } from './supervisor/cvl';
-import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, type PolicyApplicationResult, type PolicyConstraints } from './supervisor/learning-layer';
+import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, GLOBAL_DEFAULT_BUNDLE, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 
@@ -1111,6 +1111,7 @@ class SupervisorService {
     let policyResult: PolicyApplicationResult | null = null;
     const runStartTime = Date.now();
     let runToolCallCount = 0;
+    let MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '5', 10);
     try {
       policyResult = await applyPolicy({
         request: originalUserGoal,
@@ -1120,17 +1121,15 @@ class SupervisorService {
         userValue: userRequestedCountFinal ?? undefined,
       });
 
-      if (policyResult.applied) {
-        const pc = policyResult.constraints;
-        if (pc.searchBudgetCount !== searchBudgetCount) {
-          console.log(`[LEARNING_LAYER] Overriding searchBudgetCount: ${searchBudgetCount} → ${pc.searchBudgetCount}`);
-          searchBudgetCount = pc.searchBudgetCount;
-          searchCount = pc.searchBudgetCount;
-        }
-        if (pc.maxPlanVersions !== MAX_REPLANS) {
-          console.log(`[LEARNING_LAYER] Overriding MAX_REPLANS: ${MAX_REPLANS} → ${pc.maxPlanVersions}`);
-          MAX_REPLANS = pc.maxPlanVersions;
-        }
+      const ep = policyResult.executionParams;
+      if (ep.searchBudgetCount !== searchBudgetCount) {
+        console.log(`[LEARNING_LAYER] Overriding searchBudgetCount: ${searchBudgetCount} → ${ep.searchBudgetCount}`);
+        searchBudgetCount = ep.searchBudgetCount;
+        searchCount = ep.searchCount;
+      }
+      if (ep.maxReplans !== MAX_REPLANS) {
+        console.log(`[LEARNING_LAYER] Overriding MAX_REPLANS: ${MAX_REPLANS} → ${ep.maxReplans}`);
+        MAX_REPLANS = ep.maxReplans;
       }
 
       await persistPolicyApplication(chatRunId, {
@@ -1148,11 +1147,8 @@ class SupervisorService {
         scopeKey: policyResult.scopeKey,
         policyVersion: policyResult.policyVersion,
         policyApplied: policyResult.applied,
-        chosenRadiusKm: policyResult.constraints.radiusKm,
-        chosenEnrichmentBatch: policyResult.constraints.enrichmentBatchSize,
-        chosenSearchBudget: policyResult.constraints.searchBudgetCount,
-        stopThresholds: { zero: policyResult.constraints.stopThresholdZero, min: policyResult.constraints.stopThresholdMin },
-        maxPlanVersions: policyResult.constraints.maxPlanVersions,
+        snapshot: policyResult.snapshot,
+        executionParams: policyResult.executionParams,
         inputVertical: businessType,
         inputLocation: city,
         constraintBucket: hard_constraints,
@@ -1235,7 +1231,6 @@ class SupervisorService {
       return s;
     }
 
-    let MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '5', 10);
     const accumulatedCandidates = new Map<string, AccumulatedCandidate>();
 
     const hasHardNameConstraints = structuredConstraints.some(c => (c.type === 'NAME_STARTS_WITH' || c.type === 'NAME_CONTAINS') && c.hard);
@@ -1592,7 +1587,7 @@ class SupervisorService {
     // 5c. Build enrichment plan AFTER discovery using actual lead data, then execute
     const accumulatedStepData: Record<string, Record<string, unknown>> = {};
     if (!usedStub && leads.length > 0) {
-      const policyEnrichBatch = policyResult?.applied ? policyResult.constraints.enrichmentBatchSize : parseInt(process.env.ENRICHMENT_BATCH_SIZE || '5', 10);
+      const policyEnrichBatch = policyResult ? policyResult.executionParams.enrichmentBatchSize : parseInt(process.env.ENRICHMENT_BATCH_SIZE || '5', 10);
       const enrichmentBatchSize = Math.min(leads.length, policyEnrichBatch);
       const leadsWithWebsites = leads.filter(l => l.website);
       const leadsWithoutWebsites = leads.filter(l => !l.website);
@@ -3358,14 +3353,11 @@ class SupervisorService {
         scopeKey: outcomeScopeKey,
       });
 
-      const policyConstraintsUsed: PolicyConstraints = policyResult?.constraints ?? {
-        radiusKm: 0, enrichmentBatchSize: 5, stopThresholdZero: false,
-        stopThresholdMin: 1, maxPlanVersions: 2, searchBudgetCount: 30,
-      };
+      const policyBundleUsed: PolicyBundleV1 = policyResult?.bundle ?? structuredClone(GLOBAL_DEFAULT_BUNDLE);
       await writeOutcomePolicyVersion(
         outcomeScopeKey,
         policyResult?.policyVersion ?? 0,
-        policyConstraintsUsed,
+        policyBundleUsed,
         {
           deliveredCount: mainDsPayload.delivered_total_count,
           requestedCount: mainDsPayload.requested_count,

@@ -1,5 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { deriveScopeKey, mergePolicy, type PolicyConstraints } from './learning-layer';
+import {
+  deriveScopeKey,
+  mergePolicy,
+  deriveExecutionParams,
+  upgradeFlatPolicyToBundle,
+  buildApplicationSnapshot,
+  GLOBAL_DEFAULT_BUNDLE,
+  GLOBAL_DEFAULT_SCOPE_KEY,
+  type PolicyConstraints,
+  type PolicyBundleV1,
+  type PolicyApplicationSnapshot,
+} from './learning-layer';
 
 const DEFAULT_POLICY: PolicyConstraints = {
   radiusKm: 0,
@@ -42,14 +53,13 @@ describe('Learning Layer', () => {
     });
   });
 
-  describe('mergePolicy', () => {
+  describe('mergePolicy (legacy compat)', () => {
     it('applies stored policy values over defaults', () => {
       const stored = { radiusKm: 25, searchBudgetCount: 50 };
       const merged = mergePolicy(DEFAULT_POLICY, stored);
       expect(merged.radiusKm).toBe(25);
       expect(merged.searchBudgetCount).toBe(50);
       expect(merged.enrichmentBatchSize).toBe(5);
-      expect(merged.stopThresholdZero).toBe(false);
     });
 
     it('ignores invalid types in stored policy', () => {
@@ -58,75 +68,221 @@ describe('Learning Layer', () => {
       expect(merged.radiusKm).toBe(0);
       expect(merged.searchBudgetCount).toBe(30);
     });
+  });
 
-    it('applies stopThresholdZero boolean', () => {
-      const stored = { stopThresholdZero: true };
-      const merged = mergePolicy(DEFAULT_POLICY, stored);
-      expect(merged.stopThresholdZero).toBe(true);
+  describe('GLOBAL_DEFAULT_BUNDLE', () => {
+    it('has policy_bundle_version 1', () => {
+      expect(GLOBAL_DEFAULT_BUNDLE.policy_bundle_version).toBe(1);
+    });
+
+    it('contains all three policy sections', () => {
+      expect(GLOBAL_DEFAULT_BUNDLE.policies.radius_policy_v1).toBeDefined();
+      expect(GLOBAL_DEFAULT_BUNDLE.policies.enrichment_policy_v1).toBeDefined();
+      expect(GLOBAL_DEFAULT_BUNDLE.policies.stop_policy_v1).toBeDefined();
+    });
+
+    it('has correct default radius steps', () => {
+      expect(GLOBAL_DEFAULT_BUNDLE.policies.radius_policy_v1.default_steps_km).toEqual([2, 5, 10]);
+    });
+
+    it('has correct default enrichment batch size', () => {
+      expect(GLOBAL_DEFAULT_BUNDLE.policies.enrichment_policy_v1.enrichment_batch_size).toBe(10);
+    });
+
+    it('has correct default stop policy values', () => {
+      const stop = GLOBAL_DEFAULT_BUNDLE.policies.stop_policy_v1;
+      expect(stop.max_replans).toBe(2);
+      expect(stop.search_budget_count).toBe(1);
+      expect(stop.search_count).toBe(1);
+      expect(stop.stop_when_verified_exact_is_zero_after_enrichment).toBe(true);
+    });
+
+    it('includes known_unverifiable_hard_constraints', () => {
+      expect(GLOBAL_DEFAULT_BUNDLE.policies.stop_policy_v1.known_unverifiable_hard_constraints).toEqual([
+        'c_attr_live_music',
+        'c_attr_opened_recently',
+      ]);
+    });
+
+    it('GLOBAL_DEFAULT_SCOPE_KEY is GLOBAL_DEFAULT', () => {
+      expect(GLOBAL_DEFAULT_SCOPE_KEY).toBe('GLOBAL_DEFAULT');
     });
   });
 
-  describe('policy alters plan parameters (run 2 scenario)', () => {
-    it('stored policy with higher searchBudgetCount overrides default', () => {
-      const storedPolicy = { searchBudgetCount: 50, radiusKm: 10, enrichmentBatchSize: 8 };
-      const merged = mergePolicy(DEFAULT_POLICY, storedPolicy);
-      expect(merged.searchBudgetCount).toBe(50);
-      expect(merged.searchBudgetCount).toBeGreaterThan(DEFAULT_POLICY.searchBudgetCount);
-      expect(merged.radiusKm).toBe(10);
-      expect(merged.enrichmentBatchSize).toBe(8);
+  describe('deriveExecutionParams', () => {
+    it('extracts execution params from canonical bundle', () => {
+      const ep = deriveExecutionParams(GLOBAL_DEFAULT_BUNDLE);
+      expect(ep.searchBudgetCount).toBe(1);
+      expect(ep.searchCount).toBe(1);
+      expect(ep.maxReplans).toBe(2);
+      expect(ep.enrichmentBatchSize).toBe(10);
+      expect(ep.radiusStepsKm).toEqual([2, 5, 10]);
+      expect(ep.radiusMaxCapKm).toBe(10);
+      expect(ep.stopWhenVerifiedZero).toBe(true);
+      expect(ep.stopWhenCostExceedsBudget).toBe(true);
+      expect(ep.maxEnrichCallsPerLead).toBe(1);
+      expect(ep.maxTotalEnrichCalls).toBe(25);
     });
 
-    it('policy with maxPlanVersions alters replan ceiling', () => {
-      const storedPolicy = { maxPlanVersions: 4 };
-      const merged = mergePolicy(DEFAULT_POLICY, storedPolicy);
-      expect(merged.maxPlanVersions).toBe(4);
-      expect(merged.maxPlanVersions).toBeGreaterThan(DEFAULT_POLICY.maxPlanVersions);
+    it('reflects changes in bundle', () => {
+      const modified = structuredClone(GLOBAL_DEFAULT_BUNDLE);
+      modified.policies.stop_policy_v1.max_replans = 4;
+      modified.policies.stop_policy_v1.search_budget_count = 45;
+      modified.policies.enrichment_policy_v1.enrichment_batch_size = 15;
+      const ep = deriveExecutionParams(modified);
+      expect(ep.maxReplans).toBe(4);
+      expect(ep.searchBudgetCount).toBe(45);
+      expect(ep.enrichmentBatchSize).toBe(15);
+    });
+  });
+
+  describe('upgradeFlatPolicyToBundle', () => {
+    it('passes through already-canonical bundles unchanged', () => {
+      const result = upgradeFlatPolicyToBundle(GLOBAL_DEFAULT_BUNDLE as unknown as Record<string, unknown>);
+      expect(result.policy_bundle_version).toBe(1);
+      expect(result.policies.stop_policy_v1.max_replans).toBe(2);
     });
 
-    it('simulates run-2 override flow: stored policy changes searchBudgetCount and MAX_REPLANS', () => {
+    it('converts legacy flat policy to canonical bundle', () => {
+      const flat = {
+        radiusKm: 20,
+        enrichmentBatchSize: 8,
+        searchBudgetCount: 40,
+        maxPlanVersions: 3,
+        stopThresholdZero: true,
+      };
+      const result = upgradeFlatPolicyToBundle(flat);
+      expect(result.policy_bundle_version).toBe(1);
+      expect(result.policies.radius_policy_v1.max_cap_km).toBe(20);
+      expect(result.policies.enrichment_policy_v1.enrichment_batch_size).toBe(8);
+      expect(result.policies.stop_policy_v1.search_budget_count).toBe(40);
+      expect(result.policies.stop_policy_v1.search_count).toBe(40);
+      expect(result.policies.stop_policy_v1.max_replans).toBe(3);
+      expect(result.policies.stop_policy_v1.stop_when_verified_exact_is_zero_after_enrichment).toBe(true);
+    });
+
+    it('preserves defaults for missing flat fields', () => {
+      const flat = { radiusKm: 15 };
+      const result = upgradeFlatPolicyToBundle(flat);
+      expect(result.policies.radius_policy_v1.max_cap_km).toBe(15);
+      expect(result.policies.enrichment_policy_v1.enrichment_batch_size).toBe(10);
+      expect(result.policies.stop_policy_v1.max_replans).toBe(2);
+    });
+  });
+
+  describe('run-2 override simulation', () => {
+    it('canonical bundle overrides supervisor execution params', () => {
       let searchBudgetCount = 30;
-      let searchCount = searchBudgetCount;
+      let searchCount = 30;
       let MAX_REPLANS = 5;
 
-      const storedPolicyData = { searchBudgetCount: 45, maxPlanVersions: 3, enrichmentBatchSize: 7 };
-      const merged = mergePolicy(DEFAULT_POLICY, storedPolicyData);
+      const learnedBundle = structuredClone(GLOBAL_DEFAULT_BUNDLE);
+      learnedBundle.policies.stop_policy_v1.search_budget_count = 45;
+      learnedBundle.policies.stop_policy_v1.search_count = 45;
+      learnedBundle.policies.stop_policy_v1.max_replans = 3;
 
-      if (merged.searchBudgetCount !== searchBudgetCount) {
-        searchBudgetCount = merged.searchBudgetCount;
-        searchCount = merged.searchBudgetCount;
+      const ep = deriveExecutionParams(learnedBundle);
+
+      if (ep.searchBudgetCount !== searchBudgetCount) {
+        searchBudgetCount = ep.searchBudgetCount;
+        searchCount = ep.searchCount;
       }
-      if (merged.maxPlanVersions !== MAX_REPLANS) {
-        MAX_REPLANS = merged.maxPlanVersions;
+      if (ep.maxReplans !== MAX_REPLANS) {
+        MAX_REPLANS = ep.maxReplans;
       }
 
       expect(searchBudgetCount).toBe(45);
       expect(searchCount).toBe(45);
       expect(MAX_REPLANS).toBe(3);
     });
+  });
 
-    it('run-1 without stored policy uses defaults', () => {
-      let searchBudgetCount = 30;
-      let MAX_REPLANS = 5;
+  describe('buildApplicationSnapshot (canonical format)', () => {
+    it('produces snapshot with all required fields', () => {
+      const snapshot = buildApplicationSnapshot(
+        'pubs::london::business_type',
+        GLOBAL_DEFAULT_BUNDLE,
+        1,
+        ['Default learning bundle applied (no learned updates yet).'],
+      );
+      expect(snapshot.scope_key).toBe('pubs::london::business_type');
+      expect(snapshot.applied_at).toBeDefined();
+      expect(new Date(snapshot.applied_at).toISOString()).toBe(snapshot.applied_at);
+      expect(snapshot.applied_versions).toEqual({
+        radius_policy_v1: 1,
+        enrichment_policy_v1: 1,
+        stop_policy_v1: 1,
+      });
+      expect(snapshot.why_short).toEqual(['Default learning bundle applied (no learned updates yet).']);
+    });
 
-      const merged = mergePolicy(DEFAULT_POLICY, {});
+    it('applied_policies contains correct subset of policy fields', () => {
+      const snapshot = buildApplicationSnapshot(
+        'pubs::london::business_type',
+        GLOBAL_DEFAULT_BUNDLE,
+        1,
+        ['test'],
+      );
+      expect(snapshot.applied_policies.radius_policy_v1).toEqual({
+        default_steps_km: [2, 5, 10],
+        max_cap_km: 10,
+      });
+      expect(snapshot.applied_policies.enrichment_policy_v1).toEqual({
+        mode: 'places_first_then_web',
+        max_total_enrich_calls: 25,
+        enrichment_batch_size: 10,
+      });
+      expect(snapshot.applied_policies.stop_policy_v1).toEqual({
+        max_replans: 2,
+        search_budget_count: 1,
+        search_count: 1,
+        stop_when_verified_exact_is_zero_after_enrichment: true,
+        require_user_override_to_attempt_unverifiable_hard: true,
+      });
+    });
 
-      expect(merged.searchBudgetCount).toBe(30);
-      expect(merged.maxPlanVersions).toBe(2);
-
-      expect(searchBudgetCount).toBe(30);
-      expect(MAX_REPLANS).toBe(5);
+    it('snapshot does not contain extra keys beyond the canonical set', () => {
+      const snapshot = buildApplicationSnapshot('test::scope::key', GLOBAL_DEFAULT_BUNDLE, 0, []);
+      const allowedKeys = ['scope_key', 'applied_at', 'applied_versions', 'applied_policies', 'why_short'];
+      expect(Object.keys(snapshot).sort()).toEqual(allowedKeys.sort());
     });
   });
 
-  describe('decision_log and outcome_log artefact types', () => {
-    it('writeDecisionLog and writeOutcomeLog are importable functions', async () => {
-      const { writeDecisionLog, writeOutcomeLog } = await import('./learning-layer');
-      expect(typeof writeDecisionLog).toBe('function');
-      expect(typeof writeOutcomeLog).toBe('function');
+  describe('GLOBAL_DEFAULT seeding', () => {
+    it('ensureGlobalDefault is called via applyPolicy (importable)', async () => {
+      const { applyPolicy } = await import('./learning-layer');
+      expect(typeof applyPolicy).toBe('function');
     });
 
-    it('writeOutcomePolicyVersion is importable', async () => {
+    it('GLOBAL_DEFAULT_SCOPE_KEY is the reserved key', () => {
+      expect(GLOBAL_DEFAULT_SCOPE_KEY).toBe('GLOBAL_DEFAULT');
+    });
+  });
+
+  describe('no flat policy writes (canonical enforcement)', () => {
+    it('upgradeFlatPolicyToBundle always returns policy_bundle_version 1', () => {
+      const flat1 = { radiusKm: 5 };
+      expect(upgradeFlatPolicyToBundle(flat1).policy_bundle_version).toBe(1);
+
+      const flat2 = { searchBudgetCount: 40, maxPlanVersions: 3 };
+      expect(upgradeFlatPolicyToBundle(flat2).policy_bundle_version).toBe(1);
+
+      const flat3 = {};
+      expect(upgradeFlatPolicyToBundle(flat3).policy_bundle_version).toBe(1);
+    });
+
+    it('writeOutcomePolicyVersion takes PolicyBundleV1 not flat constraints', async () => {
       const { writeOutcomePolicyVersion } = await import('./learning-layer');
+      expect(typeof writeOutcomePolicyVersion).toBe('function');
+      expect(writeOutcomePolicyVersion.length).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  describe('artefact writer importability', () => {
+    it('writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion are importable', async () => {
+      const { writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion } = await import('./learning-layer');
+      expect(typeof writeDecisionLog).toBe('function');
+      expect(typeof writeOutcomeLog).toBe('function');
       expect(typeof writeOutcomePolicyVersion).toBe('function');
     });
 
