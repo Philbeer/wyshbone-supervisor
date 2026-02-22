@@ -121,6 +121,13 @@ export interface IStorage {
   // Policy applications
   createPolicyApplication(pa: InsertPolicyApplication): Promise<PolicyApplication>;
   getPolicyApplicationsByRun(runId: string): Promise<PolicyApplication[]>;
+  getRunSnapshot(runId: string): Promise<{
+    run_id: string;
+    policy_application_snapshot: Record<string, unknown> | null;
+    delivery_summary: Record<string, unknown> | null;
+    leads_list: Record<string, unknown> | null;
+    agent_run: Record<string, unknown> | null;
+  }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -657,6 +664,99 @@ export class DatabaseStorage implements IStorage {
 
   async getPolicyApplicationsByRun(runId: string): Promise<PolicyApplication[]> {
     return db.select().from(policyApplications).where(eq(policyApplications.runId, runId)).orderBy(desc(policyApplications.createdAt));
+  }
+
+  async getRunSnapshot(runId: string): Promise<{
+    run_id: string;
+    policy_application_snapshot: Record<string, unknown> | null;
+    delivery_summary: Record<string, unknown> | null;
+    leads_list: Record<string, unknown> | null;
+    agent_run: Record<string, unknown> | null;
+  }> {
+    const [allArtefacts, policyApps, agentRunRows] = await Promise.all([
+      db.select().from(artefacts).where(eq(artefacts.runId, runId)).orderBy(desc(artefacts.createdAt)),
+      db.select().from(policyApplications).where(eq(policyApplications.runId, runId)).orderBy(desc(policyApplications.createdAt)).limit(1),
+      db.select().from(agentRuns).where(eq(agentRuns.id, runId)).limit(1),
+    ]);
+
+    const policySnapshotArtefact = allArtefacts.find(a => a.type === 'policy_application_snapshot');
+    const deliverySummaryArtefact = allArtefacts.find(a => a.type === 'delivery_summary');
+    const leadsListArtefact = allArtefacts.find(a => a.type === 'leads_list');
+
+    const policyAppRow = policyApps[0] ?? null;
+    const agentRunRow = agentRunRows[0] ?? null;
+
+    const policySnapshot = policySnapshotArtefact
+      ? {
+          artefact_id: policySnapshotArtefact.id,
+          run_id: policySnapshotArtefact.runId,
+          type: policySnapshotArtefact.type,
+          title: policySnapshotArtefact.title,
+          summary: policySnapshotArtefact.summary,
+          payload: policySnapshotArtefact.payloadJson as Record<string, unknown> | null,
+          created_at: policySnapshotArtefact.createdAt,
+          ...(policyAppRow ? {
+            db_row: {
+              id: policyAppRow.id,
+              scope_key: policyAppRow.scopeKey,
+              applied_policies: policyAppRow.appliedPolicies,
+              output_constraints: policyAppRow.outputConstraints,
+            },
+          } : {}),
+        }
+      : (policyAppRow ? {
+          db_row: {
+            id: policyAppRow.id,
+            run_id: policyAppRow.runId,
+            scope_key: policyAppRow.scopeKey,
+            applied_policies: policyAppRow.appliedPolicies,
+            output_constraints: policyAppRow.outputConstraints,
+          },
+        } : null);
+
+    const deliverySummary = deliverySummaryArtefact
+      ? {
+          artefact_id: deliverySummaryArtefact.id,
+          run_id: deliverySummaryArtefact.runId,
+          type: deliverySummaryArtefact.type,
+          title: deliverySummaryArtefact.title,
+          summary: deliverySummaryArtefact.summary,
+          payload: deliverySummaryArtefact.payloadJson as Record<string, unknown> | null,
+          created_at: deliverySummaryArtefact.createdAt,
+        }
+      : null;
+
+    const leadsList = leadsListArtefact
+      ? {
+          artefact_id: leadsListArtefact.id,
+          run_id: leadsListArtefact.runId,
+          type: leadsListArtefact.type,
+          title: leadsListArtefact.title,
+          summary: leadsListArtefact.summary,
+          payload: leadsListArtefact.payloadJson as Record<string, unknown> | null,
+          created_at: leadsListArtefact.createdAt,
+        }
+      : null;
+
+    const agentRun = agentRunRow
+      ? {
+          id: agentRunRow.id,
+          client_request_id: agentRunRow.clientRequestId,
+          status: agentRunRow.status,
+          terminal_state: agentRunRow.terminalState,
+          metadata: agentRunRow.metadata,
+          created_at: agentRunRow.createdAt,
+          updated_at: agentRunRow.updatedAt,
+        }
+      : null;
+
+    return {
+      run_id: runId,
+      policy_application_snapshot: policySnapshot as Record<string, unknown> | null,
+      delivery_summary: deliverySummary as Record<string, unknown> | null,
+      leads_list: leadsList as Record<string, unknown> | null,
+      agent_run: agentRun as Record<string, unknown> | null,
+    };
   }
 }
 

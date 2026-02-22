@@ -383,4 +383,59 @@ describe('Learning Layer', () => {
       expect(rows[0].scopeKey).toBe(scopeKey);
     });
   });
+
+  describe('getRunSnapshot hydration', () => {
+    it('returns policy_application_snapshot from policy_applications table by run_id', async () => {
+      const { persistPolicyApplication, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE } = await import('./learning-layer');
+      const { storage } = await import('../storage');
+
+      const runId = `snapshot_test_${Date.now()}`;
+      const scopeKey = 'bars::berlin::business_type';
+      const bundle = structuredClone(GLOBAL_DEFAULT_BUNDLE);
+      const snapshot = buildApplicationSnapshot(scopeKey, bundle, 0, ['snapshot hydration test']);
+      const execParams = deriveExecutionParams(bundle);
+
+      await persistPolicyApplication(runId, {
+        request: 'find bars in berlin',
+        vertical: 'bars',
+        location: 'berlin',
+        constraintBucket: ['business_type'],
+      }, {
+        scopeKey,
+        policyVersionId: null,
+        policyVersion: 0,
+        bundle,
+        executionParams: execParams,
+        snapshot,
+        applied: false,
+        rationale: 'test',
+        constraints: {
+          radiusKm: bundle.policies.radius_policy_v1.max_cap_km,
+          enrichmentBatchSize: bundle.policies.enrichment_policy_v1.enrichment_batch_size,
+          stopThresholdZero: bundle.policies.stop_policy_v1.stop_when_verified_exact_is_zero_after_enrichment,
+          stopThresholdMin: 1,
+          maxPlanVersions: bundle.policies.stop_policy_v1.max_replans,
+          searchBudgetCount: bundle.policies.stop_policy_v1.search_budget_count,
+        },
+      });
+
+      const result = await storage.getRunSnapshot(runId);
+      expect(result.run_id).toBe(runId);
+      expect(result.policy_application_snapshot).not.toBeNull();
+      const paSnapshot = result.policy_application_snapshot as any;
+      expect(paSnapshot.db_row).toBeDefined();
+      expect(paSnapshot.db_row.scope_key).toBe(scopeKey);
+      expect(paSnapshot.db_row.run_id).toBe(runId);
+    });
+
+    it('returns null sections for a non-existent run_id', async () => {
+      const { storage } = await import('../storage');
+      const result = await storage.getRunSnapshot('nonexistent_run_id_xyz');
+      expect(result.run_id).toBe('nonexistent_run_id_xyz');
+      expect(result.policy_application_snapshot).toBeNull();
+      expect(result.delivery_summary).toBeNull();
+      expect(result.leads_list).toBeNull();
+      expect(result.agent_run).toBeNull();
+    });
+  });
 });

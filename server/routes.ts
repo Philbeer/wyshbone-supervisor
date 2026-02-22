@@ -2232,6 +2232,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.get("/api/afr/runs/:runId/snapshot", async (req, res) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) {
+        return res.status(400).json({ error: "runId is required" });
+      }
+      const snapshot = await storage.getRunSnapshot(runId);
+      res.json(snapshot);
+    } catch (error: any) {
+      console.error(`[RUN_SNAPSHOT] Error fetching snapshot for runId=${req.params.runId}: ${error.message}`);
+      res.status(500).json({ error: error.message || "Failed to fetch run snapshot" });
+    }
+  });
+  console.log('[DEBUG] Registered: GET /api/afr/runs/:runId/snapshot');
+
   app.get("/api/afr/runs", async (req, res) => {
     try {
       const userId = req.query.user_id as string | undefined;
