@@ -577,21 +577,23 @@ class SupervisorService {
           source: 'supervisor',
           metadata: {
             supervisor_task_id: task.id,
+            run_id: jobId,
             capabilities,
             lead_ids: leadIds,
             factory_demo: true,
             scenario: demoResult.scenario,
           },
-          created_at: Date.now()
+          created_at: new Date().toISOString(),
         })
         .select()
         .single();
 
       if (messageError) {
+        console.error(`[FINAL_MESSAGE] final_message_creation_failed run_id=${jobId} conversation_id=${task.conversation_id} error=${messageError.message}`);
         throw new Error(`Failed to write message: ${messageError.message}`);
       }
 
-      console.log(`✅ Factory demo response posted to conversation ${task.conversation_id}`);
+      console.log(`[FINAL_MESSAGE] final_message_created run_id=${jobId} conversation_id=${task.conversation_id} message_id=${messageId} status=OK (factory_demo)`);
 
       await supabase
         .from('supervisor_tasks')
@@ -614,23 +616,32 @@ class SupervisorService {
     }
 
     let towerResult: { response: string; leadIds: string[] };
+    let runFailed = false;
+    let failureReason = '';
     try {
       towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId);
     } catch (execErr: any) {
-      console.error(`[TOWER_LOOP_CHAT] executeTowerLoopChat failed for runId=${jobId}: ${execErr.message}`);
+      runFailed = true;
+      failureReason = execErr.message || String(execErr);
+      console.error(`[TOWER_LOOP_CHAT] executeTowerLoopChat failed for runId=${jobId}: ${failureReason}`);
       await storage.updateAgentRun(jobId, {
         status: 'failed',
         terminalState: 'error',
-        error: execErr.message,
+        error: failureReason,
         endedAt: new Date(),
       }).catch((updateErr: any) => {
         console.warn(`[TOWER_LOOP_CHAT] Failed to mark agent_run as failed (run may not exist yet): ${updateErr.message}`);
       });
-      throw execErr;
+      towerResult = {
+        response: `The search encountered an issue and could not complete. You can view partial results if any are available.`,
+        leadIds: [],
+      };
     }
     const response = sanitizeSupervisorMessage(towerResult.response);
     const leadIds = towerResult.leadIds;
-    const capabilities = ['lead_generation', 'tower_validated'];
+    const capabilities = runFailed
+      ? ['lead_generation', 'run_failed']
+      : ['lead_generation', 'tower_validated'];
 
     const messageId = randomUUID();
     const { data: newMessage, error: messageError } = await supabase
@@ -643,29 +654,35 @@ class SupervisorService {
         source: 'supervisor',
         metadata: {
           supervisor_task_id: task.id,
+          run_id: jobId,
           capabilities,
           lead_ids: leadIds,
           run_lane: true,
+          ...(runFailed ? { run_failed: true, failure_reason: failureReason } : {}),
         },
-        created_at: Date.now()
+        created_at: new Date().toISOString(),
       })
       .select()
       .single();
 
     if (messageError) {
+      console.error(`[FINAL_MESSAGE] final_message_creation_failed run_id=${jobId} conversation_id=${task.conversation_id} error=${messageError.message}`);
       throw new Error(`Failed to write message: ${messageError.message}`);
     }
 
-    console.log(`✅ Supervisor response posted to conversation ${task.conversation_id}`);
+    console.log(`[FINAL_MESSAGE] final_message_created run_id=${jobId} conversation_id=${task.conversation_id} message_id=${newMessage.id} status=${runFailed ? 'FAIL' : 'OK'}`);
 
+    const taskStatus = runFailed ? 'failed' : 'completed';
     await supabase
       .from('supervisor_tasks')
       .update({
-        status: 'completed',
+        status: taskStatus,
         result: {
           message_id: newMessage.id,
           lead_ids: leadIds,
-          capabilities_used: capabilities
+          capabilities_used: capabilities,
+          run_id: jobId,
+          ...(runFailed ? { error: failureReason } : {}),
         }
       })
       .eq('id', task.id);
