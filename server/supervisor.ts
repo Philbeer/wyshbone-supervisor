@@ -611,7 +611,7 @@ class SupervisorService {
     console.log(`[ID_MAP] jobId=${jobId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${task.id} entry=processChatTask`);
     console.log(`[SUPERVISOR] Processing chat task ${task.id} (${task.task_type}) jobId=${jobId} uiRunId=${uiRunId} clientRequestId=${clientRequestId}`);
 
-    this.bridgeRunToUI(uiRunId, jobId, clientRequestId).catch((e: any) =>
+    this.bridgeRunToUI(uiRunId, jobId, clientRequestId, task.conversation_id, task.user_id).catch((e: any) =>
       console.error(`[RUN_BRIDGE] bridgeRunToUI failed: ${e.message}`)
     );
 
@@ -969,25 +969,61 @@ class SupervisorService {
     }
   }
 
-  private async bridgeRunToUI(uiRunId: string, supervisorRunId: string, clientRequestId?: string): Promise<void> {
+  private async bridgeRunToUI(uiRunId: string, supervisorRunId: string, clientRequestId?: string, conversationId?: string, userId?: string): Promise<void> {
     const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
     if (!uiBaseUrl) {
       console.error(`[RUN_BRIDGE] UI_URL not configured — cannot bridge run IDs`);
       return;
     }
+    const requestPayload = {
+      runId: uiRunId,
+      supervisorRunId,
+      ...(clientRequestId ? { clientRequestId } : {}),
+      ...(conversationId ? { conversationId } : {}),
+    };
+    console.log(`[RUN_BRIDGE] Sending bridge request: runId=${uiRunId} supervisorRunId=${supervisorRunId} crid=${clientRequestId || 'none'} convId=${conversationId || 'none'} url=${uiBaseUrl}/api/afr/run-bridge`);
     try {
       const resp = await fetch(`${uiBaseUrl}/api/afr/run-bridge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          runId: uiRunId,
-          supervisorRunId,
-          ...(clientRequestId ? { clientRequestId } : {}),
-        }),
+        body: JSON.stringify(requestPayload),
       });
-      console.log(`[RUN_BRIDGE] uiRunId=${uiRunId} supervisorRunId=${supervisorRunId} status=${resp.status}`);
+      const respBody = await resp.text().catch(() => '(no body)');
+      if (resp.ok) {
+        console.log(`[RUN_BRIDGE] SUCCESS uiRunId=${uiRunId} supervisorRunId=${supervisorRunId} status=${resp.status} body=${respBody.substring(0, 200)}`);
+      } else {
+        console.error(`[RUN_BRIDGE] FAILED uiRunId=${uiRunId} supervisorRunId=${supervisorRunId} status=${resp.status} body=${respBody.substring(0, 500)}`);
+        console.error(`[RUN_BRIDGE] Request payload: ${JSON.stringify(requestPayload)}`);
+        createArtefact({
+          runId: supervisorRunId,
+          type: 'diagnostic',
+          title: `Run bridge failed: HTTP ${resp.status}`,
+          summary: `bridgeRunToUI returned ${resp.status}. Body: ${respBody.substring(0, 200)}`,
+          payload: {
+            reason: 'run_bridge_failed',
+            http_status: resp.status,
+            response_body: respBody.substring(0, 500),
+            request_payload: requestPayload,
+          },
+          userId: userId || 'system',
+          conversationId,
+        }).catch((artErr: any) => console.warn(`[RUN_BRIDGE] Failed to emit diagnostic artefact: ${artErr.message}`));
+      }
     } catch (e: any) {
-      console.error(`[RUN_BRIDGE] uiRunId=${uiRunId} supervisorRunId=${supervisorRunId} NETWORK_ERROR: ${e.message}`);
+      console.error(`[RUN_BRIDGE] NETWORK_ERROR uiRunId=${uiRunId} supervisorRunId=${supervisorRunId} error=${e.message}`);
+      createArtefact({
+        runId: supervisorRunId,
+        type: 'diagnostic',
+        title: `Run bridge failed: network error`,
+        summary: `bridgeRunToUI network error: ${e.message}`,
+        payload: {
+          reason: 'run_bridge_network_error',
+          error: e.message,
+          request_payload: requestPayload,
+        },
+        userId: userId || 'system',
+        conversationId,
+      }).catch((artErr: any) => console.warn(`[RUN_BRIDGE] Failed to emit diagnostic artefact: ${artErr.message}`));
     }
   }
 
@@ -2246,14 +2282,46 @@ class SupervisorService {
       attributeVerificationAttempted = true;
       const attrValues = hardAttributeConstraints.map(c => typeof c.value === 'string' ? c.value : String(c.value));
       const attrLabel = attrValues.join(', ');
-      console.log(`[ATTR_VERIFY] Hard attribute constraint(s) detected: ${attrLabel} — running attribute verification for ${finalLeads.length} candidate(s)`);
+      const totalChecksExpected = finalLeads.length * attrValues.length;
+      console.log(`[ATTR_VERIFY] Hard attribute constraint(s) detected: ${attrLabel} — running attribute verification for ${finalLeads.length} candidate(s) (${totalChecksExpected} checks expected)`);
+
+      await createArtefact({
+        runId: chatRunId,
+        type: 'verification_pending',
+        title: `Verifying attributes: ${attrLabel}`,
+        summary: `Provisional results generated. Verifying ${attrLabel} for ${finalLeads.length} leads (${totalChecksExpected} checks).`,
+        payload: {
+          leads_count: finalLeads.length,
+          attributes_being_verified: attrValues,
+          total_checks_expected: totalChecksExpected,
+          phase: 'attribute_verification',
+          status: 'in_progress',
+        },
+        userId: task.user_id,
+        conversationId,
+      });
+      console.log(`[ATTR_VERIFY] verification_pending artefact emitted — ${totalChecksExpected} checks for "${attrLabel}"`);
+
+      await this.postArtefactToUI({
+        runId: chatRunId,
+        clientRequestId,
+        type: 'verification_pending',
+        payload: {
+          leads_count: finalLeads.length,
+          attributes_being_verified: attrValues,
+          total_checks_expected: totalChecksExpected,
+          lead_names: finalLeads.map(l => l.name),
+        },
+        userId: task.user_id,
+        conversationId,
+      }).catch((e: any) => console.warn(`[ATTR_VERIFY] postArtefactToUI verification_pending failed (non-fatal): ${e.message}`));
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'attribute_verification_started', status: 'pending',
-        taskGenerated: `Attribute verification: checking ${attrLabel} for ${finalLeads.length} candidates`,
+        taskGenerated: `Attribute verification: checking ${attrLabel} for ${finalLeads.length} candidates (${totalChecksExpected} checks)`,
         runType: 'plan',
-        metadata: { attributes: attrValues, candidates: finalLeads.length },
+        metadata: { attributes: attrValues, candidates: finalLeads.length, total_checks_expected: totalChecksExpected },
       });
 
       const attrVerificationResults: Array<{
