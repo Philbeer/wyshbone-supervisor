@@ -114,28 +114,7 @@ class SupervisorService {
     this.claimIntervalId = setInterval(async () => {
       if (!supabase || !this.isRunning) return;
       try {
-        const { data: pending } = await supabase
-          .from('supervisor_tasks')
-          .select('*')
-          .eq('status', 'pending')
-          .order('created_at', { ascending: true })
-          .limit(10);
-
-        if (!pending || pending.length === 0) return;
-
-        for (const task of pending) {
-          const { data: claimed, error: claimErr } = await supabase
-            .from('supervisor_tasks')
-            .update({ status: 'processing' })
-            .eq('id', task.id)
-            .eq('status', 'pending')
-            .select();
-
-          if (!claimErr && claimed && claimed.length > 0) {
-            console.log(`[BG_CLAIM] Claimed task ${task.id} (run_id=${task.run_id || task.request_data?.run_id || task.id}) while main loop busy`);
-            this.pendingClaimedQueue.push(task);
-          }
-        }
+        await this.claimPendingTasks();
       } catch (err: any) {
         console.warn(`[BG_CLAIM] Background claim error (non-fatal): ${err.message}`);
       }
@@ -481,28 +460,14 @@ class SupervisorService {
     
     await this.sweepStaleTasks();
 
-    const { data: tasks, error } = await supabase
-      .from('supervisor_tasks')
-      .select('*')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: true })
-      .limit(10);
+    await this.claimPendingTasks();
 
-    if (error) {
-      if (error.code === 'PGRST205') {
-        if (!this.missingTableWarned) {
-          console.warn('⚠️  supervisor_tasks table not found in Supabase.');
-          console.warn('   Run migrations/supabase-supervisor-integration.sql in Supabase SQL Editor');
-          console.warn('   Chat integration will be unavailable until migration is complete.');
-          this.missingTableWarned = true;
-        }
-        return;
-      }
-      console.error('Error fetching supervisor tasks:', error);
-      return;
+    const tasksToProcess: any[] = [];
+    while (this.pendingClaimedQueue.length > 0) {
+      tasksToProcess.push(this.pendingClaimedQueue.shift());
     }
 
-    if (!tasks || tasks.length === 0) {
+    if (tasksToProcess.length === 0) {
       const now = Date.now();
       if (now - this.lastNoTasksLogAt > 60_000) {
         console.log('[SUPERVISOR_POLL] No pending tasks (heartbeat)');
@@ -511,34 +476,9 @@ class SupervisorService {
       return;
     }
 
-    console.log(`💬 Found ${tasks.length} pending chat task(s)`);
+    console.log(`[TASK_PROCESS] Processing ${tasksToProcess.length} claimed task(s)`);
 
-    const claimedTasks: typeof tasks = [];
-    for (const task of tasks) {
-      const { data: claimed, error: claimErr } = await supabase
-        .from('supervisor_tasks')
-        .update({ status: 'processing' })
-        .eq('id', task.id)
-        .eq('status', 'pending')
-        .select();
-
-      if (claimErr || !claimed || claimed.length === 0) {
-        const reason = claimErr ? claimErr.message : 'already claimed by another processor';
-        console.warn(`[BATCH_CLAIM] Task ${task.id} claim failed: ${reason}`);
-        continue;
-      }
-      console.log(`[BATCH_CLAIM] Claimed task ${task.id} (run_id=${task.run_id || task.request_data?.run_id || task.id})`);
-      claimedTasks.push(task);
-    }
-
-    if (claimedTasks.length === 0) {
-      console.log(`[BATCH_CLAIM] All ${tasks.length} task(s) were claimed by another processor`);
-      return;
-    }
-
-    console.log(`[BATCH_CLAIM] Claimed ${claimedTasks.length}/${tasks.length} task(s) — processing sequentially`);
-
-    for (const task of claimedTasks) {
+    for (const task of tasksToProcess) {
       try {
         await this.processChatTask(task as SupervisorTask);
       } catch (error) {
@@ -564,37 +504,82 @@ class SupervisorService {
           })
           .eq('id', task.id);
       }
+
+      while (this.pendingClaimedQueue.length > 0) {
+        const bgTask = this.pendingClaimedQueue.shift();
+        if (!bgTask) break;
+        console.log(`[TASK_PROCESS] Also processing bg-claimed task ${bgTask.id}`);
+        try {
+          await this.processChatTask(bgTask as SupervisorTask);
+        } catch (bgError) {
+          const errMsg = bgError instanceof Error ? bgError.message : String(bgError);
+          console.error(`Failed to process bg task ${bgTask.id}:`, bgError);
+
+          const taskRunId = bgTask.run_id || bgTask.request_data?.run_id || bgTask.id;
+          createArtefact({
+            runId: taskRunId,
+            type: 'diagnostic',
+            title: 'Run failed: unhandled exception in processChatTask',
+            summary: `Error: ${errMsg.substring(0, 200)}`,
+            payload: { reason: 'unhandled_exception', error: errMsg, taskId: bgTask.id },
+            userId: bgTask.user_id,
+            conversationId: bgTask.conversation_id,
+          }).catch((e: any) => console.warn(`[TASK_PROCESS] Failed to emit diagnostic artefact: ${e.message}`));
+
+          await supabase
+            .from('supervisor_tasks')
+            .update({
+              status: 'failed',
+              error: errMsg
+            })
+            .eq('id', bgTask.id);
+        }
+      }
+    }
+  }
+
+  private async claimPendingTasks() {
+    if (!supabase) return;
+
+    const { data: tasks, error } = await supabase
+      .from('supervisor_tasks')
+      .select('*')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: true })
+      .limit(10);
+
+    if (error) {
+      if (error.code === 'PGRST205') {
+        if (!this.missingTableWarned) {
+          console.warn('⚠️  supervisor_tasks table not found in Supabase.');
+          console.warn('   Run migrations/supabase-supervisor-integration.sql in Supabase SQL Editor');
+          console.warn('   Chat integration will be unavailable until migration is complete.');
+          this.missingTableWarned = true;
+        }
+        return;
+      }
+      console.error('Error fetching supervisor tasks:', error);
+      return;
     }
 
-    while (this.pendingClaimedQueue.length > 0) {
-      const bgTask = this.pendingClaimedQueue.shift();
-      if (!bgTask) break;
-      console.log(`[BG_DRAIN] Processing background-claimed task ${bgTask.id}`);
-      try {
-        await this.processChatTask(bgTask as SupervisorTask);
-      } catch (error) {
-        const errMsg = error instanceof Error ? error.message : String(error);
-        console.error(`[BG_DRAIN] Failed to process task ${bgTask.id}:`, error);
+    if (!tasks || tasks.length === 0) return;
 
-        const taskRunId = bgTask.run_id || bgTask.request_data?.run_id || bgTask.id;
-        createArtefact({
-          runId: taskRunId,
-          type: 'diagnostic',
-          title: 'Run failed: unhandled exception in processChatTask',
-          summary: `Error: ${errMsg.substring(0, 200)}`,
-          payload: { reason: 'unhandled_exception', error: errMsg, taskId: bgTask.id },
-          userId: bgTask.user_id,
-          conversationId: bgTask.conversation_id,
-        }).catch((e: any) => console.warn(`[BG_DRAIN] Failed to emit diagnostic artefact: ${e.message}`));
+    const alreadyQueued = new Set(this.pendingClaimedQueue.map((t: any) => t.id));
 
-        await supabase
-          .from('supervisor_tasks')
-          .update({
-            status: 'failed',
-            error: errMsg
-          })
-          .eq('id', bgTask.id);
-      }
+    for (const task of tasks) {
+      if (alreadyQueued.has(task.id)) continue;
+
+      const { data: claimed, error: claimErr } = await supabase
+        .from('supervisor_tasks')
+        .update({ status: 'processing' })
+        .eq('id', task.id)
+        .eq('status', 'pending')
+        .select();
+
+      if (claimErr || !claimed || claimed.length === 0) continue;
+
+      console.log(`[CLAIM] Claimed task ${task.id} (run_id=${task.run_id || task.request_data?.run_id || task.id})`);
+      this.pendingClaimedQueue.push(task);
     }
   }
 
