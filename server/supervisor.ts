@@ -673,7 +673,16 @@ class SupervisorService {
       const capabilities = ['factory_sim', 'tower_validated'];
 
       const messageId = randomUUID();
-      const { error: messageError } = await supabase
+
+      const demoTaskUpdatePromise = supabase
+        .from('supervisor_tasks')
+        .update({
+          status: 'completed',
+          result: { response: response.substring(0, 200), capabilities, factory_demo: true, message_id: messageId },
+        })
+        .eq('id', task.id);
+
+      const demoMessagePromise = supabase
         .from('messages')
         .insert({
           id: messageId,
@@ -694,20 +703,18 @@ class SupervisorService {
         .select()
         .single();
 
-      if (messageError) {
-        console.error(`[FINAL_MESSAGE] final_message_creation_failed run_id=${jobId} conversation_id=${task.conversation_id} error=${messageError.message}`);
-        throw new Error(`Failed to write message: ${messageError.message}`);
+      const [demoTaskResult, demoMsgResult] = await Promise.all([demoTaskUpdatePromise, demoMessagePromise]);
+
+      if (demoTaskResult.error) {
+        console.error(`[FINAL_TASK_UPDATE] task_update_failed run_id=${jobId} task_id=${task.id} error=${demoTaskResult.error.message}`);
       }
 
-      console.log(`[FINAL_MESSAGE] final_message_created run_id=${jobId} conversation_id=${task.conversation_id} message_id=${messageId} status=OK (factory_demo)`);
+      if (demoMsgResult.error) {
+        console.error(`[FINAL_MESSAGE] final_message_creation_failed run_id=${jobId} conversation_id=${task.conversation_id} error=${demoMsgResult.error.message}`);
+        throw new Error(`Failed to write message: ${demoMsgResult.error.message}`);
+      }
 
-      await supabase
-        .from('supervisor_tasks')
-        .update({
-          status: 'completed',
-          result: { response: response.substring(0, 200), capabilities, factory_demo: true },
-        })
-        .eq('id', task.id);
+      console.log(`[FINAL_MESSAGE] final_message_created run_id=${jobId} conversation_id=${task.conversation_id} message_id=${messageId} task_status=completed status=OK (factory_demo)`);
 
       logAFREvent({
         userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
@@ -766,7 +773,23 @@ class SupervisorService {
     const dsStatus = towerResult.deliverySummary?.status ?? (runFailed ? 'STOP' : 'PASS');
 
     const messageId = randomUUID();
-    const { data: newMessage, error: messageError } = await supabase
+    const taskStatus = runFailed ? 'failed' : 'completed';
+
+    const taskUpdatePromise = supabase
+      .from('supervisor_tasks')
+      .update({
+        status: taskStatus,
+        result: {
+          message_id: messageId,
+          lead_ids: leadIds,
+          capabilities_used: capabilities,
+          run_id: jobId,
+          ...(runFailed ? { error: failureReason } : {}),
+        }
+      })
+      .eq('id', task.id);
+
+    const messageInsertPromise = supabase
       .from('messages')
       .insert({
         id: messageId,
@@ -791,27 +814,18 @@ class SupervisorService {
       .select()
       .single();
 
-    if (messageError) {
-      console.error(`[FINAL_MESSAGE] final_message_creation_failed run_id=${jobId} conversation_id=${task.conversation_id} error=${messageError.message}`);
-      throw new Error(`Failed to write message: ${messageError.message}`);
+    const [taskUpdateResult, messageResult] = await Promise.all([taskUpdatePromise, messageInsertPromise]);
+
+    if (taskUpdateResult.error) {
+      console.error(`[FINAL_TASK_UPDATE] task_update_failed run_id=${jobId} task_id=${task.id} error=${taskUpdateResult.error.message}`);
     }
 
-    console.log(`[FINAL_MESSAGE] final_message_created run_id=${jobId} conversation_id=${task.conversation_id} message_id=${newMessage.id} status=${runFailed ? 'FAIL' : 'OK'}`);
+    if (messageResult.error) {
+      console.error(`[FINAL_MESSAGE] final_message_creation_failed run_id=${jobId} conversation_id=${task.conversation_id} error=${messageResult.error.message}`);
+      throw new Error(`Failed to write message: ${messageResult.error.message}`);
+    }
 
-    const taskStatus = runFailed ? 'failed' : 'completed';
-    await supabase
-      .from('supervisor_tasks')
-      .update({
-        status: taskStatus,
-        result: {
-          message_id: newMessage.id,
-          lead_ids: leadIds,
-          capabilities_used: capabilities,
-          run_id: jobId,
-          ...(runFailed ? { error: failureReason } : {}),
-        }
-      })
-      .eq('id', task.id);
+    console.log(`[FINAL_MESSAGE] final_message_created run_id=${jobId} conversation_id=${task.conversation_id} message_id=${messageResult.data.id} task_status=${taskStatus} status=${runFailed ? 'FAIL' : 'OK'}`);
   }
 
   // ensureTowerJudgement: REMOVED — inline observation is mandatory. No safety nets.
