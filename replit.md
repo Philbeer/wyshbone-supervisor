@@ -59,6 +59,8 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Tool Planning Policy**: Deterministic tool ordering rules for primary and fallback paths.
 - **Verification Pending Artefact**: When hard attribute verification starts (e.g., "beer garden", "live music"), a `verification_pending` artefact is emitted immediately after enrichment completes, showing total checks expected and attributes being verified. This keeps the UI informed during the 1-2 minute verification window.
 - **Run Bridge Diagnostics**: `bridgeRunToUI` logs full request/response details (payload, status, body) and emits a `diagnostic` artefact on HTTP or network failure, including the response body and request payload for debugging.
+- **Attribute Evidence Artefacts**: For every HAS_ATTRIBUTE hard constraint, the attribute verification loop emits one `attribute_evidence` artefact per lead+attribute pair. Each artefact contains `verdict` (yes/no/unknown), `confidence` (high/medium/low), `evidence` (source_url, quote, source_type), `rationale`, and the `attribute_key`. Uses a keyword mapping system (e.g., "live music" → ["live music", "live band", "open mic", ...]) and a trust ladder (official site with clear mention → high confidence yes; directory/guide → medium; weak hints → unknown low; official contradiction → no high).
+- **Simultaneous Task+Message Writes**: The final message insert and supervisor_tasks status update are fired in parallel via `Promise.all` so the chat bubble and Activity panel resolve at the same time.
 
 ## External Dependencies
 

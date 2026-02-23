@@ -2351,8 +2351,68 @@ class SupervisorService {
         evidence_strength: 'strong' | 'weak' | 'none';
       }> = [];
 
+      const ATTRIBUTE_KEYWORD_MAP: Record<string, string[]> = {
+        'live music': ['live music', 'live band', 'live bands', 'open mic', 'gigs', 'gig', 'music listings', 'live entertainment', 'live acoustic'],
+        'beer garden': ['beer garden', 'garden seating', 'outdoor seating', 'patio', 'terrace', 'garden area', 'outside seating'],
+        'dog friendly': ['dog friendly', 'dogs welcome', 'dog-friendly', 'pet friendly', 'well-behaved dogs', 'four-legged'],
+        'wheelchair accessible': ['wheelchair accessible', 'wheelchair access', 'disabled access', 'step-free', 'accessibility'],
+        'family friendly': ['family friendly', 'family-friendly', 'children welcome', 'kids welcome', 'child friendly', 'family dining'],
+        'outdoor seating': ['outdoor seating', 'outside seating', 'terrace', 'patio', 'al fresco', 'garden seating'],
+        'rooftop': ['rooftop', 'roof terrace', 'rooftop bar', 'rooftop dining'],
+        'pool table': ['pool table', 'billiards', 'snooker'],
+        'darts': ['darts', 'dartboard'],
+        'quiz night': ['quiz night', 'pub quiz', 'trivia night', 'quiz nights'],
+        'karaoke': ['karaoke', 'karaoke night'],
+        'sports bar': ['sports bar', 'live sports', 'big screen', 'sky sports', 'bt sport'],
+        'craft beer': ['craft beer', 'craft ale', 'microbrewery', 'real ale', 'cask ale'],
+        'gluten free': ['gluten free', 'gluten-free', 'coeliac', 'celiac'],
+        'vegan': ['vegan', 'vegan options', 'plant-based', 'plant based'],
+        'private dining': ['private dining', 'private room', 'function room', 'private hire'],
+      };
+
+      function getKeywordsForAttribute(attrValue: string): string[] {
+        const key = attrValue.toLowerCase().trim();
+        if (ATTRIBUTE_KEYWORD_MAP[key]) return ATTRIBUTE_KEYWORD_MAP[key];
+        const underscored = key.replace(/_/g, ' ');
+        if (ATTRIBUTE_KEYWORD_MAP[underscored]) return ATTRIBUTE_KEYWORD_MAP[underscored];
+        return [key];
+      }
+
+      const NEGATIVE_KEYWORD_MAP: Record<string, string[]> = {
+        'live music': ['no live music', 'no music', 'does not have live music'],
+        'beer garden': ['no beer garden', 'no garden', 'no outdoor seating'],
+        'dog friendly': ['no dogs', 'dogs not allowed', 'no pets'],
+      };
+
+      function getNegativeKeywords(attrValue: string): string[] {
+        const key = attrValue.toLowerCase().trim();
+        return NEGATIVE_KEYWORD_MAP[key] || [`no ${key}`, `not ${key}`];
+      }
+
+      function textMatchesKeywords(text: string, keywords: string[]): { matched: boolean; matchedKeyword: string | null } {
+        const lower = text.toLowerCase();
+        for (const kw of keywords) {
+          if (lower.includes(kw)) return { matched: true, matchedKeyword: kw };
+        }
+        return { matched: false, matchedKeyword: null };
+      }
+
+      function classifySourceType(url: string, leadName: string): 'official_site' | 'directory' | 'other' {
+        const urlLower = url.toLowerCase();
+        const nameWords = leadName.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 2);
+        const domain = urlLower.replace(/^https?:\/\//, '').split('/')[0];
+        const domainHasName = nameWords.some(w => domain.includes(w));
+        if (domainHasName) return 'official_site';
+        const directoryDomains = ['tripadvisor', 'yelp', 'google.com/maps', 'useyourlocal', 'pubswithmore', 'whatpub', 'timeout', 'visitarundel', 'visitengland', 'thegoodpubguide', 'camra'];
+        if (directoryDomains.some(d => domain.includes(d))) return 'directory';
+        return 'other';
+      }
+
       for (const lead of finalLeads) {
         for (const attrValue of attrValues) {
+          const attrKey = attrValue.toLowerCase().replace(/\s+/g, '_');
+          const keywords = getKeywordsForAttribute(attrValue);
+          const negativeKeywords = getNegativeKeywords(attrValue);
           const searchQuery = `${lead.name} ${city} ${attrValue}`;
           let webSearchSuccess = false;
           let urlVisited: string | null = null;
@@ -2360,6 +2420,14 @@ class SupervisorService {
           const snippets: string[] = [];
           let attributeFound = false;
           let evidenceStrength: 'strong' | 'weak' | 'none' = 'none';
+
+          let evidenceVerdict: 'yes' | 'no' | 'unknown' = 'unknown';
+          let evidenceConfidence: 'high' | 'medium' | 'low' = 'low';
+          let evidenceSourceUrl: string | null = null;
+          let evidenceQuote: string | null = null;
+          let evidenceSourceType: 'official_site' | 'directory' | 'other' = 'other';
+          let evidenceRationale = `No evidence found for "${attrValue}" at ${lead.name}.`;
+          let negativeFound = false;
 
           try {
             const wsResult = await executeAction({
@@ -2372,27 +2440,68 @@ class SupervisorService {
               webSearchSuccess = true;
               const wsOutputs = (wsResult.data?.envelope as any)?.outputs;
               const results = wsOutputs?.results || [];
-              const attrLower = attrValue.toLowerCase();
 
               for (const r of results) {
-                const title = (r.title || '').toLowerCase();
-                const description = (r.description || '').toLowerCase();
-                if (title.includes(attrLower) || description.includes(attrLower)) {
-                  snippets.push(`${r.title}: ${r.description}`.slice(0, 300));
-                  if (!urlVisited && r.url) urlVisited = r.url;
+                const title = (r.title || '');
+                const description = (r.description || '');
+                const combined = `${title} ${description}`;
+
+                const negMatch = textMatchesKeywords(combined, negativeKeywords);
+                if (negMatch.matched) {
+                  negativeFound = true;
+                  const srcType = r.url ? classifySourceType(r.url, lead.name) : 'other';
+                  if (srcType === 'official_site') {
+                    evidenceVerdict = 'no';
+                    evidenceConfidence = 'high';
+                    evidenceSourceUrl = r.url || null;
+                    evidenceQuote = `${title}: ${description}`.slice(0, 300);
+                    evidenceSourceType = srcType;
+                    evidenceRationale = `Official site explicitly states "${negMatch.matchedKeyword}" for ${lead.name}.`;
+                  }
+                  continue;
+                }
+
+                const posMatch = textMatchesKeywords(combined, keywords);
+                if (posMatch.matched) {
+                  const snippet = `${title}: ${description}`.slice(0, 300);
+                  snippets.push(snippet);
+                  const srcType = r.url ? classifySourceType(r.url, lead.name) : 'other';
+
+                  if (!urlVisited && r.url) {
+                    urlVisited = r.url;
+                    evidenceSourceUrl = r.url;
+                    evidenceSourceType = srcType;
+                    evidenceQuote = snippet;
+                  }
+
+                  if (srcType === 'official_site' && evidenceSourceType !== 'official_site') {
+                    urlVisited = r.url;
+                    evidenceSourceUrl = r.url;
+                    evidenceSourceType = srcType;
+                    evidenceQuote = snippet;
+                  }
                 }
               }
 
-              if (snippets.length > 0) {
+              if (snippets.length > 0 && !negativeFound) {
                 evidenceStrength = 'weak';
                 attributeFound = true;
+                if (evidenceSourceType === 'directory') {
+                  evidenceVerdict = 'yes';
+                  evidenceConfidence = 'medium';
+                  evidenceRationale = `Directory/guide mentions "${attrValue}" for ${lead.name} (keyword: "${textMatchesKeywords(evidenceQuote || '', keywords).matchedKeyword}").`;
+                } else {
+                  evidenceVerdict = 'unknown';
+                  evidenceConfidence = 'low';
+                  evidenceRationale = `Weak web search evidence for "${attrValue}" at ${lead.name}; needs page-level confirmation.`;
+                }
               }
             }
           } catch (wsErr: any) {
             console.warn(`[ATTR_VERIFY] WEB_SEARCH failed for "${lead.name}" + "${attrValue}" (non-fatal): ${wsErr.message}`);
           }
 
-          if (urlVisited && snippets.length > 0) {
+          if (urlVisited && snippets.length > 0 && evidenceVerdict !== 'no') {
             try {
               const wvResult = await executeAction({
                 toolName: 'WEB_VISIT',
@@ -2403,15 +2512,44 @@ class SupervisorService {
               if (wvResult.success && wvResult.data) {
                 webVisitSuccess = true;
                 const pages = (wvResult.data?.envelope as any)?.outputs?.pages || [];
-                const attrLower = attrValue.toLowerCase();
                 for (const page of pages) {
-                  const text = (page.cleaned_text || '').toLowerCase();
-                  if (text.includes(attrLower)) {
+                  const text = (page.cleaned_text || '');
+                  const textLower = text.toLowerCase();
+
+                  const negPageMatch = textMatchesKeywords(textLower, negativeKeywords);
+                  if (negPageMatch.matched && evidenceSourceType === 'official_site') {
+                    evidenceVerdict = 'no';
+                    evidenceConfidence = 'high';
+                    const negIdx = textLower.indexOf(negPageMatch.matchedKeyword!);
+                    const negStart = Math.max(0, negIdx - 50);
+                    const negEnd = Math.min(textLower.length, negIdx + (negPageMatch.matchedKeyword?.length || 0) + 50);
+                    evidenceQuote = `[page] ...${text.slice(negStart, negEnd)}...`;
+                    evidenceRationale = `Official site page explicitly states "${negPageMatch.matchedKeyword}" for ${lead.name}.`;
+                    attributeFound = false;
                     evidenceStrength = 'strong';
-                    const idx = text.indexOf(attrLower);
+                    break;
+                  }
+
+                  const posPageMatch = textMatchesKeywords(textLower, keywords);
+                  if (posPageMatch.matched) {
+                    evidenceStrength = 'strong';
+                    const idx = textLower.indexOf(posPageMatch.matchedKeyword!);
                     const contextStart = Math.max(0, idx - 100);
-                    const contextEnd = Math.min(text.length, idx + attrLower.length + 100);
-                    snippets.push(`[page] ...${text.slice(contextStart, contextEnd)}...`);
+                    const contextEnd = Math.min(text.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 100);
+                    const pageSnippet = `[page] ...${text.slice(contextStart, contextEnd)}...`;
+                    snippets.push(pageSnippet);
+                    evidenceQuote = pageSnippet;
+
+                    if (evidenceSourceType === 'official_site') {
+                      evidenceVerdict = 'yes';
+                      evidenceConfidence = 'high';
+                      evidenceRationale = `Official site page clearly mentions "${posPageMatch.matchedKeyword}" for ${lead.name}.`;
+                    } else {
+                      evidenceVerdict = 'yes';
+                      evidenceConfidence = 'medium';
+                      evidenceRationale = `Page content confirms "${posPageMatch.matchedKeyword}" for ${lead.name} (source: ${evidenceSourceType}).`;
+                    }
+                    attributeFound = true;
                     break;
                   }
                 }
@@ -2434,7 +2572,33 @@ class SupervisorService {
             evidence_strength: evidenceStrength,
           });
 
-          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": found=${attributeFound} strength=${evidenceStrength} snippets=${snippets.length}`);
+          createArtefact({
+            runId: chatRunId,
+            type: 'attribute_evidence',
+            title: `Attribute evidence: ${lead.name} — ${attrValue} → ${evidenceVerdict}`,
+            summary: evidenceRationale,
+            payload: {
+              run_id: chatRunId,
+              lead_place_id: lead.placeId,
+              lead_name: lead.name,
+              attribute_key: attrKey,
+              attribute_value: attrValue,
+              verdict: evidenceVerdict,
+              confidence: evidenceConfidence,
+              evidence: {
+                source_url: evidenceSourceUrl,
+                quote: evidenceQuote,
+                source_type: evidenceSourceType,
+              },
+              rationale: evidenceRationale,
+              keywords_used: keywords,
+              negative_checked: negativeKeywords,
+            },
+            userId: task.user_id,
+            conversationId,
+          }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] Failed to create attribute_evidence artefact for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
+
+          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType} snippets=${snippets.length}`);
         }
       }
 
