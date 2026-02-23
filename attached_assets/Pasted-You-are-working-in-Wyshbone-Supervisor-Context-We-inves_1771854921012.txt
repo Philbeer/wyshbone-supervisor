@@ -1,0 +1,89 @@
+You are working in Wyshbone Supervisor.
+
+Context
+We investigated why The Red Lion Arundel failed HAS_ATTRIBUTE(live music) verification even though its website clearly shows live music.
+
+This is NOT a one-off bug. It is a general verification failure mode.
+
+What happened (confirmed from last run)
+
+WEB_SEARCH correctly found strong signals for “live music” for The Red Lion.
+
+The system selected https://www.redlionarundel.com/the-rub/ as the official URL.
+
+WEB_VISIT successfully crawled that page.
+
+Attribute verification scanned only cleaned body text.
+
+The cleaned body text did not contain the literal keywords (they appear in page title, meta, nav, and structured elements that are stripped).
+
+Result: verdict=unknown despite strong real-world evidence.
+
+This caused CVL to mark the hard constraint as unknown and Tower to STOP.
+
+Root cause (general, not Red Lion specific)
+
+Attribute verification currently:
+
+Scans only cleaned body text
+
+Ignores:
+
+page titles
+
+meta / OG descriptions
+
+navigation link text
+
+headings outside main content
+
+Does not retry with the domain root if a deep page fails keyword scan
+
+This will systematically fail for:
+
+live music
+
+dog friendly
+
+beer garden
+
+live sport
+
+accessibility
+
+any attribute conveyed via nav, badges, icons, or listings rather than prose
+
+Required change (do NOT implement yet, just acknowledge)
+
+This needs a general fix, not curve-fitting:
+
+Options (any one or combination, design choice):
+
+During WEB_VISIT attribute checks, scan:
+
+page title
+
+meta description
+
+h1/h2 headings
+
+nav / anchor text
+in addition to cleaned body text
+
+If a deep page scan returns no keywords, retry verification on the domain root /
+
+Allow “official site + keyword in search snippet” to produce a medium-confidence YES when body text is empty
+
+For now
+
+Please confirm:
+
+where in the code attribute keyword matching is performed
+
+exactly which fields are scanned today
+
+whether meta/title/nav text is currently discarded
+
+whether a domain-root fallback exists (it appears not)
+
+Report only. Do not change behaviour yet.
