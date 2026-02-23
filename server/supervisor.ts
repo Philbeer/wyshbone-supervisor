@@ -481,14 +481,25 @@ class SupervisorService {
       try {
         await this.processChatTask(task as SupervisorTask);
       } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
         console.error(`Failed to process task ${task.id}:`, error);
-        // Mark task as failed
+
+        const taskRunId = task.run_id || task.request_data?.run_id || task.id;
+        createArtefact({
+          runId: taskRunId,
+          type: 'diagnostic',
+          title: 'Run failed: unhandled exception in processChatTask',
+          summary: `Error: ${errMsg.substring(0, 200)}`,
+          payload: { reason: 'unhandled_exception', error: errMsg, taskId: task.id },
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch((e: any) => console.warn(`[PROCESS_TASK] Failed to emit diagnostic artefact: ${e.message}`));
+
         await supabase
           .from('supervisor_tasks')
           .update({
             status: 'failed',
-            error: error instanceof Error ? error.message : String(error)
-            // processed_at omitted - uses database DEFAULT
+            error: errMsg
           })
           .eq('id', task.id);
       }
@@ -540,8 +551,30 @@ class SupervisorService {
       .select();
 
     if (updateError || !updateResult || updateResult.length === 0) {
-      // Task already being processed or failed to update
-      console.log(`⏭️  Task ${task.id} already processing or unavailable`);
+      const guardReason = updateError
+        ? `update_error: ${updateError.message}`
+        : 'status no longer pending (race/sweep/recovery)';
+      console.warn(`⏭️  Task ${task.id} concurrency guard fired — ${guardReason}`);
+
+      logAFREvent({
+        userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
+        clientRequestId,
+        actionTaken: 'task_skipped_concurrency_guard', status: 'failed',
+        taskGenerated: `Task skipped: ${guardReason}`,
+        runType: 'plan',
+        metadata: { taskId: task.id, task_type: task.task_type, guard_reason: guardReason },
+      }).catch(() => {});
+
+      createArtefact({
+        runId: jobId,
+        type: 'diagnostic',
+        title: 'Run short-circuited: concurrency guard',
+        summary: `Task ${task.id} was not processed — ${guardReason}. No tools executed, no Tower invoked.`,
+        payload: { reason: 'concurrency_guard', detail: guardReason, taskId: task.id },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch((e: any) => console.warn(`[GUARD] Failed to emit diagnostic artefact: ${e.message}`));
+
       return;
     }
 
@@ -632,6 +665,17 @@ class SupervisorService {
       }).catch((updateErr: any) => {
         console.warn(`[TOWER_LOOP_CHAT] Failed to mark agent_run as failed (run may not exist yet): ${updateErr.message}`);
       });
+
+      createArtefact({
+        runId: jobId,
+        type: 'diagnostic',
+        title: 'Run failed: executeTowerLoopChat threw',
+        summary: `Error: ${failureReason.substring(0, 200)}`,
+        payload: { reason: 'execution_error', error: failureReason, taskId: task.id },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch((e: any) => console.warn(`[TOWER_LOOP_CHAT] Failed to emit diagnostic artefact: ${e.message}`));
+
       towerResult = {
         response: `The search encountered an issue and could not complete. You can view partial results if any are available.`,
         leadIds: [],

@@ -569,15 +569,18 @@ export async function startJob(request: StartJobRequest): Promise<string> {
 
     if (supabase) {
       const taskId = randomUUID();
+      const canonicalRunId = request.payload?.run_id || jobId;
       const fullUserMessage = String(request.payload?.user_message || request.payload?.topic || request.payload?.prompt || userText);
       const { error: insertErr } = await supabase.from('supervisor_tasks').insert({
         id: taskId,
         conversation_id: request.payload?.conversation_id || null,
         user_id: userId,
         task_type: 'generate_leads',
+        run_id: canonicalRunId,
+        client_request_id: request.clientRequestId || null,
         request_data: {
           user_message: fullUserMessage,
-          run_id: randomUUID(),
+          run_id: canonicalRunId,
           client_request_id: request.clientRequestId || null,
         },
         status: 'pending',
@@ -586,7 +589,7 @@ export async function startJob(request: StartJobRequest): Promise<string> {
       if (insertErr) {
         console.warn(`[SUPERVISOR_REDIRECT] Failed to insert supervisor_task: ${insertErr.message}`);
       } else {
-        console.log(`[SUPERVISOR_REDIRECT] Created supervisor_task ${taskId}`);
+        console.log(`[SUPERVISOR_REDIRECT] Created supervisor_task ${taskId} run_id=${canonicalRunId}`);
       }
     }
 
