@@ -976,10 +976,10 @@ class SupervisorService {
       return;
     }
     const requestPayload = {
-      runId: uiRunId,
-      supervisorRunId,
-      ...(clientRequestId ? { clientRequestId } : {}),
-      ...(conversationId ? { conversationId } : {}),
+      run_id: uiRunId,
+      supervisor_run_id: supervisorRunId,
+      ...(clientRequestId ? { client_request_id: clientRequestId } : {}),
+      ...(conversationId ? { conversation_id: conversationId } : {}),
     };
     console.log(`[RUN_BRIDGE] Sending bridge request: runId=${uiRunId} supervisorRunId=${supervisorRunId} crid=${clientRequestId || 'none'} convId=${conversationId || 'none'} url=${uiBaseUrl}/api/afr/run-bridge`);
     try {
