@@ -286,18 +286,24 @@ export async function applyPolicy(input: PolicyInput): Promise<PolicyApplication
 
   let bundle: PolicyBundleV1;
 
+  const envMaxReplans = parseInt(process.env.MAX_REPLANS || '5', 10);
+  const defaultMaxReplans = GLOBAL_DEFAULT_BUNDLE.policies.stop_policy_v1.max_replans;
+
   if (!latestPolicy) {
     const globalDefault = await storage.getLatestPolicyVersion(GLOBAL_DEFAULT_SCOPE_KEY);
     bundle = globalDefault
       ? upgradeFlatPolicyToBundle(globalDefault.policyData as Record<string, unknown>)
       : structuredClone(GLOBAL_DEFAULT_BUNDLE);
     whyShort.push('Default learning bundle applied (no learned updates yet).');
+    whyShort.push(`stop_policy_v1.max_replans=${bundle.policies.stop_policy_v1.max_replans} (default, env MAX_REPLANS=${envMaxReplans}).`);
     console.log(`[LEARNING_LAYER] No stored policy for scope=${scopeKey}, using GLOBAL_DEFAULT`);
   } else {
     const rawData = latestPolicy.policyData as Record<string, unknown>;
     bundle = upgradeFlatPolicyToBundle(rawData);
     applied = true;
+    const learnedMaxReplans = bundle.policies.stop_policy_v1.max_replans;
     whyShort.push(`Learned policy v${latestPolicy.version} applied from scope=${scopeKey}.`);
+    whyShort.push(`stop_policy_v1.max_replans=${learnedMaxReplans} (learned, was ${defaultMaxReplans}).`);
     console.log(`[LEARNING_LAYER] Applied policy v${latestPolicy.version} for scope=${scopeKey}`);
   }
 

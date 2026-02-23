@@ -602,7 +602,39 @@ export default function Activity() {
                   </div>
                 )}
 
-                {artefacts.filter(a => a.type !== "leads" && a.type !== "delivery_summary").map((art, idx) => (
+                {artefacts.filter(a => a.type === "policy_application_snapshot").map((art, idx) => {
+                  const payload = art.payloadJson;
+                  const appliedMaxReplans = payload?.applied_max_replans;
+                  const whyShort = Array.isArray(payload?.why_short) ? payload.why_short as string[] : [];
+                  return (
+                    <Card key={art.id} className="border-blue-200 dark:border-blue-800" data-testid={`card-policy-snapshot-${idx}`}>
+                      <CardContent className="p-4">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <h4 className="text-sm font-medium flex items-center gap-2" data-testid={`text-policy-title-${idx}`}>
+                            <ShieldCheck className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                            Policy Applied
+                          </h4>
+                          <Badge variant="outline">policy</Badge>
+                        </div>
+                        {typeof appliedMaxReplans === "number" && (
+                          <div className="mt-2 flex items-center gap-2" data-testid={`text-policy-max-replans-${idx}`}>
+                            <span className="text-xs font-medium text-muted-foreground">max_replans:</span>
+                            <Badge variant="secondary" data-testid={`badge-max-replans-${idx}`}>{appliedMaxReplans}</Badge>
+                          </div>
+                        )}
+                        {whyShort.length > 0 && (
+                          <ul className="mt-2 space-y-1">
+                            {whyShort.map((line, i) => (
+                              <li key={i} className="text-xs text-muted-foreground" data-testid={`text-policy-why-${idx}-${i}`}>{line}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+
+                {artefacts.filter(a => a.type !== "leads" && a.type !== "delivery_summary" && a.type !== "policy_application_snapshot").map((art, idx) => (
                   <Card key={art.id}>
                     <CardContent className="p-4">
                       <div className="flex items-center justify-between gap-2 flex-wrap">

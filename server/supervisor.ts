@@ -3461,6 +3461,7 @@ class SupervisorService {
           run_id: chatRunId,
           scope_key: finalScopeKey,
           applied_versions: finalSnapshot.applied_versions,
+          applied_max_replans: finalSnapshot.applied_policies.stop_policy_v1.max_replans,
           why_short: finalSnapshot.why_short,
           written_to_db: policyApplicationWritten,
         },
