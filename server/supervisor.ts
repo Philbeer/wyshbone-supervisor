@@ -2351,42 +2351,37 @@ class SupervisorService {
         evidence_strength: 'strong' | 'weak' | 'none';
       }> = [];
 
+      type UnknownReason =
+        | 'no_relevant_pages_found'
+        | 'pages_crawled_no_keywords'
+        | 'official_site_blocked'
+        | 'only_weak_third_party_mentions'
+        | 'unsupported_attribute'
+        | 'web_search_failed';
+
       const ATTRIBUTE_KEYWORD_MAP: Record<string, string[]> = {
         'live music': ['live music', 'live band', 'live bands', 'open mic', 'gigs', 'gig', 'music listings', 'live entertainment', 'live acoustic'],
-        'beer garden': ['beer garden', 'garden seating', 'outdoor seating', 'patio', 'terrace', 'garden area', 'outside seating'],
-        'dog friendly': ['dog friendly', 'dogs welcome', 'dog-friendly', 'pet friendly', 'well-behaved dogs', 'four-legged'],
-        'wheelchair accessible': ['wheelchair accessible', 'wheelchair access', 'disabled access', 'step-free', 'accessibility'],
-        'family friendly': ['family friendly', 'family-friendly', 'children welcome', 'kids welcome', 'child friendly', 'family dining'],
-        'outdoor seating': ['outdoor seating', 'outside seating', 'terrace', 'patio', 'al fresco', 'garden seating'],
-        'rooftop': ['rooftop', 'roof terrace', 'rooftop bar', 'rooftop dining'],
-        'pool table': ['pool table', 'billiards', 'snooker'],
-        'darts': ['darts', 'dartboard'],
-        'quiz night': ['quiz night', 'pub quiz', 'trivia night', 'quiz nights'],
-        'karaoke': ['karaoke', 'karaoke night'],
-        'sports bar': ['sports bar', 'live sports', 'big screen', 'sky sports', 'bt sport'],
-        'craft beer': ['craft beer', 'craft ale', 'microbrewery', 'real ale', 'cask ale'],
-        'gluten free': ['gluten free', 'gluten-free', 'coeliac', 'celiac'],
-        'vegan': ['vegan', 'vegan options', 'plant-based', 'plant based'],
-        'private dining': ['private dining', 'private room', 'function room', 'private hire'],
+        'beer garden': ['beer garden'],
+        'dog friendly': ['dog friendly', 'dogs welcome', 'dog-friendly', 'well-behaved dogs', 'well behaved dogs'],
       };
 
-      function getKeywordsForAttribute(attrValue: string): string[] {
+      const NEGATIVE_KEYWORD_MAP: Record<string, string[]> = {
+        'live music': ['no live music', 'no music', 'does not have live music'],
+        'beer garden': ['no beer garden', 'no garden'],
+        'dog friendly': ['no dogs', 'dogs not allowed', 'no pets'],
+      };
+
+      function getKeywordsForAttribute(attrValue: string): string[] | null {
         const key = attrValue.toLowerCase().trim();
         if (ATTRIBUTE_KEYWORD_MAP[key]) return ATTRIBUTE_KEYWORD_MAP[key];
         const underscored = key.replace(/_/g, ' ');
         if (ATTRIBUTE_KEYWORD_MAP[underscored]) return ATTRIBUTE_KEYWORD_MAP[underscored];
-        return [key];
+        return null;
       }
-
-      const NEGATIVE_KEYWORD_MAP: Record<string, string[]> = {
-        'live music': ['no live music', 'no music', 'does not have live music'],
-        'beer garden': ['no beer garden', 'no garden', 'no outdoor seating'],
-        'dog friendly': ['no dogs', 'dogs not allowed', 'no pets'],
-      };
 
       function getNegativeKeywords(attrValue: string): string[] {
         const key = attrValue.toLowerCase().trim();
-        return NEGATIVE_KEYWORD_MAP[key] || [`no ${key}`, `not ${key}`];
+        return NEGATIVE_KEYWORD_MAP[key] || NEGATIVE_KEYWORD_MAP[key.replace(/_/g, ' ')] || [`no ${key}`, `not ${key}`];
       }
 
       function textMatchesKeywords(text: string, keywords: string[]): { matched: boolean; matchedKeyword: string | null } {
@@ -2427,7 +2422,54 @@ class SupervisorService {
           let evidenceQuote: string | null = null;
           let evidenceSourceType: 'official_site' | 'directory' | 'other' = 'other';
           let evidenceRationale = `No evidence found for "${attrValue}" at ${lead.name}.`;
+          let unknownReason: UnknownReason = 'no_relevant_pages_found';
           let negativeFound = false;
+
+          if (!keywords) {
+            evidenceVerdict = 'unknown';
+            evidenceConfidence = 'low';
+            unknownReason = 'unsupported_attribute';
+            evidenceRationale = `Attribute "${attrValue}" is not in the supported verification set. Verdict defaults to unknown.`;
+            console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": UNSUPPORTED — skipping verification, verdict=unknown`);
+
+            attrVerificationResults.push({
+              lead_name: lead.name,
+              lead_place_id: lead.placeId,
+              attribute: attrValue,
+              search_query: searchQuery,
+              web_search_success: false,
+              url_visited: null,
+              web_visit_success: false,
+              snippets: [],
+              attribute_found: false,
+              evidence_strength: 'none',
+            });
+
+            createArtefact({
+              runId: chatRunId,
+              type: 'attribute_evidence',
+              title: `Attribute evidence: ${lead.name} — ${attrValue} → unknown`,
+              summary: evidenceRationale,
+              payload: {
+                run_id: chatRunId,
+                lead_place_id: lead.placeId,
+                lead_name: lead.name,
+                attribute_key: attrKey,
+                attribute_value: attrValue,
+                verdict: 'unknown' as const,
+                confidence: 'low' as const,
+                unknown_reason: unknownReason,
+                evidence: { source_url: null, quote: null, source_type: 'other' as const },
+                rationale: evidenceRationale,
+                keywords_used: [],
+                negative_checked: [],
+              },
+              userId: task.user_id,
+              conversationId,
+            }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] artefact failed for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
+
+            continue;
+          }
 
           try {
             const wsResult = await executeAction({
@@ -2486,19 +2528,22 @@ class SupervisorService {
               if (snippets.length > 0 && !negativeFound) {
                 evidenceStrength = 'weak';
                 attributeFound = true;
-                if (evidenceSourceType === 'directory') {
-                  evidenceVerdict = 'yes';
-                  evidenceConfidence = 'medium';
-                  evidenceRationale = `Directory/guide mentions "${attrValue}" for ${lead.name} (keyword: "${textMatchesKeywords(evidenceQuote || '', keywords).matchedKeyword}").`;
-                } else {
-                  evidenceVerdict = 'unknown';
-                  evidenceConfidence = 'low';
-                  evidenceRationale = `Weak web search evidence for "${attrValue}" at ${lead.name}; needs page-level confirmation.`;
-                }
+                evidenceVerdict = 'unknown';
+                evidenceConfidence = 'low';
+                unknownReason = 'only_weak_third_party_mentions';
+                evidenceRationale = `Web search snippets mention keyword for "${attrValue}" at ${lead.name}, but no page-level confirmation yet.`;
+              } else if (snippets.length === 0 && !negativeFound) {
+                unknownReason = 'no_relevant_pages_found';
+                evidenceRationale = `No web search results contained keywords for "${attrValue}" at ${lead.name}.`;
               }
+            } else {
+              unknownReason = 'web_search_failed';
+              evidenceRationale = `Web search returned no data for "${attrValue}" at ${lead.name}.`;
             }
           } catch (wsErr: any) {
             console.warn(`[ATTR_VERIFY] WEB_SEARCH failed for "${lead.name}" + "${attrValue}" (non-fatal): ${wsErr.message}`);
+            unknownReason = 'web_search_failed';
+            evidenceRationale = `Web search failed for "${attrValue}" at ${lead.name}: ${wsErr.message}`;
           }
 
           if (urlVisited && snippets.length > 0 && evidenceVerdict !== 'no') {
@@ -2512,6 +2557,12 @@ class SupervisorService {
               if (wvResult.success && wvResult.data) {
                 webVisitSuccess = true;
                 const pages = (wvResult.data?.envelope as any)?.outputs?.pages || [];
+
+                if (pages.length === 0) {
+                  unknownReason = 'official_site_blocked';
+                  evidenceRationale = `Page at ${urlVisited} returned no crawlable content for "${attrValue}" at ${lead.name}.`;
+                }
+
                 for (const page of pages) {
                   const text = (page.cleaned_text || '');
                   const textLower = text.toLowerCase();
@@ -2550,12 +2601,21 @@ class SupervisorService {
                       evidenceRationale = `Page content confirms "${posPageMatch.matchedKeyword}" for ${lead.name} (source: ${evidenceSourceType}).`;
                     }
                     attributeFound = true;
+                    unknownReason = undefined as any;
                     break;
+                  } else {
+                    unknownReason = 'pages_crawled_no_keywords';
+                    evidenceRationale = `Page at ${urlVisited} was crawled but no keywords for "${attrValue}" found in content for ${lead.name}.`;
                   }
                 }
+              } else {
+                unknownReason = 'official_site_blocked';
+                evidenceRationale = `Page visit to ${urlVisited} failed or returned empty for "${attrValue}" at ${lead.name}.`;
               }
             } catch (wvErr: any) {
               console.warn(`[ATTR_VERIFY] WEB_VISIT failed for "${lead.name}" url=${urlVisited} (non-fatal): ${wvErr.message}`);
+              unknownReason = 'official_site_blocked';
+              evidenceRationale = `WEB_VISIT failed for ${urlVisited}: ${wvErr.message}`;
             }
           }
 
@@ -2585,6 +2645,7 @@ class SupervisorService {
               attribute_value: attrValue,
               verdict: evidenceVerdict,
               confidence: evidenceConfidence,
+              ...(evidenceVerdict === 'unknown' ? { unknown_reason: unknownReason } : {}),
               evidence: {
                 source_url: evidenceSourceUrl,
                 quote: evidenceQuote,
@@ -2598,7 +2659,7 @@ class SupervisorService {
             conversationId,
           }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] Failed to create attribute_evidence artefact for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
 
-          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType} snippets=${snippets.length}`);
+          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType}${evidenceVerdict === 'unknown' ? ` reason=${unknownReason}` : ''} snippets=${snippets.length}`);
         }
       }
 
