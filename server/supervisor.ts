@@ -2358,7 +2358,9 @@ class SupervisorService {
         | 'only_weak_third_party_mentions'
         | 'unsupported_attribute'
         | 'web_search_failed'
-        | 'web_search_empty';
+        | 'web_search_empty'
+        | 'web_search_quota_exceeded'
+        | 'no_website';
 
       const ATTR_TRACE = process.env.ATTR_VERIFY_TRACE === '1';
       const ATTR_SEARCH_DELAY_MS = 300;
@@ -2430,6 +2432,8 @@ class SupervisorService {
         return 'other';
       }
 
+      let braveQuotaBreaker = false;
+
       let attrLeadIndex = 0;
       for (const lead of finalLeads) {
         for (const attrValue of attrValues) {
@@ -2454,7 +2458,9 @@ class SupervisorService {
           let negativeFound = false;
           let matchSource: 'title' | 'body' | 'search_snippet' | null = null;
 
-          if (ATTR_TRACE) console.log(`[ATTR_TRACE] lead="${lead.name}" placeId=${lead.placeId} attr="${attrValue}" searchQuery="${searchQuery}" website=${(lead as any).website || 'none'}`);
+          const leadWebsite = lead.website as string | null;
+
+          if (ATTR_TRACE) console.log(`[ATTR_TRACE] lead="${lead.name}" placeId=${lead.placeId} attr="${attrValue}" website=${leadWebsite || 'none'}`);
 
           if (!keywords) {
             evidenceVerdict = 'unknown';
@@ -2486,7 +2492,7 @@ class SupervisorService {
                 lead_place_id: lead.placeId,
                 lead_name: lead.name,
                 attribute_key: attrKey,
-                attribute_value: attrValue,
+                attribute_label: attrValue,
                 verdict: 'unknown' as const,
                 confidence: 'low' as const,
                 unknown_reason: unknownReason,
@@ -2502,134 +2508,16 @@ class SupervisorService {
             continue;
           }
 
-          // B) Pacing: delay between WEB_SEARCH calls to avoid rate limiting
           if (attrLeadIndex > 0) {
             await attrSleep(ATTR_SEARCH_DELAY_MS);
           }
           attrLeadIndex++;
 
-          let searchEmpty = false;
-          try {
-            let wsResult = await executeAction({
-              toolName: 'WEB_SEARCH',
-              toolArgs: { query: searchQuery, entity_name: lead.name, location_hint: city, limit: 5 },
-              userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
-            });
-
-            const wsOutputs = (wsResult.data?.envelope as any)?.outputs;
-            const wsErrors = (wsResult.data?.envelope as any)?.errors || [];
-            const isSearchEmpty = wsOutputs?.empty_results === true || wsErrors.some((e: any) => e.code === 'SEARCH_EMPTY');
-
-            // B) Retry once with backoff if empty results (possible rate limit)
-            if (isSearchEmpty) {
-              if (ATTR_TRACE) console.log(`[ATTR_TRACE] WEB_SEARCH returned empty for "${lead.name}", retrying after ${ATTR_RETRY_DELAY_MS}ms...`);
-              await attrSleep(ATTR_RETRY_DELAY_MS);
-              wsResult = await executeAction({
-                toolName: 'WEB_SEARCH',
-                toolArgs: { query: searchQuery, entity_name: lead.name, location_hint: city, limit: 5 },
-                userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
-              });
-            }
-
-            const wsOutputs2 = (wsResult.data?.envelope as any)?.outputs;
-            const wsErrors2 = (wsResult.data?.envelope as any)?.errors || [];
-            const stillEmpty = wsOutputs2?.empty_results === true || wsErrors2.some((e: any) => e.code === 'SEARCH_EMPTY');
-
-            if (wsResult.success && wsResult.data && !stillEmpty) {
-              webSearchSuccess = true;
-              const results = wsOutputs2?.results || [];
-
-              if (ATTR_TRACE) console.log(`[ATTR_TRACE] WEB_SEARCH result: success=true resultCount=${results.length} urls=${results.map((r: any) => r.url).join(', ')}`);
-
-              for (const r of results) {
-                const title = (r.title || '');
-                const description = (r.description || r.snippet || '');
-                const combined = `${title} ${description}`;
-
-                const negMatch = textMatchesKeywords(combined, negativeKeywords);
-                if (negMatch.matched) {
-                  negativeFound = true;
-                  const srcType = r.url ? classifySourceType(r.url, lead.name) : 'other';
-                  if (srcType === 'official_site') {
-                    evidenceVerdict = 'no';
-                    evidenceConfidence = 'high';
-                    evidenceSourceUrl = r.url || null;
-                    evidenceQuote = `${title}: ${description}`.slice(0, 300);
-                    evidenceSourceType = srcType;
-                    evidenceRationale = `Official site explicitly states "${negMatch.matchedKeyword}" for ${lead.name}.`;
-                  }
-                  continue;
-                }
-
-                const posMatch = textMatchesKeywords(combined, keywords);
-                if (posMatch.matched) {
-                  const snippet = `${title}: ${description}`.slice(0, 300);
-                  snippets.push(snippet);
-                  matchSource = 'search_snippet';
-                  const srcType = r.url ? classifySourceType(r.url, lead.name) : 'other';
-
-                  if (!urlVisited && r.url) {
-                    urlVisited = r.url;
-                    evidenceSourceUrl = r.url;
-                    evidenceSourceType = srcType;
-                    evidenceQuote = snippet;
-                  }
-
-                  if (srcType === 'official_site' && evidenceSourceType !== 'official_site') {
-                    urlVisited = r.url;
-                    evidenceSourceUrl = r.url;
-                    evidenceSourceType = srcType;
-                    evidenceQuote = snippet;
-                  }
-                }
-              }
-
-              if (snippets.length > 0 && !negativeFound) {
-                evidenceStrength = 'weak';
-                attributeFound = true;
-                evidenceVerdict = 'unknown';
-                evidenceConfidence = 'low';
-                unknownReason = 'only_weak_third_party_mentions';
-                evidenceRationale = `Web search snippets mention keyword for "${attrValue}" at ${lead.name}, but no page-level confirmation yet.`;
-              } else if (snippets.length === 0 && !negativeFound) {
-                unknownReason = 'no_relevant_pages_found';
-                evidenceRationale = `No web search results contained keywords for "${attrValue}" at ${lead.name}.`;
-              }
-            } else if (stillEmpty) {
-              // A) Distinct reason for empty results vs API failure
-              searchEmpty = true;
-              unknownReason = 'web_search_empty';
-              evidenceRationale = `Web search returned HTTP 200 but zero organic results for "${attrValue}" at ${lead.name}.`;
-              if (ATTR_TRACE) console.log(`[ATTR_TRACE] WEB_SEARCH confirmed empty after retry for "${lead.name}"`);
-            } else {
-              unknownReason = 'web_search_failed';
-              evidenceRationale = `Web search returned no data for "${attrValue}" at ${lead.name}.`;
-            }
-          } catch (wsErr: any) {
-            console.warn(`[ATTR_VERIFY] WEB_SEARCH failed for "${lead.name}" + "${attrValue}" (non-fatal): ${wsErr.message}`);
-            unknownReason = 'web_search_failed';
-            evidenceRationale = `Web search failed for "${attrValue}" at ${lead.name}: ${wsErr.message}`;
-          }
-
-          // C) Fallback: if web search is empty/failed and lead has a website, visit it directly
-          if (!urlVisited && snippets.length === 0 && evidenceVerdict !== 'no' && (searchEmpty || unknownReason === 'web_search_failed' || unknownReason === 'no_relevant_pages_found')) {
-            const leadWebsite = (lead as any).website as string | null;
-            if (leadWebsite) {
-              const rootUrl = getDomainRoot(leadWebsite) || leadWebsite;
-              urlVisited = rootUrl;
-              evidenceSourceType = classifySourceType(rootUrl, lead.name);
-              evidenceSourceUrl = rootUrl;
-              if (ATTR_TRACE) console.log(`[ATTR_TRACE] Falling back to lead.website: ${rootUrl} (original: ${leadWebsite})`);
-            }
-          }
-
-          if (ATTR_TRACE) console.log(`[ATTR_TRACE] pre-visit: snippets=${snippets.length} urlToVisit=${urlVisited} sourceType=${evidenceSourceType} negativeFound=${negativeFound}`);
-
           const scanPagesForAttribute = async (visitUrl: string): Promise<{ matched: boolean; pages: any[] }> => {
             try {
               const wvResult = await executeAction({
                 toolName: 'WEB_VISIT',
-                toolArgs: { url: visitUrl, max_pages: 1, same_domain_only: true, page_hints: ['home'] },
+                toolArgs: { url: visitUrl, max_pages: 3, same_domain_only: true, page_hints: ['home', 'events', 'whats-on', 'entertainment', 'what-s-on'] },
                 userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
               });
 
@@ -2646,7 +2534,6 @@ class SupervisorService {
                 }
 
                 for (const page of pages) {
-                  // D) Scan title + body text (not just body)
                   const scanText = buildScanText(page);
                   const scanTextLower = scanText.toLowerCase();
                   const bodyText = (page.text_clean || page.cleaned_text || '') as string;
@@ -2658,7 +2545,7 @@ class SupervisorService {
                     const negIdx = scanTextLower.indexOf(negPageMatch.matchedKeyword!);
                     const negStart = Math.max(0, negIdx - 50);
                     const negEnd = Math.min(scanTextLower.length, negIdx + (negPageMatch.matchedKeyword?.length || 0) + 50);
-                    evidenceQuote = `[page] ...${scanText.slice(negStart, negEnd)}...`;
+                    evidenceQuote = `[page] ...${scanText.slice(negStart, negEnd)}...`.slice(0, 150);
                     evidenceRationale = `Official site page explicitly states "${negPageMatch.matchedKeyword}" for ${lead.name}.`;
                     attributeFound = false;
                     evidenceStrength = 'strong';
@@ -2672,9 +2559,9 @@ class SupervisorService {
                     const inTitle = titleLower.includes(posPageMatch.matchedKeyword!);
                     matchSource = inTitle ? 'title' : 'body';
                     const idx = scanTextLower.indexOf(posPageMatch.matchedKeyword!);
-                    const contextStart = Math.max(0, idx - 100);
-                    const contextEnd = Math.min(scanText.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 100);
-                    const pageSnippet = `[page${inTitle ? ':title' : ''}] ...${scanText.slice(contextStart, contextEnd)}...`;
+                    const contextStart = Math.max(0, idx - 50);
+                    const contextEnd = Math.min(scanText.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 50);
+                    const pageSnippet = `...${scanText.slice(contextStart, contextEnd)}...`.slice(0, 150);
                     snippets.push(pageSnippet);
                     evidenceQuote = pageSnippet;
 
@@ -2689,6 +2576,7 @@ class SupervisorService {
                     }
                     attributeFound = true;
                     unknownReason = undefined as any;
+                    evidenceSourceUrl = visitUrl;
 
                     if (ATTR_TRACE) console.log(`[ATTR_TRACE] pageKeywordScan: matched=true keyword="${posPageMatch.matchedKeyword}" matchSource=${matchSource} url=${visitUrl}`);
                     return { matched: true, pages };
@@ -2711,22 +2599,87 @@ class SupervisorService {
               evidenceRationale = `WEB_VISIT failed for ${visitUrl}: ${wvErr.message}`;
               return { matched: false, pages: [] };
             }
+          };
+
+          // ── WEBSITE-FIRST FLOW ──
+          // Primary path: visit lead.website directly from Places Details
+          if (leadWebsite) {
+            const rootUrl = getDomainRoot(leadWebsite) || leadWebsite;
+            urlVisited = rootUrl;
+            evidenceSourceType = classifySourceType(rootUrl, lead.name);
+            evidenceSourceUrl = rootUrl;
+
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] Website-first: visiting ${rootUrl} (from Places: ${leadWebsite})`);
+
+            const scanResult = await scanPagesForAttribute(rootUrl);
+
+            if (!scanResult.matched && (evidenceVerdict as string) !== 'no' && (evidenceVerdict as string) !== 'yes' && isDeepPath(leadWebsite) && rootUrl !== leadWebsite) {
+              if (ATTR_TRACE) console.log(`[ATTR_TRACE] Root had no keywords, trying original deep path: ${leadWebsite}`);
+              evidenceSourceUrl = leadWebsite;
+              await scanPagesForAttribute(leadWebsite);
+            }
           }
 
-          // Visit the URL if we have one and verdict is not already decided
-          if (urlVisited && evidenceVerdict !== 'no') {
-            const scanResult = await scanPagesForAttribute(urlVisited);
+          // Fallback path: only use WEB_SEARCH if lead has no website AND Brave quota not exceeded
+          if (!leadWebsite && !braveQuotaBreaker) {
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] No website for "${lead.name}", falling back to WEB_SEARCH`);
 
-            // E) Domain-root fallback: if we visited a deep page and found no match, retry on domain root
-            if (!scanResult.matched && (evidenceVerdict as string) !== 'no' && (evidenceVerdict as string) !== 'yes' && isDeepPath(urlVisited)) {
-              const rootUrl = getDomainRoot(urlVisited);
-              if (rootUrl && rootUrl !== urlVisited) {
-                if (ATTR_TRACE) console.log(`[ATTR_TRACE] Deep path ${urlVisited} had no keywords, retrying domain root: ${rootUrl}`);
-                urlVisited = rootUrl;
-                evidenceSourceUrl = rootUrl;
-                await scanPagesForAttribute(rootUrl);
+            try {
+              const wsResult = await executeAction({
+                toolName: 'WEB_SEARCH',
+                toolArgs: { query: searchQuery, entity_name: lead.name, location_hint: city, limit: 5 },
+                userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
+              });
+
+              const wsOutputs = (wsResult.data?.envelope as any)?.outputs;
+              const wsErrors = (wsResult.data?.envelope as any)?.errors || [];
+              const isQuotaExceeded = wsOutputs?.quota_exceeded === true || wsErrors.some((e: any) => e.code === 'QUOTA_EXCEEDED');
+
+              if (isQuotaExceeded) {
+                braveQuotaBreaker = true;
+                console.warn(`[ATTR_VERIFY] Brave quota exceeded — circuit breaker TRIPPED, skipping WEB_SEARCH for remaining leads`);
+                unknownReason = 'web_search_quota_exceeded';
+                evidenceRationale = `Web search quota exceeded (402). Cannot verify "${attrValue}" for ${lead.name} without a website.`;
+              } else if (wsResult.success && wsResult.data) {
+                webSearchSuccess = true;
+                const results = wsOutputs?.results || [];
+
+                for (const r of results) {
+                  const title = (r.title || '');
+                  const description = (r.description || r.snippet || '');
+                  const combined = `${title} ${description}`;
+
+                  const posMatch = textMatchesKeywords(combined, keywords);
+                  if (posMatch.matched && r.url) {
+                    urlVisited = r.url;
+                    evidenceSourceUrl = r.url;
+                    evidenceSourceType = classifySourceType(r.url, lead.name);
+                    matchSource = 'search_snippet';
+                    snippets.push(`${title}: ${description}`.slice(0, 150));
+                    evidenceQuote = `${title}: ${description}`.slice(0, 150);
+                    break;
+                  }
+                }
+
+                if (urlVisited) {
+                  await scanPagesForAttribute(urlVisited);
+                } else {
+                  unknownReason = 'no_relevant_pages_found';
+                  evidenceRationale = `No web search results contained keywords for "${attrValue}" at ${lead.name}.`;
+                }
+              } else {
+                unknownReason = 'web_search_failed';
+                evidenceRationale = `Web search returned no data for "${attrValue}" at ${lead.name}.`;
               }
+            } catch (wsErr: any) {
+              console.warn(`[ATTR_VERIFY] WEB_SEARCH failed for "${lead.name}" + "${attrValue}" (non-fatal): ${wsErr.message}`);
+              unknownReason = 'web_search_failed';
+              evidenceRationale = `Web search failed for "${attrValue}" at ${lead.name}: ${wsErr.message}`;
             }
+          } else if (!leadWebsite && braveQuotaBreaker) {
+            unknownReason = 'web_search_quota_exceeded';
+            evidenceRationale = `No website from Places Details and web search quota exceeded. Cannot verify "${attrValue}" for ${lead.name}.`;
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] Skipping "${lead.name}" — no website + Brave circuit breaker active`);
           }
 
           attrVerificationResults.push({
@@ -2753,7 +2706,7 @@ class SupervisorService {
               lead_place_id: lead.placeId,
               lead_name: lead.name,
               attribute_key: attrKey,
-              attribute_value: attrValue,
+              attribute_label: attrValue,
               verdict: evidenceVerdict,
               confidence: evidenceConfidence,
               ...(evidenceVerdict === 'unknown' ? { unknown_reason: unknownReason } : {}),
@@ -2771,7 +2724,7 @@ class SupervisorService {
             conversationId,
           }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] Failed to create attribute_evidence artefact for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
 
-          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType}${evidenceVerdict === 'unknown' ? ` reason=${unknownReason}` : ''}${matchSource ? ` match=${matchSource}` : ''} snippets=${snippets.length}`);
+          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType} strategy=${leadWebsite ? 'website-first' : braveQuotaBreaker ? 'skipped(quota)' : 'search-fallback'}${evidenceVerdict === 'unknown' ? ` reason=${unknownReason}` : ''}${matchSource ? ` match=${matchSource}` : ''} url=${urlVisited || 'none'}`);
         }
       }
 

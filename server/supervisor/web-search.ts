@@ -41,7 +41,7 @@ const BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search";
 async function fetchBraveResults(
   query: string,
   limit: number,
-): Promise<{ results: RawSearchHit[]; error?: string; empty_results?: boolean }> {
+): Promise<{ results: RawSearchHit[]; error?: string; empty_results?: boolean; quota_exceeded?: boolean }> {
   const apiKey = process.env.BRAVE_SEARCH_API_KEY;
   if (!apiKey) {
     return {
@@ -72,9 +72,11 @@ async function fetchBraveResults(
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
+      const isQuotaExceeded = response.status === 402 || response.status === 429;
       return {
         results: [],
         error: `Brave API returned ${response.status}: ${body.substring(0, 200)}`,
+        quota_exceeded: isQuotaExceeded,
       };
     }
 
@@ -234,13 +236,15 @@ export async function executeWebSearch(
     ? `${query} ${input.location_hint}`
     : query;
 
-  const { results: rawHits, error, empty_results: braveEmpty } = await fetchBraveResults(fullQuery, limit);
+  const { results: rawHits, error, empty_results: braveEmpty, quota_exceeded: braveQuotaExceeded } = await fetchBraveResults(fullQuery, limit);
 
   if ((error || braveEmpty) && rawHits.length === 0) {
-    const errorCode = braveEmpty ? "SEARCH_EMPTY" : "SEARCH_FAILED";
-    const errorMsg = braveEmpty
-      ? `Brave returned HTTP 200 but zero organic results for "${query}"`
-      : error!;
+    const errorCode = braveQuotaExceeded ? "QUOTA_EXCEEDED" : braveEmpty ? "SEARCH_EMPTY" : "SEARCH_FAILED";
+    const errorMsg = braveQuotaExceeded
+      ? `Brave API quota exceeded (402/429) for "${query}"`
+      : braveEmpty
+        ? `Brave returned HTTP 200 but zero organic results for "${query}"`
+        : error!;
     return buildToolResult({
       tool_name: TOOL_NAME,
       tool_version: TOOL_VERSION,
@@ -252,7 +256,7 @@ export async function executeWebSearch(
         entity_name: input.entity_name ?? null,
         limit,
       },
-      outputs: { results: [], best_guess_official_url: null, why_this_url: null, empty_results: !!braveEmpty },
+      outputs: { results: [], best_guess_official_url: null, why_this_url: null, empty_results: !!braveEmpty, quota_exceeded: !!braveQuotaExceeded },
       errors: [buildToolError(errorCode, errorMsg, true)],
     });
   }
