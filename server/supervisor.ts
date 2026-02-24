@@ -2357,7 +2357,34 @@ class SupervisorService {
         | 'official_site_blocked'
         | 'only_weak_third_party_mentions'
         | 'unsupported_attribute'
-        | 'web_search_failed';
+        | 'web_search_failed'
+        | 'web_search_empty';
+
+      const ATTR_TRACE = process.env.ATTR_VERIFY_TRACE === '1';
+      const ATTR_SEARCH_DELAY_MS = 300;
+      const ATTR_RETRY_DELAY_MS = 500;
+
+      const attrSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+      const getDomainRoot = (urlStr: string): string | null => {
+        try {
+          const parsed = new URL(urlStr);
+          return `${parsed.protocol}//${parsed.host}/`;
+        } catch { return null; }
+      };
+
+      const isDeepPath = (urlStr: string): boolean => {
+        try {
+          const path = new URL(urlStr).pathname;
+          return path !== '/' && path !== '';
+        } catch { return false; }
+      };
+
+      const buildScanText = (page: any): string => {
+        const title = (page.title || '');
+        const body = (page.text_clean || page.cleaned_text || '');
+        return `${title} ${body}`;
+      };
 
       const ATTRIBUTE_KEYWORD_MAP: Record<string, string[]> = {
         'live music': ['live music', 'live band', 'live bands', 'open mic', 'gigs', 'gig', 'music listings', 'live entertainment', 'live acoustic'],
@@ -2403,6 +2430,7 @@ class SupervisorService {
         return 'other';
       }
 
+      let attrLeadIndex = 0;
       for (const lead of finalLeads) {
         for (const attrValue of attrValues) {
           const attrKey = attrValue.toLowerCase().replace(/\s+/g, '_');
@@ -2424,6 +2452,9 @@ class SupervisorService {
           let evidenceRationale = `No evidence found for "${attrValue}" at ${lead.name}.`;
           let unknownReason: UnknownReason = 'no_relevant_pages_found';
           let negativeFound = false;
+          let matchSource: 'title' | 'body' | 'search_snippet' | null = null;
+
+          if (ATTR_TRACE) console.log(`[ATTR_TRACE] lead="${lead.name}" placeId=${lead.placeId} attr="${attrValue}" searchQuery="${searchQuery}" website=${(lead as any).website || 'none'}`);
 
           if (!keywords) {
             evidenceVerdict = 'unknown';
@@ -2445,7 +2476,7 @@ class SupervisorService {
               evidence_strength: 'none',
             });
 
-            createArtefact({
+            await createArtefact({
               runId: chatRunId,
               type: 'attribute_evidence',
               title: `Attribute evidence: ${lead.name} — ${attrValue} → unknown`,
@@ -2471,21 +2502,48 @@ class SupervisorService {
             continue;
           }
 
+          // B) Pacing: delay between WEB_SEARCH calls to avoid rate limiting
+          if (attrLeadIndex > 0) {
+            await attrSleep(ATTR_SEARCH_DELAY_MS);
+          }
+          attrLeadIndex++;
+
+          let searchEmpty = false;
           try {
-            const wsResult = await executeAction({
+            let wsResult = await executeAction({
               toolName: 'WEB_SEARCH',
               toolArgs: { query: searchQuery, entity_name: lead.name, location_hint: city, limit: 5 },
               userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
             });
 
-            if (wsResult.success && wsResult.data) {
+            const wsOutputs = (wsResult.data?.envelope as any)?.outputs;
+            const wsErrors = (wsResult.data?.envelope as any)?.errors || [];
+            const isSearchEmpty = wsOutputs?.empty_results === true || wsErrors.some((e: any) => e.code === 'SEARCH_EMPTY');
+
+            // B) Retry once with backoff if empty results (possible rate limit)
+            if (isSearchEmpty) {
+              if (ATTR_TRACE) console.log(`[ATTR_TRACE] WEB_SEARCH returned empty for "${lead.name}", retrying after ${ATTR_RETRY_DELAY_MS}ms...`);
+              await attrSleep(ATTR_RETRY_DELAY_MS);
+              wsResult = await executeAction({
+                toolName: 'WEB_SEARCH',
+                toolArgs: { query: searchQuery, entity_name: lead.name, location_hint: city, limit: 5 },
+                userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
+              });
+            }
+
+            const wsOutputs2 = (wsResult.data?.envelope as any)?.outputs;
+            const wsErrors2 = (wsResult.data?.envelope as any)?.errors || [];
+            const stillEmpty = wsOutputs2?.empty_results === true || wsErrors2.some((e: any) => e.code === 'SEARCH_EMPTY');
+
+            if (wsResult.success && wsResult.data && !stillEmpty) {
               webSearchSuccess = true;
-              const wsOutputs = (wsResult.data?.envelope as any)?.outputs;
-              const results = wsOutputs?.results || [];
+              const results = wsOutputs2?.results || [];
+
+              if (ATTR_TRACE) console.log(`[ATTR_TRACE] WEB_SEARCH result: success=true resultCount=${results.length} urls=${results.map((r: any) => r.url).join(', ')}`);
 
               for (const r of results) {
                 const title = (r.title || '');
-                const description = (r.description || '');
+                const description = (r.description || r.snippet || '');
                 const combined = `${title} ${description}`;
 
                 const negMatch = textMatchesKeywords(combined, negativeKeywords);
@@ -2507,6 +2565,7 @@ class SupervisorService {
                 if (posMatch.matched) {
                   const snippet = `${title}: ${description}`.slice(0, 300);
                   snippets.push(snippet);
+                  matchSource = 'search_snippet';
                   const srcType = r.url ? classifySourceType(r.url, lead.name) : 'other';
 
                   if (!urlVisited && r.url) {
@@ -2536,6 +2595,12 @@ class SupervisorService {
                 unknownReason = 'no_relevant_pages_found';
                 evidenceRationale = `No web search results contained keywords for "${attrValue}" at ${lead.name}.`;
               }
+            } else if (stillEmpty) {
+              // A) Distinct reason for empty results vs API failure
+              searchEmpty = true;
+              unknownReason = 'web_search_empty';
+              evidenceRationale = `Web search returned HTTP 200 but zero organic results for "${attrValue}" at ${lead.name}.`;
+              if (ATTR_TRACE) console.log(`[ATTR_TRACE] WEB_SEARCH confirmed empty after retry for "${lead.name}"`);
             } else {
               unknownReason = 'web_search_failed';
               evidenceRationale = `Web search returned no data for "${attrValue}" at ${lead.name}.`;
@@ -2546,11 +2611,25 @@ class SupervisorService {
             evidenceRationale = `Web search failed for "${attrValue}" at ${lead.name}: ${wsErr.message}`;
           }
 
-          if (urlVisited && snippets.length > 0 && evidenceVerdict !== 'no') {
+          // C) Fallback: if web search is empty/failed and lead has a website, visit it directly
+          if (!urlVisited && snippets.length === 0 && evidenceVerdict !== 'no' && (searchEmpty || unknownReason === 'web_search_failed' || unknownReason === 'no_relevant_pages_found')) {
+            const leadWebsite = (lead as any).website as string | null;
+            if (leadWebsite) {
+              const rootUrl = getDomainRoot(leadWebsite) || leadWebsite;
+              urlVisited = rootUrl;
+              evidenceSourceType = classifySourceType(rootUrl, lead.name);
+              evidenceSourceUrl = rootUrl;
+              if (ATTR_TRACE) console.log(`[ATTR_TRACE] Falling back to lead.website: ${rootUrl} (original: ${leadWebsite})`);
+            }
+          }
+
+          if (ATTR_TRACE) console.log(`[ATTR_TRACE] pre-visit: snippets=${snippets.length} urlToVisit=${urlVisited} sourceType=${evidenceSourceType} negativeFound=${negativeFound}`);
+
+          const scanPagesForAttribute = async (visitUrl: string): Promise<{ matched: boolean; pages: any[] }> => {
             try {
               const wvResult = await executeAction({
                 toolName: 'WEB_VISIT',
-                toolArgs: { url: urlVisited, max_pages: 1, same_domain_only: true },
+                toolArgs: { url: visitUrl, max_pages: 1, same_domain_only: true, page_hints: ['home'] },
                 userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
               });
 
@@ -2558,64 +2637,95 @@ class SupervisorService {
                 webVisitSuccess = true;
                 const pages = (wvResult.data?.envelope as any)?.outputs?.pages || [];
 
+                if (ATTR_TRACE) console.log(`[ATTR_TRACE] WEB_VISIT pages=${pages.length} url=${visitUrl} titles=${pages.map((p: any) => p.title).join(' | ')} textLengths=${pages.map((p: any) => ((p.text_clean || p.cleaned_text || '') as string).length)}`);
+
                 if (pages.length === 0) {
                   unknownReason = 'official_site_blocked';
-                  evidenceRationale = `Page at ${urlVisited} returned no crawlable content for "${attrValue}" at ${lead.name}.`;
+                  evidenceRationale = `Page at ${visitUrl} returned no crawlable content for "${attrValue}" at ${lead.name}.`;
+                  return { matched: false, pages: [] };
                 }
 
                 for (const page of pages) {
-                  const text = (page.cleaned_text || '');
-                  const textLower = text.toLowerCase();
+                  // D) Scan title + body text (not just body)
+                  const scanText = buildScanText(page);
+                  const scanTextLower = scanText.toLowerCase();
+                  const bodyText = (page.text_clean || page.cleaned_text || '') as string;
 
-                  const negPageMatch = textMatchesKeywords(textLower, negativeKeywords);
+                  const negPageMatch = textMatchesKeywords(scanTextLower, negativeKeywords);
                   if (negPageMatch.matched && evidenceSourceType === 'official_site') {
                     evidenceVerdict = 'no';
                     evidenceConfidence = 'high';
-                    const negIdx = textLower.indexOf(negPageMatch.matchedKeyword!);
+                    const negIdx = scanTextLower.indexOf(negPageMatch.matchedKeyword!);
                     const negStart = Math.max(0, negIdx - 50);
-                    const negEnd = Math.min(textLower.length, negIdx + (negPageMatch.matchedKeyword?.length || 0) + 50);
-                    evidenceQuote = `[page] ...${text.slice(negStart, negEnd)}...`;
+                    const negEnd = Math.min(scanTextLower.length, negIdx + (negPageMatch.matchedKeyword?.length || 0) + 50);
+                    evidenceQuote = `[page] ...${scanText.slice(negStart, negEnd)}...`;
                     evidenceRationale = `Official site page explicitly states "${negPageMatch.matchedKeyword}" for ${lead.name}.`;
                     attributeFound = false;
                     evidenceStrength = 'strong';
-                    break;
+                    return { matched: true, pages };
                   }
 
-                  const posPageMatch = textMatchesKeywords(textLower, keywords);
+                  const posPageMatch = textMatchesKeywords(scanTextLower, keywords);
                   if (posPageMatch.matched) {
                     evidenceStrength = 'strong';
-                    const idx = textLower.indexOf(posPageMatch.matchedKeyword!);
+                    const titleLower = (page.title || '').toLowerCase();
+                    const inTitle = titleLower.includes(posPageMatch.matchedKeyword!);
+                    matchSource = inTitle ? 'title' : 'body';
+                    const idx = scanTextLower.indexOf(posPageMatch.matchedKeyword!);
                     const contextStart = Math.max(0, idx - 100);
-                    const contextEnd = Math.min(text.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 100);
-                    const pageSnippet = `[page] ...${text.slice(contextStart, contextEnd)}...`;
+                    const contextEnd = Math.min(scanText.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 100);
+                    const pageSnippet = `[page${inTitle ? ':title' : ''}] ...${scanText.slice(contextStart, contextEnd)}...`;
                     snippets.push(pageSnippet);
                     evidenceQuote = pageSnippet;
 
                     if (evidenceSourceType === 'official_site') {
                       evidenceVerdict = 'yes';
                       evidenceConfidence = 'high';
-                      evidenceRationale = `Official site page clearly mentions "${posPageMatch.matchedKeyword}" for ${lead.name}.`;
+                      evidenceRationale = `Official site page clearly mentions "${posPageMatch.matchedKeyword}" for ${lead.name} (found in ${matchSource}).`;
                     } else {
                       evidenceVerdict = 'yes';
                       evidenceConfidence = 'medium';
-                      evidenceRationale = `Page content confirms "${posPageMatch.matchedKeyword}" for ${lead.name} (source: ${evidenceSourceType}).`;
+                      evidenceRationale = `Page content confirms "${posPageMatch.matchedKeyword}" for ${lead.name} (source: ${evidenceSourceType}, found in ${matchSource}).`;
                     }
                     attributeFound = true;
                     unknownReason = undefined as any;
-                    break;
+
+                    if (ATTR_TRACE) console.log(`[ATTR_TRACE] pageKeywordScan: matched=true keyword="${posPageMatch.matchedKeyword}" matchSource=${matchSource} url=${visitUrl}`);
+                    return { matched: true, pages };
                   } else {
-                    unknownReason = 'pages_crawled_no_keywords';
-                    evidenceRationale = `Page at ${urlVisited} was crawled but no keywords for "${attrValue}" found in content for ${lead.name}.`;
+                    if (ATTR_TRACE) console.log(`[ATTR_TRACE] pageKeywordScan: matched=false url=${visitUrl} titleField="${page.title}" textPreview="${bodyText.substring(0, 200)}"`);
                   }
                 }
+
+                unknownReason = 'pages_crawled_no_keywords';
+                evidenceRationale = `Page at ${visitUrl} was crawled but no keywords for "${attrValue}" found in title or content for ${lead.name}.`;
+                return { matched: false, pages };
               } else {
                 unknownReason = 'official_site_blocked';
-                evidenceRationale = `Page visit to ${urlVisited} failed or returned empty for "${attrValue}" at ${lead.name}.`;
+                evidenceRationale = `Page visit to ${visitUrl} failed or returned empty for "${attrValue}" at ${lead.name}.`;
+                return { matched: false, pages: [] };
               }
             } catch (wvErr: any) {
-              console.warn(`[ATTR_VERIFY] WEB_VISIT failed for "${lead.name}" url=${urlVisited} (non-fatal): ${wvErr.message}`);
+              console.warn(`[ATTR_VERIFY] WEB_VISIT failed for "${lead.name}" url=${visitUrl} (non-fatal): ${wvErr.message}`);
               unknownReason = 'official_site_blocked';
-              evidenceRationale = `WEB_VISIT failed for ${urlVisited}: ${wvErr.message}`;
+              evidenceRationale = `WEB_VISIT failed for ${visitUrl}: ${wvErr.message}`;
+              return { matched: false, pages: [] };
+            }
+          }
+
+          // Visit the URL if we have one and verdict is not already decided
+          if (urlVisited && evidenceVerdict !== 'no') {
+            const scanResult = await scanPagesForAttribute(urlVisited);
+
+            // E) Domain-root fallback: if we visited a deep page and found no match, retry on domain root
+            if (!scanResult.matched && (evidenceVerdict as string) !== 'no' && (evidenceVerdict as string) !== 'yes' && isDeepPath(urlVisited)) {
+              const rootUrl = getDomainRoot(urlVisited);
+              if (rootUrl && rootUrl !== urlVisited) {
+                if (ATTR_TRACE) console.log(`[ATTR_TRACE] Deep path ${urlVisited} had no keywords, retrying domain root: ${rootUrl}`);
+                urlVisited = rootUrl;
+                evidenceSourceUrl = rootUrl;
+                await scanPagesForAttribute(rootUrl);
+              }
             }
           }
 
@@ -2632,7 +2742,8 @@ class SupervisorService {
             evidence_strength: evidenceStrength,
           });
 
-          createArtefact({
+          // F) Always write attribute_evidence artefact per lead+attribute
+          await createArtefact({
             runId: chatRunId,
             type: 'attribute_evidence',
             title: `Attribute evidence: ${lead.name} — ${attrValue} → ${evidenceVerdict}`,
@@ -2654,12 +2765,13 @@ class SupervisorService {
               rationale: evidenceRationale,
               keywords_used: keywords,
               negative_checked: negativeKeywords,
+              ...(matchSource ? { match_source: matchSource } : {}),
             },
             userId: task.user_id,
             conversationId,
           }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] Failed to create attribute_evidence artefact for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
 
-          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType}${evidenceVerdict === 'unknown' ? ` reason=${unknownReason}` : ''} snippets=${snippets.length}`);
+          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType}${evidenceVerdict === 'unknown' ? ` reason=${unknownReason}` : ''}${matchSource ? ` match=${matchSource}` : ''} snippets=${snippets.length}`);
         }
       }
 

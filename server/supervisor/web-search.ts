@@ -41,7 +41,7 @@ const BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search";
 async function fetchBraveResults(
   query: string,
   limit: number,
-): Promise<{ results: RawSearchHit[]; error?: string }> {
+): Promise<{ results: RawSearchHit[]; error?: string; empty_results?: boolean }> {
   const apiKey = process.env.BRAVE_SEARCH_API_KEY;
   if (!apiKey) {
     return {
@@ -80,6 +80,15 @@ async function fetchBraveResults(
 
     const data = await response.json();
     const webResults = data?.web?.results ?? [];
+
+    if (webResults.length === 0) {
+      const responseKeys = Object.keys(data || {}).join(",");
+      console.log(`[BRAVE_EMPTY] query="${query}" http=200 rawHits=0 keys=${responseKeys}`);
+      return {
+        results: [],
+        empty_results: true,
+      };
+    }
 
     return {
       results: webResults.map((r: any) => ({
@@ -225,9 +234,13 @@ export async function executeWebSearch(
     ? `${query} ${input.location_hint}`
     : query;
 
-  const { results: rawHits, error } = await fetchBraveResults(fullQuery, limit);
+  const { results: rawHits, error, empty_results: braveEmpty } = await fetchBraveResults(fullQuery, limit);
 
-  if (error && rawHits.length === 0) {
+  if ((error || braveEmpty) && rawHits.length === 0) {
+    const errorCode = braveEmpty ? "SEARCH_EMPTY" : "SEARCH_FAILED";
+    const errorMsg = braveEmpty
+      ? `Brave returned HTTP 200 but zero organic results for "${query}"`
+      : error!;
     return buildToolResult({
       tool_name: TOOL_NAME,
       tool_version: TOOL_VERSION,
@@ -239,8 +252,8 @@ export async function executeWebSearch(
         entity_name: input.entity_name ?? null,
         limit,
       },
-      outputs: { results: [], best_guess_official_url: null, why_this_url: null },
-      errors: [buildToolError("SEARCH_FAILED", error, true)],
+      outputs: { results: [], best_guess_official_url: null, why_this_url: null, empty_results: !!braveEmpty },
+      errors: [buildToolError(errorCode, errorMsg, true)],
     });
   }
 

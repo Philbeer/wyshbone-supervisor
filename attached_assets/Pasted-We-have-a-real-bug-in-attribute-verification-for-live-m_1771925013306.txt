@@ -1,0 +1,63 @@
+We have a real bug in attribute verification for “live music”.
+
+Repro:
+Query: “pubs in Arundel that have live music”
+Expected: Red Lion should verify “live_music” from its own website text.
+Actual: verified_exact=0, hard_unknown=11, unknown_reason=web_search_failed.
+Latest run shows Brave Search returning HTTP 200 but ZERO organic results for every query, silently.
+
+I need you to implement the minimum fixes below (do not refactor or redesign, just surgical changes), and keep behaviour identical except where specified.
+
+A) Fix Brave “200 but empty results” handling
+1) In server/supervisor/web-search.ts (or wherever Brave response is parsed):
+   - Detect the case: HTTP 200, no error, but rawHits.length === 0.
+   - Treat this as a first-class failure state for our purposes:
+     - Add a flag on the returned result (e.g. empty_results=true) OR set success=false with a clear reason.
+   - Always log a single line when this happens (behind existing trace flag if possible):
+     [BRAVE_EMPTY] query="..." http=200 rawHits=0 keys=...
+
+2) In attribute verification loop:
+   - If web search returns empty results, set attribute_evidence.payload.unknown_reason = "web_search_empty" (not generic web_search_failed).
+
+B) Add pacing/backoff to avoid rate limiting during attribute verification
+In the attribute verification batch (11 leads x 1 attribute):
+- Ensure calls are NOT fired in a tight loop with high concurrency.
+- Add a small delay between WEB_SEARCH calls (200–500ms).
+- Add 1 retry with exponential backoff when empty_results=true:
+  - retry after 500ms, then give up.
+Keep this minimal and behind the attribute verification path only (do not slow the whole system).
+
+C) Add fallback to visit the lead’s website if web search is empty
+If web search is empty AND we have lead.website (or best_guess_official_url from enrichment):
+- Call WEB_VISIT directly on that URL (prefer domain root “/” if possible) with page_hints:["home"].
+- Then run keyword scan on the visited page content (see D).
+- If this finds keywords, mark verified yes and emit attribute_evidence as normal.
+If there is no website, keep unknown_reason="web_search_empty".
+
+D) Improve keyword scan surface (do NOT loosen requirements, just scan more fields)
+Currently keyword matching only checks page.cleaned_text after cleanHtml() strips nav/header/footer/meta.
+Change textMatchesKeywords usage so it scans:
+- page.title + " " + page.cleaned_text (or page.text_clean)
+Optionally (only if already available easily): include meta description if it exists.
+Do NOT scan raw HTML or nav/footer. Just title + body.
+
+E) Domain-root fallback when URL visited is deep
+If WEB_VISIT visits a non-root path and finds no match:
+- Retry once with the domain root (same domain, path “/”) using page_hints:["home"].
+This should only occur inside attribute verification.
+
+F) Ensure attribute_evidence artefacts are always written
+Confirm we create one artefact row per lead+attribute with artefact_type EXACTLY "attribute_evidence" and run_id set correctly.
+If it’s currently writing under a different type or missing writes when web search fails, fix it.
+
+Deliverables:
+1) Implement A–F.
+2) Add or keep ATTR_VERIFY_TRACE logging lines so we can verify:
+   - query
+   - resultCount
+   - urlVisited
+   - pages crawled
+   - whether match came from title/body
+3) Provide a short summary of what changed and where.
+
+Do not change any other behaviour.
