@@ -1802,7 +1802,7 @@ class SupervisorService {
           runId: chatRunId,
           type: 'plan_update',
           title: `Plan v1 enrichment: ${enrichToolPlan.selected_path}`,
-          summary: `Enrichment plan built from ${leads.length} discovered leads (${leadsWithWebsites.length} with websites): ${enrichOrderedTools.filter(t => t !== 'SEARCH_PLACES').join(' → ')}`,
+          summary: `Enrichment plan (Places-only): ${leads.length} leads discovered, ${leadsWithWebsites.length} with websites from Places Details: ${enrichOrderedTools.filter(t => t !== 'SEARCH_PLACES' && t !== 'WEB_SEARCH').join(' → ')}`,
           payload: {
             plan_version: 1,
             tool_plan_path: enrichToolPlan.selected_path,
@@ -1818,38 +1818,7 @@ class SupervisorService {
         console.log(`[ENRICHMENT] Starting enrichment (${enrichToolPlan.selected_path}): ${enrichSteps.map(s => s.tool).join(' → ')} for up to ${enrichmentBatchSize} leads`);
 
         const indexedLeads = leads.map((l, idx) => ({ ...l, _idx: idx }));
-        const hasWebSearchStep = enrichSteps.some(s => s.tool === 'WEB_SEARCH');
-        const webSearchFallbackUsed: number[] = [];
-        if (hasWebSearchStep && leadsWithoutWebsites.length > 0) {
-          const fallbackLeads = indexedLeads.filter(l => !l.website).slice(0, enrichmentBatchSize);
-          console.log(`[ENRICHMENT] ${leadsWithoutWebsites.length} leads without websites — using WEB_SEARCH fallback for ${fallbackLeads.length} leads`);
-          for (const il of fallbackLeads) {
-            try {
-              const wsResult = await executeAction({
-                toolName: 'WEB_SEARCH',
-                toolArgs: { query: `${il.name} ${city} contact`, entity_name: il.name, location_hint: city, limit: 5 },
-                userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
-              });
-              if (wsResult.success && wsResult.data) {
-                accumulatedStepData[`WEB_SEARCH_${il._idx}`] = wsResult.data;
-                webSearchFallbackUsed.push(il._idx);
-                const bestUrl = (wsResult.data?.envelope as any)?.outputs?.best_guess_official_url;
-                if (bestUrl) {
-                  il.website = bestUrl;
-                  leads[il._idx].website = bestUrl;
-                  console.log(`[ENRICHMENT] WEB_SEARCH found website for "${il.name}": ${bestUrl}`);
-                }
-              }
-            } catch (wsErr: any) {
-              console.warn(`[ENRICHMENT] WEB_SEARCH failed for "${il.name}" (non-fatal): ${wsErr.message}`);
-            }
-          }
-        }
-
-        const enrichablePath = leadsWithWebsites.length > 0 ? 'primary' : (webSearchFallbackUsed.length > 0 ? 'fallback' : 'mixed');
-        if (enrichablePath !== enrichToolPlan.selected_path) {
-          console.log(`[ENRICHMENT] Plan path adjusted: declared=${enrichToolPlan.selected_path}, actual=${enrichablePath} (${leadsWithWebsites.length} primary, ${webSearchFallbackUsed.length} fallback)`);
-        }
+        console.log(`[ENRICHMENT] Places-only mode: ${leadsWithWebsites.length}/${leads.length} leads have websites from Places Details`);
 
         const enrichableLeads = indexedLeads.filter(l => l.website).slice(0, enrichmentBatchSize);
         const ENRICH_CONCURRENCY = 3;
@@ -1896,7 +1865,7 @@ class SupervisorService {
                 places_lead: { name: lead.name, address: lead.address, phone: lead.phone, website: lead.website, place_id: lead.placeId },
                 web_visit_pages: (accumulatedStepData[`WEB_VISIT_${leadIdx}`]?.envelope as any)?.outputs?.pages || null,
                 contact_extract: (accumulatedStepData[`CONTACT_EXTRACT_${leadIdx}`]?.envelope as any)?.outputs || null,
-                web_search: accumulatedStepData[`WEB_SEARCH_${leadIdx}`]?.envelope || null,
+                web_search: null,
               };
             } else if (tool === 'ASK_LEAD_QUESTION') {
               continue;
@@ -2281,9 +2250,9 @@ class SupervisorService {
       console.warn(`[ACCUMULATION] Failed to create accumulation_update artefact (v1): ${accErr.message}`);
     }
 
-    // 12a-pre. Attribute-verification gate
+    // 12a-pre. Attribute-verification gate (website-only, Places-only mode)
     //   If a HARD HAS_ATTRIBUTE constraint exists that CVL cannot verify from Places data,
-    //   and we have candidate leads, run WEB_SEARCH + optional WEB_VISIT per lead to attempt
+    //   and we have candidate leads, visit lead.website via WEB_VISIT per lead to attempt
     //   attribute verification before wasting replans on quantity expansion.
     let attributeVerificationAttempted = false;
     let attributeVerificationStopped = false;
@@ -2357,10 +2326,7 @@ class SupervisorService {
         | 'official_site_blocked'
         | 'only_weak_third_party_mentions'
         | 'unsupported_attribute'
-        | 'web_search_failed'
-        | 'web_search_empty'
-        | 'web_search_quota_exceeded'
-        | 'no_website';
+        | 'no_website_from_places';
 
       const ATTR_TRACE = process.env.ATTR_VERIFY_TRACE === '1';
       const ATTR_SEARCH_DELAY_MS = 300;
@@ -2431,8 +2397,6 @@ class SupervisorService {
         if (directoryDomains.some(d => domain.includes(d))) return 'directory';
         return 'other';
       }
-
-      let braveQuotaBreaker = false;
 
       let attrLeadIndex = 0;
       for (const lead of finalLeads) {
@@ -2601,15 +2565,14 @@ class SupervisorService {
             }
           };
 
-          // ── WEBSITE-FIRST FLOW ──
-          // Primary path: visit lead.website directly from Places Details
+          // ── WEBSITE-ONLY FLOW (Places-only mode) ──
           if (leadWebsite) {
             const rootUrl = getDomainRoot(leadWebsite) || leadWebsite;
             urlVisited = rootUrl;
             evidenceSourceType = classifySourceType(rootUrl, lead.name);
             evidenceSourceUrl = rootUrl;
 
-            if (ATTR_TRACE) console.log(`[ATTR_TRACE] Website-first: visiting ${rootUrl} (from Places: ${leadWebsite})`);
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] Website-only: visiting ${rootUrl} (from Places: ${leadWebsite})`);
 
             const scanResult = await scanPagesForAttribute(rootUrl);
 
@@ -2618,68 +2581,10 @@ class SupervisorService {
               evidenceSourceUrl = leadWebsite;
               await scanPagesForAttribute(leadWebsite);
             }
-          }
-
-          // Fallback path: only use WEB_SEARCH if lead has no website AND Brave quota not exceeded
-          if (!leadWebsite && !braveQuotaBreaker) {
-            if (ATTR_TRACE) console.log(`[ATTR_TRACE] No website for "${lead.name}", falling back to WEB_SEARCH`);
-
-            try {
-              const wsResult = await executeAction({
-                toolName: 'WEB_SEARCH',
-                toolArgs: { query: searchQuery, entity_name: lead.name, location_hint: city, limit: 5 },
-                userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
-              });
-
-              const wsOutputs = (wsResult.data?.envelope as any)?.outputs;
-              const wsErrors = (wsResult.data?.envelope as any)?.errors || [];
-              const isQuotaExceeded = wsOutputs?.quota_exceeded === true || wsErrors.some((e: any) => e.code === 'QUOTA_EXCEEDED');
-
-              if (isQuotaExceeded) {
-                braveQuotaBreaker = true;
-                console.warn(`[ATTR_VERIFY] Brave quota exceeded — circuit breaker TRIPPED, skipping WEB_SEARCH for remaining leads`);
-                unknownReason = 'web_search_quota_exceeded';
-                evidenceRationale = `Web search quota exceeded (402). Cannot verify "${attrValue}" for ${lead.name} without a website.`;
-              } else if (wsResult.success && wsResult.data) {
-                webSearchSuccess = true;
-                const results = wsOutputs?.results || [];
-
-                for (const r of results) {
-                  const title = (r.title || '');
-                  const description = (r.description || r.snippet || '');
-                  const combined = `${title} ${description}`;
-
-                  const posMatch = textMatchesKeywords(combined, keywords);
-                  if (posMatch.matched && r.url) {
-                    urlVisited = r.url;
-                    evidenceSourceUrl = r.url;
-                    evidenceSourceType = classifySourceType(r.url, lead.name);
-                    matchSource = 'search_snippet';
-                    snippets.push(`${title}: ${description}`.slice(0, 150));
-                    evidenceQuote = `${title}: ${description}`.slice(0, 150);
-                    break;
-                  }
-                }
-
-                if (urlVisited) {
-                  await scanPagesForAttribute(urlVisited);
-                } else {
-                  unknownReason = 'no_relevant_pages_found';
-                  evidenceRationale = `No web search results contained keywords for "${attrValue}" at ${lead.name}.`;
-                }
-              } else {
-                unknownReason = 'web_search_failed';
-                evidenceRationale = `Web search returned no data for "${attrValue}" at ${lead.name}.`;
-              }
-            } catch (wsErr: any) {
-              console.warn(`[ATTR_VERIFY] WEB_SEARCH failed for "${lead.name}" + "${attrValue}" (non-fatal): ${wsErr.message}`);
-              unknownReason = 'web_search_failed';
-              evidenceRationale = `Web search failed for "${attrValue}" at ${lead.name}: ${wsErr.message}`;
-            }
-          } else if (!leadWebsite && braveQuotaBreaker) {
-            unknownReason = 'web_search_quota_exceeded';
-            evidenceRationale = `No website from Places Details and web search quota exceeded. Cannot verify "${attrValue}" for ${lead.name}.`;
-            if (ATTR_TRACE) console.log(`[ATTR_TRACE] Skipping "${lead.name}" — no website + Brave circuit breaker active`);
+          } else {
+            unknownReason = 'no_website_from_places';
+            evidenceRationale = `No website returned from Places Details for ${lead.name}. Cannot verify "${attrValue}" without a website.`;
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] No website for "${lead.name}" — verdict=unknown reason=no_website_from_places`);
           }
 
           attrVerificationResults.push({
@@ -2724,7 +2629,7 @@ class SupervisorService {
             conversationId,
           }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] Failed to create attribute_evidence artefact for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
 
-          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType} strategy=${leadWebsite ? 'website-first' : braveQuotaBreaker ? 'skipped(quota)' : 'search-fallback'}${evidenceVerdict === 'unknown' ? ` reason=${unknownReason}` : ''}${matchSource ? ` match=${matchSource}` : ''} url=${urlVisited || 'none'}`);
+          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType} strategy=${leadWebsite ? 'website-only' : 'no-website'}${evidenceVerdict === 'unknown' ? ` reason=${unknownReason}` : ''}${matchSource ? ` match=${matchSource}` : ''} url=${urlVisited || 'none'}`);
         }
       }
 
@@ -3240,27 +3145,7 @@ class SupervisorService {
 
         if (replanEnrichSteps.length > 0) {
           console.log(`[REPLAN_ENRICH] Starting enrichment (${replanEnrichPlan.selected_path}): ${replanEnrichSteps.map(s => s.tool).join(' → ')} (${vLabel})`);
-
-          if (replanLeadsWithWebsites.length === 0 && replanEnrichSteps.some(s => s.tool === 'WEB_SEARCH')) {
-            const fallbackLeads = replanLeadsNoWebsites.slice(0, replanEnrichBatchSize);
-            for (let li = 0; li < fallbackLeads.length; li++) {
-              const lead = fallbackLeads[li];
-              try {
-                const wsResult = await executeAction({
-                  toolName: 'WEB_SEARCH',
-                  toolArgs: { query: `${lead.name} ${v2.location} contact`, entity_name: lead.name, location_hint: v2.location, limit: 5 },
-                  userId: task.user_id, tracker: toolTracker, runId: chatRunId, conversationId, clientRequestId,
-                });
-                if (wsResult.success && wsResult.data) {
-                  replanAccumulatedStepData[`WEB_SEARCH_${li}`] = wsResult.data;
-                  const bestUrl = (wsResult.data?.envelope as any)?.outputs?.best_guess_official_url;
-                  if (bestUrl) { lead.website = bestUrl; }
-                }
-              } catch (wsErr: any) {
-                console.warn(`[REPLAN_ENRICH] WEB_SEARCH failed for "${lead.name}": ${wsErr.message}`);
-              }
-            }
-          }
+          console.log(`[REPLAN_ENRICH] Places-only mode: ${replanLeadsWithWebsites.length}/${replanLeads.length} leads have websites from Places Details`);
 
           const replanEnrichableLeads = replanLeads.filter(l => l.website).slice(0, replanEnrichBatchSize);
           const REPLAN_ENRICH_CONCURRENCY = 3;
@@ -3295,7 +3180,7 @@ class SupervisorService {
                   places_lead: { name: lead.name, address: lead.address, phone: lead.phone, website: lead.website, place_id: lead.placeId },
                   web_visit_pages: (replanAccumulatedStepData[`WEB_VISIT_${li}`]?.envelope as any)?.outputs?.pages || null,
                   contact_extract: (replanAccumulatedStepData[`CONTACT_EXTRACT_${li}`]?.envelope as any)?.outputs || null,
-                  web_search: replanAccumulatedStepData[`WEB_SEARCH_${li}`]?.envelope || null,
+                  web_search: null,
                 };
               } else if (tool === 'ASK_LEAD_QUESTION') {
                 continue;
