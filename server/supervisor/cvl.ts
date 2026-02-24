@@ -210,9 +210,9 @@ export function buildCapabilityCheck(
         break;
 
       case 'HAS_ATTRIBUTE':
-        verifiable = false;
-        verification_method = null;
-        reason = 'Venue attributes (e.g. beer garden, outdoor seating) cannot be deterministically verified from Places API data alone; requires manual or web-scrape verification';
+        verifiable = true;
+        verification_method = 'website_visit';
+        reason = 'Attribute verified via website visit (WEB_VISIT) — keyword scan on official site pages';
         break;
 
       default:
@@ -256,12 +256,22 @@ export interface VerifiableLead {
   source: string;
 }
 
+export interface AttributeEvidenceEntry {
+  verdict: 'yes' | 'no' | 'unknown';
+  confidence: 'high' | 'medium' | 'low';
+  reason: string;
+  evidenceUrl: string | null;
+}
+
+export type AttributeEvidenceMap = Map<string, Map<string, AttributeEvidenceEntry>>;
+
 export function verifyLeads(
   leads: VerifiableLead[],
   constraints: StructuredConstraint[],
   requestedCountUser: number | null,
   searchBudgetCount: number,
   leadsReturnedFromApi: number,
+  attributeEvidence?: AttributeEvidenceMap,
 ): CvlVerificationOutput {
   const leadVerifications: LeadVerificationResult[] = [];
   const evidenceItems: VerificationEvidence[] = [];
@@ -278,7 +288,7 @@ export function verifyLeads(
     let allHardSatisfied = true;
 
     for (const c of constraints) {
-      const check = verifyOneConstraint(lead, c, i, evidenceCounter, evidenceItems);
+      const check = verifyOneConstraint(lead, c, i, evidenceCounter, evidenceItems, attributeEvidence);
       checks.push(check.result);
       evidenceCounter = check.nextEvidenceCounter;
 
@@ -386,6 +396,7 @@ function verifyOneConstraint(
   leadIndex: number,
   evidenceCounter: number,
   evidenceItems: VerificationEvidence[],
+  attributeEvidence?: AttributeEvidenceMap,
 ): { result: ConstraintCheck; nextEvidenceCounter: number } {
   let status: VerificationStatus = 'unknown';
   let confidence: VerificationConfidence = 'low';
@@ -551,9 +562,29 @@ function verifyOneConstraint(
 
     case 'HAS_ATTRIBUTE': {
       const attrValue = typeof constraint.value === 'string' ? constraint.value.toLowerCase() : '';
-      status = 'unknown';
-      confidence = 'low';
-      reason = `Attribute "${attrValue}" cannot be deterministically verified from Places API data; requires manual/web-scrape check`;
+      const leadEvMap = attributeEvidence?.get(lead.placeId);
+      const attrEv = leadEvMap?.get(attrValue);
+      if (attrEv) {
+        status = attrEv.verdict;
+        confidence = attrEv.confidence;
+        reason = attrEv.reason;
+        if (attrEv.verdict === 'yes' && attrEv.evidenceUrl) {
+          evidenceId = `ev_${evidenceCounter++}`;
+          evidenceItems.push({
+            evidence_id: evidenceId,
+            constraint_id: constraint.id,
+            lead_index: leadIndex,
+            lead_name: lead.name,
+            field: 'attribute',
+            source: 'website_visit',
+            snippet: attrEv.evidenceUrl,
+          });
+        }
+      } else {
+        status = 'unknown';
+        confidence = 'low';
+        reason = `Attribute "${attrValue}" was not checked via website visit`;
+      }
       break;
     }
 

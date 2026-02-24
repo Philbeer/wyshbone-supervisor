@@ -20,7 +20,7 @@ import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type D
 import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
-import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput } from './supervisor/cvl';
+import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput, type AttributeEvidenceMap } from './supervisor/cvl';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
@@ -2260,6 +2260,21 @@ class SupervisorService {
       c => c.type === 'HAS_ATTRIBUTE' && c.hard
     );
     const hasHardAttribute = hardAttributeConstraints.length > 0;
+    const attrVerificationResults: Array<{
+      lead_name: string;
+      lead_place_id: string;
+      attribute: string;
+      search_query: string;
+      web_search_success: boolean;
+      url_visited: string | null;
+      web_visit_success: boolean;
+      snippets: string[];
+      attribute_found: boolean;
+      evidence_strength: 'strong' | 'weak' | 'none';
+      verdict: 'yes' | 'no' | 'unknown';
+      confidence: 'high' | 'medium' | 'low';
+      rationale: string;
+    }> = [];
 
     if (hasHardAttribute && finalLeads.length > 0 && !usedStub) {
       attributeVerificationAttempted = true;
@@ -2306,19 +2321,6 @@ class SupervisorService {
         runType: 'plan',
         metadata: { attributes: attrValues, candidates: finalLeads.length, total_checks_expected: totalChecksExpected },
       });
-
-      const attrVerificationResults: Array<{
-        lead_name: string;
-        lead_place_id: string;
-        attribute: string;
-        search_query: string;
-        web_search_success: boolean;
-        url_visited: string | null;
-        web_visit_success: boolean;
-        snippets: string[];
-        attribute_found: boolean;
-        evidence_strength: 'strong' | 'weak' | 'none';
-      }> = [];
 
       type UnknownReason =
         | 'no_relevant_pages_found'
@@ -2444,6 +2446,9 @@ class SupervisorService {
               snippets: [],
               attribute_found: false,
               evidence_strength: 'none',
+              verdict: evidenceVerdict,
+              confidence: evidenceConfidence,
+              rationale: evidenceRationale,
             });
 
             await createArtefact({
@@ -2598,6 +2603,9 @@ class SupervisorService {
             snippets,
             attribute_found: attributeFound,
             evidence_strength: evidenceStrength,
+            verdict: evidenceVerdict,
+            confidence: evidenceConfidence,
+            rationale: evidenceRationale,
           });
 
           // F) Always write attribute_evidence artefact per lead+attribute
@@ -3473,12 +3481,29 @@ class SupervisorService {
         source: l.source,
       }));
 
+      const attrEvidenceMap: AttributeEvidenceMap = new Map();
+      if (attrVerificationResults.length > 0) {
+        for (const r of attrVerificationResults) {
+          if (!attrEvidenceMap.has(r.lead_place_id)) {
+            attrEvidenceMap.set(r.lead_place_id, new Map());
+          }
+          const leadMap = attrEvidenceMap.get(r.lead_place_id)!;
+          leadMap.set(r.attribute.toLowerCase(), {
+            verdict: r.verdict,
+            confidence: r.confidence,
+            reason: r.rationale,
+            evidenceUrl: r.url_visited,
+          });
+        }
+      }
+
       cvlVerification = verifyLeads(
         cvlLeads,
         structuredConstraints,
         userRequestedCountFinal,
         searchBudgetCount,
         totalUniqueLeads,
+        attrEvidenceMap.size > 0 ? attrEvidenceMap : undefined,
       );
 
       for (const lv of cvlVerification.leadVerifications) {

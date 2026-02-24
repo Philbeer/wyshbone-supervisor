@@ -27,7 +27,7 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Plan Execution**: Calls Tower via `judgeArtefact` after every step, with a bounded retry/replan inner loop.
 - **Two-Phase Multi-Tool Execution**: Discovers leads with `SEARCH_PLACES` then enriches them using `WEB_VISIT`, `CONTACT_EXTRACT`, and `LEAD_ENRICH`, with `WEB_SEARCH` as a fallback.
 - **RESTful API**: Manages leads, user context, signals, and plan execution, including creation, approval, and progress monitoring.
-- **Constraint Verification Layer (CVL)**: An additive layer that extracts, checks, and performs per-lead deterministic verification, influencing the final verdict.
+- **Constraint Verification Layer (CVL)**: An additive layer that extracts, checks, and performs per-lead deterministic verification, influencing the final verdict. For `HAS_ATTRIBUTE` constraints, the CVL receives an `AttributeEvidenceMap` (keyed by placeId → attribute → {verdict, confidence, reason, evidenceUrl}) from the attribute verification gate, so per-lead attribute verdicts (yes/no/unknown) are incorporated into `verified_exact` counts and the CVL override logic.
 - **Intelligent Replanning**: Separates user-requested counts from search budgets, accumulates and deduplicates leads across replan versions, employs a progressive geographic expansion strategy, enforces hard constraints, and includes early stopping.
 - **LLM-backed Goal-to-Constraints Parser**: Converts natural language user goals into structured constraints using LLMs and strict JSON schema validation.
 - **Canonical Delivery Summary**: `delivery_summary` provides a canonical `status` field (PASS/PARTIAL/STOP) derived from Tower verdict and CVL verified counts, serving as the authoritative user-facing output.
