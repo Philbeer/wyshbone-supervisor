@@ -92,8 +92,8 @@ describe('Learning Layer', () => {
     it('has correct default stop policy values', () => {
       const stop = GLOBAL_DEFAULT_BUNDLE.policies.stop_policy_v1;
       expect(stop.max_replans).toBe(2);
-      expect(stop.search_budget_count).toBe(1);
-      expect(stop.search_count).toBe(1);
+      expect(stop.search_budget_count).toBe(30);
+      expect(stop.search_count).toBe(30);
       expect(stop.stop_when_verified_exact_is_zero_after_enrichment).toBe(true);
     });
 
@@ -112,8 +112,8 @@ describe('Learning Layer', () => {
   describe('deriveExecutionParams', () => {
     it('extracts execution params from canonical bundle', () => {
       const ep = deriveExecutionParams(GLOBAL_DEFAULT_BUNDLE);
-      expect(ep.searchBudgetCount).toBe(1);
-      expect(ep.searchCount).toBe(1);
+      expect(ep.searchBudgetCount).toBe(30);
+      expect(ep.searchCount).toBe(30);
       expect(ep.maxReplans).toBe(2);
       expect(ep.enrichmentBatchSize).toBe(10);
       expect(ep.radiusStepsKm).toEqual([2, 5, 10]);
@@ -234,8 +234,8 @@ describe('Learning Layer', () => {
       });
       expect(snapshot.applied_policies.stop_policy_v1).toEqual({
         max_replans: 2,
-        search_budget_count: 1,
-        search_count: 1,
+        search_budget_count: 30,
+        search_count: 30,
         stop_when_verified_exact_is_zero_after_enrichment: true,
         require_user_override_to_attempt_unverifiable_hard: true,
       });

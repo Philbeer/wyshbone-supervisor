@@ -84,8 +84,8 @@ export const GLOBAL_DEFAULT_BUNDLE: PolicyBundleV1 = {
     stop_policy_v1: {
       enabled: true,
       max_replans: 2,
-      search_budget_count: 1,
-      search_count: 1,
+      search_budget_count: 30,
+      search_count: 30,
       stop_when_verified_exact_is_zero_after_enrichment: true,
       stop_when_cost_exceeds_budget: true,
       known_unverifiable_hard_constraints: [
