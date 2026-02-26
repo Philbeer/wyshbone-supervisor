@@ -1,0 +1,155 @@
+We ran the query:
+
+“find 5 pubs in arundel”
+
+Facts already established (verified):
+
+UI Replit uses Google Places v1 places:searchText
+
+Text Search returns 20+ pubs near Arundel
+
+Pagination works
+
+No aggressive filters in UI code
+
+UI Replit does NOT execute the search
+
+All execution is delegated to this Supervisor service
+
+Final run result stored:
+
+requested = 5
+
+allLeads = 1
+
+verifiedExact = 1
+
+status = STOP
+
+So the loss happened inside the Supervisor.
+
+❓ Your Task (Supervisor Only — No Code Changes)
+
+Produce a forensic execution report for the most recent
+"find 5 pubs in arundel" run.
+
+1️⃣ Confirm Execution Path
+
+For this run, explicitly state:
+
+Did the Supervisor execute a SEARCH_PLACES step itself?
+
+Or did it call another internal search helper?
+
+Or did it short-circuit early?
+
+List the exact function(s) executed.
+
+2️⃣ Show the Exact Google Request(s)
+
+For every Google Places call made by the Supervisor, output:
+
+Endpoint used
+
+(places:searchText, Nearby, Find Place, other)
+
+Full request body (redact API key only)
+
+Radius / location handling
+
+Whether pagination (nextPageToken) was followed
+
+Number of raw results returned per page
+
+👉 I want counts, not descriptions.
+
+Example format:
+
+Request 1:
+endpoint: places:searchText
+textQuery: "pubs"
+locationBias: circle(radius=12000m)
+page: 1
+results: 20
+nextPageToken: yes
+3️⃣ Raw Results vs Stored Leads
+
+Explain numerically what happened after search:
+
+Raw places returned from Google: ?
+
+After OPERATIONAL filter: ?
+
+After any type / semantic filtering: ?
+
+After verification step: ?
+
+Final leads persisted: 1
+
+If filtering occurred, list which rule removed which items.
+
+4️⃣ Verification Step Impact
+
+For the pubs that were dropped, answer:
+
+Were they:
+
+Never searched?
+
+Searched but failed verification?
+
+Dropped before verification?
+
+Did verifyVenue run on more than one place?
+
+If verification rejected places:
+
+Why?
+
+Missing website?
+
+Missing phone?
+
+Type mismatch?
+
+Timeout?
+
+5️⃣ STOP Trigger
+
+Explain exactly why the run stopped:
+
+Was STOP triggered because:
+
+maxReplansExceeded?
+
+noMoreCandidates?
+
+Verification failure?
+
+Internal error?
+
+Why didn’t the Supervisor retry discovery if only 1/5 was found?
+
+6️⃣ Critical Consistency Check
+
+Answer yes/no with explanation:
+
+Is the Supervisor using different search logic or parameters than the UI Replit’s searchPlaces() implementation?
+
+If yes:
+
+What is different?
+
+Why does that divergence exist?
+
+📌 Output Requirements
+
+No speculation
+
+No summaries
+
+No “likely” language
+
+Evidence-based only
+
+Line references or logs where possible
