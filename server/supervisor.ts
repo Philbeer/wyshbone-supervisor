@@ -21,7 +21,7 @@ import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput, type AttributeEvidenceMap } from './supervisor/cvl';
-import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
+import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 
@@ -1160,7 +1160,7 @@ class SupervisorService {
 
     const parsedGoal = await parseGoalToConstraints(originalUserGoal);
 
-    let businessType: string = searchQuery?.business_type as string || parsedGoal.business_type;
+    let businessType: string = canonicaliseBusinessType(searchQuery?.business_type as string || parsedGoal.business_type || '');
     let location = (searchQuery?.location as string) || parsedGoal.location;
     let requestedCount = parsedGoal.search_budget_count;
     const prefixFilter = parsedGoal.prefix_filter || undefined;

@@ -232,8 +232,15 @@ export interface PolicyApplicationResult {
   constraints: PolicyConstraints;
 }
 
+export function canonicaliseBusinessType(raw: string): string {
+  let v = raw.toLowerCase().trim().replace(/\s+/g, ' ');
+  v = v.replace(/^[\d]+\s+/, '');
+  v = v.replace(/^(some|several|many|few|a few|a couple of|couple of|multiple|numerous|various|any|all|the)\s+/i, '');
+  return v.trim();
+}
+
 export function deriveScopeKey(vertical: string, location: string, constraintBucket: string[]): string {
-  const normVertical = vertical.toLowerCase().trim();
+  const normVertical = canonicaliseBusinessType(vertical);
   const normLocation = location.toLowerCase().trim().replace(/\s+/g, '_');
   const sortedBucket = [...constraintBucket].sort().map(c => c.toLowerCase().trim()).join('|');
   return `${normVertical}::${normLocation}::${sortedBucket}`;

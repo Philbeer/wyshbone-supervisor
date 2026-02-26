@@ -5,6 +5,7 @@ import {
   deriveExecutionParams,
   upgradeFlatPolicyToBundle,
   buildApplicationSnapshot,
+  canonicaliseBusinessType,
   GLOBAL_DEFAULT_BUNDLE,
   GLOBAL_DEFAULT_SCOPE_KEY,
   type PolicyConstraints,
@@ -50,6 +51,47 @@ describe('Learning Layer', () => {
     it('scope key format is vertical::location::bucket', () => {
       const key = deriveScopeKey('pubs', 'London', ['business_type', 'location']);
       expect(key).toMatch(/^pubs::london::business_type\|location$/);
+    });
+
+    it('strips leading numeric tokens from vertical via canonicalisation', () => {
+      const key1 = deriveScopeKey('5 pubs', 'arundel', ['business_type']);
+      const key2 = deriveScopeKey('pubs', 'arundel', ['business_type']);
+      expect(key1).toBe(key2);
+    });
+
+    it('strips quantifier words from vertical via canonicalisation', () => {
+      const key1 = deriveScopeKey('Some Coffee Shops', 'London', ['business_type']);
+      const key2 = deriveScopeKey('coffee shops', 'London', ['business_type']);
+      expect(key1).toBe(key2);
+    });
+  });
+
+  describe('canonicaliseBusinessType', () => {
+    it('lowercases and trims', () => {
+      expect(canonicaliseBusinessType(' PUBS ')).toBe('pubs');
+    });
+
+    it('removes leading numeric tokens', () => {
+      expect(canonicaliseBusinessType('5 pubs')).toBe('pubs');
+      expect(canonicaliseBusinessType('10 restaurants')).toBe('restaurants');
+      expect(canonicaliseBusinessType('100 cafes')).toBe('cafes');
+    });
+
+    it('removes quantifier words', () => {
+      expect(canonicaliseBusinessType('Some Coffee Shops')).toBe('coffee shops');
+      expect(canonicaliseBusinessType('several pubs')).toBe('pubs');
+      expect(canonicaliseBusinessType('a few bars')).toBe('bars');
+      expect(canonicaliseBusinessType('multiple dentists')).toBe('dentists');
+    });
+
+    it('collapses internal whitespace', () => {
+      expect(canonicaliseBusinessType('coffee   shops')).toBe('coffee shops');
+    });
+
+    it('preserves valid business types unchanged', () => {
+      expect(canonicaliseBusinessType('pubs')).toBe('pubs');
+      expect(canonicaliseBusinessType('coffee shops')).toBe('coffee shops');
+      expect(canonicaliseBusinessType('italian restaurants')).toBe('italian restaurants');
     });
   });
 
