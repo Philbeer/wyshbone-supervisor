@@ -1,0 +1,41 @@
+You are working in the WYSHBONE SUPERVISOR repo.
+
+Problem:
+The external UI renders "Verified match" vs "not verified" based on delivery_summary arrays:
+- delivered_exact[] is shown as "Verified match"
+- delivered_closest[] is shown as "not verified"
+
+Even after CVL geo verification correctly verifies all 30 Sussex dentists, delivery_summary still splits arrays using naive substring matching:
+leadSatisfiesOriginalSoftConstraint() checks:
+  (lead.address || '').toLowerCase().includes(originalValue)
+So only 11 leads whose formatted address contains "sussex" become delivered_exact, and 19 become delivered_closest, even though CVL verified them.
+
+Worse: delivered_exact_count is overridden from CVL to 30, but the arrays are not reconciled. UI renders the arrays, so the UI is wrong.
+
+Goal:
+Make delivery_summary classification use CVL per-lead verification results when available, and ONLY fall back to substring heuristics when CVL data is missing.
+
+Requirements:
+1) If CVL produced per-lead location verification for the run:
+   - Any lead that CVL marks as VERIFIED_GEO or SEARCH_BOUNDED for the location constraint should be classified as EXACT (go into delivered_exact[]).
+   - OUT_OF_AREA or UNKNOWN should NOT be exact.
+2) Ensure delivered_exact_count matches delivered_exact.length (no more "count says 30 but array has 11").
+3) Remove / bypass leadSatisfiesOriginalSoftConstraint() substring matching for location/area/geo constraints when CVL verification data exists.
+4) Preserve existing behaviour for runs where CVL verification is not present (fallback allowed).
+5) Add a regression test:
+   - Input: dentists in Sussex
+   - With CVL verifying all 30 as in-area/search-bounded
+   - Expect: delivered_exact.length == 30, delivered_closest.length == 0
+   - And count fields match array lengths
+
+Implementation notes (don’t overcomplicate):
+- Thread CVL verification results into classifyLead() or into the structure it uses.
+- Build a map keyed by place_id (or lead_id) => { location_status, etc. } from CVL output.
+- Classification should be:
+   EXACT if CVL says location passes (verified_geo/search_bounded) and other constraints pass as per current rules.
+- Make sure you don’t break non-location constraints.
+
+Deliverables:
+- Updated delivery-summary.ts classification logic
+- Remove mismatch between counts and arrays
+- Tests proving the Sussex case and at least one non-location case still works

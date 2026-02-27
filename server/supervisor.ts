@@ -3797,6 +3797,13 @@ class SupervisorService {
       cvlRequestedCountUser: cvlVerification?.summary?.requested_count_user ?? null,
       cvlHardUnverifiable: dsHardUnverifiable.map(u => u.value),
       cvlLocationBreakdown: cvlVerification?.summary?.location_breakdown ?? null,
+      cvlLeadVerifications: cvlVerification?.leadVerifications.map(lv => ({
+        lead_place_id: lv.lead_place_id,
+        lead_name: lv.lead_name,
+        verified_exact: lv.verified_exact,
+        all_hard_satisfied: lv.all_hard_satisfied,
+        location_confidence: lv.location_confidence,
+      })),
     };
     const mainDsPayload = await emitDeliverySummary(mainDsInput);
 

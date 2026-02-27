@@ -66,6 +66,16 @@ export interface DeliverySummaryLeadInput {
   found_in_plan_version?: number;
 }
 
+export type CvlLocationStatus = 'verified_geo' | 'search_bounded' | 'out_of_area' | 'unknown' | 'not_applicable';
+
+export interface CvlLeadVerification {
+  lead_place_id: string;
+  lead_name: string;
+  verified_exact: boolean;
+  all_hard_satisfied: boolean;
+  location_confidence: CvlLocationStatus;
+}
+
 export interface DeliverySummaryInput {
   runId: string;
   userId: string;
@@ -84,6 +94,7 @@ export interface DeliverySummaryInput {
   cvlRequestedCountUser?: number | null;
   cvlHardUnverifiable?: string[];
   cvlLocationBreakdown?: CvlLocationBreakdown | null;
+  cvlLeadVerifications?: CvlLeadVerification[];
 }
 
 function isNonTextualConstraint(constraintName: string): boolean {
@@ -112,9 +123,19 @@ function leadSatisfiesHardConstraint(
   return true;
 }
 
+function isLocationConstraint(constraintName: string): boolean {
+  const lower = constraintName.toLowerCase();
+  return lower.includes('location') || lower.includes('area') || lower.includes('geo');
+}
+
+function cvlLocationPasses(status: CvlLocationStatus): boolean {
+  return status === 'verified_geo' || status === 'search_bounded' || status === 'not_applicable';
+}
+
 function leadSatisfiesOriginalSoftConstraint(
   lead: DeliverySummaryLeadInput,
   relaxation: SoftRelaxation,
+  cvlVerification?: CvlLeadVerification | null,
 ): boolean {
   const originalValue = relaxation.from.toLowerCase().trim();
   if (!originalValue) return true;
@@ -126,7 +147,10 @@ function leadSatisfiesOriginalSoftConstraint(
     return relaxation.plan_version > planVersion;
   }
 
-  if (constraintName.includes('location') || constraintName.includes('area') || constraintName.includes('geo')) {
+  if (isLocationConstraint(constraintName)) {
+    if (cvlVerification) {
+      return cvlLocationPasses(cvlVerification.location_confidence);
+    }
     const addr = (lead.address || '').toLowerCase();
     return addr.includes(originalValue);
   }
@@ -150,6 +174,7 @@ function classifyLead(
   lead: DeliverySummaryLeadInput,
   hardConstraints: string[],
   softRelaxations: SoftRelaxation[],
+  cvlVerification?: CvlLeadVerification | null,
 ): DeliveredEntity {
   const entityId = lead.entity_id || lead.place_id || lead.placeId || `lead:${lead.name}`;
 
@@ -182,7 +207,7 @@ function classifyLead(
 
   const softViolations: string[] = [];
   for (const relaxation of softRelaxations) {
-    if (!leadSatisfiesOriginalSoftConstraint(lead, relaxation)) {
+    if (!leadSatisfiesOriginalSoftConstraint(lead, relaxation, cvlVerification)) {
       softViolations.push(relaxation.constraint);
     }
   }
@@ -250,11 +275,21 @@ function deriveCanonicalStatus(
 }
 
 export function buildDeliverySummaryPayload(input: DeliverySummaryInput): DeliverySummaryPayload {
+  const cvlMap = new Map<string, CvlLeadVerification>();
+  if (input.cvlLeadVerifications) {
+    for (const lv of input.cvlLeadVerifications) {
+      cvlMap.set(lv.lead_place_id, lv);
+      cvlMap.set(lv.lead_name, lv);
+    }
+  }
+
   const exact: DeliveredEntity[] = [];
   const closest: DeliveredEntity[] = [];
 
   for (const lead of input.leads) {
-    const classified = classifyLead(lead, input.hardConstraints, input.softRelaxations);
+    const leadId = lead.entity_id || lead.place_id || lead.placeId || '';
+    const cvlMatch = cvlMap.get(leadId) || cvlMap.get(lead.name) || null;
+    const classified = classifyLead(lead, input.hardConstraints, input.softRelaxations, cvlMatch);
     if (classified.match_level === 'exact') {
       exact.push(classified);
     } else {
@@ -264,10 +299,9 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
 
   const hasCvl = input.cvlVerifiedExactCount !== undefined && input.cvlVerifiedExactCount !== null;
 
-  const rawExactCount = exact.length;
   const rawTotalCount = exact.length + closest.length;
 
-  const exactCount = hasCvl ? input.cvlVerifiedExactCount! : rawExactCount;
+  const exactCount = exact.length;
   const requestedCount = hasCvl
     ? (input.cvlRequestedCountUser ?? input.requestedCount)
     : input.requestedCount;
@@ -280,7 +314,7 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
   const status = deriveCanonicalStatus(exactCount, requestedCount, towerVerdict, hasHardUnverifiable);
 
   const cvlSummary: CvlSummary | null = hasCvl ? {
-    verified_exact_count: exactCount,
+    verified_exact_count: input.cvlVerifiedExactCount!,
     unverifiable_count: input.cvlUnverifiableCount ?? 0,
     hard_unverifiable: hardUnverifiable,
     location_breakdown: input.cvlLocationBreakdown ?? null,
@@ -323,7 +357,7 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
     cvl_summary: cvlSummary,
     stop_reason: stopReason,
     suggested_next_question: suggestedNextQuestion,
-    cvl_verified_exact_count: hasCvl ? exactCount : null,
+    cvl_verified_exact_count: hasCvl ? input.cvlVerifiedExactCount! : null,
     cvl_unverifiable_count: input.cvlUnverifiableCount ?? null,
   };
 }
