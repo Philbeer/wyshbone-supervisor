@@ -6,7 +6,7 @@
  */
 
 import type { PlanStep } from './types/plan';
-import { searchPlaces } from './google-places';
+import { searchPlaces, type GoogleQueryMode } from './google-places';
 import { executeWebVisit } from './web-visit';
 import type { WebVisitInput } from './web-visit';
 import { executeContactExtract } from './contact-extract';
@@ -246,10 +246,13 @@ async function executeSearchPlaces(
   const country = (args.country as string) || 'GB';
   const maxResults = Number(args.maxResults) || 20;
   const targetCount = args.target_count != null ? Number(args.target_count) : null;
+  const rawMode = (args.google_query_mode as string) || '';
+  const queryMode: GoogleQueryMode = rawMode === 'BIASED_STABLE' ? 'BIASED_STABLE' : 'TEXT_ONLY';
+  const modeDefaulted = !rawMode || (rawMode !== 'TEXT_ONLY' && rawMode !== 'BIASED_STABLE');
   
-  console.log(`[ACTION_EXECUTOR] SEARCH_PLACES: ${query} in ${location}, ${country} (maxResults=${maxResults}, target=${targetCount ?? 'unspecified'})`);
+  console.log(`[ACTION_EXECUTOR] SEARCH_PLACES: ${query} in ${location}, ${country} (maxResults=${maxResults}, target=${targetCount ?? 'unspecified'}, mode=${queryMode}${modeDefaulted ? ' [defaulted]' : ''})`);
   
-  const result = await searchPlaces(query, location, country, maxResults);
+  const result = await searchPlaces(query, location, country, maxResults, queryMode);
   
   if (result.success) {
     return {
@@ -260,13 +263,15 @@ async function executeSearchPlaces(
         count: result.places.length,
         delivered_count: result.places.length,
         target_count: targetCount,
+        ...(result.debug ? { search_debug: result.debug } : {}),
       }
     };
   } else {
     return {
       success: false,
       summary: `Search failed: ${result.error}`,
-      error: result.error
+      error: result.error,
+      data: result.debug ? { search_debug: result.debug } : undefined,
     };
   }
 }

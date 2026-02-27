@@ -1547,7 +1547,7 @@ class SupervisorService {
         step_id: 'search_places_v1',
         tool: 'SEARCH_PLACES',
         phase: 'discovery',
-        tool_args: { query: `${businessType} in ${city} ${country}`, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective },
+        tool_args: { query: `${businessType} ${city} ${country}`, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective, google_query_mode: 'TEXT_ONLY' },
         expected_output: `Up to ${searchCount} ${businessType} results from Google Places`,
         ...(postProcessing.length > 0 ? { post_processing: postProcessing.join('; ') } : {}),
       },
@@ -1621,11 +1621,12 @@ class SupervisorService {
     const createdLeadIds: string[] = [];
     const towerLoopStepStartedAt = Date.now();
     let towerLoopStepError: string | undefined;
+    let searchDebug: Record<string, unknown> | null = null;
 
     try {
       const searchResult = await executeAction({
         toolName: 'SEARCH_PLACES',
-        toolArgs: { query: businessType, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective },
+        toolArgs: { query: businessType, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective, google_query_mode: 'TEXT_ONLY' },
         userId: task.user_id,
         tracker: toolTracker,
         runId: chatRunId,
@@ -1634,6 +1635,7 @@ class SupervisorService {
       });
 
       runToolCallCount++;
+      searchDebug = (searchResult.data?.search_debug as Record<string, unknown>) ?? null;
       if (searchResult.success && searchResult.data?.places && Array.isArray(searchResult.data.places)) {
         const places = searchResult.data.places as any[];
         for (const p of places) {
@@ -1744,7 +1746,7 @@ class SupervisorService {
             step_index: 0,
             step_status: towerLoopStepStatus,
             inputs_summary: compactInputs({ query: businessType, location: city, country, maxResults: searchCount }),
-            outputs_summary: { leads_count: leads.length, used_stub: usedStub, prefix_filter: prefixFilter || null, name_filter: nameFilter || null, attribute_filter: attributeFilter || null, requested_count: requestedCount, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}) },
+            outputs_summary: { leads_count: leads.length, used_stub: usedStub, prefix_filter: prefixFilter || null, name_filter: nameFilter || null, attribute_filter: attributeFilter || null, requested_count: requestedCount, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}), ...(searchDebug ? { search_debug: searchDebug } : {}) },
             ...safeOutputsRaw({ leads: safeLeads } as Record<string, unknown>),
             timings: {
               started_at: new Date(towerLoopStepStartedAt).toISOString(),
@@ -3012,7 +3014,7 @@ class SupervisorService {
       try {
         const replanSearchResult = await executeAction({
           toolName: 'SEARCH_PLACES',
-          toolArgs: { query: v2.business_type, location: v2.location, country: v2.country, maxResults: v2.search_count, target_count: v2.requested_count_user },
+          toolArgs: { query: v2.business_type, location: v2.location, country: v2.country, maxResults: v2.search_count, target_count: v2.requested_count_user, google_query_mode: 'TEXT_ONLY' },
           userId: task.user_id,
           tracker: toolTracker,
           runId: chatRunId,
@@ -3021,6 +3023,7 @@ class SupervisorService {
         });
 
         runToolCallCount++;
+        const replanSearchDebug = (replanSearchResult.data?.search_debug as Record<string, unknown>) ?? null;
         if (replanSearchResult.success && replanSearchResult.data?.places && Array.isArray(replanSearchResult.data.places)) {
           const places = replanSearchResult.data.places as any[];
           for (const p of places) {
@@ -3121,7 +3124,7 @@ class SupervisorService {
           step_index: 0,
           step_status: replanStepError ? 'failed' : 'success',
           inputs_summary: compactInputs({ query: v2.business_type, location: v2.location, country: v2.country, maxResults: v2.search_count }),
-          outputs_summary: { leads_count: replanLeads.length, prefix_filter: v2.prefix_filter || null, requested_count: v2.requested_count },
+          outputs_summary: { leads_count: replanLeads.length, prefix_filter: v2.prefix_filter || null, requested_count: v2.requested_count, ...(replanSearchDebug ? { search_debug: replanSearchDebug } : {}) },
           timings: {
             started_at: new Date(replanStepStartedAt).toISOString(),
             finished_at: new Date(replanStepFinishedAt).toISOString(),

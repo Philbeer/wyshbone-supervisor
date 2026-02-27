@@ -1,0 +1,77 @@
+Repo: wyshbone-supervisor
+
+TASK
+Implement `google_query_mode` handling for SEARCH_PLACES so we can switch between:
+(A) TEXT_ONLY: query phrasing only (no “in”)
+(B) BIASED_STABLE: region=uk + location bias (lat/lng + radius), fallback to TEXT_ONLY if bias can’t be resolved
+
+FIELD CONTRACT
+Input field (from UI): `google_query_mode`
+Enum values: "TEXT_ONLY" | "BIASED_STABLE"
+Default behaviour if missing/unknown: treat as "BIASED_STABLE" (preferred reliability) OR keep current default if you think that’s safer — but be consistent and log which default was used.
+
+CURRENT PROBLEM
+“micropubs in sussex UK” sometimes returns 1 result.
+“micropub sussex UK” returns many and includes next_page_token.
+
+IMPLEMENTATION DETAILS
+1) Update the SEARCH_PLACES tool executor (where Google Places Text Search is called).
+2) Add support for `google_query_mode` in tool args and in any internal types.
+
+MODE A — TEXT_ONLY
+- Construct query exactly:
+    q = `${businessType} ${location} ${country}`.trim()
+  IMPORTANT: do not inject the word “in”.
+- Call legacy Text Search endpoint:
+    /maps/api/place/textsearch/json?query=ENC(q)&key=...
+- Respect maxResults by paginating using next_page_token until:
+    - results length >= maxResults, or
+    - no next_page_token.
+  (If pagination already exists, ensure it still works.)
+
+MODE B — BIASED_STABLE
+- Prefer stable, geo-biased search using the SAME Text Search endpoint but add:
+    - region=uk when country is UK/United Kingdom/GB
+    - location=lat,lng (centroid for the location string, e.g. “Sussex”)
+    - radius=50000 default (50km) for county-level searches
+- Query string should remain clean:
+    Option 1: query = `${businessType} ${country}` (often enough when bias+region present)
+    Option 2: query = `${businessType}` (if you prefer)
+  BUT: do not use “in {location}” phrasing in this mode; rely on bias + region.
+
+- Resolving lat/lng for the location:
+   If you already have a geocoding helper, use it.
+   If not, add a small resolver:
+     - Use Google Geocoding API OR Places Find Place/Autocomplete to turn (location + country) into lat/lng.
+     - Cache result in-memory per run to avoid repeated calls.
+   If lat/lng cannot be resolved:
+     - fallback to TEXT_ONLY behaviour
+     - set a debug flag `bias_unavailable_fallback=true`
+
+DEBUG OUTPUTS (must be included in step outputs_summary or similar)
+Add fields so we can prove what happened in a run:
+- google_query_mode_requested
+- google_query_mode_used
+- google_query_string
+- region_used (e.g. "uk" or null)
+- bias_applied (true/false)
+- bias_location (lat,lng or null)
+- radius_used
+- pages_fetched (int)
+- results_returned (int)
+
+SAFETY / COMPATIBILITY
+- Do not break existing planner/router contracts.
+- Keep behaviour unchanged for other tools.
+- Do not change Tower.
+
+ACCEPTANCE TESTS
+1) With google_query_mode="TEXT_ONLY", “micropubs sussex” style phrasing is used (no “in”).
+2) With google_query_mode="BIASED_STABLE", request includes region=uk and location+radius when location resolves.
+3) If location resolve fails, fallback kicks in and is logged.
+4) Pagination works: next_page_token is used to fetch until maxResults (20) or token ends.
+5) The run artefacts/debug output clearly show which mode was used and the exact query string.
+
+DELIVERABLE
+- Commit message: `feat(supervisor): google places query mode (fast vs stable)`
+- Ensure tests/build pass.
