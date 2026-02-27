@@ -1,5 +1,20 @@
 import { z } from 'zod';
 
+export const DEFAULT_LEADS_TARGET = 20;
+
+export interface RequestedCountCanonical {
+  requested_count_user: 'explicit' | 'any';
+  requested_count_value: number | null;
+  requested_count_effective: number;
+}
+
+export function buildRequestedCount(userCount: number | null): RequestedCountCanonical {
+  if (userCount !== null && userCount > 0) {
+    return { requested_count_user: 'explicit', requested_count_value: userCount, requested_count_effective: userCount };
+  }
+  return { requested_count_user: 'any', requested_count_value: null, requested_count_effective: DEFAULT_LEADS_TARGET };
+}
+
 export const CONSTRAINT_TYPES = [
   'COUNT_MIN',
   'LOCATION_EQUALS',

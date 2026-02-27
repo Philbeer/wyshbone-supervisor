@@ -1,0 +1,53 @@
+Goal: eliminate Tower STOPs caused by requested_count_user is missing from input. Make requested counts production-safe.
+
+What to do (Supervisor repo):
+
+Introduce a canonical “requested count” object produced during constraints extraction and carried through the run:
+
+requested_count_user: "explicit" | "any"
+
+requested_count_value: number | null (only if explicit)
+
+requested_count_effective: number (always present)
+
+Defaulting rule (server-side, Supervisor-owned):
+
+If user provided a number → requested_count_user="explicit", requested_count_value=n, requested_count_effective=n
+
+Else → requested_count_user="any", requested_count_value=null, requested_count_effective=DEFAULT_LEADS_TARGET
+
+Set DEFAULT_LEADS_TARGET = 20 (or 10 if you prefer—choose one and apply consistently)
+
+Ensure this data is included everywhere Tower reads it:
+
+Tower judgement input for leads_list MUST include requested_count_user and requested_count_effective
+
+Remove any path where requested count can be omitted / undefined / null when building Tower payloads
+
+Update Tower judgement logic expectation (if needed in Supervisor interface layer):
+
+If requested_count_user="any", Tower should not “Cannot evaluate” — it should evaluate using requested_count_effective
+
+Outcome should be PASS if delivered >= effective, otherwise PARTIAL with suggested replan, but not a hard STOP unless max replans exhausted or constraints impossible
+
+Add a regression test:
+
+Input: “find micropubs in sussex” (no number)
+
+Assert: constraints_extracted includes requested_count_user="any" and requested_count_effective=20
+
+Assert: Tower judgement does not error “requested_count_user missing”
+
+Assert: run does not STOP solely due to missing count
+
+Run a live smoke test after implementing:
+
+“find micropubs in sussex” should return many leads (where available) and not halt at 1 due to judgement contract.
+
+Acceptance criteria:
+
+No run can reach Tower with missing requested count fields
+
+No Tower judgement can fail purely due to missing count
+
+“count not specified” results in a sensible default target and sensible replanning, not STOP.

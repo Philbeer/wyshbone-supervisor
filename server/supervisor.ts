@@ -14,7 +14,7 @@ import { redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-e
 import { buildToolPlan, persistToolPlanExplainer, getOrderedToolNames, type LeadContext, type ToolStepId, type ToolPlanExplainer } from './supervisor/tool-planning-policy';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
 import { extractChangePlanDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, type PlanV2Constraints } from './supervisor/replan-policy';
-import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, type ParsedGoal, type StructuredConstraint } from './supervisor/goal-to-constraints';
+import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, buildRequestedCount, DEFAULT_LEADS_TARGET, type ParsedGoal, type StructuredConstraint, type RequestedCountCanonical } from './supervisor/goal-to-constraints';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
 import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type DeliverySummaryPayload } from './supervisor/delivery-summary';
 import { writeBeliefs } from './supervisor/belief-writer';
@@ -1183,8 +1183,9 @@ class SupervisorService {
     const rawCountryPart = location.split(',')[1]?.trim();
     const countryFromLocation = rawCountryPart ? inferCountryFromLocation(rawCountryPart) : '';
     const country = countryFromGoal || countryFromLocation || inferCountryFromLocation(location);
-    const userSpecifiedCount = userRequestedCount !== undefined;
-    const displayCount = userRequestedCount ?? null;
+    const rc: RequestedCountCanonical = buildRequestedCount(parsedGoal.requested_count_user);
+    const userSpecifiedCount = rc.requested_count_user === 'explicit';
+    const displayCount = rc.requested_count_value;
 
     if (attributeFilter) {
       const attrRegex = new RegExp(`\\s+with\\s+(?:a\\s+)?${attributeFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
@@ -1218,14 +1219,14 @@ class SupervisorService {
     }
     assumptions.push(`Location "${city}" will be used as-is in the Google Places text query`);
 
-    const userRequestedCountFinal: number | null = userSpecifiedCount ? userRequestedCount! : null;
-    let searchBudgetCount = userSpecifiedCount ? Math.min(50, Math.max(30, requestedCount)) : 20;
+    const userRequestedCountFinal: number | null = rc.requested_count_value;
+    let searchBudgetCount = userSpecifiedCount ? Math.min(50, Math.max(30, requestedCount)) : DEFAULT_LEADS_TARGET;
     let searchCount = searchBudgetCount;
     const postProcessing: string[] = [];
     if (prefixFilter) postProcessing.push(`Filter names starting with "${prefixFilter}"`);
     if (nameFilter) postProcessing.push(`Filter names containing "${nameFilter}"`);
     if (userSpecifiedCount && userRequestedCountFinal! < searchBudgetCount) postProcessing.push(`Take first ${userRequestedCountFinal} results`);
-    console.log(`[TOWER_LOOP_CHAT] Count split — requested_count_user=${userRequestedCountFinal ?? 'any'} search_budget_count=${searchBudgetCount} user_specified=${userSpecifiedCount}`);
+    console.log(`[TOWER_LOOP_CHAT] Count split — requested_count_user=${rc.requested_count_user} requested_count_value=${rc.requested_count_value} requested_count_effective=${rc.requested_count_effective} search_budget_count=${searchBudgetCount} user_specified=${userSpecifiedCount}`);
 
     const nameDesc = prefixFilter ? ` starting with ${prefixFilter}` : nameFilter ? ` containing "${nameFilter}"` : '';
     const attrDesc = attributeFilter ? ` (attribute: ${attributeFilter} — verified post-search via CVL, not injected into query)` : '';
@@ -1469,7 +1470,7 @@ class SupervisorService {
           feature_flag: 'TOWER_LOOP_CHAT_MODE',
           original_user_goal: originalUserGoal,
           normalized_goal: normalizedGoal,
-          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount, target_count: userRequestedCountFinal } }] },
+          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective } }] },
         },
       });
       console.log(`[TOWER_LOOP_CHAT] [agent_run_create] runId=${chatRunId}`);
@@ -1485,7 +1486,7 @@ class SupervisorService {
           retry_reuse: true,
           original_user_goal: originalUserGoal,
           normalized_goal: normalizedGoal,
-          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount, target_count: userRequestedCountFinal } }] },
+          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective } }] },
         };
 
         if (isPkeyConflict) {
@@ -1526,7 +1527,7 @@ class SupervisorService {
       const goalRow = await storage.createGoal({
         userId: task.user_id,
         goalText: originalUserGoal,
-        successCriteria: { requested_count_user: userRequestedCountFinal, constraints_summary: constraintsSummary },
+        successCriteria: { requested_count_user: rc.requested_count_user, requested_count_value: rc.requested_count_value, requested_count_effective: rc.requested_count_effective, constraints_summary: constraintsSummary },
         status: 'ACTIVE',
         linkedRunIds: [chatRunId],
       });
@@ -1546,7 +1547,7 @@ class SupervisorService {
         step_id: 'search_places_v1',
         tool: 'SEARCH_PLACES',
         phase: 'discovery',
-        tool_args: { query: `${businessType} in ${city} ${country}`, location: city, country, maxResults: searchCount, target_count: userRequestedCountFinal },
+        tool_args: { query: `${businessType} in ${city} ${country}`, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective },
         expected_output: `Up to ${searchCount} ${businessType} results from Google Places`,
         ...(postProcessing.length > 0 ? { post_processing: postProcessing.join('; ') } : {}),
       },
@@ -1564,7 +1565,9 @@ class SupervisorService {
       assumptions,
       steps: discoveryPlanSteps,
       enrichment_deferred: true,
-      requested_count_user: userRequestedCountFinal,
+      requested_count_user: rc.requested_count_user,
+      requested_count_value: rc.requested_count_value,
+      requested_count_effective: rc.requested_count_effective,
       search_budget_count: searchBudgetCount,
       name_filter: nameFilter || null,
       attribute_filter: attributeFilter || null,
@@ -1622,7 +1625,7 @@ class SupervisorService {
     try {
       const searchResult = await executeAction({
         toolName: 'SEARCH_PLACES',
-        toolArgs: { query: businessType, location: city, country, maxResults: searchCount, target_count: userRequestedCountFinal },
+        toolArgs: { query: businessType, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective },
         userId: task.user_id,
         tracker: toolTracker,
         runId: chatRunId,
@@ -1989,7 +1992,7 @@ class SupervisorService {
       soft_constraints,
       plan_artefact_id: planArtefact.id,
       delivered_count: leads.length,
-      target_count: displayCount,
+      target_count: rc.requested_count_effective,
       success_criteria: successCriteria,
       structured_constraints: structuredConstraints,
       query: businessType,
@@ -1999,7 +2002,9 @@ class SupervisorService {
       prefix_filter: prefixFilter || null,
       name_filter: nameFilter || null,
       attribute_filter: attributeFilter || null,
-      requested_count_user: userRequestedCountFinal,
+      requested_count_user: rc.requested_count_user,
+      requested_count_value: rc.requested_count_value,
+      requested_count_effective: rc.requested_count_effective,
       requested_count_internal: searchBudgetCount,
       relaxed_constraints: v1Label.relaxed_constraints,
       constraint_diffs: v1Label.constraint_diffs,
@@ -2039,7 +2044,10 @@ class SupervisorService {
     // 9. Call Tower via judgeArtefact (persists tower_judgements row + emits tower_judgement AFR)
     const v1SuccessCriteria = {
       mission_type: 'leadgen',
-      target_count: userRequestedCountFinal,
+      target_count: rc.requested_count_effective,
+      requested_count_user: rc.requested_count_user,
+      requested_count_value: rc.requested_count_value,
+      requested_count_effective: rc.requested_count_effective,
       user_specified_count: userSpecifiedCount,
       ...(prefixFilter ? { prefix: prefixFilter } : {}),
       ...(attributeFilter ? { attribute_filter: attributeFilter, attribute_note: 'attribute not injected into search query; CVL verifies post-search' } : {}),
@@ -2052,7 +2060,9 @@ class SupervisorService {
         location: city,
         country,
         search_count: searchCount,
-        requested_count: userRequestedCountFinal,
+        requested_count: rc.requested_count_effective,
+        requested_count_user: rc.requested_count_user,
+        requested_count_effective: rc.requested_count_effective,
         prefix_filter: prefixFilter || null,
         attribute_filter: attributeFilter || null,
       },
@@ -2214,7 +2224,7 @@ class SupervisorService {
       country,
       search_count: searchBudgetCount,
       requested_count: requestedCount,
-      requested_count_user: userRequestedCountFinal,
+      requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective,
       search_budget_count: searchBudgetCount,
       prefix_filter: prefixFilter,
       radius_rung: 0,
@@ -2860,7 +2870,7 @@ class SupervisorService {
           suggested_changes: directive.suggested_changes,
           prior_delivered: priorLeadsCount,
           accumulated_unique: accumulatedCandidates.size,
-          requested_count_user: userRequestedCountFinal,
+          requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective,
           replan_number: replansUsed + 1,
           max_replans: MAX_REPLANS,
         },
@@ -3253,8 +3263,8 @@ class SupervisorService {
         delivered_count: replanLeads.length,
         accumulated_total_unique: accumulatedCandidates.size,
         accumulated_matching: midReplanMatchInfo.matching.length,
-        target_count: v2.requested_count_user ?? null,
-        success_criteria: { target_count: v2.requested_count_user ?? null, user_specified_count: userSpecifiedCount, ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}) },
+        target_count: rc.requested_count_effective,
+        success_criteria: { target_count: rc.requested_count_effective, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective, user_specified_count: userSpecifiedCount, ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}) },
         query: v2.business_type,
         location: v2.location,
         country: v2.country,
@@ -3303,7 +3313,10 @@ class SupervisorService {
           conversationId,
           successCriteria: {
             mission_type: 'leadgen',
-            target_count: v2.requested_count_user ?? null,
+            target_count: rc.requested_count_effective,
+            requested_count_user: rc.requested_count_user,
+            requested_count_value: rc.requested_count_value,
+            requested_count_effective: rc.requested_count_effective,
             user_specified_count: userSpecifiedCount,
             accumulated_unique_count: accumulatedCandidates.size,
             accumulated_matching_count: midReplanMatchInfo.matching.length,
@@ -3321,7 +3334,8 @@ class SupervisorService {
               location: v2.location,
               country: v2.country,
               search_count: v2.search_count,
-              requested_count_user: v2.requested_count_user,
+              requested_count_user: rc.requested_count_user,
+              requested_count_effective: rc.requested_count_effective,
               search_budget_count: v2.search_budget_count,
               prefix_filter: v2.prefix_filter || null,
               radius_km: v2.radius_km,
@@ -3447,7 +3461,7 @@ class SupervisorService {
         runType: 'plan',
         metadata: {
           plan_version: planVersion, prior_delivered: priorLeadsCount, replan_delivered: replanLeads.length,
-          accumulated_unique: accumulatedCandidates.size, accumulated_matching: replanCompletedMatchInfo.matching.length, requested_count_user: userRequestedCountFinal,
+          accumulated_unique: accumulatedCandidates.size, accumulated_matching: replanCompletedMatchInfo.matching.length, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective,
           replan_verdict: replanVerdict, replan_action: replanAction,
           replans_used: replansUsed, max_replans: MAX_REPLANS,
           strategy: replanResult.strategy_summary,
@@ -3672,7 +3686,7 @@ class SupervisorService {
           ? `Run halted: unverifiable hard constraint — attribute verification found no evidence. verdict=${finalVerdict}`
           : `Tower loop chat halted: verdict=${finalVerdict} action=${finalAction} plan_version=${planVersion}`,
         runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed, ...(haltReason ? { halt_reason: haltReason } : {}) },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective, plan_version: planVersion, replans_used: replansUsed, ...(haltReason ? { halt_reason: haltReason } : {}) },
       });
       console.log(`[TOWER_LOOP_CHAT] [run_halted] verdict=${finalVerdict} plan_version=${planVersion} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads}${haltReason ? ` halt_reason=${haltReason}` : ''}`);
 
@@ -3683,7 +3697,7 @@ class SupervisorService {
         actionTaken: 'run_completed', status: 'success',
         taskGenerated: `Tower loop chat completed: ${totalMatchingLeads} matching of ${totalUniqueLeads} unique leads (accumulated across ${planVersion} plan versions), verdict=${finalVerdict}`,
         runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: userRequestedCountFinal, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal', early_stop_override: true } : {}) },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal', early_stop_override: true } : {}) },
       });
       console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads} plan_version=${planVersion}${earlyStopOverride ? ' (early_stop_override)' : ''}`);
 
