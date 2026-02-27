@@ -97,6 +97,27 @@ export interface DeliverySummaryInput {
   cvlLeadVerifications?: CvlLeadVerification[];
 }
 
+export function determineLeadExactness(
+  lead: DeliverySummaryLeadInput,
+  hardConstraints: string[],
+  softRelaxations: SoftRelaxation[],
+  cvlVerification: CvlLeadVerification | null,
+): { match_level: 'exact' | 'closest'; soft_violations: string[] } {
+  if (cvlVerification) {
+    if (!cvlVerification.verified_exact) {
+      const violations = cvlVerification.all_hard_satisfied
+        ? softRelaxations.map(r => r.constraint)
+        : hardConstraints.length > 0
+          ? hardConstraints
+          : ['CVL verification failed'];
+      return { match_level: 'closest', soft_violations: violations };
+    }
+    return { match_level: 'exact', soft_violations: [] };
+  }
+
+  return classifyLeadByHeuristic(lead, hardConstraints, softRelaxations);
+}
+
 function isNonTextualConstraint(constraintName: string): boolean {
   const lower = constraintName.toLowerCase();
   return lower.includes('radius') || lower.includes('distance') || lower.includes('count') || lower.includes('limit');
@@ -123,19 +144,9 @@ function leadSatisfiesHardConstraint(
   return true;
 }
 
-function isLocationConstraint(constraintName: string): boolean {
-  const lower = constraintName.toLowerCase();
-  return lower.includes('location') || lower.includes('area') || lower.includes('geo');
-}
-
-function cvlLocationPasses(status: CvlLocationStatus): boolean {
-  return status === 'verified_geo' || status === 'search_bounded' || status === 'not_applicable';
-}
-
 function leadSatisfiesOriginalSoftConstraint(
   lead: DeliverySummaryLeadInput,
   relaxation: SoftRelaxation,
-  cvlVerification?: CvlLeadVerification | null,
 ): boolean {
   const originalValue = relaxation.from.toLowerCase().trim();
   if (!originalValue) return true;
@@ -147,10 +158,7 @@ function leadSatisfiesOriginalSoftConstraint(
     return relaxation.plan_version > planVersion;
   }
 
-  if (isLocationConstraint(constraintName)) {
-    if (cvlVerification) {
-      return cvlLocationPasses(cvlVerification.location_confidence);
-    }
+  if (constraintName.includes('location') || constraintName.includes('area') || constraintName.includes('geo')) {
     const addr = (lead.address || '').toLowerCase();
     return addr.includes(originalValue);
   }
@@ -170,14 +178,11 @@ function leadSatisfiesOriginalSoftConstraint(
   return relaxation.plan_version > planVersion;
 }
 
-function classifyLead(
+function classifyLeadByHeuristic(
   lead: DeliverySummaryLeadInput,
   hardConstraints: string[],
   softRelaxations: SoftRelaxation[],
-  cvlVerification?: CvlLeadVerification | null,
-): DeliveredEntity {
-  const entityId = lead.entity_id || lead.place_id || lead.placeId || `lead:${lead.name}`;
-
+): { match_level: 'exact' | 'closest'; soft_violations: string[] } {
   const hardViolations: string[] = [];
   for (const hc of hardConstraints) {
     if (!leadSatisfiesHardConstraint(lead, hc)) {
@@ -186,49 +191,25 @@ function classifyLead(
   }
 
   if (hardViolations.length > 0) {
-    return {
-      entity_id: entityId,
-      name: lead.name,
-      address: lead.address,
-      match_level: 'closest',
-      soft_violations: hardViolations,
-    };
+    return { match_level: 'closest', soft_violations: hardViolations };
   }
 
   if (softRelaxations.length === 0) {
-    return {
-      entity_id: entityId,
-      name: lead.name,
-      address: lead.address,
-      match_level: 'exact',
-      soft_violations: [],
-    };
+    return { match_level: 'exact', soft_violations: [] };
   }
 
   const softViolations: string[] = [];
   for (const relaxation of softRelaxations) {
-    if (!leadSatisfiesOriginalSoftConstraint(lead, relaxation, cvlVerification)) {
+    if (!leadSatisfiesOriginalSoftConstraint(lead, relaxation)) {
       softViolations.push(relaxation.constraint);
     }
   }
 
   if (softViolations.length === 0) {
-    return {
-      entity_id: entityId,
-      name: lead.name,
-      address: lead.address,
-      match_level: 'exact',
-      soft_violations: [],
-    };
+    return { match_level: 'exact', soft_violations: [] };
   }
 
-  return {
-    entity_id: entityId,
-    name: lead.name,
-    address: lead.address,
-    match_level: 'closest',
-    soft_violations: softViolations,
-  };
+  return { match_level: 'closest', soft_violations: softViolations };
 }
 
 function deriveSuggestedNextQuestion(
@@ -275,9 +256,11 @@ function deriveCanonicalStatus(
 }
 
 export function buildDeliverySummaryPayload(input: DeliverySummaryInput): DeliverySummaryPayload {
+  const hasCvlLeadData = !!(input.cvlLeadVerifications && input.cvlLeadVerifications.length > 0);
+
   const cvlMap = new Map<string, CvlLeadVerification>();
-  if (input.cvlLeadVerifications) {
-    for (const lv of input.cvlLeadVerifications) {
+  if (hasCvlLeadData) {
+    for (const lv of input.cvlLeadVerifications!) {
       cvlMap.set(lv.lead_place_id, lv);
       cvlMap.set(lv.lead_name, lv);
     }
@@ -287,21 +270,40 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
   const closest: DeliveredEntity[] = [];
 
   for (const lead of input.leads) {
+    const entityId = lead.entity_id || lead.place_id || lead.placeId || `lead:${lead.name}`;
     const leadId = lead.entity_id || lead.place_id || lead.placeId || '';
-    const cvlMatch = cvlMap.get(leadId) || cvlMap.get(lead.name) || null;
-    const classified = classifyLead(lead, input.hardConstraints, input.softRelaxations, cvlMatch);
-    if (classified.match_level === 'exact') {
-      exact.push(classified);
+    const cvlMatch = hasCvlLeadData
+      ? (cvlMap.get(leadId) || cvlMap.get(lead.name) || null)
+      : null;
+
+    const { match_level, soft_violations } = determineLeadExactness(
+      lead,
+      input.hardConstraints,
+      input.softRelaxations,
+      cvlMatch,
+    );
+
+    const entity: DeliveredEntity = {
+      entity_id: entityId,
+      name: lead.name,
+      address: lead.address,
+      match_level,
+      soft_violations,
+    };
+
+    if (match_level === 'exact') {
+      exact.push(entity);
     } else {
-      closest.push(classified);
+      closest.push(entity);
     }
   }
 
   const hasCvl = input.cvlVerifiedExactCount !== undefined && input.cvlVerifiedExactCount !== null;
 
-  const rawTotalCount = exact.length + closest.length;
-
   const exactCount = exact.length;
+  const closestCount = closest.length;
+  const rawTotalCount = exactCount + closestCount;
+
   const requestedCount = hasCvl
     ? (input.cvlRequestedCountUser ?? input.requestedCount)
     : input.requestedCount;

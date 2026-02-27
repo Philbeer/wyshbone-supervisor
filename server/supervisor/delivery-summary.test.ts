@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildDeliverySummaryPayload,
+  determineLeadExactness,
   DeliverySummaryInput,
+  DeliverySummaryLeadInput,
   CvlLeadVerification,
   SoftRelaxation,
 } from './delivery-summary';
 
-function makeLead(name: string, address: string, placeId: string) {
+function makeLead(name: string, address: string, placeId: string): DeliverySummaryLeadInput {
   return { entity_id: placeId, place_id: placeId, name, address, found_in_plan_version: 1 };
 }
 
@@ -41,7 +43,106 @@ function baseInput(overrides: Partial<DeliverySummaryInput> = {}): DeliverySumma
   };
 }
 
-describe('delivery-summary buildDeliverySummaryPayload', () => {
+function assertArrayCountInvariant(result: ReturnType<typeof buildDeliverySummaryPayload>) {
+  expect(result.delivered_exact_count).toBe(result.delivered_exact.length);
+  expect(result.delivered_total_count).toBe(result.delivered_exact.length + result.delivered_closest.length);
+}
+
+describe('determineLeadExactness (single helper)', () => {
+  const lead = makeLead('Test Dental', '10 High St', 'p1');
+
+  it('CVL verified_exact=true → exact, no heuristic used', () => {
+    const cvl = makeCvlLv('p1', 'Test Dental', 'search_bounded', true);
+    const result = determineLeadExactness(lead, ['category=plumber'], [], cvl);
+    expect(result.match_level).toBe('exact');
+    expect(result.soft_violations).toEqual([]);
+  });
+
+  it('CVL verified_exact=false, all_hard_satisfied=true → closest with soft violations', () => {
+    const cvl: CvlLeadVerification = {
+      lead_place_id: 'p1',
+      lead_name: 'Test Dental',
+      verified_exact: false,
+      all_hard_satisfied: true,
+      location_confidence: 'out_of_area',
+    };
+    const softRelax: SoftRelaxation[] = [
+      { constraint: 'location', from: 'Sussex', to: 'wider', reason: 'expand', plan_version: 2 },
+    ];
+    const result = determineLeadExactness(lead, [], softRelax, cvl);
+    expect(result.match_level).toBe('closest');
+    expect(result.soft_violations).toContain('location');
+  });
+
+  it('CVL verified_exact=false, all_hard_satisfied=false → closest with hard constraint names', () => {
+    const cvl: CvlLeadVerification = {
+      lead_place_id: 'p1',
+      lead_name: 'Test Dental',
+      verified_exact: false,
+      all_hard_satisfied: false,
+      location_confidence: 'unknown',
+    };
+    const result = determineLeadExactness(lead, ['category=plumber'], [], cvl);
+    expect(result.match_level).toBe('closest');
+    expect(result.soft_violations).toContain('category=plumber');
+  });
+
+  it('no CVL → heuristic fallback: hard constraint violation', () => {
+    const result = determineLeadExactness(lead, ['category=plumber'], [], null);
+    expect(result.match_level).toBe('closest');
+  });
+
+  it('no CVL → heuristic fallback: no relaxations → exact', () => {
+    const result = determineLeadExactness(lead, [], [], null);
+    expect(result.match_level).toBe('exact');
+  });
+
+  it('no CVL → heuristic fallback: location substring match', () => {
+    const sussexLead = makeLead('Dental', '10 High St, West Sussex', 'p2');
+    const locRelax: SoftRelaxation = {
+      constraint: 'location', from: 'Sussex', to: 'wider', reason: 'expand', plan_version: 2,
+    };
+    const result = determineLeadExactness(sussexLead, [], [locRelax], null);
+    expect(result.match_level).toBe('exact');
+  });
+
+  it('no CVL → heuristic fallback: location substring miss', () => {
+    const noSussexLead = makeLead('Dental', '10 High St, Brighton, BN1', 'p2');
+    const locRelax: SoftRelaxation = {
+      constraint: 'location', from: 'Sussex', to: 'wider', reason: 'expand', plan_version: 2,
+    };
+    const result = determineLeadExactness(noSussexLead, [], [locRelax], null);
+    expect(result.match_level).toBe('closest');
+  });
+
+  it('CVL takes precedence: lead would fail heuristic but CVL says exact', () => {
+    const noSussexLead = makeLead('Dental', '10 High St, Brighton, BN1', 'p2');
+    const cvl = makeCvlLv('p2', 'Dental', 'search_bounded', true);
+    const locRelax: SoftRelaxation = {
+      constraint: 'location', from: 'Sussex', to: 'wider', reason: 'expand', plan_version: 2,
+    };
+    const result = determineLeadExactness(noSussexLead, [], [locRelax], cvl);
+    expect(result.match_level).toBe('exact');
+  });
+
+  it('CVL takes precedence: lead would pass heuristic but CVL says not exact', () => {
+    const sussexLead = makeLead('Dental', '10 High St, West Sussex', 'p2');
+    const cvl: CvlLeadVerification = {
+      lead_place_id: 'p2',
+      lead_name: 'Dental',
+      verified_exact: false,
+      all_hard_satisfied: true,
+      location_confidence: 'out_of_area',
+    };
+    const locRelax: SoftRelaxation = {
+      constraint: 'location', from: 'Sussex', to: 'wider', reason: 'expand', plan_version: 2,
+    };
+    const result = determineLeadExactness(sussexLead, [], [locRelax], cvl);
+    expect(result.match_level).toBe('closest');
+  });
+});
+
+describe('buildDeliverySummaryPayload', () => {
   describe('Sussex regression: CVL verifies all 30 leads but only 11 have Sussex in address', () => {
     const sussexLeads = [
       makeLead('Sussex Dental Group - Crawley', '123 High St, Crawley, West Sussex', 'p1'),
@@ -104,6 +205,7 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
       expect(result.delivered_total_count).toBe(30);
       expect(result.shortfall).toBe(0);
       expect(result.status).toBe('PASS');
+      assertArrayCountInvariant(result);
     });
 
     it('with CVL verified_geo: all 30 leads should be delivered_exact', () => {
@@ -121,6 +223,7 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
 
       expect(result.delivered_exact.length).toBe(30);
       expect(result.delivered_closest.length).toBe(0);
+      assertArrayCountInvariant(result);
     });
 
     it('without CVL: falls back to substring matching (11 exact, 19 closest)', () => {
@@ -134,19 +237,7 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
       const addressesWithSussex = sussexLeads.filter(l => l.address.toLowerCase().includes('sussex')).length;
       expect(result.delivered_exact.length).toBe(addressesWithSussex);
       expect(result.delivered_closest.length).toBe(30 - addressesWithSussex);
-    });
-
-    it('count matches array length (no more count/array mismatch)', () => {
-      const input = baseInput({
-        leads: sussexLeads,
-        softRelaxations: [locationRelaxation],
-        cvlVerifiedExactCount: 30,
-        cvlLeadVerifications: cvlVerifications,
-      });
-
-      const result = buildDeliverySummaryPayload(input);
-
-      expect(result.delivered_exact_count).toBe(result.delivered_exact.length);
+      assertArrayCountInvariant(result);
     });
 
     it('CVL out_of_area leads go to delivered_closest', () => {
@@ -167,6 +258,7 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
       expect(result.delivered_exact.length).toBe(2);
       expect(result.delivered_closest.length).toBe(1);
       expect(result.delivered_closest[0].name).toBe('Old Mill Dental Surgery');
+      assertArrayCountInvariant(result);
     });
 
     it('CVL unknown location leads go to delivered_closest', () => {
@@ -184,6 +276,7 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
 
       expect(result.delivered_exact.length).toBe(0);
       expect(result.delivered_closest.length).toBe(30);
+      assertArrayCountInvariant(result);
     });
   });
 
@@ -212,6 +305,7 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
       expect(result.delivered_exact[0].name).toBe('ABC Dental');
       expect(result.delivered_closest.length).toBe(1);
       expect(result.delivered_closest[0].name).toBe('XYZ Dental');
+      assertArrayCountInvariant(result);
     });
 
     it('name/category constraint still uses substring matching', () => {
@@ -237,9 +331,10 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
       expect(result.delivered_exact.length).toBe(1);
       expect(result.delivered_exact[0].name).toBe('Brighton Dental Surgery');
       expect(result.delivered_closest.length).toBe(1);
+      assertArrayCountInvariant(result);
     });
 
-    it('mixed location + prefix constraints: CVL overrides location, prefix still uses substring', () => {
+    it('mixed location + non-location: CVL decides all constraints when present', () => {
       const leads = [
         makeLead('ABC Dental', '10 High St, Crawley, RH10', 'p1'),
         makeLead('XYZ Dental', '20 Low St, Horsham, RH12', 'p2'),
@@ -259,8 +354,8 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
         plan_version: 2,
       };
       const cvlLvs: CvlLeadVerification[] = [
-        makeCvlLv('p1', 'ABC Dental', 'search_bounded'),
-        makeCvlLv('p2', 'XYZ Dental', 'search_bounded'),
+        makeCvlLv('p1', 'ABC Dental', 'search_bounded', true),
+        makeCvlLv('p2', 'XYZ Dental', 'search_bounded', false),
       ];
       const input = baseInput({
         leads,
@@ -276,7 +371,7 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
       expect(result.delivered_exact[0].name).toBe('ABC Dental');
       expect(result.delivered_closest.length).toBe(1);
       expect(result.delivered_closest[0].name).toBe('XYZ Dental');
-      expect(result.delivered_closest[0].soft_violations).toContain('prefix');
+      assertArrayCountInvariant(result);
     });
   });
 
@@ -297,14 +392,28 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
       expect(result.delivered_exact.length).toBe(2);
       expect(result.delivered_closest.length).toBe(0);
       expect(result.status).toBe('PASS');
+      assertArrayCountInvariant(result);
     });
 
-    it('hard constraint violation puts lead in closest regardless of CVL', () => {
-      const leads = [
-        makeLead('Dental A', 'Addr A', 'p1'),
-      ];
+    it('hard constraint violation: heuristic fallback puts lead in closest', () => {
+      const leads = [makeLead('Dental A', 'Addr A', 'p1')];
+      const input = baseInput({
+        leads,
+        hardConstraints: ['category=plumber'],
+        requestedCount: 1,
+      });
+
+      const result = buildDeliverySummaryPayload(input);
+
+      expect(result.delivered_exact.length).toBe(0);
+      expect(result.delivered_closest.length).toBe(1);
+      assertArrayCountInvariant(result);
+    });
+
+    it('hard constraint violation ignored when CVL says verified_exact', () => {
+      const leads = [makeLead('Dental A', 'Addr A', 'p1')];
       const cvlLvs: CvlLeadVerification[] = [
-        makeCvlLv('p1', 'Dental A', 'verified_geo'),
+        makeCvlLv('p1', 'Dental A', 'verified_geo', true),
       ];
       const input = baseInput({
         leads,
@@ -316,8 +425,8 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
 
       const result = buildDeliverySummaryPayload(input);
 
-      expect(result.delivered_exact.length).toBe(0);
-      expect(result.delivered_closest.length).toBe(1);
+      expect(result.delivered_exact.length).toBe(1);
+      assertArrayCountInvariant(result);
     });
   });
 
@@ -332,7 +441,7 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
         plan_version: 2,
       };
       const cvlLvs: CvlLeadVerification[] = [
-        makeCvlLv('p1', 'Online Biz', 'not_applicable'),
+        makeCvlLv('p1', 'Online Biz', 'not_applicable', true),
       ];
       const input = baseInput({
         leads,
@@ -345,17 +454,18 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
       const result = buildDeliverySummaryPayload(input);
 
       expect(result.delivered_exact.length).toBe(1);
+      assertArrayCountInvariant(result);
     });
   });
 
-  describe('cvl_verified_exact_count field preserves raw CVL count', () => {
-    it('stores the original CVL count, not the array length', () => {
+  describe('cvl_verified_exact_count preserves raw CVL count', () => {
+    it('stores the original CVL count separately from array length', () => {
       const leads = [
         makeLead('Dental A', 'Brighton', 'p1'),
         makeLead('Dental B', 'Crawley', 'p2'),
       ];
       const cvlLvs: CvlLeadVerification[] = [
-        makeCvlLv('p1', 'Dental A', 'search_bounded'),
+        makeCvlLv('p1', 'Dental A', 'search_bounded', true),
         makeCvlLv('p2', 'Dental B', 'out_of_area', false),
       ];
       const input = baseInput({
@@ -377,6 +487,55 @@ describe('delivery-summary buildDeliverySummaryPayload', () => {
       expect(result.cvl_verified_exact_count).toBe(1);
       expect(result.delivered_exact_count).toBe(1);
       expect(result.delivered_exact.length).toBe(1);
+      assertArrayCountInvariant(result);
+    });
+  });
+
+  describe('invariant: exact_count === delivered_exact.length across all scenarios', () => {
+    it('empty leads', () => {
+      const result = buildDeliverySummaryPayload(baseInput({ leads: [] }));
+      assertArrayCountInvariant(result);
+    });
+
+    it('all CVL exact', () => {
+      const leads = [makeLead('A', 'Addr', 'p1'), makeLead('B', 'Addr', 'p2')];
+      const cvl = leads.map(l => makeCvlLv(l.place_id!, l.name, 'verified_geo', true));
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads, cvlVerifiedExactCount: 2, cvlLeadVerifications: cvl, requestedCount: 2,
+      }));
+      assertArrayCountInvariant(result);
+    });
+
+    it('all CVL closest', () => {
+      const leads = [makeLead('A', 'Addr', 'p1'), makeLead('B', 'Addr', 'p2')];
+      const cvl = leads.map(l => makeCvlLv(l.place_id!, l.name, 'out_of_area', false));
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads, cvlVerifiedExactCount: 0, cvlLeadVerifications: cvl, requestedCount: 2,
+        softRelaxations: [{ constraint: 'location', from: 'X', to: 'Y', reason: 'r', plan_version: 2 }],
+      }));
+      assertArrayCountInvariant(result);
+    });
+
+    it('mixed CVL and no-CVL leads (partial coverage)', () => {
+      const leads = [makeLead('A', 'London', 'p1'), makeLead('B', 'Brighton', 'p2')];
+      const cvl = [makeCvlLv('p1', 'A', 'verified_geo', true)];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads, cvlVerifiedExactCount: 1, cvlLeadVerifications: cvl, requestedCount: 2,
+      }));
+      assertArrayCountInvariant(result);
+    });
+
+    it('heuristic fallback only', () => {
+      const leads = [
+        makeLead('A', 'London, Sussex', 'p1'),
+        makeLead('B', 'Brighton', 'p2'),
+      ];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        softRelaxations: [{ constraint: 'location', from: 'Sussex', to: 'wider', reason: 'r', plan_version: 2 }],
+        requestedCount: 2,
+      }));
+      assertArrayCountInvariant(result);
     });
   });
 });
