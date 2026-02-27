@@ -1,0 +1,152 @@
+Task:
+Perform a full forensic investigation into why the query “find dentists in Texas” (or equivalent) returned only 1 dentist, which is clearly incorrect.
+
+Do not change any code.
+This is a read-only forensic report.
+
+Scope of investigation
+
+Trace the exact execution path for the most recent run where only 1 dentist was returned.
+
+You must determine where the result set collapsed and why.
+
+Required outputs
+
+Please answer the following explicitly, with code references and log evidence:
+
+1. Routing & Intent
+
+How was the user query parsed?
+
+business_type (e.g. “dentist”)
+
+location (Texas)
+
+requested_count (if any)
+
+Did the system treat this as:
+
+a strong venue search or
+
+a semantic org search?
+
+2. Discovery Strategy
+
+Which discovery path was actually used?
+
+Google Text Search
+
+Google Nearby Search
+
+New Places v1 API
+
+Old Text Search API
+
+Was Text Search first enforced?
+
+Was the search constrained by:
+
+radius
+
+state boundary handling
+
+implicit location bias
+
+3. Search Budget & Truncation
+
+What was the effective:
+
+search_count
+
+search_budget
+
+maxResults
+
+Was the result set truncated by:
+
+learning-layer defaults
+
+a policy override
+
+pagination not being followed
+
+Did allResults.slice(0, N) or equivalent drop results?
+
+4. Learning Layer & Policy Application
+
+What policy scope key was computed?
+
+(e.g. dentist::texas::business_type|requested_count)
+
+Did a learned policy exist for this scope?
+
+If not:
+
+which GLOBAL_DEFAULT policy was applied?
+
+what values did it enforce (especially search_count)?
+
+5. Filtering & Verification Loss
+
+For each stage, report how many candidates remained:
+
+Stage	Count
+Raw Google results	?
+After truncation	?
+After deduplication	?
+After verification	?
+Final persisted leads	?
+
+Identify exactly where the other dentists were lost.
+
+6. Replanning Behaviour
+
+Did replans occur?
+
+If yes:
+
+did replans reuse the same search budget?
+
+did replans change geography meaningfully?
+
+Why did replanning fail to recover more results?
+
+7. Root Cause Summary
+
+Provide a clear causal chain, e.g.:
+
+“Dentists in Texas returned 1 result because:
+
+X happened
+
+Which caused Y
+
+Which forced Z”
+
+Explicitly state whether this is:
+
+a search strategy bug
+
+a policy / learning-layer bug
+
+a scope-key pollution bug
+
+or a verification over-constraint
+
+8. Confidence Check
+
+Finally, answer:
+
+If the same code ran for ‘dentists in California’ or ‘dentists in London’, would it also likely return 1 result?
+
+Explain why or why not.
+
+Output format
+
+Structured forensic report
+
+No speculative fixes
+
+No code changes
+
+Evidence-backed conclusions only
