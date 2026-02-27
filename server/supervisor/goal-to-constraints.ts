@@ -70,7 +70,7 @@ CONSTRAINT TYPES and how to detect them:
 - COUNT_MIN: when user says "find N" → { id: "c_count", type: "COUNT_MIN", field: "count", operator: ">=", value: N, hard: true, rationale: "User requested N results" }
 - LOCATION_EQUALS: when user says "in <place>" → { id: "c_location", type: "LOCATION_EQUALS", field: "location", operator: "=", value: "<place>", hard: false, rationale: "..." }
 - LOCATION_NEAR: when user says "near <place>" or "within X km" → { id: "c_location", type: "LOCATION_NEAR", field: "location", operator: "within_km", value: { center: "<place>", km: N }, hard: false, rationale: "..." }
-- CATEGORY_EQUALS: the CORE business type ONLY → { id: "c_category", type: "CATEGORY_EQUALS", field: "business_type", operator: "=", value: "<core type>", hard: true, rationale: "..." }. The value must be the clean business type without attribute qualifiers.
+- CATEGORY_EQUALS: DISABLED — business type is used as a text query term only, not as a verifiable constraint. Do NOT emit any CATEGORY_EQUALS constraint.
 - NAME_STARTS_WITH: when user says "starting with X" or "beginning with X" → { id: "c_name_prefix", type: "NAME_STARTS_WITH", field: "name", operator: "starts_with", value: "X", hard: false, rationale: "..." }
 - NAME_CONTAINS: when user says "with the word X in the name" or "called X" or "named X" → { id: "c_name_contains", type: "NAME_CONTAINS", field: "name", operator: "contains_word", value: "X", hard: false, rationale: "..." }. Only for BUSINESS NAME matching, not venue attributes.
 - MUST_USE_TOOL: when user says "using google places" → { id: "c_tool", type: "MUST_USE_TOOL", field: "tool", operator: "=", value: "GOOGLE_PLACES", hard: false, rationale: "..." }
@@ -85,7 +85,7 @@ CRITICAL RULE — Attribute vs Name distinction:
 
 HARD vs SOFT rules:
 - If user uses words like "must", "only", "exactly", "strict", "strictly", "do not relax", "hard constraint" → mark that constraint as hard: true
-- Default hard: COUNT_MIN (always hard), CATEGORY_EQUALS (always hard), HAS_ATTRIBUTE (hard because user explicitly asked for this feature)
+- Default hard: COUNT_MIN (always hard), HAS_ATTRIBUTE (hard because user explicitly asked for this feature)
 - Default soft: LOCATION_EQUALS, LOCATION_NEAR, NAME_STARTS_WITH, NAME_CONTAINS, MUST_USE_TOOL
 - HAS_ATTRIBUTE becomes soft ONLY if user uses hedging language: "preferably with", "if possible", "ideally", "optionally", "nice to have", "bonus if"
 - Override: if user says "must be in london only" → LOCATION_EQUALS becomes hard.
@@ -252,11 +252,7 @@ function regexFallback(rawGoal: string): ParsedGoal {
     requiredIds.push(c.id);
   }
 
-  {
-    const c: StructuredConstraint = { id: 'c_category', type: 'CATEGORY_EQUALS', field: 'business_type', operator: '=', value: businessType, hard: true, rationale: `User searching for ${businessType}` };
-    constraints.push(c);
-    requiredIds.push(c.id);
-  }
+  
 
   {
     const isHard = hasHardSignal && /\b(only|within)\b/i.test(msg);
@@ -324,6 +320,10 @@ export async function parseGoalToConstraints(rawUserGoal: string): Promise<Parse
     raw.original_goal = rawUserGoal;
 
     const parsed = ParsedGoalSchema.parse(raw);
+
+    parsed.constraints = parsed.constraints.filter(c => c.type !== 'CATEGORY_EQUALS');
+    parsed.success_criteria.required_constraints = parsed.success_criteria.required_constraints.filter(id => id !== 'c_category');
+    parsed.success_criteria.optional_constraints = parsed.success_criteria.optional_constraints.filter(id => id !== 'c_category');
 
     const elapsed = Date.now() - startMs;
     console.log(`[GOAL_PARSER] LLM parsed in ${elapsed}ms — business_type="${parsed.business_type}" location="${parsed.location}" count=${parsed.requested_count_user} constraints=${parsed.constraints.length} name_filter=${parsed.name_filter} prefix_filter=${parsed.prefix_filter}`);

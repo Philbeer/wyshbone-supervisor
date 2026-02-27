@@ -1235,7 +1235,7 @@ class SupervisorService {
 
     const hard_constraints: string[] = structuredConstraints.filter(c => c.hard).map(c => c.field === 'count' ? 'requested_count' : c.field === 'business_type' ? 'business_type' : c.field === 'location' ? 'location' : c.field === 'name' && c.type === 'NAME_STARTS_WITH' ? 'prefix_filter' : c.field === 'name' && c.type === 'NAME_CONTAINS' ? 'name_filter' : c.field);
     const soft_constraints: string[] = structuredConstraints.filter(c => !c.hard).map(c => c.field === 'count' ? 'requested_count' : c.field === 'business_type' ? 'business_type' : c.field === 'location' ? 'location' : c.field === 'name' && c.type === 'NAME_STARTS_WITH' ? 'prefix_filter' : c.field === 'name' && c.type === 'NAME_CONTAINS' ? 'name_filter' : c.field);
-    if (!hard_constraints.includes('business_type')) hard_constraints.push('business_type');
+    
     if (userSpecifiedCount && !hard_constraints.includes('requested_count')) hard_constraints.push('requested_count');
     console.log(`[TOWER_LOOP_CHAT] Constraint classification — hard: [${hard_constraints.join(', ')}] soft: [${soft_constraints.join(', ')}]`);
 
@@ -1248,9 +1248,7 @@ class SupervisorService {
       value: c.value,
       hardness: c.hard ? 'hard' as const : 'soft' as const,
     }));
-    if (!typedConstraints.some(tc => tc.field === 'business_type')) {
-      typedConstraints.push({ type: 'CATEGORY_EQUALS' as const, field: 'business_type', value: businessType!, hardness: 'hard' });
-    }
+    
     if (!typedConstraints.some(tc => tc.field === 'requested_count') && userRequestedCountFinal !== null) {
       typedConstraints.push({ type: 'COUNT_MIN' as const, field: 'requested_count', value: userRequestedCountFinal, hardness: 'hard' });
     }
