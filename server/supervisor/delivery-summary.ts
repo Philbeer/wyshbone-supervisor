@@ -23,10 +23,18 @@ export interface DeliveredEntity {
 
 export type CanonicalVerdict = 'PASS' | 'PARTIAL' | 'STOP';
 
+export interface CvlLocationBreakdown {
+  verified_geo_count: number;
+  search_bounded_count: number;
+  out_of_area_count: number;
+  unknown_count: number;
+}
+
 export interface CvlSummary {
   verified_exact_count: number;
   unverifiable_count: number;
   hard_unverifiable: string[];
+  location_breakdown: CvlLocationBreakdown | null;
 }
 
 export interface DeliverySummaryPayload {
@@ -75,6 +83,7 @@ export interface DeliverySummaryInput {
   cvlUnverifiableCount?: number | null;
   cvlRequestedCountUser?: number | null;
   cvlHardUnverifiable?: string[];
+  cvlLocationBreakdown?: CvlLocationBreakdown | null;
 }
 
 function isNonTextualConstraint(constraintName: string): boolean {
@@ -274,6 +283,7 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
     verified_exact_count: exactCount,
     unverifiable_count: input.cvlUnverifiableCount ?? 0,
     hard_unverifiable: hardUnverifiable,
+    location_breakdown: input.cvlLocationBreakdown ?? null,
   } : null;
 
   let stopReason: string | null = null;
@@ -336,7 +346,10 @@ export async function emitDeliverySummary(input: DeliverySummaryInput): Promise<
       userId: input.userId,
       conversationId: input.conversationId,
     });
-    console.log(`[DELIVERY_SUMMARY] runId=${input.runId} status=${payload.status} exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} total=${payload.delivered_total_count} requested=${payload.requested_count} shortfall=${payload.shortfall} tower=${payload.tower_verdict || 'none'}`);
+    const locLabel = payload.cvl_summary?.location_breakdown
+      ? ` location=[geo=${payload.cvl_summary.location_breakdown.verified_geo_count} bounded=${payload.cvl_summary.location_breakdown.search_bounded_count} out=${payload.cvl_summary.location_breakdown.out_of_area_count} unk=${payload.cvl_summary.location_breakdown.unknown_count}]`
+      : '';
+    console.log(`[DELIVERY_SUMMARY] runId=${input.runId} status=${payload.status} exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} total=${payload.delivered_total_count} requested=${payload.requested_count} shortfall=${payload.shortfall} tower=${payload.tower_verdict || 'none'}${locLabel}`);
   } catch (err: any) {
     console.error(`[DELIVERY_SUMMARY] Failed to emit delivery_summary artefact: ${err.message}`);
   }

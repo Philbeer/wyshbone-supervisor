@@ -3730,7 +3730,24 @@ class SupervisorService {
       payload: {
         title: artefactTitle('', finalLeads.length, finalConstraints, planVersion).trim(),
         summary: `Found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalPrefixDisplay}${matchingQualifier}${finalAnnotations}${usedStub ? ' (stub data)' : ''} — Tower verdict: ${finalVerdict}`,
-        leads: finalLeads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website, placeId: l.placeId, source: l.source })),
+        leads: finalLeads.map(l => {
+          const lvMatch = cvlVerification?.leadVerifications.find(lv => lv.lead_place_id === l.placeId);
+          const locCheck = lvMatch?.constraint_checks.find(cc => cc.constraint_type === 'LOCATION_EQUALS' || cc.constraint_type === 'LOCATION_NEAR');
+          return {
+            name: l.name,
+            address: l.address,
+            phone: l.phone,
+            website: l.website,
+            placeId: l.placeId,
+            source: l.source,
+            verification: lvMatch ? {
+              location_status: lvMatch.location_confidence,
+              location_confidence: locCheck?.confidence ?? null,
+              verified_exact: lvMatch.verified_exact,
+              all_hard_satisfied: lvMatch.all_hard_satisfied,
+            } : null,
+          };
+        }),
         query: { businessType: finalConstraints.business_type, location: finalLocDisplay, country },
         tool: 'SEARCH_PLACES',
         tower_verdict: finalVerdict,
@@ -3740,6 +3757,7 @@ class SupervisorService {
         per_plan_added: perPlanAdded,
         relaxed_constraints: finalLabel.relaxed_constraints,
         constraint_diffs: finalLabel.constraint_diffs,
+        location_breakdown: cvlVerification?.summary?.location_breakdown ?? null,
       },
       userId: task.user_id,
       conversationId,
@@ -3778,6 +3796,7 @@ class SupervisorService {
       cvlUnverifiableCount: cvlVerification?.summary?.unverifiable_count ?? null,
       cvlRequestedCountUser: cvlVerification?.summary?.requested_count_user ?? null,
       cvlHardUnverifiable: dsHardUnverifiable.map(u => u.value),
+      cvlLocationBreakdown: cvlVerification?.summary?.location_breakdown ?? null,
     };
     const mainDsPayload = await emitDeliverySummary(mainDsInput);
 
