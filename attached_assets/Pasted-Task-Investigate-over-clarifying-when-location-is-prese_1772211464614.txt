@@ -1,0 +1,45 @@
+Task: Investigate “over-clarifying when location is present” and report with evidence + minimal fix.
+
+Symptom (user-facing):
+- When the user includes a location (e.g. “micropubs in Sussex”), the system asks too many clarifying questions or gets stuck clarifying, instead of just running SEARCH_PLACES.
+- We want: default to runnable whenever location is usable, only clarify when location is actually ambiguous/unusable.
+
+Do NOT implement changes yet. Investigate and report only.
+
+What I need in the report (must include concrete IDs / code references):
+1) Reproduction matrix (run 3–5 test prompts):
+   A. “find micropubs in sussex”
+   B. “find micropubs in arundel”
+   C. “find micropubs near me”
+   D. “find micropubs” (no location)
+   E. “find micropubs in west sussex” (variant)
+   For each: show router decision, constraints_extracted, capability_check, and whether it went to RUN (agent) or CLARIFY (chat).
+
+2) Decision chain trace:
+   - Where is the “runnable vs clarify” decision made?
+   - Show the exact function(s) and conditions that cause a CLARIFY when location exists.
+   - Identify whether the trigger is:
+     a) location parsing failure (no geo resolved)
+     b) location treated as hard unverifiable constraint
+     c) business_type/category constraint capability causing stop/clarify
+     d) a UI-side location-suggestions failure being interpreted as “missing location”
+     e) policy/stop rules (e.g. conservative gating) overriding runnable
+
+3) Data evidence from runs:
+   - For at least one “over-clarify” run: include run_id, client_request_id, conversation_id, and the key artefacts payload snippets (constraints + capability + plan start/stop).
+   - Confirm whether SEARCH_PLACES could have run with the raw text query even if geo wasn’t resolved.
+
+4) Root cause summary:
+   - One paragraph: what exactly is causing extra clarification when location is present.
+   - Distinguish: “location present but not resolvable” vs “location resolvable but still clarifying”.
+
+5) Proposed minimal fix plan (no code yet):
+   - The smallest change that restores default-to-run:
+     - If we have a location string but no geo: still run TEXT search using query + location (and mark geo verification as unknown), instead of clarifying.
+     - Only clarify if the location string is truly unusable (“near me” without user geo, or empty).
+   - Include acceptance criteria (what tests should pass after fix).
+
+Output format:
+- Use headings 1–5 above.
+- Include code file names + line ranges for every decision point you mention.
+- No implementation in this task.
