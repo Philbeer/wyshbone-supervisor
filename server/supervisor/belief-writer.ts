@@ -43,7 +43,7 @@ function deriveBeliefs(input: BeliefWriterInput): InsertBeliefStore[] {
     });
   }
 
-  if (ds.status === 'PARTIAL' && ds.shortfall > 0) {
+  if (ds.status === 'PARTIAL' && ds.shortfall > 0 && ds.requested_count !== null) {
     beliefs.push({
       runId,
       goalId: goalId ?? null,
