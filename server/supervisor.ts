@@ -3526,8 +3526,8 @@ class SupervisorService {
           await createArtefact({
             runId: chatRunId,
             type: 'lead_verification',
-            title: `Lead verification: ${lv.lead_name} — ${lv.verified_exact ? 'exact' : 'partial'}`,
-            summary: `${lv.constraint_checks.filter(c => c.status === 'yes').length} yes, ${lv.constraint_checks.filter(c => c.status === 'no').length} no, ${lv.constraint_checks.filter(c => c.status === 'unknown').length} unknown | all_hard_satisfied=${lv.all_hard_satisfied}`,
+            title: `Lead verification: ${lv.lead_name} — ${lv.verified_exact ? 'exact' : 'partial'} (${lv.location_confidence})`,
+            summary: `${lv.constraint_checks.filter(c => c.status === 'yes').length} yes, ${lv.constraint_checks.filter(c => c.status === 'no').length} no, ${lv.constraint_checks.filter(c => c.status === 'search_bounded').length} search_bounded, ${lv.constraint_checks.filter(c => c.status === 'unknown').length} unknown | all_hard_satisfied=${lv.all_hard_satisfied} | location=${lv.location_confidence}`,
             payload: lv as unknown as Record<string, unknown>,
             userId: task.user_id,
             conversationId,
@@ -3539,15 +3539,18 @@ class SupervisorService {
 
       const lvTitle = `Lead verification: ${cvlVerification.leadVerifications.length} leads checked, ${cvlVerification.verified_exact_count} verified exact`;
       const lvSummary = `${cvlVerification.leadVerifications.filter(lv => lv.all_hard_satisfied).length} all_hard_satisfied | ${cvlVerification.verified_exact_count} verified_exact of ${cvlVerification.leadVerifications.length} checked`;
+      const locBreak = cvlVerification.summary.location_breakdown;
       const aggregatedLvPayload = {
         title: lvTitle,
         summary: lvSummary,
         leads_checked: cvlVerification.leadVerifications.length,
         verified_exact_count: cvlVerification.verified_exact_count,
+        location_breakdown: locBreak,
         verifications: cvlVerification.leadVerifications.map(lv => ({
           lead_name: lv.lead_name,
           verified_exact: lv.verified_exact,
           all_hard_satisfied: lv.all_hard_satisfied,
+          location_confidence: lv.location_confidence,
           constraint_checks: lv.constraint_checks,
         })),
       };
@@ -3602,7 +3605,8 @@ class SupervisorService {
           userId: task.user_id,
           conversationId,
         });
-        console.log(`[CVL] verification_summary: verified_exact=${vs.verified_exact_count} checked=${vs.candidates_checked} requested=${vs.requested_count_user} hard_unknown=${vs.hard_unknown_count} unverifiable_hard=${vs.unverifiable_hard_constraints.length}`);
+        const lb = vs.location_breakdown;
+        console.log(`[CVL] verification_summary: verified_exact=${vs.verified_exact_count} checked=${vs.candidates_checked} requested=${vs.requested_count_user} hard_unknown=${vs.hard_unknown_count} unverifiable_hard=${vs.unverifiable_hard_constraints.length} location=[geo=${lb.verified_geo_count} bounded=${lb.search_bounded_count} out=${lb.out_of_area_count} unk=${lb.unknown_count}]`);
       } catch (vsErr: any) {
         console.warn(`[CVL] Failed to emit verification_summary (non-fatal): ${vsErr.message}`);
       }

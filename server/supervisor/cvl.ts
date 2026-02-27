@@ -55,8 +55,10 @@ export interface ConstraintCapabilityCheckPayload {
   unverifiable_count: number;
 }
 
-export type VerificationStatus = 'yes' | 'no' | 'unknown';
+export type VerificationStatus = 'yes' | 'no' | 'unknown' | 'search_bounded';
 export type VerificationConfidence = 'high' | 'medium' | 'low';
+
+export type LocationConfidence = 'verified_geo' | 'search_bounded' | 'out_of_area' | 'unknown' | 'not_applicable';
 
 export interface ConstraintCheck {
   constraint_id: string;
@@ -82,6 +84,7 @@ export interface LeadVerificationResult {
   constraint_checks: ConstraintCheck[];
   all_hard_satisfied: boolean;
   verified_exact: boolean;
+  location_confidence: LocationConfidence;
 }
 
 export interface VerificationEvidence {
@@ -102,6 +105,13 @@ export interface UnverifiableHardConstraint {
   suggested_action: string;
 }
 
+export interface LocationBreakdown {
+  verified_geo_count: number;
+  search_bounded_count: number;
+  out_of_area_count: number;
+  unknown_count: number;
+}
+
 export interface VerificationSummaryPayload {
   mission_type: 'lead_finder';
   requested_count_user: number | null;
@@ -112,6 +122,7 @@ export interface VerificationSummaryPayload {
   hard_unknown_count: number;
   unverifiable_hard_constraints: UnverifiableHardConstraint[];
   suggested_next_action: string | null;
+  location_breakdown: LocationBreakdown;
   constraint_results: Array<{
     constraint_id: string;
     constraint_type: string;
@@ -121,6 +132,7 @@ export interface VerificationSummaryPayload {
     leads_passing: number;
     leads_failing: number;
     leads_unknown: number;
+    leads_search_bounded: number;
   }>;
   budget: {
     search_budget_count: number;
@@ -281,23 +293,25 @@ export function verifyLeads(
   searchBudgetCount: number,
   leadsReturnedFromApi: number,
   attributeEvidence?: AttributeEvidenceMap,
+  searchWasBounded: boolean = true,
 ): CvlVerificationOutput {
   const leadVerifications: LeadVerificationResult[] = [];
   const evidenceItems: VerificationEvidence[] = [];
   let evidenceCounter = 0;
 
-  const constraintAgg: Map<string, { passing: number; failing: number; unknown: number }> = new Map();
+  const constraintAgg: Map<string, { passing: number; failing: number; unknown: number; search_bounded: number }> = new Map();
   for (const c of constraints) {
-    constraintAgg.set(c.id, { passing: 0, failing: 0, unknown: 0 });
+    constraintAgg.set(c.id, { passing: 0, failing: 0, unknown: 0, search_bounded: 0 });
   }
 
   for (let i = 0; i < leads.length; i++) {
     const lead = leads[i];
     const checks: ConstraintCheck[] = [];
     let allHardSatisfied = true;
+    let locationConf: LocationConfidence = 'not_applicable';
 
     for (const c of constraints) {
-      const check = verifyOneConstraint(lead, c, i, evidenceCounter, evidenceItems, attributeEvidence);
+      const check = verifyOneConstraint(lead, c, i, evidenceCounter, evidenceItems, attributeEvidence, searchWasBounded);
       checks.push(check.result);
       evidenceCounter = check.nextEvidenceCounter;
 
@@ -305,13 +319,29 @@ export function verifyLeads(
       if (agg) {
         if (check.result.status === 'yes') agg.passing++;
         else if (check.result.status === 'no') agg.failing++;
+        else if (check.result.status === 'search_bounded') agg.search_bounded++;
         else agg.unknown++;
       }
 
-      if (c.hard && check.result.status !== 'yes') {
-        allHardSatisfied = false;
+      if (c.hard) {
+        if (check.result.status !== 'yes') {
+          allHardSatisfied = false;
+        }
+      }
+
+      if (c.type === 'LOCATION_EQUALS' || c.type === 'LOCATION_NEAR') {
+        if (check.result.status === 'yes') locationConf = 'verified_geo';
+        else if (check.result.status === 'search_bounded') locationConf = 'search_bounded';
+        else if (check.result.status === 'no') locationConf = 'out_of_area';
+        else locationConf = 'unknown';
       }
     }
+
+    const verifiedExact = allHardSatisfied && checks.every(cc => {
+      if (cc.status === 'yes') return true;
+      if (cc.status === 'search_bounded' && !cc.hard) return true;
+      return false;
+    });
 
     leadVerifications.push({
       lead_index: i,
@@ -319,7 +349,8 @@ export function verifyLeads(
       lead_place_id: lead.placeId,
       constraint_checks: checks,
       all_hard_satisfied: allHardSatisfied,
-      verified_exact: allHardSatisfied,
+      verified_exact: verifiedExact,
+      location_confidence: locationConf,
     });
   }
 
@@ -355,11 +386,12 @@ export function verifyLeads(
     : null;
 
   const constraint_results = constraints.map(c => {
-    const agg = constraintAgg.get(c.id) || { passing: 0, failing: 0, unknown: 0 };
+    const agg = constraintAgg.get(c.id) || { passing: 0, failing: 0, unknown: 0, search_bounded: 0 };
     let status: VerificationStatus = 'unknown';
-    if (agg.unknown === 0 && agg.failing === 0 && agg.passing > 0) status = 'yes';
-    else if (agg.failing > 0) status = 'no';
-    else if (agg.unknown > 0 && agg.passing > 0) status = 'unknown';
+    if (agg.failing > 0) status = 'no';
+    else if (agg.unknown === 0 && agg.search_bounded === 0 && agg.passing > 0) status = 'yes';
+    else if (agg.search_bounded > 0 && agg.unknown === 0) status = 'search_bounded';
+    else if (agg.unknown > 0 && (agg.passing > 0 || agg.search_bounded > 0)) status = 'unknown';
 
     return {
       constraint_id: c.id,
@@ -370,8 +402,16 @@ export function verifyLeads(
       leads_passing: agg.passing,
       leads_failing: agg.failing,
       leads_unknown: agg.unknown,
+      leads_search_bounded: agg.search_bounded,
     };
   });
+
+  const location_breakdown: LocationBreakdown = {
+    verified_geo_count: leadVerifications.filter(lv => lv.location_confidence === 'verified_geo').length,
+    search_bounded_count: leadVerifications.filter(lv => lv.location_confidence === 'search_bounded').length,
+    out_of_area_count: leadVerifications.filter(lv => lv.location_confidence === 'out_of_area').length,
+    unknown_count: leadVerifications.filter(lv => lv.location_confidence === 'unknown').length,
+  };
 
   const summary: VerificationSummaryPayload = {
     mission_type: 'lead_finder',
@@ -383,6 +423,7 @@ export function verifyLeads(
     hard_unknown_count: hardUnknownCount,
     unverifiable_hard_constraints: unverifiableHardConstraints,
     suggested_next_action: suggestedNextAction,
+    location_breakdown,
     constraint_results,
     budget: {
       search_budget_count: searchBudgetCount,
@@ -406,6 +447,7 @@ function verifyOneConstraint(
   evidenceCounter: number,
   evidenceItems: VerificationEvidence[],
   attributeEvidence?: AttributeEvidenceMap,
+  searchWasBounded: boolean = true,
 ): { result: ConstraintCheck; nextEvidenceCounter: number } {
   let status: VerificationStatus = 'unknown';
   let confidence: VerificationConfidence = 'low';
@@ -482,9 +524,15 @@ function verifyOneConstraint(
           reason = geoResult.reason;
           break;
         case 'SEARCH_BOUNDED':
-          status = 'yes';
-          confidence = 'medium';
-          reason = geoResult.reason;
+          if (searchWasBounded) {
+            status = 'search_bounded';
+            confidence = 'medium';
+            reason = geoResult.reason;
+          } else {
+            status = 'unknown';
+            confidence = 'low';
+            reason = `${geoResult.reason} (search was not bounded to region)`;
+          }
           break;
         case 'UNKNOWN':
           status = 'unknown';

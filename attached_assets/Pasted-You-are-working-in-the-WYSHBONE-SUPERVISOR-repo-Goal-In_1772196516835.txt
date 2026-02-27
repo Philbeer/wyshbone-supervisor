@@ -1,0 +1,42 @@
+You are working in the WYSHBONE SUPERVISOR repo.
+
+Goal:
+Introduce a truth-preserving "SEARCH_BOUNDED" status so SOFT location constraints don't demote good results when geo verification is unavailable or not performed.
+
+Context:
+We currently treat location failures as "Not met" which moves many leads into "Candidates (not fully verified)" even when the search itself was bounded to the requested location. That undermines UX and is misleading.
+
+Rules:
+1) If a location constraint is SOFT:
+   - If geo verification says VERIFIED_GEO => pass
+   - If geo verification says OUT_OF_AREA => fail (still show as candidate/out-of-area depending on UI mapping)
+   - If geo verification is UNKNOWN or not run, but the lead comes from a search query bounded to the requested region => status should be SEARCH_BOUNDED (neither fail nor full verified)
+2) SEARCH_BOUNDED must NOT be shown as "Verified". It must be its own category / confidence label.
+3) If a location constraint is HARD:
+   - SEARCH_BOUNDED is NOT allowed as a pass
+   - Must be VERIFIED_GEO to pass; OUT_OF_AREA fails; UNKNOWN remains unknown and should block hard satisfaction
+
+Implementation details:
+- Record in the run metadata or step outputs whether the Places query was region-bounded (e.g., viewport/bounds/region filter used).
+- Propagate that context into CVL verification so it can assign SEARCH_BOUNDED when appropriate.
+- Update the CVL “verified_exact” semantics:
+   - verified_exact should mean "all HARD constraints satisfied + all SOFT constraints satisfied" (or whatever current definition is)
+   - Add a new summary metric for SOFT location confidence:
+        verified_geo_count
+        search_bounded_count
+        out_of_area_count
+        unknown_count
+- Update artefact output so the UI can render:
+   - Verified (geo)
+   - Search-bounded (likely in area)
+   - Candidate / Unknown
+   - Out-of-area
+
+Acceptance tests:
+- Sussex dentists run: if we bounded the search to Sussex, leads should not be labelled as "Not met" solely because geo verification wasn’t possible; they should appear as SEARCH_BOUNDED at worst.
+- Hard constraint like "must be in West Sussex": SEARCH_BOUNDED must not satisfy it.
+
+Deliverables:
+- Updated CVL result schema to include SEARCH_BOUNDED status
+- Updated aggregation/summary metrics
+- Tests covering SOFT vs HARD location constraints
