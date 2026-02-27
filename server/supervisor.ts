@@ -1212,14 +1212,14 @@ class SupervisorService {
       assumptions.push(`Attribute "${attributeFilter}" not injected into search query; will pull wider candidate set and verify via CVL post-search`);
     }
     if (!userSpecifiedCount) {
-      assumptions.push(`No count specified by user — will return all results found (search budget: ${parsedGoal.search_budget_count})`);
+      assumptions.push(`No count specified by user — will return Google page 1 results (up to ~20)`);
     } else if (requestedCount < 30) {
       assumptions.push(`Will request wider candidate set from Google Places (30-50), then verify via CVL and trim to ${requestedCount}`);
     }
     assumptions.push(`Location "${city}" will be used as-is in the Google Places text query`);
 
     const userRequestedCountFinal: number | null = userSpecifiedCount ? userRequestedCount! : null;
-    let searchBudgetCount = Math.min(50, Math.max(30, requestedCount));
+    let searchBudgetCount = userSpecifiedCount ? Math.min(50, Math.max(30, requestedCount)) : 20;
     let searchCount = searchBudgetCount;
     const postProcessing: string[] = [];
     if (prefixFilter) postProcessing.push(`Filter names starting with "${prefixFilter}"`);
@@ -1236,7 +1236,7 @@ class SupervisorService {
     const hard_constraints: string[] = structuredConstraints.filter(c => c.hard).map(c => c.field === 'count' ? 'requested_count' : c.field === 'business_type' ? 'business_type' : c.field === 'location' ? 'location' : c.field === 'name' && c.type === 'NAME_STARTS_WITH' ? 'prefix_filter' : c.field === 'name' && c.type === 'NAME_CONTAINS' ? 'name_filter' : c.field);
     const soft_constraints: string[] = structuredConstraints.filter(c => !c.hard).map(c => c.field === 'count' ? 'requested_count' : c.field === 'business_type' ? 'business_type' : c.field === 'location' ? 'location' : c.field === 'name' && c.type === 'NAME_STARTS_WITH' ? 'prefix_filter' : c.field === 'name' && c.type === 'NAME_CONTAINS' ? 'name_filter' : c.field);
     if (!hard_constraints.includes('business_type')) hard_constraints.push('business_type');
-    if (!hard_constraints.includes('requested_count')) hard_constraints.push('requested_count');
+    if (userSpecifiedCount && !hard_constraints.includes('requested_count')) hard_constraints.push('requested_count');
     console.log(`[TOWER_LOOP_CHAT] Constraint classification — hard: [${hard_constraints.join(', ')}] soft: [${soft_constraints.join(', ')}]`);
 
     const typedConstraints = structuredConstraints.map(c => ({
@@ -1323,15 +1323,19 @@ class SupervisorService {
     try {
       policyResult = await applyPolicy(policyInput);
 
-      const ep = policyResult.executionParams;
-      if (ep.searchBudgetCount !== searchBudgetCount) {
-        console.log(`[LEARNING_LAYER] Overriding searchBudgetCount: ${searchBudgetCount} → ${ep.searchBudgetCount}`);
-        searchBudgetCount = ep.searchBudgetCount;
-        searchCount = ep.searchCount;
-      }
-      if (ep.maxReplans !== MAX_REPLANS) {
-        console.log(`[LEARNING_LAYER] Overriding MAX_REPLANS: ${MAX_REPLANS} → ${ep.maxReplans}`);
-        MAX_REPLANS = ep.maxReplans;
+      if (userSpecifiedCount) {
+        const ep = policyResult.executionParams;
+        if (ep.searchBudgetCount !== searchBudgetCount) {
+          console.log(`[LEARNING_LAYER] Overriding searchBudgetCount: ${searchBudgetCount} → ${ep.searchBudgetCount}`);
+          searchBudgetCount = ep.searchBudgetCount;
+          searchCount = ep.searchCount;
+        }
+        if (ep.maxReplans !== MAX_REPLANS) {
+          console.log(`[LEARNING_LAYER] Overriding MAX_REPLANS: ${MAX_REPLANS} → ${ep.maxReplans}`);
+          MAX_REPLANS = ep.maxReplans;
+        }
+      } else {
+        console.log(`[LEARNING_LAYER] Skipping execution param overrides — no user-specified count (default page 1 search)`);
       }
 
       await persistPolicyApplication(chatRunId, policyInput, policyResult);
@@ -2121,7 +2125,7 @@ class SupervisorService {
         userId: task.user_id,
         conversationId,
         originalUserGoal,
-        requestedCount: userRequestedCountFinal ?? requestedCount,
+        requestedCount: userRequestedCountFinal,
         hardConstraints: hard_constraints,
         softConstraints: soft_constraints,
         planVersions: [{ version: 1, changes_made: ['Initial plan'] }] as PlanVersionEntry[],
@@ -2759,9 +2763,9 @@ class SupervisorService {
 
     // 12a. Local safety net: if Tower said stop/fail but we have unused replan budget,
     //      a quantifiable shortfall, and expandable soft constraints → override to change_plan
-    if (!attributeVerificationStopped && finalAction !== 'change_plan' && !usedStub && replansUsed < MAX_REPLANS) {
+    if (!attributeVerificationStopped && finalAction !== 'change_plan' && !usedStub && replansUsed < MAX_REPLANS && userSpecifiedCount) {
       const delivered = finalLeads.length;
-      const target = userRequestedCountFinal ?? requestedCount;
+      const target = userRequestedCountFinal!;
       const hasShortfall = delivered < target;
       const locationIsSoft = soft_constraints.includes('location');
 
@@ -3784,7 +3788,7 @@ class SupervisorService {
       userId: task.user_id,
       conversationId,
       originalUserGoal,
-      requestedCount: userRequestedCountFinal ?? requestedCount,
+      requestedCount: userRequestedCountFinal,
       hardConstraints: hard_constraints,
       softConstraints: soft_constraints,
       planVersions: dsPlanVersions,

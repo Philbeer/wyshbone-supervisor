@@ -38,7 +38,7 @@ export interface CvlSummary {
 }
 
 export interface DeliverySummaryPayload {
-  requested_count: number;
+  requested_count: number | null;
   hard_constraints: string[];
   soft_constraints: string[];
   plan_versions: PlanVersionEntry[];
@@ -81,7 +81,7 @@ export interface DeliverySummaryInput {
   userId: string;
   conversationId?: string;
   originalUserGoal: string;
-  requestedCount: number;
+  requestedCount: number | null;
   hardConstraints: string[];
   softConstraints: string[];
   planVersions: PlanVersionEntry[];
@@ -215,8 +215,9 @@ function classifyLeadByHeuristic(
 function deriveSuggestedNextQuestion(
   softRelaxations: SoftRelaxation[],
   exactCount: number,
-  requestedCount: number,
+  requestedCount: number | null,
 ): string | null {
+  if (requestedCount === null) return null;
   if (exactCount >= requestedCount) return null;
 
   if (softRelaxations.length === 0) return null;
@@ -245,11 +246,14 @@ function normalizeTowerVerdict(raw: string | undefined | null): string | null {
 
 function deriveCanonicalStatus(
   verifiedExact: number,
-  requested: number,
+  requested: number | null,
   towerVerdict: string | null,
   hasHardUnverifiable: boolean,
 ): CanonicalVerdict {
   if (towerVerdict === 'STOP' || hasHardUnverifiable) return 'STOP';
+  if (requested === null) {
+    return verifiedExact > 0 ? 'PASS' : 'STOP';
+  }
   if (verifiedExact >= requested && requested > 0) return 'PASS';
   if (verifiedExact > 0) return 'PARTIAL';
   return 'STOP';
@@ -304,10 +308,10 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
   const closestCount = closest.length;
   const rawTotalCount = exactCount + closestCount;
 
-  const requestedCount = hasCvl
-    ? (input.cvlRequestedCountUser ?? input.requestedCount)
-    : input.requestedCount;
-  const shortfall = Math.max(0, requestedCount - exactCount);
+  const requestedCount: number | null = input.requestedCount === null
+    ? null
+    : (hasCvl ? (input.cvlRequestedCountUser ?? input.requestedCount) : input.requestedCount);
+  const shortfall = requestedCount === null ? 0 : Math.max(0, requestedCount - exactCount);
 
   const towerVerdict = normalizeTowerVerdict(input.finalVerdict);
   const hardUnverifiable = input.cvlHardUnverifiable ?? [];
@@ -330,11 +334,13 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
       stopReason = `Unverifiable hard constraint: ${hardUnverifiable.join(', ')}`;
     } else if (towerVerdict === 'STOP') {
       stopReason = `Tower verdict: ${input.finalVerdict}`;
-    } else {
+    } else if (requestedCount !== null) {
       stopReason = `Delivered 0 of ${requestedCount} requested`;
+    } else {
+      stopReason = `No results found`;
     }
   } else if (status === 'PARTIAL') {
-    stopReason = input.stopReason || `Verified ${exactCount} of ${requestedCount} requested`;
+    stopReason = input.stopReason || (requestedCount !== null ? `Verified ${exactCount} of ${requestedCount} requested` : null);
   }
 
   const suggestedNextQuestion = deriveSuggestedNextQuestion(
@@ -367,10 +373,15 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
 export async function emitDeliverySummary(input: DeliverySummaryInput): Promise<DeliverySummaryPayload> {
   const payload = buildDeliverySummaryPayload(input);
 
-  const title = `Delivery Summary: ${payload.status} — ${payload.delivered_exact_count} of ${payload.requested_count} delivered`;
+  const countLabel = payload.requested_count !== null
+    ? `${payload.delivered_exact_count} of ${payload.requested_count} delivered`
+    : `${payload.delivered_exact_count} delivered`;
+  const title = `Delivery Summary: ${payload.status} — ${countLabel}`;
   const cvlLabel = payload.cvl_summary ? ` cvl_verified=${payload.cvl_summary.verified_exact_count}` : '';
   const towerLabel = payload.tower_verdict ? ` tower=${payload.tower_verdict}` : '';
-  const summary = `status=${payload.status} exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} shortfall=${payload.shortfall}${cvlLabel}${towerLabel}${payload.stop_reason ? ` stop_reason="${payload.stop_reason}"` : ''}`;
+  const requestedLabel = payload.requested_count !== null ? ` requested=${payload.requested_count}` : '';
+  const shortfallLabel = payload.requested_count !== null ? ` shortfall=${payload.shortfall}` : '';
+  const summary = `status=${payload.status} exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length}${shortfallLabel}${requestedLabel}${cvlLabel}${towerLabel}${payload.stop_reason ? ` stop_reason="${payload.stop_reason}"` : ''}`;
 
   try {
     await createArtefact({
@@ -385,7 +396,7 @@ export async function emitDeliverySummary(input: DeliverySummaryInput): Promise<
     const locLabel = payload.cvl_summary?.location_breakdown
       ? ` location=[geo=${payload.cvl_summary.location_breakdown.verified_geo_count} bounded=${payload.cvl_summary.location_breakdown.search_bounded_count} out=${payload.cvl_summary.location_breakdown.out_of_area_count} unk=${payload.cvl_summary.location_breakdown.unknown_count}]`
       : '';
-    console.log(`[DELIVERY_SUMMARY] runId=${input.runId} status=${payload.status} exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} total=${payload.delivered_total_count} requested=${payload.requested_count} shortfall=${payload.shortfall} tower=${payload.tower_verdict || 'none'}${locLabel}`);
+    console.log(`[DELIVERY_SUMMARY] runId=${input.runId} status=${payload.status} exact=${payload.delivered_exact_count} closest=${payload.delivered_closest.length} total=${payload.delivered_total_count}${payload.requested_count !== null ? ` requested=${payload.requested_count} shortfall=${payload.shortfall}` : ''} tower=${payload.tower_verdict || 'none'}${locLabel}`);
   } catch (err: any) {
     console.error(`[DELIVERY_SUMMARY] Failed to emit delivery_summary artefact: ${err.message}`);
   }

@@ -1,0 +1,126 @@
+Context:
+We are fixing incorrect default behaviour and trust issues in search runs (e.g. “find dentists in Sussex”).
+
+Problem to fix
+
+The Supervisor currently:
+
+Uses hidden default target counts (e.g. 30)
+
+Applies Learning Layer caps (e.g. 30 → 11)
+
+Stops early and then reports a fake “shortfall” (e.g. “19 could not be found”)
+
+This creates incorrect behaviour and misleading UI explanations.
+
+Required behaviour (authoritative)
+1️⃣ Default search = Google page 1 only
+
+If the user does not specify a number (e.g. “find dentists in Sussex”):
+
+Perform exactly one Google Places / Text Search page
+
+Return whatever Google returns on page 1 (up to ~20)
+
+Do not:
+
+Set a target count
+
+Calculate a shortfall
+
+Attempt paging
+
+Replan for count reasons
+
+This must be deterministic and always run.
+
+2️⃣ Disable Learning Layer interference for default searches
+
+For searches where:
+
+user_specified_count === false
+
+Then:
+
+Learning Layer must NOT override search budget
+
+No remembered caps (e.g. “last time only 11”)
+
+Always fetch page 1 in full
+
+Learning may only apply when:
+
+The user explicitly asks for more results
+
+OR a multi-page search has already been attempted in the same run
+
+3️⃣ No “missing / could not be found” logic without user count
+
+If the user did not request a number:
+
+Do NOT compute:
+
+requested
+
+shortfall
+
+missing
+
+Do NOT emit copy like:
+
+“X more could not be found”
+
+“insufficient count”
+
+Returned results are complete by definition.
+
+4️⃣ Paging is opt-in only
+
+Only offer page 2 / page 3 when:
+
+Google returns a next_page_token
+
+AND the user explicitly chooses to continue
+
+Supervisor should expose this as:
+
+“More results available (next page)”
+Not as an automatic replan or failure.
+
+5️⃣ Location verification rule (confirm, do not change)
+
+If Google returns a result for a regional search (e.g. “Sussex”):
+
+Treat it as location-valid
+
+Do NOT require the region name to appear in the address
+
+(This is already correct — do not regress.)
+
+Acceptance criteria
+
+After this change:
+
+“find dentists in Sussex”
+
+Returns ~20 (page 1)
+
+No “19 missing”
+
+No early stop weirdness
+
+No learning-based truncation
+
+“find 5 dentists in Sussex”
+
+Returns 5 max
+
+Count logic applies correctly
+
+“find 40 dentists in Sussex”
+
+Page 1 + page 2 logic may run
+
+Learning may apply after page 1
+
+Important

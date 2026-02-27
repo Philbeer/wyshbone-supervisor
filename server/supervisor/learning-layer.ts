@@ -397,7 +397,7 @@ export interface OutcomeLogEntry {
   userId: string;
   conversationId?: string;
   deliveredCount: number;
-  requestedCount: number;
+  requestedCount: number | null;
   verifiedExact: number;
   verifiedClosest: number;
   stopReason: string | null;
@@ -412,8 +412,8 @@ export async function writeOutcomeLog(entry: OutcomeLogEntry): Promise<void> {
   await createArtefact({
     runId: entry.runId,
     type: 'outcome_log',
-    title: `Outcome Log: delivered=${entry.deliveredCount}/${entry.requestedCount}`,
-    summary: `delivered=${entry.deliveredCount} requested=${entry.requestedCount} verified_exact=${entry.verifiedExact} stop_reason=${entry.stopReason || 'none'} tool_calls=${entry.toolCalls} cost=${entry.costEstimate.toFixed(2)} duration=${entry.durationMs}ms`,
+    title: `Outcome Log: delivered=${entry.deliveredCount}${entry.requestedCount !== null ? `/${entry.requestedCount}` : ''}`,
+    summary: `delivered=${entry.deliveredCount}${entry.requestedCount !== null ? ` requested=${entry.requestedCount}` : ''} verified_exact=${entry.verifiedExact} stop_reason=${entry.stopReason || 'none'} tool_calls=${entry.toolCalls} cost=${entry.costEstimate.toFixed(2)} duration=${entry.durationMs}ms`,
     payload: {
       delivered_count: entry.deliveredCount,
       requested_count: entry.requestedCount,
@@ -436,13 +436,13 @@ export async function writeOutcomePolicyVersion(
   scopeKey: string,
   currentVersion: number,
   bundle: PolicyBundleV1,
-  outcomeMetrics: { deliveredCount: number; requestedCount: number; stopReason: string | null },
+  outcomeMetrics: { deliveredCount: number; requestedCount: number | null; stopReason: string | null },
 ): Promise<PolicyVersion> {
   const adjusted = structuredClone(bundle);
 
-  const fillRate = outcomeMetrics.requestedCount > 0
+  const fillRate = (outcomeMetrics.requestedCount !== null && outcomeMetrics.requestedCount > 0)
     ? outcomeMetrics.deliveredCount / outcomeMetrics.requestedCount
-    : 0;
+    : 1;
 
   if (fillRate < 0.5) {
     const currentCap = adjusted.policies.radius_policy_v1.max_cap_km;
