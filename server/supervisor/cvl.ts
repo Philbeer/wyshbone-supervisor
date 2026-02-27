@@ -1,4 +1,5 @@
 import type { StructuredConstraint } from './goal-to-constraints';
+import { verifyLocationGeo, type GeoVerificationResult } from './geo-regions';
 
 const PLACES_SUPPORTED_CATEGORIES = new Set([
   'pub', 'pubs', 'bar', 'bars', 'restaurant', 'restaurants',
@@ -66,6 +67,12 @@ export interface ConstraintCheck {
   confidence: VerificationConfidence;
   reason: string;
   evidence_id: string | null;
+  geo_evidence?: {
+    method: 'geo_bbox' | 'search_bounded' | 'unknown';
+    region_key: string | null;
+    lat: number | null;
+    lng: number | null;
+  };
 }
 
 export interface LeadVerificationResult {
@@ -254,6 +261,8 @@ export interface VerifiableLead {
   website: string | null;
   placeId: string;
   source: string;
+  lat: number | null;
+  lng: number | null;
 }
 
 export interface AttributeEvidenceEntry {
@@ -402,6 +411,7 @@ function verifyOneConstraint(
   let confidence: VerificationConfidence = 'low';
   let reason = '';
   let evidenceId: string | null = null;
+  let geoEvidenceResult: ConstraintCheck['geo_evidence'] | undefined;
 
   switch (constraint.type) {
     case 'COUNT_MIN': {
@@ -436,32 +446,54 @@ function verifyOneConstraint(
         break;
       }
 
-      if (lead.address) {
-        const addrLower = lead.address.toLowerCase();
-        if (addrLower.includes(locationValue)) {
+      const geoResult: GeoVerificationResult = verifyLocationGeo(
+        lead.lat,
+        lead.lng,
+        locationValue,
+        constraint.hard,
+      );
+
+      const geoEvidence = {
+        method: geoResult.method,
+        region_key: geoResult.regionKey,
+        lat: geoResult.lat,
+        lng: geoResult.lng,
+      };
+
+      switch (geoResult.status) {
+        case 'VERIFIED_GEO':
           status = 'yes';
-          confidence = 'medium';
-          reason = `Address "${lead.address}" contains location "${locationValue}"`;
+          confidence = 'high';
+          reason = geoResult.reason;
           evidenceId = `ev_${evidenceCounter++}`;
           evidenceItems.push({
             evidence_id: evidenceId,
             constraint_id: constraint.id,
             lead_index: leadIndex,
             lead_name: lead.name,
-            field: 'address',
-            source: 'lead_data',
-            snippet: lead.address,
+            field: 'location_geo',
+            source: 'geo_bbox',
+            snippet: `${geoResult.regionName} (${geoResult.regionKey}) — lat=${geoResult.lat}, lng=${geoResult.lng}`,
           });
-        } else {
+          break;
+        case 'OUT_OF_AREA':
           status = 'no';
+          confidence = 'high';
+          reason = geoResult.reason;
+          break;
+        case 'SEARCH_BOUNDED':
+          status = 'yes';
           confidence = 'medium';
-          reason = `Address "${lead.address}" does not contain location "${locationValue}"`;
-        }
-      } else {
-        status = 'unknown';
-        confidence = 'low';
-        reason = 'Lead has no address to verify location against';
+          reason = geoResult.reason;
+          break;
+        case 'UNKNOWN':
+          status = 'unknown';
+          confidence = 'low';
+          reason = geoResult.reason;
+          break;
       }
+
+      geoEvidenceResult = geoEvidence;
       break;
     }
 
@@ -606,6 +638,7 @@ function verifyOneConstraint(
       confidence,
       reason,
       evidence_id: evidenceId,
+      ...(geoEvidenceResult ? { geo_evidence: geoEvidenceResult } : {}),
     },
     nextEvidenceCounter: evidenceCounter,
   };

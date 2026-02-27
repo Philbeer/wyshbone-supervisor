@@ -33,6 +33,8 @@ export interface AccumulatedCandidate {
   phone?: string | null;
   website?: string | null;
   source?: string;
+  lat?: number | null;
+  lng?: number | null;
   found_in_plan_version: number;
   found_at_radius_km: number;
   dedupe_key: string;
@@ -84,7 +86,7 @@ export function makeDedupeKey(lead: { placeId?: string; place_id?: string; name?
 export function mergeCandidate(
   acc: Map<string, AccumulatedCandidate>,
   key: string,
-  lead: { name: string; address?: string; phone?: string | null; website?: string | null; placeId?: string; place_id?: string; source?: string },
+  lead: { name: string; address?: string; phone?: string | null; website?: string | null; placeId?: string; place_id?: string; source?: string; lat?: number | null; lng?: number | null },
   planVersion: number,
   radiusKm?: number,
 ): boolean {
@@ -96,6 +98,8 @@ export function mergeCandidate(
     phone: lead.phone,
     website: lead.website,
     source: lead.source,
+    lat: lead.lat ?? null,
+    lng: lead.lng ?? null,
     found_in_plan_version: planVersion,
     found_at_radius_km: radiusKm ?? 0,
     dedupe_key: key,

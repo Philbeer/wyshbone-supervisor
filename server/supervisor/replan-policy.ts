@@ -298,6 +298,38 @@ export function applyLeadgenReplanPolicy(
           }
         }
         break;
+
+      case 'country':
+        if (change.suggested_value && String(change.suggested_value) !== next.country) {
+          adjustments.push({
+            field: 'country',
+            action: 'relax',
+            from: next.country,
+            to: change.suggested_value,
+            reason: change.reason || 'Correcting country based on location',
+          });
+          next.country = String(change.suggested_value);
+          no_progress = false;
+          console.log(`[REPLAN_POLICY] Corrected country: ${adjustments[adjustments.length - 1].from} → ${next.country}`);
+        }
+        break;
+
+      case 'requested_count':
+        if (change.action === 'increase' && typeof change.suggested_value === 'number') {
+          const newCount = Math.min(change.suggested_value as number, 200);
+          if (newCount > next.requested_count) {
+            adjustments.push({
+              field: 'requested_count',
+              action: 'increase',
+              from: next.requested_count,
+              to: newCount,
+              reason: change.reason || 'Increasing requested count',
+            });
+            next.requested_count = newCount;
+            no_progress = false;
+          }
+        }
+        break;
     }
   }
 

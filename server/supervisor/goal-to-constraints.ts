@@ -39,7 +39,7 @@ export const ParsedGoalSchema = z.object({
   search_budget_count: z.number(),
   business_type: z.string(),
   location: z.string(),
-  country: z.string().default('UK'),
+  country: z.string().default(''),
   prefix_filter: z.string().nullable().default(null),
   name_filter: z.string().nullable().default(null),
   attribute_filter: z.string().nullable().default(null),
@@ -58,7 +58,7 @@ You must return a JSON object with these fields:
 - search_budget_count: always max(30, requested_count_user * 3 or 30), capped at 50 — we pull a wider candidate set for post-search verification
 - business_type: the CORE type of business ONLY (e.g. "pubs", "dentists", "restaurants"). NEVER include attribute qualifiers here. "pubs with beer garden" → business_type="pubs", attribute_filter="beer garden". "restaurants with outdoor seating" → business_type="restaurants", attribute_filter="outdoor seating".
 - location: the location (e.g. "arundel", "london")
-- country: country code or name, default "UK"
+- country: country code or name. ALWAYS infer the country from the location. For US states (e.g. Texas, California, New York, Florida, etc.) or US cities, use "US". For UK locations (e.g. London, Sussex, Manchester, Kent, etc.), use "UK". For other countries, use the appropriate country code. If truly ambiguous, default to "UK".
 - prefix_filter: if user wants names starting with a specific letter/prefix (string or null)
 - name_filter: if user wants names containing a specific word IN THE BUSINESS NAME (string or null). Only use this for explicit name-matching requests like "with the word swan in the name".
 - attribute_filter: if user wants businesses with a specific feature/attribute/amenity (string or null). Use this for venue features like "beer garden", "outdoor seating", "live music", "parking", "rooftop bar", "pool table", "function room" etc. These are NOT name filters — they describe what the venue HAS, not what it is called.
@@ -162,6 +162,25 @@ async function callLLMForParsing(goal: string): Promise<Record<string, unknown>>
   throw new Error('No LLM API key configured');
 }
 
+const US_STATES = new Set([
+  'alabama','alaska','arizona','arkansas','california','colorado','connecticut',
+  'delaware','florida','georgia','hawaii','idaho','illinois','indiana','iowa',
+  'kansas','kentucky','louisiana','maine','maryland','massachusetts','michigan',
+  'minnesota','mississippi','missouri','montana','nebraska','nevada',
+  'new hampshire','new jersey','new mexico','new york','north carolina',
+  'north dakota','ohio','oklahoma','oregon','pennsylvania','rhode island',
+  'south carolina','south dakota','tennessee','texas','utah','vermont',
+  'virginia','washington','west virginia','wisconsin','wyoming',
+]);
+
+export function inferCountryFromLocation(location: string): string {
+  const lower = location.toLowerCase().trim();
+  if (US_STATES.has(lower)) return 'US';
+  if (lower.includes('usa') || lower.includes('united states') || lower.includes('america')) return 'US';
+  if (/\b(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)\b/i.test(lower) && lower.length <= 2) return 'US';
+  return 'UK';
+}
+
 function regexFallback(rawGoal: string): ParsedGoal {
   const msg = rawGoal.trim();
   const constraints: StructuredConstraint[] = [];
@@ -191,7 +210,11 @@ function regexFallback(rawGoal: string): ParsedGoal {
     const loc = inMatch[1].trim().replace(/,\s*$/, '');
     const parts = loc.split(',');
     location = parts[0].trim();
-    if (parts[1]) country = parts[1].trim();
+    if (parts[1]) {
+      country = inferCountryFromLocation(parts[1].trim());
+    } else {
+      country = inferCountryFromLocation(location);
+    }
   }
 
   const prefixMatch = msg.match(/\b(?:begin|start|starting)\s+with\s+([A-Za-z])\b/i);

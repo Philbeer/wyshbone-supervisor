@@ -1171,11 +1171,18 @@ class SupervisorService {
     const successCriteria = parsedGoal.success_criteria;
 
     const userRequestedCount = parsedGoal.requested_count_user ?? undefined;
-    if (searchQuery?.count) requestedCount = Math.min(Number(searchQuery.count), 200);
+    if (searchQuery?.count) {
+      const uiCount = Math.min(Number(searchQuery.count), 200);
+      requestedCount = Math.max(uiCount, parsedGoal.search_budget_count);
+    }
     if (!businessType) businessType = 'pubs';
     if (!location) location = 'Local';
     let city = location.split(',')[0].trim();
-    const country = parsedGoal.country || location.split(',')[1]?.trim() || 'UK';
+    const countryFromGoal = parsedGoal.country;
+    const { inferCountryFromLocation } = await import('./supervisor/goal-to-constraints');
+    const rawCountryPart = location.split(',')[1]?.trim();
+    const countryFromLocation = rawCountryPart ? inferCountryFromLocation(rawCountryPart) : '';
+    const country = countryFromGoal || countryFromLocation || inferCountryFromLocation(location);
     const userSpecifiedCount = userRequestedCount !== undefined;
     const displayCount = userRequestedCount ?? null;
 
@@ -1604,7 +1611,7 @@ class SupervisorService {
     console.log(`[TOWER_LOOP_CHAT] [step_started] step=1 tool=SEARCH_PLACES`);
 
     // 4a. Execute SEARCH_PLACES via action-executor with stub fallback
-    let leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string; source: string }> = [];
+    let leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string; source: string; lat: number | null; lng: number | null }> = [];
     let usedStub = false;
     const createdLeadIds: string[] = [];
     const towerLoopStepStartedAt = Date.now();
@@ -1632,6 +1639,8 @@ class SupervisorService {
             website: p.website || p.websiteUri || null,
             placeId: p.place_id || p.id || '',
             source: 'google_places',
+            lat: typeof p.lat === 'number' ? p.lat : (p.geometry?.location?.lat ?? null),
+            lng: typeof p.lng === 'number' ? p.lng : (p.geometry?.location?.lng ?? null),
           });
         }
         console.log(`[TOWER_LOOP_CHAT] SEARCH_PLACES (via action-executor) returned ${leads.length} results`);
@@ -3010,6 +3019,8 @@ class SupervisorService {
               website: p.website || p.websiteUri || null,
               placeId: p.place_id || p.id || '',
               source: 'google_places',
+              lat: typeof p.lat === 'number' ? p.lat : (p.geometry?.location?.lat ?? null),
+              lng: typeof p.lng === 'number' ? p.lng : (p.geometry?.location?.lng ?? null),
             });
           }
           console.log(`[REPLAN] SEARCH_PLACES ${vLabel} returned ${replanLeads.length} results`);
@@ -3463,6 +3474,8 @@ class SupervisorService {
           website: candidate.website || null,
           placeId: candidate.place_id || '',
           source: candidate.source || 'google_places',
+          lat: candidate.lat ?? null,
+          lng: candidate.lng ?? null,
         });
       }
       const trimmedUnion = userRequestedCountFinal !== null ? matchingLeads.slice(0, userRequestedCountFinal) : matchingLeads;
@@ -3479,6 +3492,8 @@ class SupervisorService {
         website: l.website,
         placeId: l.placeId,
         source: l.source,
+        lat: l.lat ?? null,
+        lng: l.lng ?? null,
       }));
 
       const attrEvidenceMap: AttributeEvidenceMap = new Map();
@@ -3883,7 +3898,7 @@ class SupervisorService {
     };
   }
 
-  private generateStubLeads(businessType: string, city: string, country: string): Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string; source: string }> {
+  private generateStubLeads(businessType: string, city: string, country: string): Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string; source: string; lat: number | null; lng: number | null }> {
     const stubNames = [
       `The ${city} ${businessType.replace(/s$/, '')} House`,
       `${city} Central ${businessType.replace(/s$/, '')}`,
@@ -3898,6 +3913,8 @@ class SupervisorService {
       website: `https://www.${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.co.uk`,
       placeId: `stub_place_${i + 1}`,
       source: 'deterministic_stub',
+      lat: null,
+      lng: null,
     }));
   }
 
