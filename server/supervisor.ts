@@ -1155,6 +1155,9 @@ class SupervisorService {
     const requestData = task.request_data;
     const rawMsg = (requestData.user_message || '') as string;
     const searchQuery = requestData.search_query;
+    const googleQueryMode: 'TEXT_ONLY' | 'BIASED_STABLE' =
+      (requestData as any).google_query_mode === 'BIASED_STABLE' ? 'BIASED_STABLE' : 'TEXT_ONLY';
+    console.log(`[TOWER_LOOP_CHAT] resolved_google_query_mode=${googleQueryMode} (from request_data: ${(requestData as any).google_query_mode ?? 'not set'})`);
 
     const originalUserGoal = rawMsg.trim();
 
@@ -1547,7 +1550,7 @@ class SupervisorService {
         step_id: 'search_places_v1',
         tool: 'SEARCH_PLACES',
         phase: 'discovery',
-        tool_args: { query: `${businessType} ${city} ${country}`, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective, google_query_mode: 'TEXT_ONLY' },
+        tool_args: { query: `${businessType} ${city} ${country}`, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective, google_query_mode: googleQueryMode },
         expected_output: `Up to ${searchCount} ${businessType} results from Google Places`,
         ...(postProcessing.length > 0 ? { post_processing: postProcessing.join('; ') } : {}),
       },
@@ -1626,7 +1629,7 @@ class SupervisorService {
     try {
       const searchResult = await executeAction({
         toolName: 'SEARCH_PLACES',
-        toolArgs: { query: businessType, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective, google_query_mode: 'TEXT_ONLY' },
+        toolArgs: { query: businessType, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective, google_query_mode: googleQueryMode },
         userId: task.user_id,
         tracker: toolTracker,
         runId: chatRunId,
@@ -3014,7 +3017,7 @@ class SupervisorService {
       try {
         const replanSearchResult = await executeAction({
           toolName: 'SEARCH_PLACES',
-          toolArgs: { query: v2.business_type, location: v2.location, country: v2.country, maxResults: v2.search_count, target_count: v2.requested_count_user, google_query_mode: 'TEXT_ONLY' },
+          toolArgs: { query: v2.business_type, location: v2.location, country: v2.country, maxResults: v2.search_count, target_count: v2.requested_count_user, google_query_mode: googleQueryMode },
           userId: task.user_id,
           tracker: toolTracker,
           runId: chatRunId,

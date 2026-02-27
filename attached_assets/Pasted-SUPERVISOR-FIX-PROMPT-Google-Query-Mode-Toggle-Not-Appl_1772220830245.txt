@@ -1,0 +1,117 @@
+SUPERVISOR FIX PROMPT — Google Query Mode Toggle Not Applied
+
+Context
+
+We added a UI toggle that sends
+google_query_mode: "TEXT_ONLY" | "BIASED_STABLE"
+inside supervisor_tasks.request_data.
+
+The UI is correct.
+Supabase confirms the value is being sent.
+
+Bug
+
+The Supervisor never reads this value and instead hard-codes 'TEXT_ONLY' in multiple places, so the toggle has zero effect.
+
+Both toggle ON and OFF runs therefore used the same Google query and returned 1 result.
+
+🎯 Goal
+
+Make the Supervisor honour google_query_mode from task.request_data, with a safe default.
+
+🔧 Required Fix (Minimal, No Behaviour Change Elsewhere)
+1. Read the mode ONCE at the top of the run
+
+In executeTowerLoopChat() (or equivalent top-level run handler):
+
+const googleQueryMode =
+  task.request_data?.google_query_mode ?? "TEXT_ONLY";
+
+Default must remain "TEXT_ONLY"
+
+Do NOT change behaviour if the field is missing
+
+2. Replace ALL hard-coded 'TEXT_ONLY' usages
+
+Find and replace every place where Google query mode is passed downstream, including but not limited to:
+
+plan creation
+
+tool execution
+
+SEARCH_PLACES calls
+
+action executor args
+
+Replace:
+
+google_query_mode: "TEXT_ONLY"
+
+With:
+
+google_query_mode: googleQueryMode
+
+⚠️ Do not rename the field
+⚠️ Do not add logic
+⚠️ Do not infer mode from query text
+
+This is a pure wiring fix.
+
+3. Ensure the mode reaches SEARCH_PLACES unchanged
+
+Confirm that SEARCH_PLACES receives:
+
+{
+  query,
+  location,
+  country,
+  google_query_mode
+}
+
+And that:
+
+"TEXT_ONLY" → builds "micropub Sussex UK"
+
+"BIASED_STABLE" → uses location bias / region / radius logic already implemented
+
+(No changes required inside Google logic itself.)
+
+4. Add a single debug breadcrumb (optional but recommended)
+
+Add one log or artefact field so we can verify at runtime:
+
+resolved_google_query_mode: googleQueryMode
+
+This can be:
+
+console.log
+
+decision_log
+
+plan artefact metadata
+
+Do not add new tables or schemas.
+
+✅ Acceptance Criteria
+
+Two runs with identical input:
+
+Toggle OFF → 1 result (TEXT_ONLY)
+
+Toggle ON → many results (BIASED_STABLE)
+
+Supabase artefacts show the resolved mode
+
+No regressions to existing searches
+
+No UI changes required
+
+❌ Explicit Non-Goals
+
+Do NOT change Google query construction logic
+
+Do NOT add heuristics
+
+Do NOT touch CVL, Tower, or UI
+
+Do NOT refactor policies
