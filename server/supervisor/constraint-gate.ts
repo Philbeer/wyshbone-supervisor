@@ -8,17 +8,19 @@ import {
   type Hardness,
   buildTimePredicateContract,
   resolveProxyChoice,
-  buildClarifyQuestion,
   detectTimePredicate,
   inferHardness,
-  getSupportedProxyIds,
 } from './time-predicate';
+
+export type LiveMusicVerification = 'website_verify' | 'best_effort' | null;
+export type TimePredicateResolution = 'news_mention' | 'recent_reviews' | 'best_effort' | null;
 
 export interface AttributeConstraint {
   type: 'attribute';
   attribute: string;
   verifiability: 'verifiable' | 'proxy' | 'unverifiable';
-  can_verify_post_search: boolean;
+  requires_clarification: boolean;
+  chosen_verification: LiveMusicVerification;
   hardness: Hardness;
 }
 
@@ -41,6 +43,8 @@ export interface PendingConstraintState {
 
 const pendingContracts = new Map<string, PendingConstraintState>();
 const PENDING_TTL_MS = 15 * 60 * 1000;
+
+const BLOCKING_ATTRIBUTES = new Set(['live_music']);
 
 const ATTRIBUTE_PATTERNS: { pattern: RegExp; attribute: string }[] = [
   { pattern: /\b(?:have|has|with|offer(?:s|ing)?|featuring?)\s+live\s*music\b/i, attribute: 'live_music' },
@@ -73,11 +77,20 @@ const PROXY_SELECTION_PATTERNS: { pattern: RegExp; proxyId: string }[] = [
   { pattern: /\b(?:use|accept|try|go\s+with|pick|choose|select)\s+(?:the\s+)?(?:first\s+)?news\s*(?:mention)?\s*(?:proxy)?\b/i, proxyId: 'news_mention' },
   { pattern: /\brecent\s*reviews?\s*(?:proxy|option|method)?\b/i, proxyId: 'recent_reviews' },
   { pattern: /\bnews\s*mentions?\s*(?:proxy|option|method)?\b/i, proxyId: 'news_mention' },
-  { pattern: /\boption\s*(?:1|one)\b/i, proxyId: 'recent_reviews' },
-  { pattern: /\boption\s*(?:2|two)\b/i, proxyId: 'news_mention' },
-  { pattern: /\bfirst\s+(?:option|one|proxy)\b/i, proxyId: 'recent_reviews' },
-  { pattern: /\bsecond\s+(?:option|one|proxy)\b/i, proxyId: 'news_mention' },
+  { pattern: /\boption\s*[Aa]\b/i, proxyId: 'news_mention' },
+  { pattern: /\boption\s*[Bb]\b/i, proxyId: 'recent_reviews' },
+  { pattern: /\bfirst\s+(?:option|one|proxy)\b/i, proxyId: 'news_mention' },
+  { pattern: /\bsecond\s+(?:option|one|proxy)\b/i, proxyId: 'recent_reviews' },
+  { pattern: /\b[Aa]\b\)?.*news/i, proxyId: 'news_mention' },
+  { pattern: /\b[Bb]\b\)?.*reviews?/i, proxyId: 'recent_reviews' },
+  { pattern: /^[Aa]\s*\)\s*$/i, proxyId: 'news_mention' },
+  { pattern: /^[Bb]\s*\)\s*$/i, proxyId: 'recent_reviews' },
 ];
+
+const BEST_EFFORT_PATTERNS = /\b(?:best[- ]?effort|unverified\s+(?:is\s+)?(?:ok|fine|acceptable|good)|don'?t\s+(?:need\s+to\s+)?verify|skip\s+verif|proceed\s+(?:unverified|without\s+verif)|that'?s?\s+(?:ok|fine)|option\s*(?:3|three|[Cc])\b|[Cc]\))/i;
+
+const LIVE_MUSIC_VERIFY_PATTERNS = /(?:\bverify\s+(?:[\w\s]*?)(?:via|through|using)\s+(?:website|listings?|web)\b|\bverify\s+via\s+(?:website|listings?|web)\b|\bcheck\s+(?:website|listings?)\b|\bwebsite\s+verif|\boption\s*(?:1|one)\b|\b[Aa]\b\s*\)|\b[Aa]\b\s*(?:for\s+live))/i;
+const LIVE_MUSIC_BEST_EFFORT_PATTERNS = /(?:\bbest[- ]?effort\b|\bunverified\s+(?:is\s+)?(?:ok|fine|acceptable|good)\b|\bdon'?t\s+(?:need\s+to\s+)?verify\b|\bskip\s+verif|\boption\s*(?:2|two)\b|\b[Bb]\b\s*\)|\b[Bb]\b\s*(?:for\s+live))/i;
 
 export function extractAttributes(msg: string): AttributeConstraint[] {
   const found = new Set<string>();
@@ -86,11 +99,13 @@ export function extractAttributes(msg: string): AttributeConstraint[] {
   for (const entry of ATTRIBUTE_PATTERNS) {
     if (entry.pattern.test(msg) && !found.has(entry.attribute)) {
       found.add(entry.attribute);
+      const isBlocking = BLOCKING_ATTRIBUTES.has(entry.attribute);
       result.push({
         type: 'attribute',
         attribute: entry.attribute,
-        verifiability: 'proxy',
-        can_verify_post_search: true,
+        verifiability: isBlocking ? 'proxy' : 'verifiable',
+        requires_clarification: isBlocking,
+        chosen_verification: null,
         hardness: inferHardness(msg),
       });
     }
@@ -120,11 +135,23 @@ export function detectNoProxySignal(msg: string): boolean {
 }
 
 export function detectProxySelection(msg: string): string | null {
+  if (BEST_EFFORT_PATTERNS.test(msg)) return null;
+
   for (const entry of PROXY_SELECTION_PATTERNS) {
     if (entry.pattern.test(msg)) {
       return entry.proxyId;
     }
   }
+  return null;
+}
+
+export function detectBestEffort(msg: string): boolean {
+  return BEST_EFFORT_PATTERNS.test(msg);
+}
+
+export function detectLiveMusicChoice(msg: string): LiveMusicVerification {
+  if (LIVE_MUSIC_VERIFY_PATTERNS.test(msg)) return 'website_verify';
+  if (LIVE_MUSIC_BEST_EFFORT_PATTERNS.test(msg)) return 'best_effort';
   return null;
 }
 
@@ -146,6 +173,61 @@ function detectWindowFromFollowUp(msg: string): { window: string; window_days: n
   }
 
   return null;
+}
+
+const TIME_PREDICATE_QUESTION = `I can't guarantee opening dates from listings. Do you want me to use a proxy or treat this as best-effort unverified?\n\nA) Use news mentions proxy\nB) Use first reviews proxy\nC) Best-effort, unverified is OK`;
+
+const LIVE_MUSIC_QUESTION = `Live music isn't reliably verified from Places data. Do you want me to verify via website / listings (slower) or treat as best-effort unverified?\n\nA) Verify via website / listings\nB) Best-effort, unverified is OK`;
+
+function isTimePredicateUnresolved(c: Constraint): boolean {
+  if (c.type !== 'time_predicate') return false;
+  return !c.can_execute;
+}
+
+function isLiveMusicUnresolved(c: Constraint): boolean {
+  if (c.type !== 'attribute') return false;
+  if (c.attribute !== 'live_music') return false;
+  return c.requires_clarification && c.chosen_verification === null;
+}
+
+function buildGateState(constraints: Constraint[], isNoProxy: boolean): ConstraintContract {
+  const clarify_questions: string[] = [];
+  const blockReasons: string[] = [];
+  let stop_recommended = false;
+
+  const hasTimePredicate = constraints.some(c => c.type === 'time_predicate');
+  const hasLiveMusic = constraints.some(c => c.type === 'attribute' && c.attribute === 'live_music');
+
+  for (const c of constraints) {
+    if (c.type === 'time_predicate') {
+      if (isNoProxy || (c.verifiability === 'unverifiable' && c.hardness === 'hard')) {
+        stop_recommended = true;
+        blockReasons.push(c.why_blocked || 'Opening dates cannot be verified from any available data source. This constraint cannot be satisfied.');
+      } else if (!c.can_execute) {
+        clarify_questions.push(TIME_PREDICATE_QUESTION);
+        blockReasons.push(c.why_blocked || 'Time predicate requires proxy selection or best-effort acceptance.');
+      }
+    } else if (c.type === 'attribute' && c.attribute === 'live_music') {
+      if (c.requires_clarification && c.chosen_verification === null) {
+        clarify_questions.push(LIVE_MUSIC_QUESTION);
+        blockReasons.push('Live music cannot be reliably verified from Places data alone.');
+      }
+    }
+  }
+
+  const anyBlocked =
+    constraints.some(c => isTimePredicateUnresolved(c)) ||
+    constraints.some(c => isLiveMusicUnresolved(c));
+
+  const can_execute = !anyBlocked && !stop_recommended;
+
+  return {
+    constraints,
+    can_execute,
+    why_blocked: blockReasons.length > 0 ? blockReasons.join(' ') : null,
+    clarify_questions,
+    stop_recommended,
+  };
 }
 
 export function preExecutionConstraintGate(msg: string): ConstraintContract {
@@ -175,45 +257,7 @@ export function preExecutionConstraintGate(msg: string): ConstraintContract {
     }
   }
 
-  const clarify_questions: string[] = [];
-  const blockReasons: string[] = [];
-  let stop_recommended = false;
-
-  for (const c of constraints) {
-    if (c.type === 'time_predicate') {
-      if (!c.can_execute) {
-        if (c.verifiability === 'unverifiable' && c.hardness === 'hard') {
-          stop_recommended = true;
-          blockReasons.push(c.why_blocked || 'Time predicate cannot be verified.');
-        } else {
-          const question = buildClarifyQuestion(c);
-          clarify_questions.push(question);
-          blockReasons.push(c.why_blocked || 'Time predicate requires proxy selection.');
-        }
-      }
-    } else if (c.type === 'attribute') {
-      if (!c.can_verify_post_search) {
-        blockReasons.push(`Attribute "${c.attribute}" cannot be verified.`);
-        clarify_questions.push(`The attribute "${c.attribute}" cannot be verified from available data. Would you like to proceed anyway or remove this requirement?`);
-      }
-    }
-  }
-
-  const anyBlocked = constraints.some(c => {
-    if (c.type === 'time_predicate') return !c.can_execute;
-    if (c.type === 'attribute') return !c.can_verify_post_search && c.hardness === 'hard';
-    return false;
-  });
-
-  const can_execute = !anyBlocked && !stop_recommended;
-
-  return {
-    constraints,
-    can_execute,
-    why_blocked: blockReasons.length > 0 ? blockReasons.join(' ') : null,
-    clarify_questions,
-    stop_recommended,
-  };
+  return buildGateState(constraints, isNoProxy);
 }
 
 export function resolveFollowUp(
@@ -222,71 +266,63 @@ export function resolveFollowUp(
 ): ConstraintContract {
   const noProxy = detectNoProxySignal(followUpMsg);
   const proxyChoice = detectProxySelection(followUpMsg);
+  const bestEffort = detectBestEffort(followUpMsg);
   const windowInfo = detectWindowFromFollowUp(followUpMsg);
+  const liveMusicChoice = detectLiveMusicChoice(followUpMsg);
 
   const updatedConstraints = existingContract.constraints.map(c => {
-    if (c.type !== 'time_predicate') return c;
+    if (c.type === 'time_predicate') {
+      let updated = { ...c };
 
-    let updated = { ...c };
+      if (windowInfo && updated.required_inputs_missing.includes('time_window')) {
+        updated = {
+          ...updated,
+          window: windowInfo.window,
+          window_days: windowInfo.window_days,
+          required_inputs_missing: updated.required_inputs_missing.filter(f => f !== 'time_window'),
+        };
+      }
 
-    if (windowInfo && updated.required_inputs_missing.includes('time_window')) {
-      updated = {
-        ...updated,
-        window: windowInfo.window,
-        window_days: windowInfo.window_days,
-        required_inputs_missing: updated.required_inputs_missing.filter(f => f !== 'time_window'),
-      };
+      if (noProxy) {
+        updated = {
+          ...updated,
+          hardness: 'hard',
+          verifiability: 'unverifiable',
+          can_execute: false,
+          why_blocked: 'User rejected all proxy options. Opening dates cannot be verified, so this constraint cannot be satisfied.',
+          suggested_rephrase: null,
+          chosen_proxy: null,
+        };
+      } else if (bestEffort) {
+        updated = {
+          ...updated,
+          hardness: 'soft',
+          verifiability: 'unverifiable',
+          can_execute: true,
+          why_blocked: null,
+          suggested_rephrase: null,
+          chosen_proxy: 'best_effort',
+        };
+      } else if (proxyChoice) {
+        updated = resolveProxyChoice(updated, proxyChoice);
+      }
+
+      return updated;
     }
 
-    if (noProxy) {
-      updated = {
-        ...updated,
-        hardness: 'hard',
-        verifiability: 'unverifiable',
-        can_execute: false,
-        why_blocked: 'User rejected all proxy options. Opening dates cannot be verified, so this constraint cannot be satisfied.',
-        suggested_rephrase: null,
-        chosen_proxy: null,
-      };
-    } else if (proxyChoice) {
-      updated = resolveProxyChoice(updated, proxyChoice);
-    }
-
-    return updated;
-  });
-
-  const blockReasons: string[] = [];
-  const clarify_questions: string[] = [];
-  let stop_recommended = false;
-
-  for (const c of updatedConstraints) {
-    if (c.type === 'time_predicate' && !c.can_execute) {
-      if (c.verifiability === 'unverifiable' && c.hardness === 'hard') {
-        stop_recommended = true;
-        blockReasons.push(c.why_blocked || 'Time predicate cannot be verified.');
-      } else {
-        const question = buildClarifyQuestion(c);
-        clarify_questions.push(question);
-        blockReasons.push(c.why_blocked || 'Time predicate requires proxy selection.');
+    if (c.type === 'attribute' && c.attribute === 'live_music' && c.requires_clarification && c.chosen_verification === null) {
+      if (liveMusicChoice) {
+        return { ...c, chosen_verification: liveMusicChoice, requires_clarification: false };
+      }
+      if (bestEffort && !existingContract.constraints.some(x => x.type === 'time_predicate')) {
+        return { ...c, chosen_verification: 'best_effort' as LiveMusicVerification, requires_clarification: false };
       }
     }
-  }
 
-  const anyBlocked = updatedConstraints.some(c => {
-    if (c.type === 'time_predicate') return !c.can_execute;
-    if (c.type === 'attribute') return !c.can_verify_post_search && c.hardness === 'hard';
-    return false;
+    return c;
   });
 
-  const can_execute = !anyBlocked && !stop_recommended;
-
-  return {
-    constraints: updatedConstraints,
-    can_execute,
-    why_blocked: blockReasons.length > 0 ? blockReasons.join(' ') : null,
-    clarify_questions,
-    stop_recommended,
-  };
+  return buildGateState(updatedConstraints, noProxy);
 }
 
 export function storePendingContract(conversationId: string, originalMessage: string, contract: ConstraintContract): void {
@@ -319,9 +355,11 @@ export function buildConstraintGateMessage(contract: ConstraintContract): string
   }
 
   if (contract.clarify_questions.length > 0) {
-    const intro = 'Before I can search, I need to clarify a few things:\n\n';
-    const questions = contract.clarify_questions.map((q, i) => `${i + 1}. ${q}`).join('\n\n');
-    return intro + questions;
+    if (contract.clarify_questions.length === 1) {
+      return `Before I search, I need to check one thing:\n\n${contract.clarify_questions[0]}`;
+    }
+    const bullets = contract.clarify_questions.map((q, i) => `${i + 1}. ${q}`).join('\n\n');
+    return `Before I search, I need to check a couple of things:\n\n${bullets}`;
   }
 
   return contract.why_blocked || 'Some constraints need clarification before I can proceed.';
