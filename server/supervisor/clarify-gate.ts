@@ -95,11 +95,46 @@ function isDirectResponse(msg: string): boolean {
   return false;
 }
 
+const KNOWN_REGIONS = /\b(?:UK|US|USA|England|Scotland|Wales|Ireland|London|Manchester|Birmingham|Bristol|Leeds|Sheffield|Liverpool|Newcastle|Edinburgh|Glasgow|Cardiff|Belfast|Sussex|East Sussex|West Sussex|Surrey|Kent|Essex|Devon|Cornwall|Norfolk|Suffolk|Yorkshire|Lancashire|Dorset|Hampshire|Somerset|Wiltshire|Berkshire|Oxfordshire|Cambridgeshire|Nottinghamshire|Derbyshire|Leicestershire|Warwickshire|Staffordshire|Shropshire|Herefordshire|Worcestershire|Gloucestershire|Lincolnshire|Rutland|Northamptonshire|Bedfordshire|Hertfordshire|Buckinghamshire|Middlesex|Merseyside|Tyneside|Berlin|Paris|Madrid|Barcelona|Rome|Milan|Amsterdam|Munich|Hamburg|Frankfurt|Vienna|Prague|Warsaw|Lisbon|Dublin|Brussels|Zurich|Geneva|Stockholm|Copenhagen|Oslo|Helsinki|Athens|Budapest|Bucharest|New York|Los Angeles|Chicago|Houston|Phoenix|Philadelphia|San Francisco|Seattle|Denver|Boston|Nashville|Portland|Las Vegas|Miami|Atlanta|Dallas|Austin|San Diego|San Jose|Sacramento|Orlando|Tampa|Minneapolis|St Louis|Pittsburgh|Cincinnati|Cleveland|Baltimore|Milwaukee|Raleigh|Charlotte|Memphis|Louisville|Richmond|Norfolk|Blackpool|Brighton|Bath|Oxford|Cambridge|Exeter|Plymouth|Norwich|Nottingham|Leicester|Derby|Reading|Southampton|Portsmouth|York|Chester|Durham|Carlisle|Lancaster|Worcester|Gloucester|Lincoln|Ipswich|Canterbury|Dover|Hastings|Eastbourne|Bournemouth|Swindon|Cheltenham|Coventry|Wolverhampton|Bolton|Preston|Stoke|Telford|Shrewsbury|Hereford)\b/i;
+
+const SUBJECTIVE_CRITERIA = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey)\b/i;
+
+const MEASURABLE_ATTRIBUTES = /\b(?:live\s*music|craft\s*beer|real\s*ale|cask\s*ale|dog\s*friendly|family\s*friendly|late[- ]?night|cheap|budget|expensive|premium|cosy|cozy|quiet|outdoor\s*seating|beer\s*garden|rooftop|waterfront|riverside|seafront|free\s*wifi|wheelchair|accessible|parking|vegan|vegetarian|gluten\s*free|halal|kosher|organic|independent|chain|gastropub|wine\s*bar|cocktail\s*bar|sports?\s*bar|micro\s*pub|tap\s*room|free\s*house|food\s*served)\b/i;
+
+const NONSENSE_LOCATION_WORDS = /\b(?:things?|stuff|whatsits?|thingamajigs?|doohickeys?|bits|pieces|whatnots?|whatchamacallits?|doodads?|gizmos?|widgets?|nonsense|blah|asdf|test|nowhere|somewhere|anywhere|whatever|idk|dunno|nothing|something)\b/i;
+
+function hasSubjectiveCriteria(msg: string): boolean {
+  if (!SUBJECTIVE_CRITERIA.test(msg)) return false;
+  if (MEASURABLE_ATTRIBUTES.test(msg)) return false;
+  return true;
+}
+
+function hasNonsenseLocation(msg: string): boolean {
+  const locMatch = msg.match(/\b(?:in|near|around|across|throughout|within)\s+([A-Za-z][\w\s,'-]*?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i);
+  if (!locMatch) return false;
+
+  let loc = locMatch[1].trim();
+  loc = loc.replace(/\s+(?:please|thanks|thank you)$/i, '').trim();
+  loc = loc.replace(/^(?:the|a|an)\s+/i, '').trim();
+
+  if (!loc || loc.length < 2) return false;
+  if (KNOWN_REGIONS.test(loc)) return false;
+
+  if (NONSENSE_LOCATION_WORDS.test(loc)) return true;
+
+  const words = loc.split(/\s+/).filter(w => !/^(?:the|a|an)$/i.test(w));
+  const PLACEHOLDER_NOUNS = /\b(?:council|random|local|some|any|those|these|my|our|your)\b/i;
+  if (words.length <= 3 && words.some(w => PLACEHOLDER_NOUNS.test(w)) && !KNOWN_REGIONS.test(loc)) {
+    return true;
+  }
+
+  return false;
+}
+
 function isMissingLocation(msg: string): boolean {
   if (EXPLICIT_LOCATION.test(msg)) return false;
 
-  const knownRegions = /\b(?:UK|US|USA|England|Scotland|Wales|Ireland|London|Manchester|Birmingham|Bristol|Leeds|Sheffield|Liverpool|Newcastle|Edinburgh|Glasgow|Cardiff|Belfast|Sussex|Surrey|Kent|Essex|Devon|Cornwall|Norfolk|Suffolk|Yorkshire|Lancashire|Dorset|Hampshire|Somerset|Wiltshire|Berkshire|Oxfordshire|Cambridgeshire|Nottinghamshire|Derbyshire|Leicestershire|Warwickshire|Staffordshire|Shropshire|Herefordshire|Worcestershire|Gloucestershire|Lincolnshire|Rutland|Northamptonshire|Bedfordshire|Hertfordshire|Buckinghamshire|Middlesex|Merseyside|Tyneside)\b/i;
-  if (knownRegions.test(msg)) return false;
+  if (KNOWN_REGIONS.test(msg)) return false;
 
   return true;
 }
@@ -254,13 +289,24 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
     missing.push('relationship_clarification');
   }
 
+  if (hasSearchIntent(msg) && hasSubjectiveCriteria(msg)) {
+    reasons.push('query contains subjective/unmeasurable criteria');
+    questions.push('What do you mean in measurable terms? Pick 1\u20132: live music, craft beer, cosy, quiet, late-night, family-friendly, cheap, dog-friendly, outdoor seating, etc.');
+  }
+
+  if (hasSearchIntent(msg) && hasNonsenseLocation(msg)) {
+    reasons.push('location appears invalid or nonsensical');
+    questions.push('What location should I search in (city, town, or area)?');
+    missing.push('location');
+  }
+
   if (hasVagueEntityType(msg) && !hasRelationshipPredicate(msg)) {
     reasons.push('entity type is vague without a sector qualifier');
     questions.push('Could you be more specific about the type of business? For example, instead of "organisations", could you specify a sector like "care providers" or "marketing agencies"?');
     missing.push('entity_type');
   }
 
-  if (isMissingLocation(msg) && hasLeadFindingVerb(msg)) {
+  if (isMissingLocation(msg) && hasLeadFindingVerb(msg) && !hasNonsenseLocation(msg)) {
     reasons.push('no clear location specified');
     questions.push('Which city, region, or country should I search in?');
     missing.push('location');
