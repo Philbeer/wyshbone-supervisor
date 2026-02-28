@@ -607,4 +607,62 @@ describe('buildDeliverySummaryPayload', () => {
       expect(result.trust_status).toBe('UNTRUSTED');
     });
   });
+
+  describe('E) Relationship predicate enforcement', () => {
+    it('demotes all exact leads to closest when relationship unverified', () => {
+      const leads = [
+        makeLead('County Councils Network', '10 Smith Sq, London', 'p1'),
+        makeLead('Council Support Ltd', '20 High St, Leeds', 'p2'),
+      ];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'pass',
+        requestedCount: null,
+        relationshipContext: {
+          requires_relationship_evidence: true,
+          detected_predicate: 'works with',
+          relationship_target: 'councils',
+          verified_relationship_count: 0,
+        },
+      }));
+      expect(result.delivered_exact.length).toBe(0);
+      expect(result.delivered_closest.length).toBe(2);
+      expect(result.delivered_closest[0].soft_violations).toContain('relationship_not_verified');
+      expect(result.status).toBe('STOP');
+      expect(result.stop_reason).toContain('works with councils');
+      expect(result.stop_reason).toContain('could not be verified');
+      expect(result.relationship_context?.requires_relationship_evidence).toBe(true);
+    });
+
+    it('passes normally when no relationship evidence required', () => {
+      const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'pass',
+        requestedCount: null,
+      }));
+      expect(result.delivered_exact.length).toBe(1);
+      expect(result.delivered_closest.length).toBe(0);
+      expect(result.status).toBe('PASS');
+      expect(result.relationship_context).toBeNull();
+    });
+
+    it('includes relationship context in output even when leads exist', () => {
+      const leads = [makeLead('A Corp', '1 Main St', 'p1')];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'pass',
+        requestedCount: null,
+        relationshipContext: {
+          requires_relationship_evidence: true,
+          detected_predicate: 'supplies',
+          relationship_target: 'schools',
+          verified_relationship_count: 0,
+        },
+      }));
+      expect(result.relationship_context).toBeDefined();
+      expect(result.relationship_context?.detected_predicate).toBe('supplies');
+      expect(result.relationship_context?.relationship_target).toBe('schools');
+    });
+  });
 });

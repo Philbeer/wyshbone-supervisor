@@ -58,6 +58,7 @@ export interface DeliverySummaryPayload {
   suggested_next_question: string | null;
   cvl_verified_exact_count: number | null;
   cvl_unverifiable_count: number | null;
+  relationship_context: RelationshipContext | null;
 }
 
 export interface DeliverySummaryLeadInput {
@@ -79,6 +80,13 @@ export interface CvlLeadVerification {
   location_confidence: CvlLocationStatus;
 }
 
+export interface RelationshipContext {
+  requires_relationship_evidence: boolean;
+  detected_predicate: string | null;
+  relationship_target: string | null;
+  verified_relationship_count: number;
+}
+
 export interface DeliverySummaryInput {
   runId: string;
   userId: string;
@@ -98,6 +106,7 @@ export interface DeliverySummaryInput {
   cvlHardUnverifiable?: string[];
   cvlLocationBreakdown?: CvlLocationBreakdown | null;
   cvlLeadVerifications?: CvlLeadVerification[];
+  relationshipContext?: RelationshipContext;
 }
 
 export function determineLeadExactness(
@@ -322,7 +331,22 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
   const hardUnverifiable = input.cvlHardUnverifiable ?? [];
   const hasHardUnverifiable = hardUnverifiable.length > 0;
 
-  const status = deriveCanonicalStatus(exactCount, requestedCount, towerVerdict, hasHardUnverifiable);
+  const relCtx = input.relationshipContext ?? null;
+  const relationshipUnverified = relCtx?.requires_relationship_evidence && relCtx.verified_relationship_count === 0;
+
+  let effectiveExactCount = exactCount;
+  if (relationshipUnverified) {
+    for (const e of exact) {
+      e.match_level = 'closest';
+      if (!e.soft_violations.includes('relationship_not_verified')) {
+        e.soft_violations.push('relationship_not_verified');
+      }
+    }
+    closest.push(...exact.splice(0));
+    effectiveExactCount = 0;
+  }
+
+  const status = deriveCanonicalStatus(effectiveExactCount, requestedCount, towerVerdict, hasHardUnverifiable);
   const trustStatus: TrustStatus = (status === 'PASS' || status === 'PARTIAL') ? 'TRUSTED' : 'UNTRUSTED';
 
   const cvlSummary: CvlSummary | null = hasCvl ? {
@@ -333,7 +357,11 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
   } : null;
 
   let stopReason: string | null = null;
-  if (status === 'STOP') {
+  if (relationshipUnverified) {
+    const target = relCtx!.relationship_target || 'the specified entity';
+    const predicate = relCtx!.detected_predicate || 'works with';
+    stopReason = `Relationship "${predicate} ${target}" could not be verified for any result. All ${rawTotalCount} results are candidates only.`;
+  } else if (status === 'STOP') {
     if (input.stopReason) {
       stopReason = input.stopReason;
     } else if (hasHardUnverifiable) {
@@ -374,6 +402,7 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
     suggested_next_question: suggestedNextQuestion,
     cvl_verified_exact_count: hasCvl ? input.cvlVerifiedExactCount! : null,
     cvl_unverifiable_count: input.cvlUnverifiableCount ?? null,
+    relationship_context: relCtx,
   };
 }
 

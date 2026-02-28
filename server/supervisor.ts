@@ -22,6 +22,7 @@ import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput, type AttributeEvidenceMap } from './supervisor/cvl';
 import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-plan-gate';
+import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
@@ -1317,6 +1318,7 @@ class SupervisorService {
         suggested_next_question: gateResult.suggested_question,
         cvl_verified_exact_count: null,
         cvl_unverifiable_count: null,
+        relationship_context: null,
       };
 
       return {
@@ -1330,6 +1332,11 @@ class SupervisorService {
 
     if (gateResult.gate_flags.query_suspected_merged) {
       console.log(`[PRE_PLAN_GATE] query_suspected_merged=true — proceeding with warning`);
+    }
+
+    const relationshipPredicate = detectRelationshipPredicate(originalUserGoal);
+    if (relationshipPredicate.requires_relationship_evidence) {
+      console.log(`[RELATIONSHIP_PREDICATE] detected="${relationshipPredicate.detected_predicate}" target="${relationshipPredicate.relationship_target}" — all results will be candidates until relationship evidence is found`);
     }
 
     const typedConstraints = structuredConstraints.map(c => ({
@@ -2162,6 +2169,8 @@ class SupervisorService {
         attribute_filter: attributeFilter || null,
       },
       max_replan_versions: 2,
+      requires_relationship_evidence: relationshipPredicate.requires_relationship_evidence,
+      verified_relationship_count: 0,
     };
     console.log(`[TOWER_PAYLOAD] v1 successCriteria: ${JSON.stringify(v1SuccessCriteria, null, 2)}`);
 
@@ -3437,6 +3446,8 @@ class SupervisorService {
               radius_km: v2.radius_km,
             },
             max_replan_versions: MAX_REPLANS + 1,
+            requires_relationship_evidence: relationshipPredicate.requires_relationship_evidence,
+            verified_relationship_count: 0,
           },
         });
       } catch (replanTowerErr: any) {
@@ -3841,10 +3852,13 @@ class SupervisorService {
       type: 'leads',
       payload: {
         title: artefactTitle('', finalLeads.length, finalConstraints, planVersion).trim(),
-        summary: `Found ${finalLeads.length} ${finalConstraints.business_type} prospects in ${finalLocDisplay}${finalPrefixDisplay}${matchingQualifier}${finalAnnotations}${usedStub ? ' (stub data)' : ''} — Tower verdict: ${finalVerdict}`,
+        summary: `Found ${finalLeads.length} ${finalConstraints.business_type} ${relationshipPredicate.requires_relationship_evidence ? 'candidates (relationship not verified)' : 'prospects'} in ${finalLocDisplay}${finalPrefixDisplay}${matchingQualifier}${finalAnnotations}${usedStub ? ' (stub data)' : ''} — Tower verdict: ${finalVerdict}`,
         leads: finalLeads.map(l => {
           const lvMatch = cvlVerification?.leadVerifications.find(lv => lv.lead_place_id === l.placeId);
           const locCheck = lvMatch?.constraint_checks.find(cc => cc.constraint_type === 'LOCATION_EQUALS' || cc.constraint_type === 'LOCATION_NEAR');
+          const relationshipOverride = relationshipPredicate.requires_relationship_evidence
+            ? { relationship_status: 'candidate' as const, relationship_verified: false }
+            : {};
           return {
             name: l.name,
             address: l.address,
@@ -3855,12 +3869,13 @@ class SupervisorService {
             verification: lvMatch ? {
               location_status: lvMatch.location_confidence,
               location_confidence: locCheck?.confidence ?? null,
-              verified_exact: lvMatch.verified_exact,
-              all_hard_satisfied: lvMatch.all_hard_satisfied,
+              verified_exact: relationshipPredicate.requires_relationship_evidence ? false : lvMatch.verified_exact,
+              all_hard_satisfied: relationshipPredicate.requires_relationship_evidence ? false : lvMatch.all_hard_satisfied,
               verification_level: lvMatch.constraint_checks.length > 0
-                ? (lvMatch.verified_exact ? 'verified' : 'checked')
+                ? (lvMatch.verified_exact && !relationshipPredicate.requires_relationship_evidence ? 'verified' : 'checked')
                 : 'candidate',
-            } : { verification_level: 'unverified' as const },
+              ...relationshipOverride,
+            } : { verification_level: 'unverified' as const, ...relationshipOverride },
           };
         }),
         query: { businessType: finalConstraints.business_type, location: finalLocDisplay, country },
@@ -3873,6 +3888,13 @@ class SupervisorService {
         relaxed_constraints: finalLabel.relaxed_constraints,
         constraint_diffs: finalLabel.constraint_diffs,
         location_breakdown: cvlVerification?.summary?.location_breakdown ?? null,
+        ...(relationshipPredicate.requires_relationship_evidence ? {
+          requires_relationship_evidence: true,
+          relationship_predicate: relationshipPredicate.detected_predicate,
+          relationship_target: relationshipPredicate.relationship_target,
+          verified_relationship_count: 0,
+          lead_status: 'candidate',
+        } : {}),
       },
       userId: task.user_id,
       conversationId,
@@ -3919,6 +3941,12 @@ class SupervisorService {
         all_hard_satisfied: lv.all_hard_satisfied,
         location_confidence: lv.location_confidence,
       })),
+      relationshipContext: relationshipPredicate.requires_relationship_evidence ? {
+        requires_relationship_evidence: true,
+        detected_predicate: relationshipPredicate.detected_predicate,
+        relationship_target: relationshipPredicate.relationship_target,
+        verified_relationship_count: 0,
+      } : undefined,
     };
     const mainDsPayload = await emitDeliverySummary(mainDsInput);
 
@@ -3936,7 +3964,12 @@ class SupervisorService {
       await writeBeliefs({ runId: chatRunId, goalId, deliverySummary: mainDsPayload });
     } catch (bErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to write beliefs (non-fatal): ${bErr.message}`); }
 
-    const chatResponse = SUPERVISOR_NEUTRAL_MESSAGE;
+    let chatResponse = SUPERVISOR_NEUTRAL_MESSAGE;
+    if (relationshipPredicate.requires_relationship_evidence && mainDsPayload.relationship_context?.verified_relationship_count === 0 && mainDsPayload.delivered_total_count > 0) {
+      const target = relationshipPredicate.relationship_target || 'the specified entity';
+      const predicate = relationshipPredicate.detected_predicate || 'works with';
+      chatResponse = `I found organisations associated with ${target}, but could not verify that they ${predicate} ${target}. No relationship evidence could be confirmed. All results are candidates only.`;
+    }
 
     try {
       const runDuration = Date.now() - runStartTime;
