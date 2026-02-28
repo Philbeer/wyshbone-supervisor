@@ -12,6 +12,8 @@ export interface ClarifyGateResult {
   parsedFields?: {
     businessType: string | null;
     location: string | null;
+    count: number | null;
+    timeFilter: string | null;
   };
 }
 
@@ -25,6 +27,14 @@ const DIRECT_RESPONSE_PATTERNS = [
   /^(?:do you|are you|can you)\b/i,
   /^(?:thanks|thank you|cheers|ok|okay|got it|understood|sure)\b/i,
   /^(?:who are you|what can you do|how do you work)\b/i,
+];
+
+const META_TRUST_PATTERNS = [
+  /\b(?:can i trust|do you guarantee|are (?:these|the|your) (?:results?|leads?|data) (?:accurate|correct|reliable|verified))\b/i,
+  /\b(?:how (?:accurate|reliable|trustworthy|correct)|is (?:this|it|the data) (?:accurate|correct|reliable|verified))\b/i,
+  /\b(?:guarantee|guaranteed)\b/i,
+  /\b(?:can you be trusted|should i trust|why should i trust|how can i trust)\b/i,
+  /\b(?:what (?:is|are) your (?:sources?|data|methodology|accuracy))\b/i,
 ];
 
 const LEAD_FINDING_VERBS = /\b(?:find|search|list|show|get|look\s+for|locate|discover|identify|give me|pull|fetch|source)\b/i;
@@ -43,6 +53,13 @@ const FALSE_PRIOR_CONTEXT = [
   /\b(?:remember when you|you already|you were saying|like you said)\b/i,
 ];
 
+function isMetaTrust(msg: string): boolean {
+  for (const pattern of META_TRUST_PATTERNS) {
+    if (pattern.test(msg)) return true;
+  }
+  return false;
+}
+
 function hasLeadFindingVerb(msg: string): boolean {
   return LEAD_FINDING_VERBS.test(msg);
 }
@@ -59,6 +76,8 @@ function hasSearchIntent(msg: string): boolean {
 function isDirectResponse(msg: string): boolean {
   const trimmed = msg.trim();
   if (trimmed.length < 3) return true;
+
+  if (isMetaTrust(trimmed)) return true;
 
   if (hasSearchIntent(trimmed)) return false;
 
@@ -141,12 +160,47 @@ function hasFalsePriorContext(msg: string): boolean {
   return false;
 }
 
+const TEMPORAL_DISQUALIFIERS = /\b(?:months?|years?|days?|weeks?|hours?|minutes?|ago|since|last|past|recent|recently|old|new|opened|closed|started|founded|established)\b/i;
+const COUNT_NEAR_SEARCH = /\b(?:find|show|get|give me|list|pull|fetch|source|locate|discover|identify)\s+(\d+)\b/i;
+const COUNT_BEFORE_NOUN = /\b(\d+)\s+(?!months?\b|years?\b|days?\b|weeks?\b|hours?\b|minutes?\b)\w+/i;
+
+function extractCount(msg: string): number | null {
+  const searchMatch = msg.match(COUNT_NEAR_SEARCH);
+  if (searchMatch) {
+    const n = parseInt(searchMatch[1], 10);
+    if (n >= 1 && n <= 500) return n;
+  }
+
+  const nounMatch = msg.match(COUNT_BEFORE_NOUN);
+  if (nounMatch) {
+    const n = parseInt(nounMatch[1], 10);
+    if (n >= 1 && n <= 500) {
+      const idx = msg.indexOf(nounMatch[0]);
+      const surrounding = msg.substring(Math.max(0, idx - 20), idx + nounMatch[0].length + 20);
+      if (TEMPORAL_DISQUALIFIERS.test(surrounding)) return null;
+      if (LEAD_FINDING_VERBS.test(msg)) return n;
+    }
+  }
+
+  return null;
+}
+
+const TIME_FILTER_PATTERN = /\b(?:(?:in|within|over)\s+(?:the\s+)?(?:last|past)\s+\d+\s+(?:months?|years?|weeks?|days?)|opened|closed|started|founded|established)\s+(?:in\s+(?:the\s+)?(?:last|past)\s+)?\d*\s*(?:months?|years?|weeks?|days?)?\b/i;
+const TIME_FILTER_SIMPLE = /\b(?:(?:last|past)\s+\d+\s+(?:months?|years?|weeks?|days?)|(?:opened|started|founded|established)\s+(?:in\s+(?:the\s+)?)?(?:last|past)?\s*\d+\s*(?:months?|years?|weeks?|days?))\b/i;
+
+function extractTimeFilter(msg: string): string | null {
+  const match = msg.match(TIME_FILTER_SIMPLE) || msg.match(TIME_FILTER_PATTERN);
+  if (match) return match[0].trim();
+  return null;
+}
+
 function extractBusinessType(msg: string): string | null {
   const lower = msg.toLowerCase();
   const verbMatch = lower.match(/\b(?:find|search|list|show|get|look\s+for|locate|discover|identify|give me|pull|fetch|source)\s+(?:\d+\s+)?(.+?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i);
   if (verbMatch) {
     let bt = verbMatch[1].trim();
     bt = bt.replace(/\b(?:for me|please|thanks|thank you)\b/gi, '').trim();
+    bt = bt.replace(/\b(?:that\s+)?(?:opened|started|founded|established)\s+(?:in\s+(?:the\s+)?)?(?:last|past)?\s*\d*\s*(?:months?|years?|weeks?|days?)\s*(?:ago)?\b/gi, '').trim();
     if (bt && bt.length > 1 && bt.length < 60) return bt;
   }
   return null;
@@ -157,6 +211,7 @@ function extractLocation(msg: string): string | null {
   if (locMatch) {
     let loc = locMatch[1].trim();
     loc = loc.replace(/\s+(?:please|thanks|thank you)$/i, '').trim();
+    loc = loc.replace(/\s+(?:that\s+)?(?:opened|started|founded|established)\b.*$/i, '').trim();
     if (loc && loc.length > 1 && loc.length < 60) return loc;
   }
   return null;
@@ -220,6 +275,8 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
       parsedFields: {
         businessType: extractBusinessType(msg),
         location: extractLocation(msg),
+        count: extractCount(msg),
+        timeFilter: extractTimeFilter(msg),
       },
     };
   }

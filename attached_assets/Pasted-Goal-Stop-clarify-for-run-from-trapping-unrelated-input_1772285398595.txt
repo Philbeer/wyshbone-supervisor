@@ -1,0 +1,50 @@
+Goal: Stop clarify_for_run from trapping unrelated inputs, add explicit execute command handling (“search now”), add a meta/trust escape hatch, and provide structured clarify_state to the UI.
+
+Keep changes minimal and production-grade. No hacks.
+
+Context from forensic report:
+- Clarify-for-run spans clarify-gate.ts, clarify-session.ts, and processChatTask in supervisor.ts.
+- ClarifySession has collectedFields (businessType, location, attribute, count, relationship).
+- No dedicated “search now” handler exists; execution triggers implicitly when fields are filled.
+- Trust/meta questions can be misrouted into clarify_before_run.
+- No temporal filter field; no multi-attribute support; refinements replace rather than accumulate.
+- Phrases like “search now” can be absorbed as literal field values (bug).
+
+Required changes:
+
+A) Add explicit message intent classification inside clarify-gate / supervisor routing:
+- Detect META_TRUST questions (e.g., “guaranteed”, “are these correct”, “how accurate”) and route to chat answer immediately, even if clarify session exists.
+- Detect NEW_TASK signals during active clarify session (new venue type/location, “new question:”, or a clear task switch) and end/abandon the current clarify session, then start fresh classification.
+- Only treat as REFINE if it plausibly fills missing fields.
+
+B) Implement explicit EXECUTE handling:
+- Recognize “search now”, “run it”, “go ahead”, “yes proceed” as EXECUTE commands regardless of missing fields.
+- If fields are missing, respond with exactly what is missing, do not absorb execute text into fields.
+- If fields are complete, execute the run.
+
+C) Bound clarify sessions:
+- Add a max clarification turns cap (e.g. 2 or 3 ask_more cycles). After cap, ask the user to choose: run draft as-is, start over, or ask a new question.
+- Ensure TTL expiry triggers a clear end: emit clarify_session_ended to UI/SSE and clear server session.
+
+D) Provide structured clarify_state to UI:
+- On every clarify response, include clarify_state in the assistant payload:
+  - status: ask_more | ready_to_search
+  - draft: { businessType, location, attributes[], count, relationship, timeFilter? }
+  - missingFields: [...]
+- Stop sending unstructured prose that the UI must parse.
+
+E) Fix numeric extraction:
+- Add safe extraction so “12 months” never becomes count=12 unless the user explicitly asks “find 12 pubs”.
+- Only set count if near keywords like “find”, “show”, “give me”, “results”, “pubs” etc, and not near “months”, “years”, “days”.
+
+Optional but recommended (small):
+- Add timeFilter field to ClarifySession (even if you later mark it as “cannot reliably verify”).
+- Support multiple attributes as a list (so “freehouses” + “dog friendly” accumulates).
+
+Files to touch (per report): clarify-session.ts, supervisor.ts, clarify-gate.ts. Keep it to these unless absolutely necessary.
+
+Deliverables:
+- No more trapping of trust questions or new tasks during clarify mode.
+- Typed “search now” works.
+- Structured clarify_state emitted.
+- Clarify resets on TTL and new tasks.

@@ -7,19 +7,38 @@ export interface ClarifySession {
   collectedFields: {
     businessType: string | null;
     location: string | null;
-    attribute: string | null;
+    attributes: string[];
     count: number | null;
     relationship: string | null;
+    timeFilter: string | null;
   };
+  turnCount: number;
   createdAt: number;
 }
 
-export type FollowUpClass = 'ANSWER_TO_MISSING_FIELD' | 'REFINEMENT' | 'NEW_REQUEST';
+export const MAX_CLARIFY_TURNS = 3;
+
+export type FollowUpClass = 'ANSWER_TO_MISSING_FIELD' | 'REFINEMENT' | 'NEW_REQUEST' | 'META_TRUST' | 'EXECUTE_NOW';
 
 export interface FollowUpResult {
   classification: FollowUpClass;
   updatedField?: MissingField;
   value?: string;
+}
+
+export interface ClarifyState {
+  status: 'ask_more' | 'ready_to_search' | 'turn_limit_reached';
+  draft: {
+    businessType: string | null;
+    location: string | null;
+    attributes: string[];
+    count: number | null;
+    relationship: string | null;
+    timeFilter: string | null;
+  };
+  missingFields: MissingField[];
+  turnCount: number;
+  maxTurns: number;
 }
 
 const sessions = new Map<string, ClarifySession>();
@@ -39,10 +58,12 @@ export function createClarifySession(
     collectedFields: {
       businessType: initialFields.businessType ?? null,
       location: initialFields.location ?? null,
-      attribute: initialFields.attribute ?? null,
+      attributes: initialFields.attributes ?? [],
       count: initialFields.count ?? null,
       relationship: initialFields.relationship ?? null,
+      timeFilter: initialFields.timeFilter ?? null,
     },
+    turnCount: 0,
     createdAt: Date.now(),
   };
   sessions.set(conversationId, session);
@@ -59,8 +80,31 @@ export function getClarifySession(conversationId: string): ClarifySession | null
   return session;
 }
 
+export function didSessionExpire(conversationId: string): boolean {
+  const session = sessions.get(conversationId);
+  if (!session) return false;
+  return Date.now() - session.createdAt > SESSION_TTL_MS;
+}
+
 export function closeClarifySession(conversationId: string): void {
   sessions.delete(conversationId);
+}
+
+export function buildClarifyState(session: ClarifySession): ClarifyState {
+  const atLimit = session.turnCount >= MAX_CLARIFY_TURNS;
+  const complete = sessionIsComplete(session);
+  let status: ClarifyState['status'];
+  if (atLimit) status = 'turn_limit_reached';
+  else if (complete) status = 'ready_to_search';
+  else status = 'ask_more';
+
+  return {
+    status,
+    draft: { ...session.collectedFields },
+    missingFields: [...session.missingFields],
+    turnCount: session.turnCount,
+    maxTurns: MAX_CLARIFY_TURNS,
+  };
 }
 
 const LOCATION_LIKE = /^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s*,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)?$/;
@@ -75,8 +119,19 @@ const NEW_REQUEST_SIGNALS = [
   /\b(?:can you|could you|would you|help me|i need|i want|i'd like)\b/i,
   /\b(?:find|search|list|show|get|look\s+for|locate|discover|identify)\b.*\b(?:in|near|around|across)\b/i,
   /\b(?:sales|marketing|pricing|billing|account|subscription|refund|cancel|support)\b/i,
-  /\b(?:guarantee|guaranteed|accurate|correct|reliable|trust|confident|sure)\b/i,
 ];
+
+const META_TRUST_PATTERNS = [
+  /\b(?:can i trust|do you guarantee|are (?:these|the|your) (?:results?|leads?|data) (?:accurate|correct|reliable|verified))\b/i,
+  /\b(?:how (?:accurate|reliable|trustworthy|correct)|is (?:this|it|the data) (?:accurate|correct|reliable|verified))\b/i,
+  /\b(?:guarantee|guaranteed)\b/i,
+  /\b(?:can you be trusted|should i trust|why should i trust|how can i trust)\b/i,
+  /\b(?:how do you work|what do you do|who are you|what are you)\b/i,
+  /\b(?:are you (?:a bot|an ai|real|automated)|how does (?:this|it) work)\b/i,
+  /\b(?:what (?:is|are) your (?:sources?|data|methodology|accuracy))\b/i,
+];
+
+const EXECUTE_INTENT = /^\s*(?:search now|run it|run the search|go ahead|yes proceed|proceed|do it|just search|start searching|execute|let's go|yes go|yes search|run now|go for it|yes run|ok search|okay search|ok run|okay run|yes please search|yes do it|start the search|kick it off|launch it|fire away)\s*[.!]?\s*$/i;
 
 const REFINEMENT_LIKE = /^[a-z\s-]+$/i;
 const BUSINESS_MODIFIERS = /\b(?:free\s*houses?|gastropubs?|wine\s*bars?|cocktail\s*bars?|sports?\s*bars?|craft\s*beer|real\s*ale|micro\s*pubs?|tap\s*rooms?|beer\s*gardens?|dog\s*friendly|family\s*friendly|live\s*music|food\s*served|cask\s*ale|independent|chain|premium|budget|organic|vegan|vegetarian|gluten\s*free|halal|kosher)\b/i;
@@ -88,15 +143,30 @@ function looksLikeLocation(msg: string): boolean {
   return false;
 }
 
+function isExecuteIntent(msg: string): boolean {
+  return EXECUTE_INTENT.test(msg.trim());
+}
+
+function isMetaTrust(msg: string): boolean {
+  const trimmed = msg.trim();
+  for (const pattern of META_TRUST_PATTERNS) {
+    if (pattern.test(trimmed)) return true;
+  }
+  return false;
+}
+
 function isShortFieldAnswer(msg: string, session: ClarifySession): boolean {
   const stripped = msg.replace(/[?!.,]+$/, '').trim();
   const wordCount = stripped.split(/\s+/).length;
   if (wordCount > 5) return false;
 
+  if (isExecuteIntent(stripped)) return false;
+  if (isMetaTrust(stripped)) return false;
+
   if (session.missingFields.includes('location') && looksLikeLocation(stripped)) return true;
   if (session.missingFields.includes('entity_type') && wordCount <= 3) return true;
   if (session.missingFields.includes('relationship_clarification')) {
-    if (/\b(?:yes|yeah|yep|sure|ok|okay|go ahead|just|any|fine|proceed|do it)\b/i.test(stripped)) return true;
+    if (/\b(?:yes|yeah|yep|sure|ok|okay|just|any|fine)\b/i.test(stripped) && !isExecuteIntent(stripped)) return true;
   }
 
   return false;
@@ -106,6 +176,8 @@ function looksLikeNewRequest(msg: string, session: ClarifySession): boolean {
   const trimmed = msg.trim();
 
   if (isShortFieldAnswer(trimmed, session)) return false;
+  if (isExecuteIntent(trimmed)) return false;
+  if (isMetaTrust(trimmed)) return false;
 
   for (const pattern of QUESTION_PATTERNS) {
     if (pattern.test(trimmed)) {
@@ -141,6 +213,14 @@ export function classifyFollowUp(msg: string, session: ClarifySession): FollowUp
   const trimmed = msg.trim();
   const stripped = trimmed.replace(/[?!.,]+$/, '').trim();
 
+  if (isExecuteIntent(trimmed) || isExecuteIntent(stripped)) {
+    return { classification: 'EXECUTE_NOW' };
+  }
+
+  if (isMetaTrust(trimmed)) {
+    return { classification: 'META_TRUST' };
+  }
+
   if (looksLikeNewRequest(trimmed, session)) {
     return { classification: 'NEW_REQUEST' };
   }
@@ -165,7 +245,7 @@ export function classifyFollowUp(msg: string, session: ClarifySession): FollowUp
 
   if (session.missingFields.includes('relationship_clarification')) {
     const lower = trimmed.toLowerCase();
-    if (/\b(?:yes|yeah|yep|sure|ok|okay|go ahead|just|any|research|proceed|do it|that's fine|fine)\b/i.test(lower)) {
+    if (/\b(?:yes|yeah|yep|sure|ok|okay|just|any|research|that's fine|fine)\b/i.test(lower)) {
       return {
         classification: 'ANSWER_TO_MISSING_FIELD',
         updatedField: 'relationship_clarification',
@@ -198,7 +278,12 @@ export function classifyFollowUp(msg: string, session: ClarifySession): FollowUp
   return { classification: 'NEW_REQUEST' };
 }
 
+export function incrementTurnCount(session: ClarifySession): void {
+  session.turnCount++;
+}
+
 export function applyFollowUp(session: ClarifySession, result: FollowUpResult): void {
+
   if (result.classification === 'ANSWER_TO_MISSING_FIELD' && result.updatedField && result.value) {
     if (result.updatedField === 'location') {
       session.collectedFields.location = result.value;
@@ -210,10 +295,14 @@ export function applyFollowUp(session: ClarifySession, result: FollowUpResult): 
     session.missingFields = session.missingFields.filter(f => f !== result.updatedField);
   } else if (result.classification === 'REFINEMENT' && result.value) {
     if (BUSINESS_MODIFIERS.test(result.value)) {
-      session.collectedFields.attribute = result.value;
+      if (!session.collectedFields.attributes.includes(result.value)) {
+        session.collectedFields.attributes.push(result.value);
+      }
     } else {
       if (session.collectedFields.businessType) {
-        session.collectedFields.attribute = result.value;
+        if (!session.collectedFields.attributes.includes(result.value)) {
+          session.collectedFields.attributes.push(result.value);
+        }
       } else {
         session.collectedFields.businessType = result.value;
       }
@@ -230,8 +319,11 @@ export function renderClarifySummary(session: ClarifySession): string {
   const loc = session.collectedFields.location;
   if (loc) parts.push(`in ${loc}`);
 
-  const attr = session.collectedFields.attribute;
-  if (attr) parts.push(`(${attr})`);
+  const attrs = session.collectedFields.attributes;
+  if (attrs.length > 0) parts.push(`(${attrs.join(', ')})`);
+
+  const tf = session.collectedFields.timeFilter;
+  if (tf) parts.push(`[${tf}]`);
 
   const count = session.collectedFields.count;
   if (count) parts.unshift(`${count}`);
@@ -246,11 +338,16 @@ export function sessionIsComplete(session: ClarifySession): boolean {
   return true;
 }
 
-export function buildSearchFromSession(session: ClarifySession): { businessType: string; location: string; attribute: string | null; count: number | null } {
+export function sessionIsAtTurnLimit(session: ClarifySession): boolean {
+  return session.turnCount >= MAX_CLARIFY_TURNS;
+}
+
+export function buildSearchFromSession(session: ClarifySession): { businessType: string; location: string; attributes: string[]; count: number | null; timeFilter: string | null } {
   return {
     businessType: session.collectedFields.businessType || 'businesses',
     location: session.collectedFields.location || 'Local',
-    attribute: session.collectedFields.attribute,
+    attributes: session.collectedFields.attributes,
     count: session.collectedFields.count,
+    timeFilter: session.collectedFields.timeFilter,
   };
 }
