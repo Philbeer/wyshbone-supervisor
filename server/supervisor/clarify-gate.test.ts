@@ -5,11 +5,13 @@ import { evaluateClarifyGate } from './clarify-gate';
 describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => {
 
   describe('Subjective / unmeasurable criteria', () => {
-    it('"find the best vibes near council things" → clarify_before_run', () => {
+    it('"find the best vibes near council things" → clarify_before_run with location + meaning questions', () => {
       const result = evaluateClarifyGate('find the best vibes near council things');
       assert.strictEqual(result.route, 'clarify_before_run');
       assert.ok(result.reason.includes('subjective'));
       assert.ok(result.questions!.some(q => q.includes('measurable')));
+      assert.ok(result.questions!.some(q => /location|place|city|town/i.test(q)));
+      assert.ok(result.questions!.length >= 2, 'Should have at least two questions (location + meaning of vibes)');
     });
 
     it('"find the coolest bars in London" → clarify_before_run (subjective)', () => {
@@ -37,6 +39,14 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
       assert.ok(result.reason.includes('subjective'));
     });
 
+    it('"find the best cafes in bristol" → clarify_before_run (subjective "best" without measurable criteria)', () => {
+      const result = evaluateClarifyGate('find the best cafes in bristol');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
+      assert.ok(result.questions!.some(q => q.includes('measurable')));
+      assert.ok(result.missingFields!.includes('semantic_constraint'), 'Should include semantic_constraint in missingFields');
+    });
+
     it('"find best pubs with live music in Brighton" → agent_run (has measurable attribute)', () => {
       const result = evaluateClarifyGate('find best pubs with live music in Brighton');
       assert.strictEqual(result.route, 'agent_run');
@@ -53,7 +63,7 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
       const result = evaluateClarifyGate('find pubs near council things');
       assert.strictEqual(result.route, 'clarify_before_run');
       assert.ok(result.reason.includes('invalid') || result.reason.includes('nonsensical'));
-      assert.ok(result.questions!.some(q => q.includes('location')));
+      assert.ok(result.questions!.some(q => /location|place|city|town/i.test(q)));
       assert.ok(result.missingFields!.includes('location'));
     });
 
@@ -72,9 +82,58 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
       const result = evaluateClarifyGate('find cafes near something');
       assert.strictEqual(result.route, 'clarify_before_run');
     });
+
+    it('nonsense location question explicitly says the phrase is not a real place', () => {
+      const result = evaluateClarifyGate('find pubs near council things');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.questions!.some(q => /isn't a real place|not a real place|not a place/i.test(q)));
+    });
   });
 
-  describe('Normal queries still run', () => {
+  describe('Vague proximity with real location', () => {
+    it('"find pubs near the council in Leeds" → clarify_before_run with proximity + location confirmation questions', () => {
+      const result = evaluateClarifyGate('find pubs near the council in Leeds');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('vague proximity'));
+      assert.ok(result.questions!.some(q => q.includes('council') && (q.includes('distance') || q.includes('building') || q.includes('vague'))));
+      assert.ok(result.questions!.some(q => q.includes('Leeds')));
+      assert.ok(!result.missingFields || !result.missingFields.includes('location'), 'Should NOT mark location as missing when Leeds is present');
+    });
+
+    it('"find restaurants near the town hall in Birmingham" → clarify_before_run', () => {
+      const result = evaluateClarifyGate('find restaurants near the town hall in Birmingham');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('vague proximity'));
+      assert.ok(result.questions!.some(q => q.includes('Birmingham')));
+    });
+
+    it('"find bars near the local authority in Manchester" → clarify_before_run', () => {
+      const result = evaluateClarifyGate('find bars near the local authority in Manchester');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('vague proximity'));
+    });
+
+    it('"find cafes in Leeds near the council" → clarify_before_run (location-first pattern)', () => {
+      const result = evaluateClarifyGate('find cafes in Leeds near the council');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('vague proximity'));
+      assert.ok(result.questions!.some(q => q.includes('Leeds')));
+    });
+
+    it('"find pubs close to council offices in Bristol" → clarify_before_run', () => {
+      const result = evaluateClarifyGate('find pubs close to council offices in Bristol');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('vague proximity'));
+      assert.ok(result.questions!.some(q => q.includes('Bristol')));
+    });
+  });
+
+  describe('Normal queries still run (no false positives)', () => {
+    it('"find cafes in Bristol" → agent_run', () => {
+      const result = evaluateClarifyGate('find cafes in Bristol');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
     it('"cafes in Bristol" → agent_run', () => {
       const result = evaluateClarifyGate('cafes in Bristol');
       assert.strictEqual(result.route, 'agent_run');

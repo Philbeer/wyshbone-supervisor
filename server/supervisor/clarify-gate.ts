@@ -2,7 +2,7 @@ import { RELATIONSHIP_PREDICATES } from './relationship-predicate';
 
 export type ClarifyRoute = 'direct_response' | 'clarify_before_run' | 'agent_run';
 
-export type ClarifyMissingField = 'location' | 'entity_type' | 'relationship_clarification';
+export type ClarifyMissingField = 'location' | 'entity_type' | 'relationship_clarification' | 'semantic_constraint';
 
 export interface ClarifyGateResult {
   route: ClarifyRoute;
@@ -109,6 +109,8 @@ function hasSubjectiveCriteria(msg: string): boolean {
   return true;
 }
 
+const VAGUE_PROXIMITY_NOUNS = /\b(?:council|local\s+authority|government|town\s+hall|civic\s+centre|civic\s+center|council\s+offices?|council\s+buildings?)\b/i;
+
 function hasNonsenseLocation(msg: string): boolean {
   const locMatch = msg.match(/\b(?:in|near|around|across|throughout|within)\s+([A-Za-z][\w\s,'-]*?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i);
   if (!locMatch) return false;
@@ -129,6 +131,28 @@ function hasNonsenseLocation(msg: string): boolean {
   }
 
   return false;
+}
+
+function detectVagueProximityWithRealLocation(msg: string): { vaguePhrase: string; realLocation: string } | null {
+  const proximityFirst = /\b((?:near|around|close\s+to|by)\s+(?:the\s+)?(?:council|local\s+authority|government|town\s+hall|civic\s+centre|civic\s+center|council\s+offices?|council\s+buildings?))\b.*?\b(?:in|around)\s+([\w][\w\s,'-]+)/i;
+  const match1 = msg.match(proximityFirst);
+  if (match1) {
+    const realLoc = match1[2].trim().replace(/\s+(?:please|thanks|thank you)$/i, '').trim();
+    if (KNOWN_REGIONS.test(realLoc)) {
+      return { vaguePhrase: match1[1].trim(), realLocation: realLoc };
+    }
+  }
+
+  const locationFirst = /\b(?:in|around)\s+([\w][\w\s,'-]+?)\s+(?:near|around|close\s+to|by)\s+((?:the\s+)?(?:council|local\s+authority|government|town\s+hall|civic\s+centre|civic\s+center|council\s+offices?|council\s+buildings?))\b/i;
+  const match2 = msg.match(locationFirst);
+  if (match2) {
+    const realLoc = match2[1].trim().replace(/\s+(?:please|thanks|thank you)$/i, '').trim();
+    if (KNOWN_REGIONS.test(realLoc)) {
+      return { vaguePhrase: `near ${match2[2].trim()}`, realLocation: realLoc };
+    }
+  }
+
+  return null;
 }
 
 function isMissingLocation(msg: string): boolean {
@@ -291,12 +315,18 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
 
   if (hasSearchIntent(msg) && hasSubjectiveCriteria(msg)) {
     reasons.push('query contains subjective/unmeasurable criteria');
-    questions.push('What do you mean in measurable terms? Pick 1\u20132: live music, craft beer, cosy, quiet, late-night, family-friendly, cheap, dog-friendly, outdoor seating, etc.');
+    questions.push('What do you mean in measurable terms? Pick 1–2: live music, craft beer, cosy, quiet, late-night, family-friendly, cheap, dog-friendly, outdoor seating, etc.');
+    missing.push('semantic_constraint');
   }
 
-  if (hasSearchIntent(msg) && hasNonsenseLocation(msg)) {
+  const vagueProximity = detectVagueProximityWithRealLocation(msg);
+  if (vagueProximity) {
+    reasons.push('location contains a vague proximity reference alongside a real location');
+    questions.push(`"${vagueProximity.vaguePhrase}" is vague — do you mean within a specific distance of a particular council building, or just generally in ${vagueProximity.realLocation}? Which building do you mean?`);
+    questions.push(`Just to confirm — is ${vagueProximity.realLocation} the right area to search?`);
+  } else if (hasSearchIntent(msg) && hasNonsenseLocation(msg)) {
     reasons.push('location appears invalid or nonsensical');
-    questions.push('What location should I search in (city, town, or area)?');
+    questions.push('That phrase isn\'t a real place I can search. Please provide a concrete location — a city, town, postcode, or area.');
     missing.push('location');
   }
 

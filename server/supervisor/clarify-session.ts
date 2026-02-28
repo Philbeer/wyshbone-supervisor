@@ -1,4 +1,4 @@
-export type MissingField = 'location' | 'entity_type' | 'relationship_clarification';
+export type MissingField = 'location' | 'entity_type' | 'relationship_clarification' | 'semantic_constraint';
 
 export interface ClarifySession {
   conversationId: string;
@@ -11,6 +11,7 @@ export interface ClarifySession {
     count: number | null;
     relationship: string | null;
     timeFilter: string | null;
+    semanticConstraint: string | null;
   };
   turnCount: number;
   createdAt: number;
@@ -35,6 +36,7 @@ export interface ClarifyState {
     count: number | null;
     relationship: string | null;
     timeFilter: string | null;
+    semanticConstraint: string | null;
   };
   missingFields: MissingField[];
   turnCount: number;
@@ -62,6 +64,7 @@ export function createClarifySession(
       count: initialFields.count ?? null,
       relationship: initialFields.relationship ?? null,
       timeFilter: initialFields.timeFilter ?? null,
+      semanticConstraint: initialFields.semanticConstraint ?? null,
     },
     turnCount: 0,
     createdAt: Date.now(),
@@ -291,6 +294,8 @@ export function applyFollowUp(session: ClarifySession, result: FollowUpResult): 
       session.collectedFields.businessType = result.value;
     } else if (result.updatedField === 'relationship_clarification') {
       session.collectedFields.relationship = result.value;
+    } else if (result.updatedField === 'semantic_constraint') {
+      session.collectedFields.semanticConstraint = result.value;
     }
     session.missingFields = session.missingFields.filter(f => f !== result.updatedField);
   } else if (result.classification === 'REFINEMENT' && result.value) {
