@@ -206,6 +206,69 @@ function looksLikeNewRequest(msg: string, session: ClarifySession): boolean {
   return false;
 }
 
+const LEAD_VERBS = /\b(?:find|search|list|show|get|look\s+for|locate|discover|identify|give me|pull|fetch|source)\b/i;
+const LOCATION_PREP = /\b(?:in|near|around|across|throughout|within)\s+\w/i;
+
+function extractEntityFromMessage(msg: string): string | null {
+  const lower = msg.toLowerCase();
+  const verbMatch = lower.match(/\b(?:find|search|list|show|get|look\s+for|locate|discover|identify|give me|pull|fetch|source)\s+(?:\d+\s+)?(.+?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i);
+  if (verbMatch) {
+    let bt = verbMatch[1].trim();
+    bt = bt.replace(/\b(?:for me|please|thanks|thank you|the|a|an|some|any|best|top|good|nice)\b/gi, '').replace(/\s+/g, ' ').trim();
+    if (bt && bt.length > 1 && bt.length < 60) return bt;
+  }
+  const nounBeforePrep = lower.match(/^(.+?)\s+(?:in|near|around|across|throughout|within)\s+/i);
+  if (nounBeforePrep) {
+    let bt = nounBeforePrep[1].trim();
+    bt = bt.replace(/\b(?:the|a|an|some|any|best|top|good|nice)\b/gi, '').replace(/\s+/g, ' ').trim();
+    if (bt && bt.length > 1 && bt.length < 60) return bt;
+  }
+  return null;
+}
+
+function extractLocationFromMessage(msg: string): string | null {
+  const locMatch = msg.match(/\b(?:in|near|around|across|throughout|within)\s+([A-Z][\w\s,'-]+)/i);
+  if (locMatch) {
+    let loc = locMatch[1].trim();
+    loc = loc.replace(/\s+(?:please|thanks|thank you)$/i, '').trim();
+    if (loc && loc.length > 1 && loc.length < 60) return loc;
+  }
+  return null;
+}
+
+function entitiesAreDifferent(a: string, b: string): boolean {
+  const normalise = (s: string) => s.toLowerCase().replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
+  const na = normalise(a);
+  const nb = normalise(b);
+  if (na === nb) return false;
+  if (na.includes(nb) || nb.includes(na)) return false;
+  return true;
+}
+
+export function isContradictoryNewTask(msg: string, session: ClarifySession): boolean {
+  const trimmed = msg.trim();
+  const msgEntity = extractEntityFromMessage(trimmed);
+  const msgLocation = extractLocationFromMessage(trimmed);
+  const sessionEntity = session.collectedFields.businessType;
+
+  if (sessionEntity && msgEntity && entitiesAreDifferent(sessionEntity, msgEntity)) {
+    if (msgLocation) return true;
+    if (LEAD_VERBS.test(trimmed)) return true;
+  }
+
+  if (LEAD_VERBS.test(trimmed) && LOCATION_PREP.test(trimmed)) {
+    if (msgEntity && sessionEntity && entitiesAreDifferent(sessionEntity, msgEntity)) {
+      return true;
+    }
+    if (msgLocation && session.collectedFields.location) {
+      const locDifferent = msgLocation.toLowerCase() !== session.collectedFields.location.toLowerCase();
+      if (locDifferent && msgEntity) return true;
+    }
+  }
+
+  return false;
+}
+
 function looksLikeRefinement(msg: string): boolean {
   const trimmed = msg.trim();
   if (trimmed.split(/\s+/).length > 5) return false;
@@ -225,6 +288,10 @@ export function classifyFollowUp(msg: string, session: ClarifySession): FollowUp
 
   if (isMetaTrust(trimmed)) {
     return { classification: 'META_TRUST' };
+  }
+
+  if (isContradictoryNewTask(trimmed, session)) {
+    return { classification: 'NEW_REQUEST' };
   }
 
   if (looksLikeNewRequest(trimmed, session)) {

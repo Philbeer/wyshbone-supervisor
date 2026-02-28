@@ -12,6 +12,7 @@ import {
   sessionIsAtTurnLimit,
   buildSearchFromSession,
   buildClarifyState,
+  isContradictoryNewTask,
   MAX_CLARIFY_TURNS,
 } from './clarify-session';
 
@@ -589,6 +590,99 @@ describe('ClarifySession', () => {
       const fu = classifyFollowUp('good for studying', session);
       assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
       assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+  });
+
+  describe('G4: scope-change escape — contradictory new task', () => {
+    function pubsSession() {
+      closeClarifySession('g4-conv');
+      return createClarifySession(
+        'g4-conv',
+        'find pubs in west sussex',
+        ['location'],
+        { businessType: 'pubs', location: null },
+      );
+    }
+
+    function pubsSessionWithLocation() {
+      closeClarifySession('g4-conv');
+      return createClarifySession(
+        'g4-conv',
+        'find pubs in west sussex',
+        [],
+        { businessType: 'pubs', location: 'West Sussex' },
+      );
+    }
+
+    it('"cafes in bristol" during pubs session → isContradictoryNewTask true', () => {
+      const session = pubsSession();
+      assert.strictEqual(isContradictoryNewTask('cafes in bristol', session), true);
+    });
+
+    it('"cafes in bristol" during pubs session → classifyFollowUp returns NEW_REQUEST', () => {
+      const session = pubsSession();
+      const fu = classifyFollowUp('cafes in bristol', session);
+      assert.strictEqual(fu.classification, 'NEW_REQUEST');
+    });
+
+    it('"find restaurants in Manchester" during pubs session → NEW_REQUEST', () => {
+      const session = pubsSession();
+      const fu = classifyFollowUp('find restaurants in Manchester', session);
+      assert.strictEqual(fu.classification, 'NEW_REQUEST');
+    });
+
+    it('"find cafes in Leeds" during pubs+location session → NEW_REQUEST', () => {
+      const session = pubsSessionWithLocation();
+      const fu = classifyFollowUp('find cafes in Leeds', session);
+      assert.strictEqual(fu.classification, 'NEW_REQUEST');
+    });
+
+    it('"list breweries in Portland" during pubs session → NEW_REQUEST', () => {
+      const session = pubsSession();
+      const fu = classifyFollowUp('list breweries in Portland', session);
+      assert.strictEqual(fu.classification, 'NEW_REQUEST');
+    });
+
+    it('"search for gyms in Birmingham" during pubs session → NEW_REQUEST', () => {
+      const session = pubsSession();
+      const fu = classifyFollowUp('search for gyms in Birmingham', session);
+      assert.strictEqual(fu.classification, 'NEW_REQUEST');
+    });
+
+    it('"Bristol" during pubs session with location missing → still ANSWER (not contradictory)', () => {
+      const session = pubsSession();
+      const fu = classifyFollowUp('Bristol', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'location');
+    });
+
+    it('"west sussex" during pubs session → still ANSWER (same context)', () => {
+      const session = pubsSession();
+      const fu = classifyFollowUp('west sussex', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'location');
+    });
+
+    it('"dog friendly" during pubs session → still REFINEMENT (not contradictory)', () => {
+      const session = pubsSessionWithLocation();
+      const fu = classifyFollowUp('dog friendly', session);
+      assert.strictEqual(fu.classification, 'REFINEMENT');
+    });
+
+    it('"freehouses" during pubs session → still REFINEMENT', () => {
+      const session = pubsSessionWithLocation();
+      const fu = classifyFollowUp('freehouses', session);
+      assert.strictEqual(fu.classification, 'REFINEMENT');
+    });
+
+    it('"pubs in Brighton" during pubs session → NOT contradictory (same entity)', () => {
+      const session = pubsSession();
+      assert.strictEqual(isContradictoryNewTask('pubs in Brighton', session), false);
+    });
+
+    it('"find pubs in Brighton" during pubs session → NOT contradictory (same entity)', () => {
+      const session = pubsSession();
+      assert.strictEqual(isContradictoryNewTask('find pubs in Brighton', session), false);
     });
   });
 });
