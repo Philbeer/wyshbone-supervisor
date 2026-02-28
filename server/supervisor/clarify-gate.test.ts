@@ -166,6 +166,90 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
     });
   });
 
+  describe('Expanded subjective criteria (G6 Phase 5)', () => {
+    it('"find nice pubs in Bristol" → clarify_before_run (subjective "nice")', () => {
+      const result = evaluateClarifyGate('find nice pubs in Bristol');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
+    });
+
+    it('"find good cafes in Manchester" → clarify_before_run (subjective "good")', () => {
+      const result = evaluateClarifyGate('find good cafes in Manchester');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
+    });
+
+    it('"find places with good atmosphere in Leeds" → clarify_before_run', () => {
+      const result = evaluateClarifyGate('find places with good atmosphere in Leeds');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
+    });
+
+    it('"find cafes good for studying in Bristol" → agent_run (measurable)', () => {
+      const result = evaluateClarifyGate('find cafes good for studying in Bristol');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+  });
+
+  describe('Measurable attributes bypass subjective block (G6 Phase 5)', () => {
+    it('"find best bars with nightlife in Manchester" → agent_run', () => {
+      const result = evaluateClarifyGate('find best bars with nightlife in Manchester');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"find top lively pubs in Leeds" → agent_run', () => {
+      const result = evaluateClarifyGate('find top lively pubs in Leeds');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"find nicest romantic restaurants in Bath" → agent_run', () => {
+      const result = evaluateClarifyGate('find nicest romantic restaurants in Bath');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"find best trendy cafes in Brighton" → agent_run', () => {
+      const result = evaluateClarifyGate('find best trendy cafes in Brighton');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"find best walkable pubs in York" → agent_run', () => {
+      const result = evaluateClarifyGate('find best walkable pubs in York');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"find top student bars in Leeds" → agent_run', () => {
+      const result = evaluateClarifyGate('find top student bars in Leeds');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"find best cafes with views in Edinburgh" → agent_run', () => {
+      const result = evaluateClarifyGate('find best cafes with views in Edinburgh');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"find nicest scenic restaurants in Cornwall" → agent_run', () => {
+      const result = evaluateClarifyGate('find nicest scenic restaurants in Cornwall');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+  });
+
+  describe('Negative tests: measurable attributes bypass subjective', () => {
+    it('"find cafes in Bristol that are quiet" → agent_run (quiet is measurable)', () => {
+      const result = evaluateClarifyGate('find cafes in Bristol that are quiet');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"find good pubs with live music in Bristol" → agent_run (live music is measurable)', () => {
+      const result = evaluateClarifyGate('find good pubs with live music in Bristol');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"find nice bars with outdoor seating in Leeds" → agent_run (outdoor seating is measurable)', () => {
+      const result = evaluateClarifyGate('find nice bars with outdoor seating in Leeds');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+  });
+
   describe('Normal queries still run (no false positives)', () => {
     it('"find cafes in Bristol" → agent_run', () => {
       const result = evaluateClarifyGate('find cafes in Bristol');

@@ -410,4 +410,185 @@ describe('ClarifySession', () => {
       assert.strictEqual(followUp.updatedField, 'semantic_constraint');
     });
   });
+
+  describe('G6 Phase 5: multi-turn 3-step flow', () => {
+    function vibesSession() {
+      closeClarifySession('g6-multi');
+      return createClarifySession(
+        'g6-multi',
+        'find the best vibes near council things',
+        ['location', 'semantic_constraint'],
+        { businessType: null, location: null },
+      );
+    }
+
+    it('step 1: initial state has both location + semantic_constraint missing, status ask_more', () => {
+      const session = vibesSession();
+      assert.strictEqual(sessionIsComplete(session), false);
+      const state = buildClarifyState(session);
+      assert.strictEqual(state.status, 'ask_more');
+      assert.ok(state.missingFields.includes('location'));
+      assert.ok(state.missingFields.includes('semantic_constraint'));
+    });
+
+    it('step 2: "Manchester city centre" resolves location but NOT semantic_constraint', () => {
+      const session = vibesSession();
+      const fu = classifyFollowUp('Manchester city centre', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'location');
+      applyFollowUp(session, fu);
+      incrementTurnCount(session);
+      assert.strictEqual(session.collectedFields.location, 'Manchester city centre');
+      assert.ok(!session.missingFields.includes('location'), 'location should be resolved');
+      assert.ok(session.missingFields.includes('semantic_constraint'), 'semantic_constraint should still be missing');
+      assert.strictEqual(sessionIsComplete(session), false);
+      const state = buildClarifyState(session);
+      assert.strictEqual(state.status, 'ask_more');
+    });
+
+    it('step 3: "lively nightlife, late night" resolves semantic_constraint → ready_to_search', () => {
+      const session = vibesSession();
+      session.collectedFields.businessType = 'bars';
+      applyFollowUp(session, { classification: 'ANSWER_TO_MISSING_FIELD', updatedField: 'location', value: 'Manchester city centre' });
+      incrementTurnCount(session);
+      const fu = classifyFollowUp('lively nightlife, late night', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+      applyFollowUp(session, fu);
+      incrementTurnCount(session);
+      assert.ok(!session.missingFields.includes('semantic_constraint'), 'semantic_constraint should be resolved');
+      assert.strictEqual(session.missingFields.length, 0);
+      assert.strictEqual(sessionIsComplete(session), true);
+      const state = buildClarifyState(session);
+      assert.strictEqual(state.status, 'ready_to_search');
+    });
+
+    it('EXECUTE_NOW after step 2 (location only) is still blocked', () => {
+      const session = vibesSession();
+      session.collectedFields.businessType = 'pubs';
+      applyFollowUp(session, { classification: 'ANSWER_TO_MISSING_FIELD', updatedField: 'location', value: 'Manchester city centre' });
+      incrementTurnCount(session);
+      const fu = classifyFollowUp('search now', session);
+      assert.strictEqual(fu.classification, 'EXECUTE_NOW');
+      assert.strictEqual(sessionIsComplete(session), false, 'Should not be complete — semantic_constraint still missing');
+    });
+
+    it('EXECUTE_NOW after step 3 (both resolved) allows search', () => {
+      const session = vibesSession();
+      session.collectedFields.businessType = 'pubs';
+      applyFollowUp(session, { classification: 'ANSWER_TO_MISSING_FIELD', updatedField: 'location', value: 'Manchester city centre' });
+      applyFollowUp(session, { classification: 'ANSWER_TO_MISSING_FIELD', updatedField: 'semantic_constraint', value: 'lively nightlife' });
+      assert.strictEqual(sessionIsComplete(session), true);
+    });
+  });
+
+  describe('G6 Phase 5: expanded measurable criteria in follow-ups', () => {
+    function semanticSession() {
+      closeClarifySession('g6-exp');
+      return createClarifySession(
+        'g6-exp',
+        'find the best bars in Bristol',
+        ['semantic_constraint'],
+        { businessType: 'bars', location: 'Bristol' },
+      );
+    }
+
+    it('"nightlife" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('nightlife', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"lively" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('lively', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"quiet" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('quiet', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"late night" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('late night', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"views" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('views', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"student" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('student', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"walkable" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('walkable', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"romantic" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('romantic', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"scenic" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('scenic', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"trendy" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('trendy', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"events" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('events', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"cosy" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('cosy', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"lively nightlife with outdoor seating and late night" resolves semantic_constraint (longer reply)', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('lively nightlife with outdoor seating and late night', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+
+    it('"good for studying" resolves semantic_constraint', () => {
+      const session = semanticSession();
+      const fu = classifyFollowUp('good for studying', session);
+      assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    });
+  });
 });

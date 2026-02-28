@@ -1,0 +1,65 @@
+ou are working in the Wyshbone Supervisor repo.
+
+Goal: Fix Chat Gate G6. The system must NOT become runnable for vague / subjective queries like:
+"find the best vibes near council things"
+
+Current failure: clarify_for_run creates a session and then shows "Ready to search" even though:
+
+location is not a real location
+
+the criterion "best vibes" is undefined and not measurable
+
+Required new behaviour (acceptance criteria):
+A) When the user query contains subjective / vague ranking language (examples: "best vibes", "best", "nice", "good atmosphere", "cool", "fun", "trendy", "romantic", "family friendly", "quiet", "lively") AND the query does not specify a measurable proxy, the clarify session must add a required field like vibe_definition (or measurable_criteria) and ask a question to define it with examples (nightlife, live music, cosy/quiet, views, student vibe, dog friendly, late night, etc).
+B) When the user location is not a real location (eg "council things"), the clarify session must keep location in missingFields and ask for a real location (city/town/postcode).
+C) The clarify session must NOT return status ready_to_search or allow execute intent to proceed until BOTH are satisfied:
+
+location is real
+
+vibe_definition is provided (or measurable criteria provided)
+D) If the user replies with only a location (eg "Manchester city centre"), the session must still ask the vibe_definition question and remain not runnable.
+E) Add unit tests for these cases.
+
+Implementation guidance:
+
+Extend ClarifySession to include a new field:
+
+vibeDefinition?: string | null (or a generic measurableCriteria?: string | null)
+
+Add detection in clarify-session.ts (or clarify-gate.ts if that is where parsing lives):
+
+Detect subjective / vague ranking terms in the initial message and in follow-ups.
+
+If detected and no measurable criteria present, add vibe_definition to missingFields and include a pending question asking what it means.
+
+Add a simple measurable-criteria detector: treat presence of known measurable proxies as satisfying the requirement (examples: "nightlife", "late night", "live music", "quiet", "cosy", "views", "student", "family friendly", "dog friendly", "budget", "walkable", "events", etc).
+
+Update buildClarifyState output so missingFields includes vibe_definition when needed, and status is "gathering" until missingFields is empty.
+
+Ensure EXECUTE_NOW ("search now") cannot run while missingFields includes vibe_definition.
+
+Ensure session summary text does not pretend "council things" is a location.
+
+Tests to add:
+
+Input: "find the best vibes near council things"
+Expect: missingFields includes location + vibe_definition, status gathering, asks 2 questions (or one combined question).
+
+Follow-up: "Manchester city centre"
+Expect: missingFields still includes vibe_definition, status gathering, asks vibe definition.
+
+Follow-up: "lively nightlife, late night"
+Expect: missingFields empty, status ready_to_search (or auto-run depending on current design).
+
+Negative test: "find cafes in Bristol that are quiet"
+Expect: quiet counts as measurable so no vibe_definition missing, just run or normal clarify for missing location if needed.
+
+Make the smallest production-grade change. Do not hack the UI. Fix it at the clarify session logic.
+
+Deliverables:
+
+Code changes
+
+Updated tests passing
+
+Short summary of what changed and where

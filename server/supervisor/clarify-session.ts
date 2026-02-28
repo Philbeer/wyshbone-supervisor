@@ -138,6 +138,7 @@ const EXECUTE_INTENT = /^\s*(?:search now|run it|run the search|go ahead|yes pro
 
 const REFINEMENT_LIKE = /^[a-z\s-]+$/i;
 const BUSINESS_MODIFIERS = /\b(?:free\s*houses?|gastropubs?|wine\s*bars?|cocktail\s*bars?|sports?\s*bars?|craft\s*beer|real\s*ale|micro\s*pubs?|tap\s*rooms?|beer\s*gardens?|dog\s*friendly|family\s*friendly|live\s*music|food\s*served|cask\s*ale|independent|chain|premium|budget|organic|vegan|vegetarian|gluten\s*free|halal|kosher)\b/i;
+const MEASURABLE_CRITERIA = /\b(?:live\s*music|craft\s*beer|real\s*ale|cask\s*ale|dog\s*friendly|family\s*friendly|late[- ]?\s*night|cheap|budget|expensive|premium|cosy|cozy|quiet|outdoor\s*seating|beer\s*garden|rooftop|waterfront|riverside|seafront|free\s*wifi|wheelchair|accessible|parking|vegan|vegetarian|gluten\s*free|halal|kosher|organic|independent|chain|gastropub|wine\s*bar|cocktail\s*bar|sports?\s*bar|micro\s*pub|tap\s*room|free\s*house|food\s*served|nightlife|lively|romantic|trendy|walkable|events|student|views|scenic|good\s+for\s+studying)\b/i;
 
 function looksLikeLocation(msg: string): boolean {
   const trimmed = msg.trim();
@@ -171,7 +172,7 @@ function isShortFieldAnswer(msg: string, session: ClarifySession): boolean {
   if (session.missingFields.includes('relationship_clarification')) {
     if (/\b(?:yes|yeah|yep|sure|ok|okay|just|any|fine)\b/i.test(stripped) && !isExecuteIntent(stripped)) return true;
   }
-  if (session.missingFields.includes('semantic_constraint') && BUSINESS_MODIFIERS.test(stripped)) return true;
+  if (session.missingFields.includes('semantic_constraint') && MEASURABLE_CRITERIA.test(stripped)) return true;
 
   return false;
 }
@@ -209,6 +210,7 @@ function looksLikeRefinement(msg: string): boolean {
   const trimmed = msg.trim();
   if (trimmed.split(/\s+/).length > 5) return false;
   if (BUSINESS_MODIFIERS.test(trimmed)) return true;
+  if (MEASURABLE_CRITERIA.test(trimmed)) return true;
   if (REFINEMENT_LIKE.test(trimmed) && trimmed.split(/\s+/).length <= 3) return true;
   return false;
 }
@@ -258,7 +260,7 @@ export function classifyFollowUp(msg: string, session: ClarifySession): FollowUp
     }
   }
 
-  if (session.missingFields.includes('semantic_constraint') && BUSINESS_MODIFIERS.test(trimmed)) {
+  if (session.missingFields.includes('semantic_constraint') && MEASURABLE_CRITERIA.test(trimmed)) {
     return {
       classification: 'ANSWER_TO_MISSING_FIELD',
       updatedField: 'semantic_constraint',
