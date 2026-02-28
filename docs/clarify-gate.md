@@ -34,6 +34,34 @@ The gate triggers `clarify_before_run` if **any** of the following are true:
 - Always includes: "I'll run the search once you confirm"
 - Never implies execution has started
 
+## Clarify Session (Follow-up Handling)
+
+When the gate triggers `clarify_before_run`, a **ClarifySession** is created in memory for the conversation. This prevents the merge/concatenation bug where follow-up answers get appended into the original query text.
+
+### Session State
+
+Each session tracks:
+- `originalUserRequest` — immutable, the exact text the user first typed
+- `missingFields` — which fields still need answers (e.g. `location`, `entity_type`)
+- `collectedFields` — structured data: `{ businessType, location, attribute, count, relationship }`
+
+### Follow-up Classification
+
+When a user replies during an active session, the message is classified as:
+
+| Classification | Meaning | Action |
+|---|---|---|
+| `ANSWER_TO_MISSING_FIELD` | Answers a pending question (e.g. "West Sussex" when location was asked) | Updates the structured field, removes from missing list |
+| `REFINEMENT` | Adds detail consistent with the original request (e.g. "freehouses", "dog friendly") | Updates attribute field |
+| `NEW_REQUEST` | Unrelated message, question, or new search (e.g. "are these results guaranteed correct", "can you help me with sales") | **Closes session immediately**, routes message normally — never merged |
+
+### Key Guarantees
+
+1. Raw user input is **never appended** to the query string
+2. The clarify summary is always **re-rendered from structured fields** (`renderClarifySummary`)
+3. `NEW_REQUEST` messages are **never merged** into the pending query — the session is closed first
+4. Sessions auto-expire after 15 minutes
+
 ## Examples
 
 | Input | Route | Reason |
@@ -46,13 +74,23 @@ The gate triggers `clarify_before_run` if **any** of the following are true:
 | `"find pubs"` | `clarify_before_run` | No location specified |
 | `"earlier you said you'd look into care homes"` | `clarify_before_run` | References false prior context |
 
+### Session Follow-up Examples
+
+| Session state | User says | Classification | Result |
+|---|---|---|---|
+| Missing: location, BT: pubs | `"west sussex"` | ANSWER_TO_MISSING_FIELD | location = "west sussex", session complete → run |
+| Complete, BT: pubs, Loc: west sussex | `"freehouses"` | REFINEMENT | attribute = "freehouses" |
+| Complete, BT: pubs, Loc: west sussex | `"are these results guaranteed correct"` | NEW_REQUEST | Session closed, routed as direct_response |
+| Missing: relationship, BT: orgs, Loc: blackpool | `"any, just research it"` | ANSWER_TO_MISSING_FIELD | relationship confirmed |
+| Missing: relationship, BT: orgs, Loc: blackpool | `"can you help me with sales"` | NEW_REQUEST | Session closed, routed normally |
+
 ## Implementation
 
-- **File:** `server/supervisor/clarify-gate.ts`
-- **Function:** `evaluateClarifyGate(userMessage: string): ClarifyGateResult`
-- **Returns:** `{ route, reason, questions? }`
+- **Clarify Gate:** `server/supervisor/clarify-gate.ts` — `evaluateClarifyGate(userMessage): ClarifyGateResult`
+- **Clarify Session:** `server/supervisor/clarify-session.ts` — session state, follow-up classification, structured field management
 - **Integration point:** `processChatTask()` in `server/supervisor.ts`, runs before `executeTowerLoopChat()`
-- **Logging:** Every routing decision is logged to console (`[CLARIFY_GATE]`) and emitted as a `diagnostic` artefact
+- **Logging:** `[CLARIFY_GATE]` and `[CLARIFY_SESSION]` console logs + `diagnostic` artefacts
+- **Tests:** `server/supervisor/clarify-session.test.ts` (17 tests)
 
 ## Relationship to Existing Gates
 

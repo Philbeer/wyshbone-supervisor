@@ -2,10 +2,17 @@ import { RELATIONSHIP_PREDICATES } from './relationship-predicate';
 
 export type ClarifyRoute = 'direct_response' | 'clarify_before_run' | 'agent_run';
 
+export type ClarifyMissingField = 'location' | 'entity_type' | 'relationship_clarification';
+
 export interface ClarifyGateResult {
   route: ClarifyRoute;
   reason: string;
   questions?: string[];
+  missingFields?: ClarifyMissingField[];
+  parsedFields?: {
+    businessType: string | null;
+    location: string | null;
+  };
 }
 
 const DIRECT_RESPONSE_PATTERNS = [
@@ -134,6 +141,27 @@ function hasFalsePriorContext(msg: string): boolean {
   return false;
 }
 
+function extractBusinessType(msg: string): string | null {
+  const lower = msg.toLowerCase();
+  const verbMatch = lower.match(/\b(?:find|search|list|show|get|look\s+for|locate|discover|identify|give me|pull|fetch|source)\s+(?:\d+\s+)?(.+?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i);
+  if (verbMatch) {
+    let bt = verbMatch[1].trim();
+    bt = bt.replace(/\b(?:for me|please|thanks|thank you)\b/gi, '').trim();
+    if (bt && bt.length > 1 && bt.length < 60) return bt;
+  }
+  return null;
+}
+
+function extractLocation(msg: string): string | null {
+  const locMatch = msg.match(/\b(?:in|near|around|across|throughout|within)\s+([A-Z][\w\s,'-]+)/i);
+  if (locMatch) {
+    let loc = locMatch[1].trim();
+    loc = loc.replace(/\s+(?:please|thanks|thank you)$/i, '').trim();
+    if (loc && loc.length > 1 && loc.length < 60) return loc;
+  }
+  return null;
+}
+
 export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   const msg = userMessage.trim();
 
@@ -146,6 +174,7 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
 
   const questions: string[] = [];
   const reasons: string[] = [];
+  const missing: ClarifyMissingField[] = [];
 
   if (hasFalsePriorContext(msg)) {
     reasons.push('references prior context that may not exist');
@@ -167,16 +196,19 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   if (hasRelationshipPredicate(msg)) {
     reasons.push('contains a relationship predicate that cannot be verified by search alone');
     questions.push('You\'re asking about a relationship between entities (e.g. "works with", "supplies"). I can find businesses in a location, but I can\'t verify relationships between them. Would you like me to search for the target entity type in a specific location instead?');
+    missing.push('relationship_clarification');
   }
 
   if (hasVagueEntityType(msg) && !hasRelationshipPredicate(msg)) {
     reasons.push('entity type is vague without a sector qualifier');
     questions.push('Could you be more specific about the type of business? For example, instead of "organisations", could you specify a sector like "care providers" or "marketing agencies"?');
+    missing.push('entity_type');
   }
 
   if (isMissingLocation(msg) && hasLeadFindingVerb(msg)) {
     reasons.push('no clear location specified');
     questions.push('Which city, region, or country should I search in?');
+    missing.push('location');
   }
 
   if (questions.length > 0) {
@@ -184,6 +216,11 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
       route: 'clarify_before_run',
       reason: `Clarification needed: ${reasons.join('; ')}.`,
       questions: questions.slice(0, 3),
+      missingFields: missing,
+      parsedFields: {
+        businessType: extractBusinessType(msg),
+        location: extractLocation(msg),
+      },
     };
   }
 

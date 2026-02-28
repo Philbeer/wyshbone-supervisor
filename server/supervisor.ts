@@ -22,7 +22,8 @@ import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput, type AttributeEvidenceMap } from './supervisor/cvl';
 import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-plan-gate';
-import { evaluateClarifyGate, type ClarifyGateResult } from './supervisor/clarify-gate';
+import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField } from './supervisor/clarify-gate';
+import { getClarifySession, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, renderClarifySummary, sessionIsComplete, buildSearchFromSession, type ClarifySession } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
 
@@ -731,54 +732,144 @@ class SupervisorService {
       return;
     }
 
-    const clarifyGate = evaluateClarifyGate(rawMsg);
-    console.log(`[CLARIFY_GATE] route=${clarifyGate.route} reason="${clarifyGate.reason}"${clarifyGate.questions ? ` questions=${JSON.stringify(clarifyGate.questions)}` : ''}`);
+    const existingSession = getClarifySession(task.conversation_id);
+    let sessionCompletedToRun = false;
 
-    await createArtefact({
-      runId: jobId,
-      type: 'diagnostic',
-      title: `Clarify gate: ${clarifyGate.route}`,
-      summary: clarifyGate.reason,
-      payload: { route: clarifyGate.route, reason: clarifyGate.reason, questions: clarifyGate.questions ?? null },
-      userId: task.user_id,
-      conversationId: task.conversation_id,
-    }).catch((e: any) => console.warn(`[CLARIFY_GATE] Failed to emit artefact: ${e.message}`));
+    if (existingSession) {
+      const followUp = classifyFollowUp(rawMsg, existingSession);
+      console.log(`[CLARIFY_SESSION] conversation=${task.conversation_id} classification=${followUp.classification} field=${followUp.updatedField ?? 'none'} value="${(followUp.value ?? '').substring(0, 40)}"`);
 
-    if (clarifyGate.route === 'direct_response') {
-      const directMsg = rawMsg.trim().endsWith('?')
-        ? `That's a great question. Let me answer directly rather than running a search.\n\nI'm a lead generation agent — I find businesses in specific locations for B2B outreach. If you'd like me to search for something, just tell me the type of business and the location.\n\nFor example: "Find 10 micropubs in Sussex UK"`
-        : `I'm a lead generation agent. I can find businesses in specific locations for B2B outreach. Just tell me the type of business and the location, and I'll get to work.\n\nFor example: "Find 10 micropubs in Sussex UK"`;
+      await createArtefact({
+        runId: jobId,
+        type: 'diagnostic',
+        title: `Clarify session follow-up: ${followUp.classification}`,
+        summary: `Follow-up to "${existingSession.originalUserRequest.substring(0, 60)}" — classified as ${followUp.classification}`,
+        payload: { classification: followUp.classification, updatedField: followUp.updatedField ?? null, value: followUp.value ?? null, originalRequest: existingSession.originalUserRequest, collectedFields: existingSession.collectedFields },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch((e: any) => console.warn(`[CLARIFY_SESSION] Failed to emit artefact: ${e.message}`));
 
-      const messageId = randomUUID();
+      if (followUp.classification === 'NEW_REQUEST') {
+        closeClarifySession(task.conversation_id);
+        console.log(`[CLARIFY_SESSION] Closed session for conversation=${task.conversation_id} — new request detected, routing normally`);
+      } else {
+        applyFollowUp(existingSession, followUp);
+        const summary = renderClarifySummary(existingSession);
+        console.log(`[CLARIFY_SESSION] Updated session — summary="${summary}" remaining_missing=[${existingSession.missingFields.join(',')}]`);
 
-      const [taskUpdateResult, msgResult] = await Promise.all([
-        supabase.from('supervisor_tasks').update({ status: 'completed', result: { response: directMsg.substring(0, 200), message_id: messageId, clarify_gate: 'direct_response' } }).eq('id', task.id),
-        supabase.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: directMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'direct_response', reason: clarifyGate.reason }, created_at: Date.now() }).select().single(),
-      ]);
+        if (sessionIsComplete(existingSession)) {
+          const searchParams = buildSearchFromSession(existingSession);
+          closeClarifySession(task.conversation_id);
+          console.log(`[CLARIFY_SESSION] Session complete — proceeding to agent_run with businessType="${searchParams.businessType}" location="${searchParams.location}" attribute="${searchParams.attribute}"`);
 
-      if (taskUpdateResult.error) console.error(`[CLARIFY_GATE] task update failed: ${taskUpdateResult.error.message}`);
-      if (msgResult.error) console.error(`[CLARIFY_GATE] message insert failed: ${msgResult.error.message}`);
+          const syntheticMsg = `find ${searchParams.count ? searchParams.count + ' ' : ''}${searchParams.businessType} in ${searchParams.location}${searchParams.attribute ? ' with ' + searchParams.attribute : ''}`;
+          (task.request_data as any).user_message = syntheticMsg;
+          if (!(task.request_data as any).search_query) (task.request_data as any).search_query = {};
+          (task.request_data as any).search_query.business_type = searchParams.businessType;
+          (task.request_data as any).search_query.location = searchParams.location;
 
-      await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'direct_response', endedAt: new Date(), metadata: { verdict: 'direct_response', clarify_gate: clarifyGate } }).catch(() => {});
-      return;
+          console.log(`[CLARIFY_SESSION] Synthetic message: "${syntheticMsg}"`);
+
+          sessionCompletedToRun = true;
+
+          await createArtefact({
+            runId: jobId,
+            type: 'diagnostic',
+            title: `Clarify session complete — launching search`,
+            summary: summary,
+            payload: { syntheticMessage: syntheticMsg, searchParams, originalRequest: existingSession.originalUserRequest },
+            userId: task.user_id,
+            conversationId: task.conversation_id,
+          }).catch((e: any) => console.warn(`[CLARIFY_SESSION] Failed to emit completion artefact: ${e.message}`));
+
+        } else {
+          const remainingQuestions: string[] = [];
+          for (const field of existingSession.missingFields) {
+            if (field === 'location') remainingQuestions.push('Which city, region, or country should I search in?');
+            else if (field === 'entity_type') remainingQuestions.push('Could you be more specific about the type of business?');
+            else if (field === 'relationship_clarification') remainingQuestions.push('Would you like me to search for the target entity type in a specific location instead?');
+          }
+
+          const clarifyMsg = `Got it. So far I have: ${summary}\n\n${remainingQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\nI'll run the search once you confirm.`;
+          const messageId = randomUUID();
+
+          const [taskUpdateResult, msgResult] = await Promise.all([
+            supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyMsg.substring(0, 200), message_id: messageId, clarify_gate: 'clarify_session_continue' } }).eq('id', task.id),
+            supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: clarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'clarify_session_continue', session_summary: summary, collected_fields: existingSession.collectedFields }, created_at: Date.now() }).select().single(),
+          ]);
+
+          if (taskUpdateResult.error) console.error(`[CLARIFY_SESSION] task update failed: ${taskUpdateResult.error.message}`);
+          if (msgResult.error) console.error(`[CLARIFY_SESSION] message insert failed: ${msgResult.error.message}`);
+
+          await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'clarify_session_continue', collected_fields: existingSession.collectedFields } }).catch(() => {});
+          return;
+        }
+      }
     }
 
-    if (clarifyGate.route === 'clarify_before_run') {
-      const clarifyQuestions = clarifyGate.questions || ['Could you provide more detail about what you need?'];
-      const clarifyMsg = clarifyQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n') + '\n\nI\'ll run the search once you confirm.';
+    if (!sessionCompletedToRun && (!existingSession || !getClarifySession(task.conversation_id))) {
+      const clarifyGate = evaluateClarifyGate(rawMsg);
+      console.log(`[CLARIFY_GATE] route=${clarifyGate.route} reason="${clarifyGate.reason}"${clarifyGate.questions ? ` questions=${JSON.stringify(clarifyGate.questions)}` : ''}`);
 
-      const messageId = randomUUID();
+      await createArtefact({
+        runId: jobId,
+        type: 'diagnostic',
+        title: `Clarify gate: ${clarifyGate.route}`,
+        summary: clarifyGate.reason,
+        payload: { route: clarifyGate.route, reason: clarifyGate.reason, questions: clarifyGate.questions ?? null, missingFields: clarifyGate.missingFields ?? null },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch((e: any) => console.warn(`[CLARIFY_GATE] Failed to emit artefact: ${e.message}`));
 
-      const [taskUpdateResult, msgResult] = await Promise.all([
-        supabase.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyMsg.substring(0, 200), message_id: messageId, clarify_gate: 'clarify_before_run' } }).eq('id', task.id),
-        supabase.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: clarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'clarify_before_run', reason: clarifyGate.reason, questions: clarifyGate.questions }, created_at: Date.now() }).select().single(),
-      ]);
+      if (clarifyGate.route === 'direct_response') {
+        closeClarifySession(task.conversation_id);
+        const directMsg = rawMsg.trim().endsWith('?')
+          ? `That's a great question. Let me answer directly rather than running a search.\n\nI'm a lead generation agent — I find businesses in specific locations for B2B outreach. If you'd like me to search for something, just tell me the type of business and the location.\n\nFor example: "Find 10 micropubs in Sussex UK"`
+          : `I'm a lead generation agent. I can find businesses in specific locations for B2B outreach. Just tell me the type of business and the location, and I'll get to work.\n\nFor example: "Find 10 micropubs in Sussex UK"`;
 
-      if (taskUpdateResult.error) console.error(`[CLARIFY_GATE] task update failed: ${taskUpdateResult.error.message}`);
-      if (msgResult.error) console.error(`[CLARIFY_GATE] message insert failed: ${msgResult.error.message}`);
+        const messageId = randomUUID();
 
-      await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'clarify_before_run', clarify_gate: clarifyGate } }).catch(() => {});
-      return;
+        const [taskUpdateResult, msgResult] = await Promise.all([
+          supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: directMsg.substring(0, 200), message_id: messageId, clarify_gate: 'direct_response' } }).eq('id', task.id),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: directMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'direct_response', reason: clarifyGate.reason }, created_at: Date.now() }).select().single(),
+        ]);
+
+        if (taskUpdateResult.error) console.error(`[CLARIFY_GATE] task update failed: ${taskUpdateResult.error.message}`);
+        if (msgResult.error) console.error(`[CLARIFY_GATE] message insert failed: ${msgResult.error.message}`);
+
+        await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'direct_response', endedAt: new Date(), metadata: { verdict: 'direct_response', clarify_gate: clarifyGate } }).catch(() => {});
+        return;
+      }
+
+      if (clarifyGate.route === 'clarify_before_run') {
+        const missingFields = clarifyGate.missingFields || [];
+        const parsedBT = clarifyGate.parsedFields?.businessType || null;
+        const parsedLoc = clarifyGate.parsedFields?.location || null;
+
+        createClarifySession(
+          task.conversation_id,
+          rawMsg,
+          missingFields as any[],
+          { businessType: parsedBT, location: parsedLoc },
+        );
+        console.log(`[CLARIFY_SESSION] Created session for conversation=${task.conversation_id} original="${rawMsg.substring(0, 60)}" missing=[${missingFields.join(',')}] bt="${parsedBT}" loc="${parsedLoc}"`);
+
+        const clarifyQuestions = clarifyGate.questions || ['Could you provide more detail about what you need?'];
+        const clarifyMsg = clarifyQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n') + '\n\nI\'ll run the search once you confirm.';
+
+        const messageId = randomUUID();
+
+        const [taskUpdateResult, msgResult] = await Promise.all([
+          supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyMsg.substring(0, 200), message_id: messageId, clarify_gate: 'clarify_before_run' } }).eq('id', task.id),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: clarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'clarify_before_run', reason: clarifyGate.reason, questions: clarifyGate.questions }, created_at: Date.now() }).select().single(),
+        ]);
+
+        if (taskUpdateResult.error) console.error(`[CLARIFY_GATE] task update failed: ${taskUpdateResult.error.message}`);
+        if (msgResult.error) console.error(`[CLARIFY_GATE] message insert failed: ${msgResult.error.message}`);
+
+        await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'clarify_before_run', clarify_gate: clarifyGate } }).catch(() => {});
+        return;
+      }
     }
 
     let towerResult: { response: string; leadIds: string[]; deliverySummary: DeliverySummaryPayload | null; towerVerdict: string | null; leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string }> };
