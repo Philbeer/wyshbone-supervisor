@@ -357,3 +357,56 @@ describe('Time Predicate — acceptance scenarios', () => {
     assert.ok(resolved.why_blocked!.includes('not supported'));
   });
 });
+
+describe('Time Predicate — realignment: Supervisor as sole authority', () => {
+  it('"Find 10 pubs in Manchester that opened in the last 12 months" → all contract fields set correctly', () => {
+    const contract = buildTimePredicateContract('Find 10 pubs in Manchester that opened in the last 12 months');
+    assert.ok(contract !== null, 'time_predicate constraint must exist');
+
+    assert.strictEqual(contract!.type, 'time_predicate');
+    assert.strictEqual(contract!.predicate, 'opened');
+    assert.strictEqual(contract!.window, '12 months');
+    assert.strictEqual(contract!.window_days, 360);
+    assert.strictEqual(contract!.reference_date, 'now');
+
+    assert.strictEqual(contract!.hardness, 'soft');
+    assert.strictEqual(contract!.verifiability, 'proxy', 'verifiability must be proxy — not verifiable from Places');
+    assert.strictEqual(contract!.can_execute, false, 'can_execute must be false — no proxy accepted yet');
+    assert.ok(contract!.why_blocked !== null, 'why_blocked must be set');
+    assert.ok(typeof contract!.why_blocked === 'string' && contract!.why_blocked.length > 0);
+    assert.ok(contract!.suggested_rephrase !== null, 'suggested_rephrase must be set');
+    assert.ok(typeof contract!.suggested_rephrase === 'string' && contract!.suggested_rephrase.length > 0);
+
+    assert.ok(Array.isArray(contract!.proxy_options), 'proxy_options must be an array');
+    assert.ok(contract!.proxy_options.length > 0, 'proxy_options must be non-empty');
+    assert.ok(contract!.proxy_options.some(p => p.supported), 'at least one proxy must be supported');
+
+    assert.strictEqual(contract!.chosen_proxy, null, 'no proxy chosen yet');
+    assert.deepStrictEqual(contract!.required_inputs_missing, [], 'window is explicit, no inputs missing');
+  });
+
+  it('resolveProxyChoice gates on ambiguous window even after proxy acceptance', () => {
+    const contract = buildTimePredicateContract('find pubs opened recently in Leeds')!;
+    assert.ok(contract.required_inputs_missing.includes('time_window'));
+    const resolved = resolveProxyChoice(contract, 'recent_reviews');
+    assert.strictEqual(resolved.can_execute, false, 'must block — window is ambiguous');
+    assert.ok(resolved.why_blocked!.includes('ambiguous'));
+    assert.strictEqual(resolved.chosen_proxy, 'recent_reviews', 'proxy is recorded but execution still blocked');
+  });
+
+  it('every contract path always sets why_blocked and suggested_rephrase when can_execute=false', () => {
+    const inputs = [
+      'find pubs opened recently in Leeds',
+      'find pubs opened in last 12 months in Leeds',
+      'find pubs that must have opened recently in Leeds',
+    ];
+    for (const input of inputs) {
+      const contract = buildTimePredicateContract(input)!;
+      assert.ok(contract !== null, `Contract must exist for: ${input}`);
+      if (!contract.can_execute) {
+        assert.ok(contract.why_blocked !== null && contract.why_blocked.length > 0, `why_blocked must be set for: ${input}`);
+        assert.ok(contract.suggested_rephrase !== null && contract.suggested_rephrase.length > 0, `suggested_rephrase must be set for: ${input}`);
+      }
+    }
+  });
+});

@@ -1,3 +1,6 @@
+// Supervisor is the sole authority for constraint interpretation and verifiability.
+// UI and Tower must not invent or infer time predicate fields — they consume this contract as-is.
+
 export type TimePredicateVerb = 'opened' | 'closed' | 'renovated' | 'new_listing' | 'recent_reviews' | 'news_mention';
 export type Verifiability = 'verifiable' | 'proxy' | 'unverifiable';
 export type Hardness = 'hard' | 'soft';
@@ -191,7 +194,7 @@ export function buildTimePredicateContract(
   } else {
     can_execute = false;
     why_blocked = 'Opening dates cannot be verified directly. Please choose an acceptable proxy or I should stop.';
-    suggested_rephrase = null;
+    suggested_rephrase = 'Try: "use recent reviews as a proxy" or "use news mentions as a proxy".';
   }
 
   return {
@@ -235,6 +238,18 @@ export function resolveProxyChoice(
       why_blocked: `The proxy "${choice}" is not supported in our current toolset.`,
       suggested_rephrase: 'Choose from the supported proxy options: ' + contract.proxy_options.filter(p => p.supported).map(p => p.label).join(', ') + '.',
       chosen_proxy: null,
+    };
+  }
+
+  const windowStillMissing = contract.required_inputs_missing.includes('time_window');
+  if (windowStillMissing) {
+    return {
+      ...contract,
+      verifiability: 'proxy',
+      can_execute: false,
+      why_blocked: 'Time window is ambiguous (e.g. "recently"). Please specify a concrete window like "last 12 months" or "last 6 months".',
+      suggested_rephrase: 'How recently? e.g. "in the last 12 months", "in the last 6 months", "this year".',
+      chosen_proxy: choice,
     };
   }
 
