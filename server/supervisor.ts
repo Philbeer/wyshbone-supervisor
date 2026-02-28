@@ -818,6 +818,7 @@ class SupervisorService {
             if (f === 'location') return 'location (city, region, or country)';
             if (f === 'entity_type') return 'type of business';
             if (f === 'relationship_clarification') return 'relationship confirmation';
+            if (f === 'semantic_constraint') return 'a measurable criterion (e.g. live music, cosy, dog-friendly)';
             return f;
           });
 

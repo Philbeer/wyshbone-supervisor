@@ -128,6 +128,44 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
     });
   });
 
+  describe('Sanitised parsedFields — no nonsense stored', () => {
+    it('"find the best vibes near council things" → parsedFields.location is null (not "council things")', () => {
+      const result = evaluateClarifyGate('find the best vibes near council things');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.strictEqual(result.parsedFields!.location, null, 'Should NOT store nonsense location');
+    });
+
+    it('"find the best vibes near council things" → parsedFields.businessType strips subjective words', () => {
+      const result = evaluateClarifyGate('find the best vibes near council things');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      const bt = result.parsedFields!.businessType;
+      if (bt) {
+        assert.ok(!/\bbest\b/i.test(bt), `businessType should not contain "best": got "${bt}"`);
+        assert.ok(!/\bvibes?\b/i.test(bt), `businessType should not contain "vibes": got "${bt}"`);
+      }
+    });
+
+    it('"find the best cafes in bristol" → parsedFields.location is "bristol" (valid location preserved)', () => {
+      const result = evaluateClarifyGate('find the best cafes in bristol');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.parsedFields!.location, 'Should preserve valid location');
+      assert.ok(/bristol/i.test(result.parsedFields!.location!));
+    });
+
+    it('"find the best cafes in bristol" → parsedFields.businessType does not contain "best"', () => {
+      const result = evaluateClarifyGate('find the best cafes in bristol');
+      const bt = result.parsedFields!.businessType;
+      if (bt) {
+        assert.ok(!/\bbest\b/i.test(bt), `businessType should not contain "best": got "${bt}"`);
+      }
+    });
+
+    it('"find pubs near council things" → parsedFields.location is null', () => {
+      const result = evaluateClarifyGate('find pubs near council things');
+      assert.strictEqual(result.parsedFields!.location, null);
+    });
+  });
+
   describe('Normal queries still run (no false positives)', () => {
     it('"find cafes in Bristol" → agent_run', () => {
       const result = evaluateClarifyGate('find cafes in Bristol');
@@ -172,6 +210,13 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
       assert.ok(result.reason.includes('subjective'));
       assert.ok(result.reason.includes('invalid') || result.reason.includes('nonsensical'));
       assert.ok(result.questions!.length >= 2);
+    });
+
+    it('"find the best vibes near council things" → missingFields includes both location and semantic_constraint', () => {
+      const result = evaluateClarifyGate('find the best vibes near council things');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.missingFields!.includes('location'), 'Should include location in missingFields');
+      assert.ok(result.missingFields!.includes('semantic_constraint'), 'Should include semantic_constraint in missingFields');
     });
   });
 });

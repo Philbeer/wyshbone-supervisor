@@ -171,6 +171,7 @@ function isShortFieldAnswer(msg: string, session: ClarifySession): boolean {
   if (session.missingFields.includes('relationship_clarification')) {
     if (/\b(?:yes|yeah|yep|sure|ok|okay|just|any|fine)\b/i.test(stripped) && !isExecuteIntent(stripped)) return true;
   }
+  if (session.missingFields.includes('semantic_constraint') && BUSINESS_MODIFIERS.test(stripped)) return true;
 
   return false;
 }
@@ -257,6 +258,14 @@ export function classifyFollowUp(msg: string, session: ClarifySession): FollowUp
     }
   }
 
+  if (session.missingFields.includes('semantic_constraint') && BUSINESS_MODIFIERS.test(trimmed)) {
+    return {
+      classification: 'ANSWER_TO_MISSING_FIELD',
+      updatedField: 'semantic_constraint',
+      value: trimmed,
+    };
+  }
+
   if (looksLikeRefinement(trimmed)) {
     return {
       classification: 'REFINEMENT',
@@ -296,6 +305,9 @@ export function applyFollowUp(session: ClarifySession, result: FollowUpResult): 
       session.collectedFields.relationship = result.value;
     } else if (result.updatedField === 'semantic_constraint') {
       session.collectedFields.semanticConstraint = result.value;
+      if (result.value && !session.collectedFields.attributes.includes(result.value)) {
+        session.collectedFields.attributes.push(result.value);
+      }
     }
     session.missingFields = session.missingFields.filter(f => f !== result.updatedField);
   } else if (result.classification === 'REFINEMENT' && result.value) {

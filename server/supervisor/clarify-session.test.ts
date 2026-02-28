@@ -339,4 +339,75 @@ describe('ClarifySession', () => {
       assert.strictEqual(summary, 'Find pubs in West Sussex (freehouses)');
     });
   });
+
+  describe('G6: semantic_constraint blocking', () => {
+    function g6Session() {
+      closeClarifySession('g6-conv');
+      return createClarifySession(
+        'g6-conv',
+        'find the best vibes near council things',
+        ['location', 'semantic_constraint'],
+        { businessType: null, location: null },
+      );
+    }
+
+    it('session with location + semantic_constraint missing is NOT complete', () => {
+      const session = g6Session();
+      assert.strictEqual(sessionIsComplete(session), false);
+      const state = buildClarifyState(session);
+      assert.strictEqual(state.status, 'ask_more');
+    });
+
+    it('providing location alone still leaves session incomplete', () => {
+      const session = g6Session();
+      applyFollowUp(session, { classification: 'ANSWER_TO_MISSING_FIELD', updatedField: 'location', value: 'Bristol' });
+      assert.strictEqual(session.collectedFields.location, 'Bristol');
+      assert.strictEqual(sessionIsComplete(session), false, 'Should not be complete — semantic_constraint still missing');
+      const state = buildClarifyState(session);
+      assert.strictEqual(state.status, 'ask_more');
+    });
+
+    it('providing measurable criteria resolves semantic_constraint', () => {
+      const session = g6Session();
+      session.collectedFields.businessType = 'cafes';
+      applyFollowUp(session, { classification: 'ANSWER_TO_MISSING_FIELD', updatedField: 'location', value: 'Bristol' });
+      const followUp = classifyFollowUp('live music', session);
+      assert.strictEqual(followUp.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(followUp.updatedField, 'semantic_constraint');
+      applyFollowUp(session, followUp);
+      assert.ok(!session.missingFields.includes('semantic_constraint'), 'semantic_constraint should be resolved');
+      assert.ok(session.collectedFields.attributes.includes('live music'), 'attribute should be added');
+    });
+
+    it('session becomes complete after location + criteria both provided', () => {
+      const session = g6Session();
+      session.collectedFields.businessType = 'pubs';
+      applyFollowUp(session, { classification: 'ANSWER_TO_MISSING_FIELD', updatedField: 'location', value: 'Leeds' });
+      applyFollowUp(session, { classification: 'ANSWER_TO_MISSING_FIELD', updatedField: 'semantic_constraint', value: 'dog friendly' });
+      assert.strictEqual(sessionIsComplete(session), true);
+      const state = buildClarifyState(session);
+      assert.strictEqual(state.status, 'ready_to_search');
+    });
+
+    it('EXECUTE_NOW is blocked when semantic_constraint is still missing', () => {
+      const session = g6Session();
+      session.collectedFields.businessType = 'pubs';
+      applyFollowUp(session, { classification: 'ANSWER_TO_MISSING_FIELD', updatedField: 'location', value: 'Bristol' });
+      assert.strictEqual(sessionIsComplete(session), false, 'Should not be complete with semantic_constraint missing');
+      assert.ok(session.missingFields.includes('semantic_constraint'));
+    });
+
+    it('"search now" classifies as EXECUTE_NOW even when blocked', () => {
+      const session = g6Session();
+      const followUp = classifyFollowUp('search now', session);
+      assert.strictEqual(followUp.classification, 'EXECUTE_NOW');
+    });
+
+    it('"dog friendly" resolves semantic_constraint when that field is missing', () => {
+      const session = g6Session();
+      const followUp = classifyFollowUp('dog friendly', session);
+      assert.strictEqual(followUp.classification, 'ANSWER_TO_MISSING_FIELD');
+      assert.strictEqual(followUp.updatedField, 'semantic_constraint');
+    });
+  });
 });

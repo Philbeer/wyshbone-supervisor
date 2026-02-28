@@ -343,14 +343,27 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   }
 
   if (questions.length > 0) {
+    const rawLoc = extractLocation(msg);
+    const locationIsInvalid = missing.includes('location');
+    const sanitisedLocation = locationIsInvalid ? null : rawLoc;
+
+    const rawBT = extractBusinessType(msg);
+    const btContainsSubjective = rawBT ? SUBJECTIVE_CRITERIA.test(rawBT) : false;
+    let sanitisedBusinessType = rawBT;
+    if (btContainsSubjective && rawBT) {
+      const SUBJECTIVE_GLOBAL = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey)\b/gi;
+      let cleaned = rawBT.replace(SUBJECTIVE_GLOBAL, '').replace(/\b(?:the|a|an)\b/gi, '').replace(/\s+/g, ' ').trim();
+      sanitisedBusinessType = cleaned.length > 1 ? cleaned : null;
+    }
+
     return {
       route: 'clarify_before_run',
       reason: `Clarification needed: ${reasons.join('; ')}.`,
       questions: questions.slice(0, 3),
       missingFields: missing,
       parsedFields: {
-        businessType: extractBusinessType(msg),
-        location: extractLocation(msg),
+        businessType: sanitisedBusinessType,
+        location: sanitisedLocation,
         count: extractCount(msg),
         timeFilter: extractTimeFilter(msg),
       },
