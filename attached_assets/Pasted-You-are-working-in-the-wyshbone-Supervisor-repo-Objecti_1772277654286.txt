@@ -1,0 +1,73 @@
+You are working in the wyshbone Supervisor repo.
+
+Objective
+Stop Wyshbone from guessing when user intent is unclear. Implement a “Clarify Gate” that routes each user message into exactly one of:
+1) direct_response (chat only, no tools)
+2) clarify_before_run (ask 1-3 targeted questions, no tools)
+3) agent_run (proceed with planning + tools)
+
+Critical problems observed
+- When user input is messy or mixed-intent, the system sometimes executes tools anyway and returns confident wrong results.
+- We saw string concatenation / mixed queries (example: "…Waleswhat organisations support vulnerable adults in leeds") which then got executed.
+- We need “if in doubt, ask again” as a hard rule.
+
+Constraints
+- Do not add new external tools.
+- Keep logic production-grade, not a hack.
+- Keep the existing agent loop. We are adding a gate BEFORE the loop.
+
+Required behavior
+A) direct_response (chat)
+If user asks for explanation, definition, advice, meta-questions, trust questions, etc, respond as chat and DO NOT run the agent.
+Examples:
+- “what does a lead generation agent do”
+- “are these results guaranteed correct”
+- “explain how this works”
+Return: direct_response
+
+B) clarify_before_run
+If the user asks for real-world entities but the request is underspecified or ambiguous, ask clarifying questions.
+Trigger clarify if ANY of these are true:
+- Missing a usable location (no city/region/country and no stored default)
+- Entity type is vague (“organisations”, “companies”, “places”) without a clear sector
+- Mixed intent or topic switch is detected (two different tasks in one message)
+- Relationship predicates are present (“works with”, “supplies”, “partners with”, “supports”, “serves”) AND the relationship target is not specified enough to verify
+- The user message appears malformed (joined strings, no spaces, obvious concatenation artifacts)
+
+Clarify output rules:
+- Ask 1-3 questions max
+- Questions must be specific and minimize user effort
+- Must state explicitly: “I can run the search once you confirm X”
+- Do not imply execution happened
+
+C) agent_run
+Only proceed when request is runnable and specific enough:
+- has a location (or we can safely use a default that the user has explicitly set in UI)
+- entity type is clear enough to search
+- no mixed-intent contamination
+- message passes basic sanity checks
+
+Implementation tasks
+1) Add a lightweight intent classifier function in Supervisor:
+- returns: {route: 'direct_response'|'clarify_before_run'|'agent_run', reason: string, questions?: string[]}
+- it should use simple heuristics + the existing parsing patterns (no new ML needed)
+- make it deterministic and debuggable (log the decision + reason into existing artefacts/decision_log)
+
+2) Add a “sanity check” for malformed / concatenated inputs:
+- detect missing spaces at join boundaries, extremely long tokens, or multiple unrelated question patterns in one line
+- if triggered: route to clarify_before_run and ask user to resend/confirm the intended query
+
+3) Integrate this at the top of the chat handling flow so agent execution never starts if route != agent_run.
+
+4) Add acceptance tests (can be simple unit tests or test cases in code comments):
+- “what does a lead generation agent do” -> direct_response
+- “find 10 micropubs in Sussex UK” -> agent_run
+- “organisations that work with councils” -> clarify_before_run (ask: location + what kind of relationship)
+- “Find decision-makers at breweries in Waleswhat organisations support vulnerable adults in Leeds” -> clarify_before_run (detect malformed mixed intent)
+
+Deliverables
+- Code changes with clear commit message
+- A short markdown note: docs/clarify-gate.md explaining the rules and examples
+- Ensure existing behavior for clean inputs still works.
+
+Do not change UI code in this task.

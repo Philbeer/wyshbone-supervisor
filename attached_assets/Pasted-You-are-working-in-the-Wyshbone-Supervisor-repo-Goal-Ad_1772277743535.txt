@@ -1,0 +1,56 @@
+You are working in the Wyshbone Supervisor repo.
+
+Goal
+Add a strict “Clarify Gate” before any agent execution.
+If user intent is unclear, DO NOT RUN TOOLS. Ask clarifying questions instead.
+
+This is the primary rule:
+IF IN DOUBT → CLARIFY, NEVER GUESS.
+
+Do not add new tools. Do not change agent logic. Only add routing logic BEFORE execution.
+
+Routes (exactly one must be chosen per message)
+1) direct_response
+   - Explanations, definitions, advice, meta questions, trust questions
+   - No agent run, no tools
+
+2) clarify_before_run
+   - Ask 1–3 targeted questions
+   - Explicitly say execution will wait for confirmation
+   - No tools, no planning
+
+3) agent_run
+   - Only when intent is clear and runnable
+
+Hard rules for clarify_before_run
+Trigger clarification if ANY are true:
+- Missing or vague location (no city/region/country and no explicit default)
+- Vague entity type (“organisations”, “companies”, “things”) without sector
+- Relationship predicates present:
+  “works with”, “supplies”, “supports”, “partners with”, “serves”, “provides services to”
+- Mixed or switched intent in a single message
+- Malformed or concatenated input (e.g. joined sentences, missing spaces, multiple questions mashed together)
+- User references false prior context (“earlier you said…”) that does not exist
+
+Clarification output rules
+- Ask max 3 questions
+- Questions must reduce uncertainty directly
+- Must say: “I’ll run the search once you confirm”
+- Must NOT imply execution has started
+
+Acceptance examples
+- “what does a lead generation agent do” → direct_response
+- “organisations that work with councils” → clarify_before_run
+- “find 10 micropubs in Sussex UK” → agent_run
+- “Find decision-makers at breweries in Waleswhat organisations support vulnerable adults in Leeds”
+  → clarify_before_run (malformed + mixed intent)
+
+Implementation requirements
+- Add a small intent routing function returning:
+  { route, reason, questions? }
+- Log the routing decision and reason to existing logs/artefacts
+- Ensure agent execution CANNOT start unless route === agent_run
+
+Deliverables
+- Code changes
+- Short markdown note: docs/clarify-gate.md explaining rules and examples
