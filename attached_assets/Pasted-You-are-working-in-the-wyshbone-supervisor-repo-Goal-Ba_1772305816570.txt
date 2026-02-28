@@ -1,0 +1,63 @@
+You are working in the wyshbone-supervisor repo.
+
+Goal (Batch 2): Implement "Time predicates honesty" in the Outlier Constraints layer.
+We must handle user queries like "opened recently", "opened in the last 12 months", "newly opened", "just opened", etc, without ever claiming certainty we cannot verify.
+
+Non-negotiables:
+- Do NOT change the base decision tree routing (G1-G7 is locked).
+- This batch must only extend the Constraint Truth Layer.
+- Never produce any output that implies "verified opened recently" unless we have explicit evidence and a defined proxy/evidence standard.
+- If the user demands certainty and we cannot verify, the run must either clarify or stop depending on hardness rules.
+
+Required deliverable:
+1) Add/extend ConstraintContract support for time predicates:
+   - constraint.type = "time_predicate"
+   - fields: predicate (opened|closed|renovated|new_listing|recent_reviews|news_mention), window (e.g. "12 months"), reference_date ("now" default), hardness, verifiability (verifiable|proxy|unverifiable)
+   - include: required_inputs_missing[], can_execute, why_blocked, suggested_rephrase
+   - include a structured "proxy_options" array when verifiability=proxy (for UI and for clarify questions)
+
+2) Parse time predicate language from user input:
+   - detect phrases: "opened recently", "just opened", "new", "newly opened", "opened in the last X months/years", "opened this year"
+   - normalize to window in days/months where possible
+   - if ambiguous (e.g. "recently" no window), keep window=null and require clarification if hardness=hard or if used as key filter
+
+3) Capability mapping / truth rules:
+   - Default assumption: "opened" is NOT directly verifiable from Google Places alone.
+   - Therefore set verifiability = "proxy" unless a reliable verifier exists in our toolset.
+   - proxy options we support in the system (define clearly):
+       A) "recent_reviews": venues with first review within window OR unusually recent review spike (define minimal rule)
+       B) "new_listing": first-seen listing date if we have it (likely we do not; if not available, do not claim)
+       C) "news_mention": web evidence that mentions opening within window
+       D) "companies_house_incorp": only for companies, not venues; only if we have that data source (if not, keep as not-supported)
+   - If no supported proxy tools exist for a proxy option, do not offer it.
+   - If user requires certainty ("must have opened in last 12 months") treat as hard time_predicate. If verifiability != verifiable, can_execute=false and why_blocked explains we need an acceptable proxy or we must stop.
+
+4) Clarify behaviour:
+   - If a time_predicate exists and verifiability is proxy or unverifiable:
+     Ask a single, tight clarification question:
+       "I can’t guarantee opening dates from Places. Which proxy is acceptable: (1) news/web mentions of opening within 12 months, or (2) first reviews within 12 months? If none are acceptable, I should stop."
+     - If user picks a proxy: update ConstraintContract to proxy and proceed.
+     - If user says "no proxies": mark as hard+unverifiable and STOP (with user-safe explanation).
+
+5) Execution behaviour:
+   - When time_predicate is present and proxy chosen:
+     Ensure downstream steps know to run verification/evidence checks consistent with the proxy choice.
+     If our current pipeline cannot actually perform the chosen proxy verification, do NOT proceed: set can_execute=false and clarify/stop instead.
+
+6) Logging and artefacts:
+   - Persist the ConstraintContract for the run (or include in run metadata / internal logs as per current architecture).
+   - Ensure any "delivery_summary" or user-facing summary includes an honesty line when proxies were used:
+     "Opening date can’t be guaranteed; results use proxy: <proxy_type>."
+
+7) Tests:
+   Add unit tests (or the repo’s existing test style) for at least these cases:
+   - "Find dentists in Texas that opened recently" => time_predicate detected, verifiability=proxy, can_execute=false until proxy accepted (or clarify triggered)
+   - "Find 10 pubs in Manchester opened in last 12 months" => window parsed, clarify prompt produced with proxy options
+   - "Find 10 cafes in Brighton, must have opened in last 6 months, no proxies" => STOP path (hard+unverifiable)
+   - "Find pubs in Leeds opened recently" with missing location specificity should still hit existing location requirement rules; time_predicate should not override G1-G7.
+   - "opened recently" but user clarifies: "use news mentions" => can_execute true only if tool exists; otherwise still block.
+
+Constraints:
+- Keep changes minimal and localized.
+- Do not refactor unrelated code.
+- Produce a short implementation summary + list of files changed + how to run tests.
