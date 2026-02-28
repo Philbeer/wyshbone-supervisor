@@ -1,0 +1,70 @@
+You are working in the wyshbone-supervisor repo.
+
+We have a Claude Chrome QA report showing Batch 2 FAILED. The system executes searches with time predicates and live-music requirements without clarification, ignores “no proxies”, loses compound requirements, and proceeds to tools. This must be fixed.
+
+GOAL:
+Add a hard “Pre-Execution Constraint Gate” that runs BEFORE any tool execution or Google search begins.
+
+NON-NEGOTIABLE RULE:
+If any HARD constraint is unresolved (verifiability=proxy without proxy_selected, or verifiability=unverifiable), then can_execute MUST be false and the run MUST enter clarification or stop. No search bubble, no Google query, no tools.
+
+MINIMAL SCOPE:
+Do not change the base decision tree (G1-G7). Do not refactor. Only add an enforcement gate and correct constraint extraction persistence across turns.
+
+REQUIRED CHANGES:
+
+A) Compound requirement extraction (must not lose the 2nd requirement)
+- From a single user message, extract ALL constraints, not just the first.
+- For the prompt:
+  "opened in the last 12 months" => time_predicate constraint
+  "have live music" => attribute/capability constraint (existing live music constraint type if present)
+- Store constraints[] in the ConstraintContract.
+
+B) Time predicate enforcement
+- If time_predicate present and verifiability != verifiable:
+  - If proxy_selected is missing => can_execute=false and required_inputs_missing includes "choose_time_proxy"
+  - why_blocked must say opening dates cannot be guaranteed from listings and proxy is required
+  - proxy_options must be an explicit list (only include proxies we can actually run today)
+- If user says “no proxies” or “must be certain” for time_predicate:
+  - Treat time_predicate as HARD + unverifiable
+  - can_execute=false and set stop_recommended=true (or equivalent) with why_blocked explaining we cannot guarantee this.
+
+C) Follow-up turn memory (proxy choice must stick)
+- If user provides proxy choice in a follow-up message (e.g. “Use first reviews proxy”):
+  - The system must attach this to the existing time_predicate constraint for that task
+  - Do NOT ask location again if already present
+- Implement a simple rule: when in a clarify state for proxy selection, parse the next user message for proxy selection and apply it.
+
+D) Pre-Execution Constraint Gate (the main fix)
+- Add a single function executed right before:
+  - generating the Google query
+  - showing "Searching for..."
+  - running any tool
+- Gate logic:
+  1) If any HARD constraint unresolved => block execution (clarify or stop)
+  2) If any compound HARD constraints exist (time + live music) and either unresolved => block
+  3) If constraints are SOFT but unresolved => allow execution only if UI messaging clearly marks as unverified AND Tower will not PASS constraint satisfaction
+     (Prefer to clarify anyway for time predicates even if soft, unless user explicitly accepts "best effort".)
+
+E) Tests (must match Chrome failures)
+Add tests for these exact cases:
+
+1. "Find 10 pubs in Manchester that opened in the last 12 months"
+Expected: can_execute=false, asks for proxy choice, NO execution.
+
+2. "Find 10 cafes in Brighton that just opened, no proxies, must be certain"
+Expected: STOP (or stop_recommended + why_blocked), NO execution.
+
+3. Two-turn proxy acceptance:
+Turn 1: "Find dentists in Texas that opened recently"
+Turn 2: "Opened recently means last 6 months. Use first reviews proxy."
+Expected: proxy_selected applied, does NOT loop on location again if already specified, proceeds ONLY if proxy is runnable.
+
+4. Compound:
+"Find 10 pubs in Bristol that opened in the last 12 months and have live music"
+Expected: constraints contains BOTH time_predicate AND live_music, can_execute=false, asks to clarify BOTH (or asks one combined clarification), NO execution.
+
+DELIVERABLE:
+- Implement the gate and fixes above.
+- Provide a short summary and list of files changed.
+- Ensure tests pass.

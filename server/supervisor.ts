@@ -25,6 +25,7 @@ import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-
 import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
+import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, type ConstraintContract } from './supervisor/constraint-gate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
@@ -656,7 +657,7 @@ class SupervisorService {
     }
 
     const userContext = await this.buildUserContext(task.user_id);
-    const rawMsg = String(requestData.user_message || '');
+    let rawMsg = String(requestData.user_message || '');
 
     console.log(`[SUPERVISOR] Executing task ${task.id} — message="${rawMsg.substring(0, 80)}"`);
     logAFREvent({
@@ -745,6 +746,58 @@ class SupervisorService {
         userId: task.user_id,
         conversationId: task.conversation_id,
       }).catch((e: any) => console.warn(`[CLARIFY_SESSION] Failed to emit TTL expiry artefact: ${e.message}`));
+    }
+
+    const pendingConstraint = getPendingContract(task.conversation_id);
+    if (pendingConstraint && !getClarifySession(task.conversation_id)) {
+      console.log(`[CONSTRAINT_GATE] Follow-up detected for conversation=${task.conversation_id} — resolving constraint contract`);
+      const resolvedContract = resolveFollowUp(pendingConstraint.contract, rawMsg);
+
+      await createArtefact({
+        runId: jobId,
+        type: 'diagnostic',
+        title: `Constraint gate follow-up: can_execute=${resolvedContract.can_execute} stop=${resolvedContract.stop_recommended}`,
+        summary: resolvedContract.why_blocked || 'Constraints resolved',
+        payload: { original: pendingConstraint.originalMessage, follow_up: rawMsg, contract: resolvedContract },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch((e: any) => console.warn(`[CONSTRAINT_GATE] Failed to emit artefact: ${e.message}`));
+
+      if (resolvedContract.stop_recommended) {
+        clearPendingContract(task.conversation_id);
+        const stopMsg = buildConstraintGateMessage(resolvedContract);
+        const messageId = randomUUID();
+
+        await Promise.all([
+          supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: stopMsg.substring(0, 200), message_id: messageId, clarify_gate: 'constraint_gate_stop' } }).eq('id', task.id),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: stopMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'constraint_gate_stop', constraint_contract: resolvedContract }, created_at: Date.now() }).select().single(),
+        ]);
+
+        await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'constraint_stop', endedAt: new Date(), metadata: { verdict: 'constraint_gate_stop', constraint_contract: resolvedContract } }).catch(() => {});
+        console.log(`[CONSTRAINT_GATE] STOP — constraints cannot be satisfied`);
+        return;
+      }
+
+      if (!resolvedContract.can_execute) {
+        storePendingContract(task.conversation_id, pendingConstraint.originalMessage, resolvedContract);
+        const clarifyMsg = buildConstraintGateMessage(resolvedContract);
+        const messageId = randomUUID();
+
+        await Promise.all([
+          supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyMsg.substring(0, 200), message_id: messageId, clarify_gate: 'constraint_gate_clarify' } }).eq('id', task.id),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: clarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'constraint_gate_clarify', constraint_contract: resolvedContract }, created_at: Date.now() }).select().single(),
+        ]);
+
+        await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'constraint_gate_clarify', constraint_contract: resolvedContract } }).catch(() => {});
+        console.log(`[CONSTRAINT_GATE] Still blocked — asking again`);
+        return;
+      }
+
+      clearPendingContract(task.conversation_id);
+      (task.request_data as any).user_message = pendingConstraint.originalMessage;
+      (task.request_data as any)._constraint_gate_resolved = true;
+      rawMsg = pendingConstraint.originalMessage;
+      console.log(`[CONSTRAINT_GATE] Constraints resolved — restoring original message: "${rawMsg.substring(0, 80)}" and proceeding to execution`);
     }
 
     const existingSession = getClarifySession(task.conversation_id);
@@ -1893,6 +1946,47 @@ class SupervisorService {
       console.log(`[TOWER_LOOP_CHAT] [goal_created] goalId=${goalId} linked to runId=${chatRunId}`);
     } catch (goalErr: any) {
       console.error(`[TOWER_LOOP_CHAT] Failed to create goal (non-fatal): ${goalErr.message}`);
+    }
+
+    // PRE-EXECUTION CONSTRAINT GATE — blocks before ANY tool or Google search
+    const constraintGateAlreadyResolved = !!(requestData as any)._constraint_gate_resolved;
+    const constraintGateResult = constraintGateAlreadyResolved
+      ? { constraints: [], can_execute: true, why_blocked: null, clarify_questions: [], stop_recommended: false } as ConstraintContract
+      : preExecutionConstraintGate(originalUserGoal);
+    console.log(`[CONSTRAINT_GATE] can_execute=${constraintGateResult.can_execute} stop=${constraintGateResult.stop_recommended} constraints=${constraintGateResult.constraints.length} already_resolved=${constraintGateAlreadyResolved}`);
+
+    if (!constraintGateResult.can_execute) {
+      await createArtefact({
+        runId: chatRunId,
+        type: 'diagnostic',
+        title: `Pre-execution constraint gate: BLOCKED (stop=${constraintGateResult.stop_recommended})`,
+        summary: constraintGateResult.why_blocked || 'Constraints require clarification',
+        payload: { constraint_contract: constraintGateResult, original_goal: originalUserGoal },
+        userId: task.user_id,
+        conversationId,
+      }).catch((e: any) => console.warn(`[CONSTRAINT_GATE] Failed to emit artefact: ${e.message}`));
+
+      storePendingContract(conversationId, originalUserGoal, constraintGateResult);
+
+      const gateMsg = buildConstraintGateMessage(constraintGateResult);
+      const gateMessageId = randomUUID();
+
+      await Promise.all([
+        supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: gateMsg.substring(0, 200), message_id: gateMessageId, clarify_gate: constraintGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify' } }).eq('id', task.id),
+        supabase!.from('messages').insert({ id: gateMessageId, conversation_id: conversationId, role: 'assistant', content: gateMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: chatRunId, clarify_gate: constraintGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: constraintGateResult }, created_at: Date.now() }).select().single(),
+      ]);
+
+      const termState = constraintGateResult.stop_recommended ? 'constraint_stop' : 'clarification_needed';
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: termState, endedAt: new Date(), metadata: { verdict: constraintGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: constraintGateResult } }).catch(() => {});
+      console.log(`[CONSTRAINT_GATE] Blocked execution — terminalState=${termState}`);
+
+      return {
+        response: gateMsg,
+        leadIds: [],
+        deliverySummary: null,
+        towerVerdict: null,
+        leads: [],
+      };
     }
 
     // 2. Create initial discovery plan artefact (SEARCH_PLACES only; enrichment plan built after discovery)
