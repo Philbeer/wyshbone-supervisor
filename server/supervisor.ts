@@ -21,6 +21,7 @@ import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput, type AttributeEvidenceMap } from './supervisor/cvl';
+import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-plan-gate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
@@ -804,6 +805,8 @@ class SupervisorService {
           lead_ids: leadIds,
           run_lane: true,
           status: dsStatus,
+          final_verdict: dsStatus,
+          trust_status: towerResult.deliverySummary?.trust_status ?? (runFailed ? 'UNTRUSTED' : 'TRUSTED'),
           ...(towerResult.deliverySummary ? { deliverySummary: towerResult.deliverySummary } : {}),
           ...(towerResult.towerVerdict ? { towerVerdict: towerResult.towerVerdict } : {}),
           ...(towerResult.leads.length > 0 ? { leads: towerResult.leads } : {}),
@@ -1243,6 +1246,92 @@ class SupervisorService {
     if (userSpecifiedCount && !hard_constraints.includes('requested_count')) hard_constraints.push('requested_count');
     console.log(`[TOWER_LOOP_CHAT] Constraint classification — hard: [${hard_constraints.join(', ')}] soft: [${soft_constraints.join(', ')}]`);
 
+    const gateResult = evaluatePrePlanGate({
+      userMessage: originalUserGoal,
+      businessType,
+      location: city,
+      verticalId: userContext.verticalId,
+    });
+    console.log(`[PRE_PLAN_GATE] clarification_needed=${gateResult.clarification_needed} flags=${JSON.stringify(gateResult.gate_flags)}`);
+
+    if (gateResult.clarification_needed) {
+      console.log(`[PRE_PLAN_GATE] CLARIFY — reason: ${gateResult.reason}`);
+
+      await createArtefact({
+        runId: chatRunId,
+        type: 'clarification_needed',
+        title: `Clarification needed: ${gateResult.gate_flags.vertical_mismatch ? 'vertical mismatch' : gateResult.gate_flags.informational_query ? 'informational query' : 'ambiguous'}`,
+        summary: gateResult.reason || 'Clarification required before search',
+        payload: {
+          clarification_needed: true,
+          reason: gateResult.reason,
+          suggested_question: gateResult.suggested_question,
+          assumptions: gateResult.assumptions,
+          gate_flags: gateResult.gate_flags,
+          parsed_business_type: businessType,
+          parsed_location: city,
+          original_user_goal: originalUserGoal,
+        },
+        userId: task.user_id,
+        conversationId,
+      });
+
+      await this.postArtefactToUI({
+        runId: chatRunId,
+        clientRequestId,
+        type: 'clarification_needed',
+        payload: {
+          clarification_needed: true,
+          reason: gateResult.reason,
+          suggested_question: gateResult.suggested_question,
+          assumptions: gateResult.assumptions,
+          gate_flags: gateResult.gate_flags,
+        },
+        userId: task.user_id,
+        conversationId,
+      }).catch(() => {});
+
+      await storage.updateAgentRun(chatRunId, {
+        status: 'completed',
+        terminalState: 'clarification_needed',
+        endedAt: new Date(),
+        metadata: { verdict: 'clarification_needed', gate_flags: gateResult.gate_flags },
+      });
+
+      const clarifyDsPayload: DeliverySummaryPayload = {
+        requested_count: null,
+        hard_constraints,
+        soft_constraints,
+        plan_versions: [],
+        soft_relaxations: [],
+        delivered_exact: [],
+        delivered_closest: [],
+        delivered_exact_count: 0,
+        delivered_total_count: 0,
+        shortfall: 0,
+        status: 'STOP',
+        trust_status: 'UNTRUSTED',
+        tower_verdict: null,
+        cvl_summary: null,
+        stop_reason: `Clarification needed: ${gateResult.reason}`,
+        suggested_next_question: gateResult.suggested_question,
+        cvl_verified_exact_count: null,
+        cvl_unverifiable_count: null,
+      };
+
+      return {
+        response: gateResult.suggested_question || 'Could you clarify your request?',
+        leadIds: [],
+        deliverySummary: clarifyDsPayload,
+        towerVerdict: null,
+        leads: [],
+      };
+    }
+
+    if (gateResult.gate_flags.query_suspected_merged) {
+      console.log(`[PRE_PLAN_GATE] query_suspected_merged=true — proceeding with warning`);
+    }
+
     const typedConstraints = structuredConstraints.map(c => ({
       type: c.type,
       field: c.field === 'count' ? 'requested_count'
@@ -1357,6 +1446,7 @@ class SupervisorService {
         inputLocation: city,
         constraintBucket: hard_constraints,
         rationale: policyResult.rationale,
+        querySuspectedMerged: gateResult.gate_flags.query_suspected_merged,
       });
     } catch (policyErr: any) {
       console.warn(`[LEARNING_LAYER] Policy application failed (non-fatal, using defaults): ${policyErr.message}`);
@@ -3767,7 +3857,10 @@ class SupervisorService {
               location_confidence: locCheck?.confidence ?? null,
               verified_exact: lvMatch.verified_exact,
               all_hard_satisfied: lvMatch.all_hard_satisfied,
-            } : null,
+              verification_level: lvMatch.constraint_checks.length > 0
+                ? (lvMatch.verified_exact ? 'verified' : 'checked')
+                : 'candidate',
+            } : { verification_level: 'unverified' as const },
           };
         }),
         query: { businessType: finalConstraints.business_type, location: finalLocDisplay, country },

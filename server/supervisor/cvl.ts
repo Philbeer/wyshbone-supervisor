@@ -337,7 +337,8 @@ export function verifyLeads(
       }
     }
 
-    const verifiedExact = allHardSatisfied && checks.every(cc => {
+    const hasVerifiableChecks = checks.length > 0;
+    const verifiedExact = hasVerifiableChecks && allHardSatisfied && checks.every(cc => {
       if (cc.status === 'yes') return true;
       if (cc.status === 'search_bounded' && !cc.hard) return true;
       return false;

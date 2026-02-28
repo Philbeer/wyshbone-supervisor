@@ -21,7 +21,7 @@ export interface DeliveredEntity {
   soft_violations: string[];
 }
 
-export type CanonicalVerdict = 'PASS' | 'PARTIAL' | 'STOP';
+export type CanonicalVerdict = 'PASS' | 'PARTIAL' | 'STOP' | 'ERROR';
 
 export interface CvlLocationBreakdown {
   verified_geo_count: number;
@@ -37,6 +37,8 @@ export interface CvlSummary {
   location_breakdown: CvlLocationBreakdown | null;
 }
 
+export type TrustStatus = 'TRUSTED' | 'UNTRUSTED';
+
 export interface DeliverySummaryPayload {
   requested_count: number | null;
   hard_constraints: string[];
@@ -49,6 +51,7 @@ export interface DeliverySummaryPayload {
   delivered_total_count: number;
   shortfall: number;
   status: CanonicalVerdict;
+  trust_status: TrustStatus;
   tower_verdict: string | null;
   cvl_summary: CvlSummary | null;
   stop_reason: string | null;
@@ -237,6 +240,7 @@ function deriveSuggestedNextQuestion(
 function normalizeTowerVerdict(raw: string | undefined | null): string | null {
   if (!raw) return null;
   const lower = raw.toLowerCase().trim();
+  if (lower === 'error') return 'ERROR';
   const stopVerdicts = ['stop', 'change_plan', 'reject', 'fail', 'blocked'];
   if (stopVerdicts.includes(lower)) return 'STOP';
   const passVerdicts = ['pass', 'accept', 'approved', 'good'];
@@ -250,6 +254,7 @@ function deriveCanonicalStatus(
   towerVerdict: string | null,
   hasHardUnverifiable: boolean,
 ): CanonicalVerdict {
+  if (towerVerdict === 'ERROR') return 'ERROR';
   if (towerVerdict === 'STOP' || hasHardUnverifiable) return 'STOP';
   if (requested === null) {
     return verifiedExact > 0 ? 'PASS' : 'STOP';
@@ -318,6 +323,7 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
   const hasHardUnverifiable = hardUnverifiable.length > 0;
 
   const status = deriveCanonicalStatus(exactCount, requestedCount, towerVerdict, hasHardUnverifiable);
+  const trustStatus: TrustStatus = (status === 'PASS' || status === 'PARTIAL') ? 'TRUSTED' : 'UNTRUSTED';
 
   const cvlSummary: CvlSummary | null = hasCvl ? {
     verified_exact_count: input.cvlVerifiedExactCount!,
@@ -361,6 +367,7 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
     delivered_total_count: rawTotalCount,
     shortfall,
     status,
+    trust_status: trustStatus,
     tower_verdict: towerVerdict,
     cvl_summary: cvlSummary,
     stop_reason: stopReason,

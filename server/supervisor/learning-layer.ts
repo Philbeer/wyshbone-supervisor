@@ -367,6 +367,7 @@ export interface DecisionLogEntry {
   inputLocation: string;
   constraintBucket: string[];
   rationale: string;
+  querySuspectedMerged?: boolean;
 }
 
 export async function writeDecisionLog(entry: DecisionLogEntry): Promise<void> {
@@ -385,6 +386,7 @@ export async function writeDecisionLog(entry: DecisionLogEntry): Promise<void> {
       input_location: entry.inputLocation,
       constraint_bucket: entry.constraintBucket,
       rationale: entry.rationale,
+      ...(entry.querySuspectedMerged ? { query_suspected_merged: true } : {}),
     },
     userId: entry.userId,
     conversationId: entry.conversationId,

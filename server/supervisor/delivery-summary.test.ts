@@ -538,4 +538,73 @@ describe('buildDeliverySummaryPayload', () => {
       assertArrayCountInvariant(result);
     });
   });
+
+  describe('D) Hard truth contract — ERROR and trust_status', () => {
+    it('Tower error verdict → status=ERROR, trust_status=UNTRUSTED', () => {
+      const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'error',
+        requestedCount: null,
+      }));
+      expect(result.status).toBe('ERROR');
+      expect(result.trust_status).toBe('UNTRUSTED');
+    });
+
+    it('Tower fail verdict → status=STOP, trust_status=UNTRUSTED', () => {
+      const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'fail',
+      }));
+      expect(result.status).toBe('STOP');
+      expect(result.trust_status).toBe('UNTRUSTED');
+    });
+
+    it('Tower stop verdict → status=STOP, trust_status=UNTRUSTED', () => {
+      const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'stop',
+      }));
+      expect(result.status).toBe('STOP');
+      expect(result.trust_status).toBe('UNTRUSTED');
+    });
+
+    it('PASS verdict with leads → trust_status=TRUSTED', () => {
+      const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'pass',
+        requestedCount: null,
+      }));
+      expect(result.status).toBe('PASS');
+      expect(result.trust_status).toBe('TRUSTED');
+    });
+
+    it('PARTIAL verdict → trust_status=TRUSTED', () => {
+      const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'pass',
+        requestedCount: 5,
+      }));
+      expect(result.status).toBe('PARTIAL');
+      expect(result.trust_status).toBe('TRUSTED');
+    });
+
+    it('never emits PASS when finalVerdict is error', () => {
+      const leads = Array.from({ length: 30 }, (_, i) =>
+        makeLead(`Pub ${i}`, `${i} High St`, `p${i}`)
+      );
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'error',
+        requestedCount: 30,
+      }));
+      expect(result.status).not.toBe('PASS');
+      expect(result.status).toBe('ERROR');
+      expect(result.trust_status).toBe('UNTRUSTED');
+    });
+  });
 });
