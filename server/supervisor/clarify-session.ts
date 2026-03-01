@@ -134,6 +134,11 @@ const META_TRUST_PATTERNS = [
   /\b(?:how do you work|what do you do|who are you|what are you)\b/i,
   /\b(?:are you (?:a bot|an ai|real|automated)|how does (?:this|it) work)\b/i,
   /\b(?:what (?:is|are) your (?:sources?|data|methodology|accuracy))\b/i,
+  /\b(?:what is wyshbone|what'?s wyshbone|tell me about wyshbone|explain wyshbone)\b/i,
+  /\b(?:can (?:it|you|wyshbone) (?:lie|make (?:things |stuff )?up|hallucinate|fabricate|be wrong|mislead))\b/i,
+  /\b(?:does (?:it|wyshbone) (?:lie|make (?:things |stuff )?up|hallucinate|fabricate|mislead))\b/i,
+  /\b(?:will (?:it|you|wyshbone) (?:lie|make (?:things |stuff )?up|hallucinate|fabricate|mislead))\b/i,
+  /\b(?:is (?:it|wyshbone) (?:honest|truthful|reliable|accurate|trustworthy))\b/i,
 ];
 
 const EXECUTE_INTENT = /^\s*(?:search now|run it|run the search|go ahead|yes proceed|proceed|do it|just search|start searching|execute|let's go|yes go|yes search|run now|go for it|yes run|ok search|okay search|ok run|okay run|yes please search|yes do it|start the search|kick it off|launch it|fire away)\s*[.!]?\s*$/i;

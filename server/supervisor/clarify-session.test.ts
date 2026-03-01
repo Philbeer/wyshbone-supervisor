@@ -728,3 +728,53 @@ describe('Batch 2 QA — compound follow-up handling', () => {
     assert.ok(fu.compoundExtras!.includes('best-effort'));
   });
 });
+
+describe('Regression: meta/trust question during active clarify session', () => {
+  it('"What is Wyshbone and can it lie?" during active session → META_TRUST, not location question', () => {
+    const session = createClarifySession('conv-meta1', 'Find pubs', ['location'], { businessType: 'pubs' });
+    incrementTurnCount(session);
+
+    const fu = classifyFollowUp('What is Wyshbone and can it lie?', session);
+    assert.strictEqual(fu.classification, 'META_TRUST', 'must be META_TRUST, not ANSWER_TO_MISSING_FIELD');
+    assert.strictEqual(fu.updatedField, undefined, 'must not update any field');
+
+    assert.ok(session.missingFields.includes('location'), 'location should still be missing — session preserved');
+  });
+
+  it('"What is Wyshbone?" during active session → META_TRUST', () => {
+    const session = createClarifySession('conv-meta2', 'Find cafes', ['location'], { businessType: 'cafes' });
+    const fu = classifyFollowUp('What is Wyshbone?', session);
+    assert.strictEqual(fu.classification, 'META_TRUST');
+  });
+
+  it('"Can it lie?" during active session → META_TRUST', () => {
+    const session = createClarifySession('conv-meta3', 'Find cafes', ['location'], { businessType: 'cafes' });
+    const fu = classifyFollowUp('Can it lie?', session);
+    assert.strictEqual(fu.classification, 'META_TRUST');
+  });
+
+  it('"Is Wyshbone trustworthy?" during active session → META_TRUST', () => {
+    const session = createClarifySession('conv-meta4', 'Find cafes', ['location'], { businessType: 'cafes' });
+    const fu = classifyFollowUp('Is Wyshbone trustworthy?', session);
+    assert.strictEqual(fu.classification, 'META_TRUST');
+  });
+
+  it('"Can you be wrong?" during active session → META_TRUST', () => {
+    const session = createClarifySession('conv-meta5', 'Find cafes', ['location'], { businessType: 'cafes' });
+    const fu = classifyFollowUp('Can you be wrong?', session);
+    assert.strictEqual(fu.classification, 'META_TRUST');
+  });
+
+  it('normal location answer "Manchester" still resolves correctly after meta question', () => {
+    const session = createClarifySession('conv-meta6', 'Find pubs', ['location'], { businessType: 'pubs' });
+
+    const meta = classifyFollowUp('What is Wyshbone and can it lie?', session);
+    assert.strictEqual(meta.classification, 'META_TRUST');
+    assert.ok(session.missingFields.includes('location'));
+
+    const loc = classifyFollowUp('Manchester', session);
+    assert.strictEqual(loc.classification, 'ANSWER_TO_MISSING_FIELD');
+    assert.strictEqual(loc.updatedField, 'location');
+    assert.strictEqual(loc.value, 'Manchester');
+  });
+});

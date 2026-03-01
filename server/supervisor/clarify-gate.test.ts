@@ -304,3 +304,25 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
     });
   });
 });
+
+describe('ClarifyGate — meta/trust about Wyshbone routes to direct_response', () => {
+  it('"What is Wyshbone and can it lie?" → direct_response', () => {
+    const result = evaluateClarifyGate('What is Wyshbone and can it lie?');
+    assert.strictEqual(result.route, 'direct_response');
+  });
+
+  it('"What is Wyshbone?" → direct_response', () => {
+    const result = evaluateClarifyGate('What is Wyshbone?');
+    assert.strictEqual(result.route, 'direct_response');
+  });
+
+  it('"Can it lie?" → direct_response', () => {
+    const result = evaluateClarifyGate('Can it lie?');
+    assert.strictEqual(result.route, 'direct_response');
+  });
+
+  it('"Is Wyshbone trustworthy?" → direct_response', () => {
+    const result = evaluateClarifyGate('Is Wyshbone trustworthy?');
+    assert.strictEqual(result.route, 'direct_response');
+  });
+});
