@@ -1,0 +1,102 @@
+Here's the UI-side report on clarify_for_run state management.
+
+1. How the UI tracks "clarify_for_run" state
+Two state variables track clarification:
+
+isClarifyingForRun (boolean state) — controls whether the amber clarify panel renders and whether certain UI elements are suppressed.
+clarifyContext (structured object with entityType, location, missingFields, status, constraintContract, etc.) — holds the clarify payload data for rendering.
+Set to true at one place — line 1694, inside the SSE handler when a clarify_for_run event arrives:
+
+// line 1694
+setIsClarifyingForRun(true);
+Set to false at four places:
+
+handleNewChat (line 1384)
+handleLoadConversation (line 1445)
+SSE handler on clarify_session_ended event (line 1724)
+SSE handler on supervisorTaskId event (line 1762) — meaning clarify ended because run started
+Error/finally cleanup in streamChatResponse (line 1991)
+2. Does the UI block or reroute messages while in clarify mode?
+The UI does NOT block or reroute user messages during clarify mode. The handleSend function (starting line 2115) has these guards:
+
+isStreaming || isRunActive — blocks if a stream/run is active (unrelated to clarify)
+Merge detection guard — substring check (unrelated to clarify)
+Vertical mismatch guard — entity-type sanity check (unrelated to clarify)
+There is no guard that checks isClarifyingForRun before sending. The message is always sent to the same endpoint regardless of clarify state.
+
+3. Does the UI send special metadata that could force messages into clarify?
+Let me look at what actually gets sent in the POST body:
+
+The UI sends NO clarify-specific metadata. The POST body to /api/chat contains:
+
+{
+  messages: conversationMessages,
+  user: { id, email },
+  defaultCountry,
+  conversationId,
+  clientRequestId,
+  google_query_mode,
+  // optional: metadata, follow_up
+}
+There is no isClarifying, clarify_mode, or similar flag. The conversationId is the only thing that links the message to an existing clarify session on the server side.
+
+4. Is "What is Wyshbone and can it lie?" treated differently?
+Let me look at classifyIntent to see if it treats trust/meta questions specially:
+
+"What is Wyshbone and can it lie?" gets NO special treatment in the UI. The classifyIntent function (lines 2060–2111) classifies it as 'CONTINUE' because:
+
+It doesn't match any NEW_REPLACE patterns (no "find/search" + location)
+It doesn't match any MODIFY patterns
+It doesn't match NEW_UNRELATED patterns (no "draft/write/analyze")
+So the message is appended to the existing conversation history and sent to the server as a normal CONTINUE message — the full conversation history including prior clarify exchanges is included in the POST body.
+
+5. What could cause the backend to remain stuck in clarification?
+Now let me also check what the SSE handler does when a clarify_for_run event arrives while already clarifying, and whether the UI's clarify state persists across responses:
+
+Report: UI-side clarify_for_run state analysis
+1. How the UI tracks clarify state
+Two state variables in chat.tsx:
+
+isClarifyingForRun (boolean) — controls the amber panel visibility and suppresses the thinking indicator / confidence bubbles.
+clarifyContext (structured object) — holds entityType, location, missingFields, status, pendingQuestions, constraintContract, etc.
+Plus a closure variable streamIsClarifying inside the SSE handler that guards ingestion-time behavior (suppressing confidence bubbles during clarify).
+
+isClarifyingForRun is set to true only when the SSE stream returns a clarify_for_run event (line 1694). It is set to false on: clarify_session_ended SSE event, supervisorTaskId SSE event, new chat, load conversation, or stream error/cleanup.
+
+2. Does the UI block or reroute messages while clarifying?
+No. The handleSend function has guards for isStreaming || isRunActive (in-flight block), the merge detection substring check, and the vertical mismatch check — none of which check isClarifyingForRun. The message is always sent to /api/chat as a normal POST. There is no client-side rerouting.
+
+3. Does the UI send clarify-specific metadata?
+No. The POST body to /api/chat is:
+
+{
+  messages,          // conversation history (last 6 + current)
+  user,              // {id, email}
+  defaultCountry,
+  conversationId,    // ← this is the ONLY link to the server-side clarify session
+  clientRequestId,
+  google_query_mode,
+  // optional: metadata, follow_up (from pendingMetadataRef)
+}
+No isClarifying, clarify_mode, or similar flag is sent. The server decides whether the message hits the clarify handler entirely based on conversationId — if the server has an active clarify session for that conversation ID, it will intercept the message in its CLARIFY_GUARD before the 3-way router runs.
+
+4. How "What is Wyshbone and can it lie?" is treated
+The UI's classifyIntent function classifies it as CONTINUE because it matches none of the NEW_REPLACE, MODIFY, or NEW_UNRELATED patterns. As a CONTINUE, the full last-6 conversation history is sent along with it, which means the server receives prior clarify-related exchanges in the message array.
+
+This is the critical point: the UI does not strip or mark meta/trust questions differently from slot-fill answers. The server sees the same POST shape regardless.
+
+5. What could cause the backend to remain stuck in clarification
+From the UI side, there are zero mechanisms that could cause this. The UI:
+
+Does not hold the clarify session open
+Does not send metadata forcing messages into clarify
+Does not prevent meta/trust questions from being sent
+Properly resets isClarifyingForRun when clarify_session_ended arrives
+The root cause is server-side. Specifically, the server's CLARIFY_GUARD in routes.ts runs before the META_TRUST check for in-session messages. The call chain is:
+
+isMetaTrustQuestion() runs first but only for top-level messages
+If a clarify session is active for the conversationId, classifyClarifyInput() intercepts the message
+If classifyClarifyInput() classifies "What is Wyshbone and can it lie?" as REFINE (the default bucket) rather than CHAT_INFO, it routes into handleClarifyResponse() which treats it as a slot-fill answer — finding nothing useful, it re-emits the clarify state unchanged
+The UI then faithfully renders the unchanged clarify_for_run SSE event, keeping the "Waiting for clarification" panel visible. The UI is behaving correctly — it's reflecting what the server sends back.
+
+Verdict: Not a UI bug. The fix needs to be in the server's classifyClarifyInput() function to classify meta/trust questions as CHAT_INFO (or in the isMetaTrustQuestion() early interception to run inside active clarify sessions, not just at the top level).
