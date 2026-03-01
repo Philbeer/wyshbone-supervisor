@@ -857,24 +857,29 @@ class SupervisorService {
       }).catch((e: any) => console.warn(`[CLARIFY_SESSION] Failed to emit artefact: ${e.message}`));
 
       if (followUp.classification === 'META_TRUST') {
+        const buildStamp = process.env.GIT_SHA?.substring(0, 7) || '5c9c5a8';
+        console.log(`[CLARIFY_SESSION] META_TRUST triggered — build=${buildStamp} conversation=${task.conversation_id} msg="${rawMsg.substring(0, 80)}"`);
+
         const summary = renderClarifySummary(existingSession);
         const clarifyState = buildClarifyState(existingSession);
+        const isDev = process.env.NODE_ENV !== 'production';
+        const stampSuffix = isDev ? `\n\n[build: ${buildStamp}]` : '';
         const directMsg = rawMsg.trim().endsWith('?')
-          ? `That's a great question. Let me answer directly rather than running a search.\n\nI'm a lead generation agent — I find businesses in specific locations for B2B outreach. I use Google Places and public web data, then run every result through a quality-control step. Results are verified against public sources, but I can't guarantee 100% accuracy.\n\nYour current draft is still active: ${summary}\n\nYou can continue refining it, say "search now" to run it, or ask me something else.`
-          : `I'm a lead generation agent. I use Google Places and public web data, then verify results through a quality gate. I can't guarantee 100% accuracy, but every result is checked.\n\nYour current draft is still active: ${summary}\n\nYou can continue refining it, say "search now" to run it, or ask me something else.`;
+          ? `That's a great question. Let me answer directly rather than running a search.\n\nI'm a lead generation agent — I find businesses in specific locations for B2B outreach. I use Google Places and public web data, then run every result through a quality-control step. Results are verified against public sources, but I can't guarantee 100% accuracy.\n\nYour current draft is still active: ${summary}\n\nYou can continue refining it, say "search now" to run it, or ask me something else.${stampSuffix}`
+          : `I'm a lead generation agent. I use Google Places and public web data, then verify results through a quality gate. I can't guarantee 100% accuracy, but every result is checked.\n\nYour current draft is still active: ${summary}\n\nYou can continue refining it, say "search now" to run it, or ask me something else.${stampSuffix}`;
 
         const messageId = randomUUID();
 
         const [taskUpdateResult, msgResult] = await Promise.all([
-          supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: directMsg.substring(0, 200), message_id: messageId, clarify_gate: 'meta_trust_during_session' } }).eq('id', task.id),
-          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: directMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'meta_trust_during_session', reason: 'Meta/trust question answered without closing clarify session', clarify_state: clarifyState }, created_at: Date.now() }).select().single(),
+          supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: directMsg.substring(0, 200), message_id: messageId, clarify_gate: 'meta_trust_during_session', build: buildStamp } }).eq('id', task.id),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: directMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'meta_trust_during_session', reason: 'Meta/trust question answered without closing clarify session', clarify_state: clarifyState, build: buildStamp }, created_at: Date.now() }).select().single(),
         ]);
 
         if (taskUpdateResult.error) console.error(`[CLARIFY_SESSION] task update failed: ${taskUpdateResult.error.message}`);
         if (msgResult.error) console.error(`[CLARIFY_SESSION] message insert failed: ${msgResult.error.message}`);
 
-        await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'direct_response', endedAt: new Date(), metadata: { verdict: 'meta_trust_during_session', clarify_state: clarifyState } }).catch(() => {});
-        console.log(`[CLARIFY_SESSION] META_TRUST answered for conversation=${task.conversation_id} — session preserved`);
+        await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'direct_response', endedAt: new Date(), metadata: { verdict: 'meta_trust_during_session', clarify_state: clarifyState, build: buildStamp } }).catch(() => {});
+        console.log(`[CLARIFY_SESSION] META_TRUST answered — build=${buildStamp} conversation=${task.conversation_id} — session preserved`);
         return;
       }
 
