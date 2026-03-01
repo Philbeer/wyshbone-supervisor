@@ -30,6 +30,35 @@ import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLo
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 
+// --- Session Isolation Guard ---
+// Tracks the active taskId per conversationId so that stale in-flight work
+// from a prior task/conversation is dropped before delivery.
+const _activeTaskPerConversation = new Map<string, { taskId: string; runId: string }>();
+
+function registerActiveTask(conversationId: string, taskId: string, runId: string): void {
+  _activeTaskPerConversation.set(conversationId, { taskId, runId });
+  console.log(`[SESSION_GUARD] Registered active task=${taskId} runId=${runId} for conversation=${conversationId}`);
+}
+
+function isTaskCurrentForConversation(conversationId: string, taskId: string): boolean {
+  const active = _activeTaskPerConversation.get(conversationId);
+  if (!active) return true;
+  return active.taskId === taskId;
+}
+
+function isRunCurrentForConversation(conversationId: string, runId: string): boolean {
+  const active = _activeTaskPerConversation.get(conversationId);
+  if (!active) return true;
+  return active.runId === runId;
+}
+
+function guardDelivery(conversationId: string, taskId: string, label: string): boolean {
+  if (isTaskCurrentForConversation(conversationId, taskId)) return true;
+  const active = _activeTaskPerConversation.get(conversationId);
+  console.warn(`[SESSION_GUARD] BLOCKED stale delivery: ${label} | stale_task=${taskId} active_task=${active?.taskId ?? 'unknown'} conversation=${conversationId}`);
+  return false;
+}
+
 const SUPERVISOR_COUNT_CLAIM_RE = /\b(found|delivered|discovered|located|identified)\b.*?\b\d+\b/i;
 
 function sanitizeSupervisorMessage(msg: string): string {
@@ -656,6 +685,8 @@ class SupervisorService {
       return;
     }
 
+    registerActiveTask(task.conversation_id, task.id, jobId);
+
     const userContext = await this.buildUserContext(task.user_id);
     let rawMsg = String(requestData.user_message || '');
 
@@ -673,6 +704,12 @@ class SupervisorService {
 
     if (isFactoryDemo) {
       const demoResult = await this.executeFactoryDemoTask(task, jobId, clientRequestId);
+
+      if (!guardDelivery(task.conversation_id, task.id, 'factory_demo_final_message')) {
+        console.warn(`[SESSION_GUARD] Dropping factory demo delivery for stale task=${task.id}`);
+        return;
+      }
+
       const response = demoResult.summary;
       const leadIds: string[] = [];
       const capabilities = ['factory_sim', 'tower_validated'];
@@ -1109,6 +1146,11 @@ class SupervisorService {
         leads: [],
       };
     }
+    if (!guardDelivery(task.conversation_id, task.id, 'final_message_after_tower_loop')) {
+      console.warn(`[SESSION_GUARD] Dropping final message delivery for stale task=${task.id} conversation=${task.conversation_id} runId=${jobId}`);
+      return;
+    }
+
     const response = sanitizeSupervisorMessage(towerResult.response);
     const leadIds = towerResult.leadIds;
     const capabilities = runFailed
@@ -1254,7 +1296,12 @@ class SupervisorService {
     payload: Record<string, unknown>;
     userId?: string;
     conversationId?: string;
+    taskId?: string;
   }): Promise<{ ok: boolean; artefactId?: string; httpStatus?: number }> {
+    if (params.conversationId && params.runId && !isRunCurrentForConversation(params.conversationId, params.runId)) {
+      console.warn(`[SESSION_GUARD] BLOCKED stale artefact POST: type=${params.type} runId=${params.runId} conversation=${params.conversationId}`);
+      return { ok: false };
+    }
     const uiBaseUrl = (process.env.UI_URL || '').replace(/\/+$/, '');
     if (!uiBaseUrl) {
       console.error(`[ARTEFACT_POST] runId=${params.runId} clientRequestId=${params.clientRequestId || 'none'} UI_URL not configured — cannot POST artefact to UI. Set UI_URL env var.`);
@@ -1277,6 +1324,7 @@ class SupervisorService {
         body: JSON.stringify({
           runId: params.runId,
           ...(params.clientRequestId ? { clientRequestId: params.clientRequestId } : {}),
+          ...(params.conversationId ? { conversationId: params.conversationId } : {}),
           type: params.type,
           payload: params.payload,
           createdAt: new Date().toISOString(),
@@ -2165,6 +2213,11 @@ class SupervisorService {
       usedStub = true;
     }
 
+    if (!isRunCurrentForConversation(conversationId, chatRunId)) {
+      console.warn(`[SESSION_GUARD] Stale run detected after SEARCH_PLACES — aborting enrichment/delivery for runId=${chatRunId} conversation=${conversationId}`);
+      return { response: '', leadIds: [], deliverySummary: null, towerVerdict: null, leads: [] };
+    }
+
     // Persist leads to suggested_leads table
     for (const lead of leads) {
       try {
@@ -2296,6 +2349,11 @@ class SupervisorService {
       persistToolPlanExplainer(enrichToolPlan, chatRunId, task.user_id, conversationId).catch((err: any) => {
         console.error(`[TOWER_LOOP_CHAT] tool_plan_explainer write failed: ${err.message}`);
       });
+
+      if (enrichSteps.length > 0 && !isRunCurrentForConversation(conversationId, chatRunId)) {
+        console.warn(`[SESSION_GUARD] Stale run detected before enrichment — aborting for runId=${chatRunId} conversation=${conversationId}`);
+        return { response: '', leadIds: createdLeadIds, deliverySummary: null, towerVerdict: null, leads: [] };
+      }
 
       if (enrichSteps.length > 0) {
         await createArtefact({
@@ -3302,6 +3360,10 @@ class SupervisorService {
     }
 
     while (finalAction === 'change_plan' && !usedStub && !attributeVerificationStopped) {
+      if (!isRunCurrentForConversation(conversationId, chatRunId)) {
+        console.warn(`[SESSION_GUARD] Stale run detected at replan loop — aborting for runId=${chatRunId} conversation=${conversationId}`);
+        return { response: '', leadIds: [], deliverySummary: null, towerVerdict: null, leads: [] };
+      }
       if (replansUsed >= MAX_REPLANS) {
         console.log(`[REPLAN] max_replans_exceeded — replans_used=${replansUsed} MAX_REPLANS=${MAX_REPLANS} plan_version=${planVersion}`);
 
