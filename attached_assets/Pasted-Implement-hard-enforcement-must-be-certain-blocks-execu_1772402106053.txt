@@ -1,0 +1,61 @@
+Implement hard enforcement: “must be certain” blocks execution for unverifiable constraints.
+
+Context:
+We have a clarify flow where user can choose how to handle constraints like:
+
+opened in last 12 months (time predicate, often proxy/unverifiable)
+
+live music (attribute, often proxy/unverifiable)
+User can select “must be certain”, and currently the system STILL offers “Search now”, runs tools, and Tower can show PASS. This is an honesty failure.
+
+Required behaviour (non-negotiable):
+If any constraint is marked “must be certain” AND that constraint is not strictly verifiable with available evidence, then:
+
+can_execute must be false
+
+the system must STOP (return a refusal message)
+
+the system must NOT offer “Search now”
+
+the system must NOT schedule tools / create an execution run
+
+the response must clearly explain: “I can’t guarantee this with public data” and list safe alternatives (proxies or relaxing constraint)
+
+Scope:
+
+Focus on clarify-session completion -> runnable decision -> execution start.
+
+The gating must happen in Supervisor before any mission/run is created.
+
+This must work for compound constraints: if either opened OR live music is must-be-certain and unverifiable, STOP.
+
+Implementation details:
+
+Introduce/confirm a boolean on each relevant constraint in the constraint/clarify state, e.g. requires_certainty or must_be_certain.
+
+Add a function like isCertainVerifiable(constraint): boolean that returns true only when we have a strict evidence path (not proxy).
+
+Time-opened: default is NOT strictly verifiable from Places alone; treat as unverifiable unless we have an explicit authoritative source in our toolchain.
+
+Live music: treat as unverifiable unless we can strictly confirm from acceptable sources AND the system is configured to do that confirmation reliably.
+
+When user selects “must be certain”, set the flag and run the gate:
+
+if any flagged constraint is not strictly verifiable: set can_execute=false, add a why_blocked reason, and return STOP response.
+
+Ensure the STOP response is emitted through the same channel the UI already renders (chat bubble). Do not rely on the yellow banner alone.
+
+Ensure no downstream “Search now” action is emitted when can_execute=false.
+
+Deliverables:
+
+Exact files changed
+
+New/updated unit tests covering:
+a) single constraint time predicate with must_be_certain -> STOP, no run created
+b) compound constraints opened + live music with must_be_certain -> STOP
+c) proxy-accepted path still allows execution
+
+Test command to run
+
+Also add a visible dev-only build stamp to the STOP response (like [build: abc1234]) so we can confirm runtime is on new code.

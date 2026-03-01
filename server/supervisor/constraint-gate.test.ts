@@ -9,6 +9,9 @@ import {
   detectProxySelection,
   detectBestEffort,
   detectLiveMusicChoice,
+  detectMustBeCertain,
+  isCertainVerifiable,
+  applyCertaintyGate,
   buildConstraintGateMessage,
   storePendingContract,
   getPendingContract,
@@ -158,8 +161,8 @@ describe('Constraint Gate — preExecutionConstraintGate', () => {
 describe('Constraint Gate — signal detection', () => {
   it('"no proxies" → true', () => assert.ok(detectNoProxySignal('no proxies')));
   it('"no proxy" → true', () => assert.ok(detectNoProxySignal('no proxy')));
-  it('"must be certain" → true', () => assert.ok(detectNoProxySignal('must be certain')));
-  it('"must be guaranteed" → true', () => assert.ok(detectNoProxySignal('must be guaranteed')));
+  it('"must be certain" → false (handled by detectMustBeCertain, not detectNoProxySignal)', () => assert.strictEqual(detectNoProxySignal('must be certain'), false));
+  it('"must be guaranteed" → false (handled by detectMustBeCertain)', () => assert.strictEqual(detectNoProxySignal('must be guaranteed'), false));
   it('"don\'t use proxies" → true', () => assert.ok(detectNoProxySignal("don't use proxies")));
   it('"use recent reviews" → false', () => assert.strictEqual(detectNoProxySignal('use recent reviews'), false));
 
@@ -470,8 +473,9 @@ describe('Batch 2 QA — detectNoProxySignal', () => {
     assert.strictEqual(detectNoProxySignal('Find 10 pubs that just opened, no proxies'), true);
   });
 
-  it('"must be certain" detected', () => {
-    assert.strictEqual(detectNoProxySignal('Find cafes opened recently, must be certain'), true);
+  it('"must be certain" detected via detectMustBeCertain (not detectNoProxySignal)', () => {
+    assert.strictEqual(detectNoProxySignal('Find cafes opened recently, must be certain'), false);
+    assert.strictEqual(detectMustBeCertain('Find cafes opened recently, must be certain'), true);
   });
 
   it('"don\'t guess" detected', () => {
@@ -483,9 +487,235 @@ describe('Batch 2 QA — detectNoProxySignal', () => {
   });
 
   it('Test 3 scenario: original request has "no proxies" → detectNoProxySignal returns true, even though synthetic message loses that signal', () => {
-    const originalRequest = 'Find 10 cafes in Brighton that just opened, no proxies, must be certain';
+    const originalRequest = 'Find 10 cafes in Brighton that just opened, no proxies';
     const syntheticMsg = 'find cafes in Brighton';
     assert.strictEqual(detectNoProxySignal(originalRequest), true);
     assert.strictEqual(detectNoProxySignal(syntheticMsg), false);
+  });
+
+  it('Test 3b scenario: original request has "must be certain" → detectMustBeCertain returns true, detectNoProxySignal returns false', () => {
+    const originalRequest = 'Find 10 cafes in Brighton that just opened, must be certain';
+    assert.strictEqual(detectMustBeCertain(originalRequest), true);
+    assert.strictEqual(detectNoProxySignal(originalRequest), false);
+  });
+});
+
+describe('detectMustBeCertain', () => {
+  it('detects "must be certain"', () => {
+    assert.strictEqual(detectMustBeCertain('Find pubs opened recently, must be certain'), true);
+  });
+
+  it('detects "must be guaranteed"', () => {
+    assert.strictEqual(detectMustBeCertain('I need pubs that opened last year, must be guaranteed'), true);
+  });
+
+  it('detects "must be verified"', () => {
+    assert.strictEqual(detectMustBeCertain('Find cafes, must be verified'), true);
+  });
+
+  it('detects "need to be certain"', () => {
+    assert.strictEqual(detectMustBeCertain('I need to be certain about the opening date'), true);
+  });
+
+  it('detects "require certainty"', () => {
+    assert.strictEqual(detectMustBeCertain('I require certainty on the opening dates'), true);
+  });
+
+  it('detects "has to be certain"', () => {
+    assert.strictEqual(detectMustBeCertain('The data has to be certain'), true);
+  });
+
+  it('detects "i need certainty"', () => {
+    assert.strictEqual(detectMustBeCertain('I need certainty on this'), true);
+  });
+
+  it('detects "certainty is required"', () => {
+    assert.strictEqual(detectMustBeCertain('Certainty is required for these results'), true);
+  });
+
+  it('detects "only if you\'re certain"', () => {
+    assert.strictEqual(detectMustBeCertain("Only if you're certain"), true);
+  });
+
+  it('does NOT trigger on normal requests', () => {
+    assert.strictEqual(detectMustBeCertain('Find 10 pubs in Manchester opened in the last 12 months'), false);
+  });
+
+  it('does NOT trigger on best-effort requests', () => {
+    assert.strictEqual(detectMustBeCertain('Find pubs, best effort is fine'), false);
+  });
+});
+
+describe('isCertainVerifiable', () => {
+  it('returns false for time_predicate constraints', () => {
+    const tp: TimePredicateContract = {
+      type: 'time_predicate',
+      predicate: 'opened',
+      window: '12 months',
+      window_days: 365,
+      reference_date: 'now',
+      hardness: 'hard',
+      verifiability: 'proxy',
+      required_inputs_missing: [],
+      can_execute: false,
+      why_blocked: null,
+      suggested_rephrase: null,
+      proxy_options: [],
+      chosen_proxy: null,
+    };
+    assert.strictEqual(isCertainVerifiable(tp), false);
+  });
+
+  it('returns false for live_music attribute', () => {
+    const attr: AttributeConstraint = {
+      type: 'attribute',
+      attribute: 'live_music',
+      verifiability: 'proxy',
+      requires_clarification: true,
+      chosen_verification: null,
+      hardness: 'soft',
+    };
+    assert.strictEqual(isCertainVerifiable(attr), false);
+  });
+
+  it('returns true for verifiable attributes like beer_garden', () => {
+    const attr: AttributeConstraint = {
+      type: 'attribute',
+      attribute: 'beer_garden',
+      verifiability: 'verifiable',
+      requires_clarification: false,
+      chosen_verification: null,
+      hardness: 'soft',
+    };
+    assert.strictEqual(isCertainVerifiable(attr), true);
+  });
+});
+
+describe('preExecutionConstraintGate — must be certain', () => {
+  it('blocks execution with stop_recommended when "must be certain" + time predicate', () => {
+    const result = preExecutionConstraintGate('Find 10 pubs in Manchester opened in the last 12 months, must be certain');
+    assert.strictEqual(result.can_execute, false);
+    assert.strictEqual(result.stop_recommended, true);
+    assert.ok(result.why_blocked);
+    assert.ok(result.why_blocked!.includes('certainty'));
+    const tp = result.constraints.find(c => c.type === 'time_predicate') as TimePredicateContract;
+    assert.ok(tp);
+    assert.strictEqual(tp.must_be_certain, true);
+    assert.strictEqual(tp.can_execute, false);
+  });
+
+  it('blocks execution when "must be guaranteed" + time predicate', () => {
+    const result = preExecutionConstraintGate('Find cafes that opened in the last 6 months, must be guaranteed');
+    assert.strictEqual(result.can_execute, false);
+    assert.strictEqual(result.stop_recommended, true);
+  });
+
+  it('does NOT block when "must be certain" but no unverifiable constraints', () => {
+    const result = preExecutionConstraintGate('Find pubs with a beer garden, must be certain');
+    assert.strictEqual(result.can_execute, true);
+    assert.strictEqual(result.stop_recommended, false);
+  });
+
+  it('sets must_be_certain on all constraints when detected in initial message', () => {
+    const result = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music, must be certain');
+    for (const c of result.constraints) {
+      assert.strictEqual(c.must_be_certain, true);
+    }
+    assert.strictEqual(result.can_execute, false);
+    assert.strictEqual(result.stop_recommended, true);
+  });
+
+  it('STOP message includes alternatives text', () => {
+    const result = preExecutionConstraintGate('Find pubs that opened in the last 12 months, must be certain');
+    const msg = buildConstraintGateMessage(result);
+    assert.ok(msg.includes('stop here') || msg.includes('certainty'), `Expected STOP message to mention "stop here" or "certainty", got: ${msg.substring(0, 200)}`);
+  });
+});
+
+describe('resolveFollowUp — must be certain as follow-up', () => {
+  it('follow-up "must be certain" after clarify question → blocks with STOP', () => {
+    const initial = preExecutionConstraintGate('Find 10 pubs in Manchester opened in the last 12 months');
+    assert.strictEqual(initial.can_execute, false);
+    assert.strictEqual(initial.stop_recommended, false);
+
+    const resolved = resolveFollowUp(initial, 'must be certain');
+    assert.strictEqual(resolved.can_execute, false);
+    assert.strictEqual(resolved.stop_recommended, true);
+    assert.ok(resolved.why_blocked);
+    assert.ok(resolved.why_blocked!.includes('certainty'));
+  });
+
+  it('follow-up "I need certainty" → blocks with STOP', () => {
+    const initial = preExecutionConstraintGate('Find 10 pubs in Manchester opened in the last 12 months');
+    const resolved = resolveFollowUp(initial, 'I need certainty');
+    assert.strictEqual(resolved.can_execute, false);
+    assert.strictEqual(resolved.stop_recommended, true);
+  });
+
+  it('follow-up "best effort" still works normally (no certainty block)', () => {
+    const initial = preExecutionConstraintGate('Find 10 pubs in Manchester opened in the last 12 months');
+    const resolved = resolveFollowUp(initial, 'best effort is fine');
+    assert.strictEqual(resolved.can_execute, true);
+    assert.strictEqual(resolved.stop_recommended, false);
+  });
+
+  it('follow-up "option B" (proxy selection) still works normally', () => {
+    const initial = preExecutionConstraintGate('Find 10 pubs in Manchester opened in the last 12 months');
+    const resolved = resolveFollowUp(initial, 'option B');
+    assert.strictEqual(resolved.can_execute, true);
+    assert.strictEqual(resolved.stop_recommended, false);
+  });
+});
+
+describe('applyCertaintyGate', () => {
+  it('blocks contract with unverifiable must_be_certain constraints', () => {
+    const contract: ConstraintContract = {
+      constraints: [{
+        type: 'time_predicate',
+        predicate: 'opened',
+        window: '12 months',
+        window_days: 365,
+        reference_date: 'now',
+        hardness: 'soft',
+        verifiability: 'proxy',
+        required_inputs_missing: [],
+        can_execute: false,
+        why_blocked: null,
+        suggested_rephrase: null,
+        proxy_options: [],
+        chosen_proxy: null,
+        must_be_certain: true,
+      }],
+      can_execute: false,
+      why_blocked: null,
+      clarify_questions: ['Some question'],
+      stop_recommended: false,
+    };
+    const result = applyCertaintyGate(contract);
+    assert.strictEqual(result.can_execute, false);
+    assert.strictEqual(result.stop_recommended, true);
+    assert.ok(result.why_blocked!.includes('certainty'));
+    assert.strictEqual(result.clarify_questions.length, 0);
+  });
+
+  it('passes through contract with only verifiable must_be_certain constraints', () => {
+    const contract: ConstraintContract = {
+      constraints: [{
+        type: 'attribute',
+        attribute: 'beer_garden',
+        verifiability: 'verifiable',
+        requires_clarification: false,
+        chosen_verification: null,
+        hardness: 'soft',
+        must_be_certain: true,
+      }],
+      can_execute: true,
+      why_blocked: null,
+      clarify_questions: [],
+      stop_recommended: false,
+    };
+    const result = applyCertaintyGate(contract);
+    assert.strictEqual(result.can_execute, true);
+    assert.strictEqual(result.stop_recommended, false);
   });
 });

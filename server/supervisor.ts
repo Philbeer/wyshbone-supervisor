@@ -25,7 +25,7 @@ import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-
 import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
-import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, type ConstraintContract } from './supervisor/constraint-gate';
+import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, type ConstraintContract } from './supervisor/constraint-gate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
@@ -1096,7 +1096,17 @@ class SupervisorService {
       // and check the follow-up for proxy/best-effort choices
       const noProxySource = sessionOriginalRequest || outerGateMsg;
       const noProxyFromOriginal = detectNoProxySignal(noProxySource);
+      const mustBeCertainFromOriginal = detectMustBeCertain(noProxySource);
       let outerGateResult = preExecutionConstraintGate(outerGateMsg);
+
+      // If the original request had must-be-certain signal but the synthetic message doesn't, apply certainty gate
+      if (mustBeCertainFromOriginal && !outerGateResult.stop_recommended && outerGateResult.constraints.length > 0) {
+        for (const c of outerGateResult.constraints) {
+          c.must_be_certain = true;
+        }
+        outerGateResult = applyCertaintyGate(outerGateResult);
+        console.log(`[CONSTRAINT_GATE_OUTER] must-be-certain signal detected from original request "${noProxySource.substring(0, 60)}" — applying certainty gate`);
+      }
 
       // If the original request had no-proxy signal but the synthetic message doesn't, override
       if (noProxyFromOriginal && !outerGateResult.stop_recommended && outerGateResult.constraints.some(c => c.type === 'time_predicate')) {

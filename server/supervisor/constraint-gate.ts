@@ -22,6 +22,7 @@ export interface AttributeConstraint {
   requires_clarification: boolean;
   chosen_verification: LiveMusicVerification;
   hardness: Hardness;
+  must_be_certain?: boolean;
 }
 
 export type Constraint = TimePredicateContract | AttributeConstraint;
@@ -70,7 +71,7 @@ const ATTRIBUTE_PATTERNS: { pattern: RegExp; attribute: string }[] = [
   { pattern: /\blate[- ]?\s*night\b/i, attribute: 'late_night' },
 ];
 
-const NO_PROXY_PATTERNS = /\b(?:no\s+prox(?:y|ies)|must\s+be\s+certain|must\s+be\s+(?:guaranteed|verified|exact|accurate)|no\s+approximation|don'?t\s+use\s+(?:any\s+)?prox(?:y|ies)|without\s+prox(?:y|ies)|certain\s+(?:about|of)|don'?t\s+guess)\b/i;
+const NO_PROXY_PATTERNS = /\b(?:no\s+prox(?:y|ies)|no\s+approximation|don'?t\s+use\s+(?:any\s+)?prox(?:y|ies)|without\s+prox(?:y|ies)|don'?t\s+guess)\b/i;
 
 const PROXY_SELECTION_PATTERNS: { pattern: RegExp; proxyId: string }[] = [
   { pattern: /\b(?:use|accept|try|go\s+with|pick|choose|select)\s+(?:the\s+)?(?:first\s+)?(?:recent\s*)?reviews?\s*(?:proxy)?\b/i, proxyId: 'recent_reviews' },
@@ -132,6 +133,60 @@ export function extractAllConstraints(msg: string): Constraint[] {
 
 export function detectNoProxySignal(msg: string): boolean {
   return NO_PROXY_PATTERNS.test(msg);
+}
+
+const MUST_BE_CERTAIN_PATTERNS = /\b(?:must\s+be\s+certain|must\s+be\s+(?:guaranteed|verified|exact|accurate|sure)|need\s+(?:to\s+be\s+)?certain|require\s+certainty|has\s+to\s+be\s+certain|i\s+need\s+certainty|certain(?:ty)?\s+(?:is\s+)?required|only\s+if\s+(?:you'?re|it'?s)\s+certain)\b/i;
+
+export function detectMustBeCertain(msg: string): boolean {
+  return MUST_BE_CERTAIN_PATTERNS.test(msg);
+}
+
+export function isCertainVerifiable(constraint: Constraint): boolean {
+  if (constraint.type === 'time_predicate') {
+    return false;
+  }
+  if (constraint.type === 'attribute' && constraint.attribute === 'live_music') {
+    return false;
+  }
+  if (constraint.verifiability === 'verifiable') {
+    return true;
+  }
+  return false;
+}
+
+export function applyCertaintyGate(contract: ConstraintContract): ConstraintContract {
+  const blocked = contract.constraints.filter(c => c.must_be_certain && !isCertainVerifiable(c));
+  if (blocked.length === 0) return contract;
+
+  const reasons = blocked.map(c => {
+    if (c.type === 'time_predicate') {
+      return `"${c.predicate}" — opening dates cannot be verified with certainty from any available data source`;
+    }
+    if (c.type === 'attribute') {
+      return `"${c.attribute}" — this attribute cannot be strictly verified from public listings data`;
+    }
+    return `unknown constraint cannot be verified`;
+  });
+
+  for (const c of contract.constraints) {
+    if (c.must_be_certain && !isCertainVerifiable(c)) {
+      c.can_execute = false;
+      c.hardness = 'hard';
+      c.verifiability = 'unverifiable';
+      if (c.type === 'time_predicate') {
+        c.why_blocked = 'User requires certainty but opening dates cannot be verified.';
+        c.suggested_rephrase = null;
+      }
+    }
+  }
+
+  return {
+    ...contract,
+    can_execute: false,
+    stop_recommended: true,
+    why_blocked: `You asked for certainty, but I can't guarantee the following with public data:\n• ${reasons.join('\n• ')}\n\nAlternatives: accept a proxy (news mentions or recent reviews as evidence), use best-effort (unverified), or remove the constraint.`,
+    clarify_questions: [],
+  };
 }
 
 export function detectProxySelection(msg: string): string | null {
@@ -244,9 +299,11 @@ export function preExecutionConstraintGate(msg: string): ConstraintContract {
   }
 
   const isNoProxy = detectNoProxySignal(msg);
+  const isMustBeCertain = detectMustBeCertain(msg);
 
-  if (isNoProxy) {
+  if (isNoProxy || isMustBeCertain) {
     for (const c of constraints) {
+      c.must_be_certain = true;
       if (c.type === 'time_predicate') {
         c.hardness = 'hard';
         c.verifiability = 'unverifiable';
@@ -257,7 +314,11 @@ export function preExecutionConstraintGate(msg: string): ConstraintContract {
     }
   }
 
-  return buildGateState(constraints, isNoProxy);
+  const gate = buildGateState(constraints, isNoProxy || isMustBeCertain);
+  if (isMustBeCertain) {
+    return applyCertaintyGate(gate);
+  }
+  return gate;
 }
 
 export function resolveFollowUp(
@@ -265,6 +326,7 @@ export function resolveFollowUp(
   followUpMsg: string,
 ): ConstraintContract {
   const noProxy = detectNoProxySignal(followUpMsg);
+  const mustBeCertain = detectMustBeCertain(followUpMsg);
   const proxyChoice = detectProxySelection(followUpMsg);
   const bestEffort = detectBestEffort(followUpMsg);
   const windowInfo = detectWindowFromFollowUp(followUpMsg);
@@ -273,6 +335,10 @@ export function resolveFollowUp(
   const updatedConstraints = existingContract.constraints.map(c => {
     if (c.type === 'time_predicate') {
       let updated = { ...c };
+
+      if (mustBeCertain) {
+        updated = { ...updated, must_be_certain: true };
+      }
 
       if (windowInfo && updated.required_inputs_missing.includes('time_window')) {
         updated = {
@@ -283,7 +349,18 @@ export function resolveFollowUp(
         };
       }
 
-      if (noProxy) {
+      if (mustBeCertain) {
+        updated = {
+          ...updated,
+          hardness: 'hard',
+          verifiability: 'unverifiable',
+          can_execute: false,
+          why_blocked: 'You asked for certainty, but I can\'t guarantee opening dates with public data.',
+          suggested_rephrase: null,
+          chosen_proxy: null,
+          must_be_certain: true,
+        };
+      } else if (noProxy) {
         updated = {
           ...updated,
           hardness: 'hard',
@@ -311,6 +388,9 @@ export function resolveFollowUp(
     }
 
     if (c.type === 'attribute' && c.attribute === 'live_music' && c.requires_clarification && c.chosen_verification === null) {
+      if (mustBeCertain) {
+        return { ...c, must_be_certain: true, hardness: 'hard', verifiability: 'unverifiable', can_execute: false };
+      }
       if (liveMusicChoice) {
         return { ...c, chosen_verification: liveMusicChoice, requires_clarification: false };
       }
@@ -319,10 +399,18 @@ export function resolveFollowUp(
       }
     }
 
+    if (mustBeCertain && c.type === 'attribute') {
+      return { ...c, must_be_certain: true };
+    }
+
     return c;
   });
 
-  return buildGateState(updatedConstraints, noProxy);
+  const gateResult = buildGateState(updatedConstraints, noProxy || mustBeCertain);
+  if (mustBeCertain) {
+    return applyCertaintyGate(gateResult);
+  }
+  return gateResult;
 }
 
 export function storePendingContract(conversationId: string, originalMessage: string, contract: ConstraintContract): void {
@@ -348,10 +436,14 @@ export function clearPendingContract(conversationId: string): void {
   pendingContracts.delete(conversationId);
 }
 
+const buildStamp = process.env.GIT_SHA?.substring(0, 7) || '5c9c5a8';
+const isDev = process.env.NODE_ENV !== 'production';
+
 export function buildConstraintGateMessage(contract: ConstraintContract): string {
   if (contract.stop_recommended) {
     const reason = contract.why_blocked || 'One or more constraints cannot be verified from available data sources.';
-    return `I need to stop here. ${reason}\n\nIf you'd like, you can rephrase your request without the unverifiable requirement, and I'll try again.`;
+    const stamp = isDev ? `\n\n[build: ${buildStamp}]` : '';
+    return `I need to stop here. ${reason}\n\nIf you'd like, you can rephrase your request without the unverifiable requirement, and I'll try again.${stamp}`;
   }
 
   if (contract.clarify_questions.length > 0) {

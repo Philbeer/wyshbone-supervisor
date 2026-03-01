@@ -26,6 +26,7 @@ export interface TimePredicateContract {
   suggested_rephrase: string | null;
   proxy_options: ProxyOption[];
   chosen_proxy: string | null;
+  must_be_certain?: boolean;
 }
 
 const PROXY_OPTIONS: ProxyOption[] = [
