@@ -1040,6 +1040,39 @@ class SupervisorService {
       }
     }
 
+    // OUTER CONSTRAINT GATE — runs BEFORE executeTowerLoopChat to prevent agent_run creation, LLM calls, or any observable side-effects
+    const outerGateMsg = String((task.request_data as any).user_message || '').trim();
+    const outerGateAlreadyResolved = !!(task.request_data as any)._constraint_gate_resolved;
+    if (!outerGateAlreadyResolved && outerGateMsg.length > 0) {
+      const outerGateResult = preExecutionConstraintGate(outerGateMsg);
+      console.log(`[CONSTRAINT_GATE_OUTER] can_execute=${outerGateResult.can_execute} stop=${outerGateResult.stop_recommended} constraints=${outerGateResult.constraints.length} msg="${outerGateMsg.substring(0, 80)}"`);
+
+      if (!outerGateResult.can_execute) {
+        await createArtefact({
+          runId: jobId,
+          type: 'diagnostic',
+          title: `Pre-execution constraint gate (outer): BLOCKED (stop=${outerGateResult.stop_recommended})`,
+          summary: outerGateResult.why_blocked || 'Constraints require clarification',
+          payload: { constraint_contract: outerGateResult, original_goal: outerGateMsg },
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch((e: any) => console.warn(`[CONSTRAINT_GATE_OUTER] Failed to emit artefact: ${e.message}`));
+
+        storePendingContract(task.conversation_id, outerGateMsg, outerGateResult);
+
+        const outerGateClarifyMsg = buildConstraintGateMessage(outerGateResult);
+        const outerGateMessageId = randomUUID();
+
+        await Promise.all([
+          supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: outerGateClarifyMsg.substring(0, 200), message_id: outerGateMessageId, clarify_gate: outerGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify' } }).eq('id', task.id),
+          supabase!.from('messages').insert({ id: outerGateMessageId, conversation_id: task.conversation_id, role: 'assistant', content: outerGateClarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: outerGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: outerGateResult }, created_at: Date.now() }).select().single(),
+        ]);
+
+        console.log(`[CONSTRAINT_GATE_OUTER] BLOCKED — no agent_run created, no LLM calls, no tools invoked.`);
+        return;
+      }
+    }
+
     let towerResult: { response: string; leadIds: string[]; deliverySummary: DeliverySummaryPayload | null; towerVerdict: string | null; leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string }> };
     let runFailed = false;
     let failureReason = '';
