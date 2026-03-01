@@ -686,3 +686,45 @@ describe('ClarifySession', () => {
     });
   });
 });
+
+describe('Batch 2 QA — compound follow-up handling', () => {
+  it('Test 5: "Manchester, within 12 months, option C" extracts only "Manchester" as location', () => {
+    const session = createClarifySession('conv-t5', 'Find 10 pubs that opened in the last 12 months and have live music', ['location'], { businessType: 'pubs' });
+
+    const fu = classifyFollowUp('Manchester, within 12 months, option C', session);
+    assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+    assert.strictEqual(fu.updatedField, 'location');
+    assert.strictEqual(fu.value, 'Manchester');
+    assert.ok(fu.compoundExtras, 'should have compound extras');
+    assert.ok(fu.compoundExtras!.includes('12 months'), 'extras should include time window');
+    assert.ok(fu.compoundExtras!.includes('option C'), 'extras should include proxy choice');
+  });
+
+  it('Test 5: compound extras are stored on session after applyFollowUp', () => {
+    const session = createClarifySession('conv-t5b', 'Find 10 pubs that opened in the last 12 months', ['location'], { businessType: 'pubs' });
+
+    const fu = classifyFollowUp('Manchester, within 12 months, option C', session);
+    applyFollowUp(session, fu);
+    assert.strictEqual(session.collectedFields.location, 'Manchester');
+    assert.ok(session.compoundExtras, 'session should store compound extras');
+  });
+
+  it('"Manchester city centre" (no compound signals) is stored as-is', () => {
+    const session = createClarifySession('conv-plain', 'Find bars with great vibes', ['location', 'semantic_constraint'], { businessType: 'bars' });
+
+    const fu = classifyFollowUp('Manchester city centre', session);
+    assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+    assert.strictEqual(fu.updatedField, 'location');
+    assert.strictEqual(fu.value, 'Manchester city centre');
+    assert.strictEqual(fu.compoundExtras, undefined);
+  });
+
+  it('"Leeds, best-effort is fine" extracts just "Leeds" and has extras', () => {
+    const session = createClarifySession('conv-be', 'Find pubs opened recently', ['location'], { businessType: 'pubs' });
+
+    const fu = classifyFollowUp('Leeds, best-effort is fine', session);
+    assert.strictEqual(fu.value, 'Leeds');
+    assert.ok(fu.compoundExtras);
+    assert.ok(fu.compoundExtras!.includes('best-effort'));
+  });
+});

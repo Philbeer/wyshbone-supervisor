@@ -15,6 +15,7 @@ export interface ClarifySession {
   };
   turnCount: number;
   createdAt: number;
+  compoundExtras?: string;
 }
 
 export const MAX_CLARIFY_TURNS = 3;
@@ -25,6 +26,7 @@ export interface FollowUpResult {
   classification: FollowUpClass;
   updatedField?: MissingField;
   value?: string;
+  compoundExtras?: string;
 }
 
 export interface ClarifyState {
@@ -145,6 +147,23 @@ function looksLikeLocation(msg: string): boolean {
   if (KNOWN_LOCATIONS.test(trimmed)) return true;
   if (LOCATION_LIKE.test(trimmed) && trimmed.split(/\s+/).length <= 4) return true;
   return false;
+}
+
+const COMPOUND_SIGNAL = /\b(?:within|last|past|next|option\s*[a-c]|best[- ]?effort|proxy|proxies|no\s+proxies|unverified|verify|months?|weeks?|years?|opened?\s+in|must\s+be\s+certain|don'?t\s+guess)\b/i;
+
+function extractLocationOnly(msg: string): string {
+  if (!COMPOUND_SIGNAL.test(msg)) return msg;
+  const parts = msg.split(/[,;]+/);
+  if (parts.length > 1) {
+    const firstPart = parts[0].trim();
+    if (firstPart.length > 1 && looksLikeLocation(firstPart)) return firstPart;
+  }
+  const locMatch = msg.match(KNOWN_LOCATIONS);
+  if (locMatch) {
+    const loc = locMatch[0].trim();
+    if (loc.length > 1) return loc;
+  }
+  return msg;
 }
 
 function isExecuteIntent(msg: string): boolean {
@@ -299,10 +318,13 @@ export function classifyFollowUp(msg: string, session: ClarifySession): FollowUp
   }
 
   if (session.missingFields.includes('location') && (looksLikeLocation(trimmed) || looksLikeLocation(stripped))) {
+    const locationOnly = extractLocationOnly(stripped);
+    const extras = locationOnly !== stripped ? stripped.replace(locationOnly, '').replace(/^[\s,;]+|[\s,;]+$/g, '').trim() : undefined;
     return {
       classification: 'ANSWER_TO_MISSING_FIELD',
       updatedField: 'location',
-      value: stripped,
+      value: locationOnly,
+      compoundExtras: extras && extras.length > 0 ? extras : undefined,
     };
   }
 
@@ -379,6 +401,9 @@ export function applyFollowUp(session: ClarifySession, result: FollowUpResult): 
       }
     }
     session.missingFields = session.missingFields.filter(f => f !== result.updatedField);
+    if (result.compoundExtras) {
+      session.compoundExtras = result.compoundExtras;
+    }
   } else if (result.classification === 'REFINEMENT' && result.value) {
     if (BUSINESS_MODIFIERS.test(result.value)) {
       if (!session.collectedFields.attributes.includes(result.value)) {

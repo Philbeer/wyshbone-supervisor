@@ -70,7 +70,7 @@ const ATTRIBUTE_PATTERNS: { pattern: RegExp; attribute: string }[] = [
   { pattern: /\blate[- ]?\s*night\b/i, attribute: 'late_night' },
 ];
 
-const NO_PROXY_PATTERNS = /\b(?:no\s+prox(?:y|ies)|must\s+be\s+certain|must\s+be\s+(?:guaranteed|verified|exact|accurate)|no\s+approximation|don'?t\s+use\s+(?:any\s+)?prox(?:y|ies)|without\s+prox(?:y|ies)|certain\s+(?:about|of))\b/i;
+const NO_PROXY_PATTERNS = /\b(?:no\s+prox(?:y|ies)|must\s+be\s+certain|must\s+be\s+(?:guaranteed|verified|exact|accurate)|no\s+approximation|don'?t\s+use\s+(?:any\s+)?prox(?:y|ies)|without\s+prox(?:y|ies)|certain\s+(?:about|of)|don'?t\s+guess)\b/i;
 
 const PROXY_SELECTION_PATTERNS: { pattern: RegExp; proxyId: string }[] = [
   { pattern: /\b(?:use|accept|try|go\s+with|pick|choose|select)\s+(?:the\s+)?(?:first\s+)?(?:recent\s*)?reviews?\s*(?:proxy)?\b/i, proxyId: 'recent_reviews' },

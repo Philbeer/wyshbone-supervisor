@@ -94,3 +94,10 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Brave Search API**: Used by `WEB_SEARCH` tool.
 - **cheerio**: HTML parsing by `WEB_VISIT` tool.
 - **Playwright**: Headless Chromium fallback for bot-blocked sites.
+
+### Batch 2 QA Fixes (Clarify Session + Constraint Gate)
+- **Compound follow-up extraction**: `extractLocationOnly()` in `clarify-session.ts` handles compound follow-up answers (e.g. "Manchester, within 12 months, option C") — extracts just the location when COMPOUND_SIGNAL tokens are present, stores remainder as `compoundExtras` on `FollowUpResult` and `ClarifySession`. Simple multi-word locations without compound signals ("Manchester city centre") stored as-is.
+- **No-proxy signal forwarding**: When a clarify session completes, the outer constraint gate in `supervisor.ts` checks `sessionOriginalRequest` (not just the synthetic message) via `detectNoProxySignal()`. If the original request had "no proxies"/"must be certain"/"don't guess" + time predicate → forces STOP. Prevents the synthetic message from losing hardness signals.
+- **Follow-up proxy pre-resolution**: If the follow-up message contained proxy/best-effort choices and the outer gate blocks without STOP, `resolveFollowUp()` is called on `sessionFollowUpMsg` to pre-resolve the constraint gate before requiring another round-trip.
+- **`detectNoProxySignal` expanded**: Now also matches "don't guess" pattern.
+- **240 tests passing** across 4 test files.

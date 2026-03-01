@@ -25,7 +25,7 @@ import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-
 import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
-import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, type ConstraintContract } from './supervisor/constraint-gate';
+import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, type ConstraintContract } from './supervisor/constraint-gate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
@@ -839,6 +839,8 @@ class SupervisorService {
 
     const existingSession = getClarifySession(task.conversation_id);
     let sessionCompletedToRun = false;
+    let sessionOriginalRequest: string | null = null;
+    let sessionFollowUpMsg: string | null = null;
 
     if (existingSession) {
       const followUp = classifyFollowUp(rawMsg, existingSession);
@@ -890,6 +892,8 @@ class SupervisorService {
 
           console.log(`[CLARIFY_SESSION] Synthetic message: "${syntheticMsg}"`);
           sessionCompletedToRun = true;
+          sessionOriginalRequest = existingSession.originalUserRequest;
+          sessionFollowUpMsg = rawMsg;
 
           await createArtefact({
             runId: jobId,
@@ -951,6 +955,8 @@ class SupervisorService {
           console.log(`[CLARIFY_SESSION] Synthetic message: "${syntheticMsg}"`);
 
           sessionCompletedToRun = true;
+          sessionOriginalRequest = existingSession.originalUserRequest;
+          sessionFollowUpMsg = rawMsg;
 
           await createArtefact({
             runId: jobId,
@@ -1081,7 +1087,43 @@ class SupervisorService {
     const outerGateMsg = String((task.request_data as any).user_message || '').trim();
     const outerGateAlreadyResolved = !!(task.request_data as any)._constraint_gate_resolved;
     if (!outerGateAlreadyResolved && outerGateMsg.length > 0) {
-      const outerGateResult = preExecutionConstraintGate(outerGateMsg);
+      // When a clarify session completed, check ORIGINAL request for no-proxy/hardness signals
+      // and check the follow-up for proxy/best-effort choices
+      const noProxySource = sessionOriginalRequest || outerGateMsg;
+      const noProxyFromOriginal = detectNoProxySignal(noProxySource);
+      let outerGateResult = preExecutionConstraintGate(outerGateMsg);
+
+      // If the original request had no-proxy signal but the synthetic message doesn't, override
+      if (noProxyFromOriginal && !outerGateResult.stop_recommended && outerGateResult.constraints.some(c => c.type === 'time_predicate')) {
+        for (const c of outerGateResult.constraints) {
+          if (c.type === 'time_predicate') {
+            c.hardness = 'hard';
+            c.verifiability = 'unverifiable';
+            c.can_execute = false;
+            c.why_blocked = 'User requires certainty but opening dates cannot be verified from any available data source. This constraint cannot be satisfied.';
+            c.suggested_rephrase = null;
+          }
+        }
+        outerGateResult = {
+          ...outerGateResult,
+          can_execute: false,
+          stop_recommended: true,
+          why_blocked: 'User requires certainty but opening dates cannot be verified.',
+          clarify_questions: [],
+        };
+        console.log(`[CONSTRAINT_GATE_OUTER] no-proxy signal detected from original request "${noProxySource.substring(0, 60)}" — forcing STOP`);
+      }
+
+      // If the follow-up contained proxy/best-effort, pre-resolve the gate
+      if (sessionFollowUpMsg && !outerGateResult.can_execute && !outerGateResult.stop_recommended) {
+        const preResolved = resolveFollowUp(outerGateResult, sessionFollowUpMsg);
+        if (preResolved.can_execute) {
+          outerGateResult = preResolved;
+          (task.request_data as any)._constraint_gate_resolved = true;
+          console.log(`[CONSTRAINT_GATE_OUTER] Follow-up "${sessionFollowUpMsg.substring(0, 60)}" pre-resolved constraint gate — proceeding to execution`);
+        }
+      }
+
       console.log(`[CONSTRAINT_GATE_OUTER] can_execute=${outerGateResult.can_execute} stop=${outerGateResult.stop_recommended} constraints=${outerGateResult.constraints.length} msg="${outerGateMsg.substring(0, 80)}"`);
 
       if (!outerGateResult.can_execute) {
@@ -1090,12 +1132,12 @@ class SupervisorService {
           type: 'diagnostic',
           title: `Pre-execution constraint gate (outer): BLOCKED (stop=${outerGateResult.stop_recommended})`,
           summary: outerGateResult.why_blocked || 'Constraints require clarification',
-          payload: { constraint_contract: outerGateResult, original_goal: outerGateMsg },
+          payload: { constraint_contract: outerGateResult, original_goal: outerGateMsg, session_original: sessionOriginalRequest, session_followup: sessionFollowUpMsg },
           userId: task.user_id,
           conversationId: task.conversation_id,
         }).catch((e: any) => console.warn(`[CONSTRAINT_GATE_OUTER] Failed to emit artefact: ${e.message}`));
 
-        storePendingContract(task.conversation_id, outerGateMsg, outerGateResult);
+        storePendingContract(task.conversation_id, sessionOriginalRequest || outerGateMsg, outerGateResult);
 
         const outerGateClarifyMsg = buildConstraintGateMessage(outerGateResult);
         const outerGateMessageId = randomUUID();

@@ -464,3 +464,28 @@ describe('Constraint Gate — acceptance tests (exact QA scenarios)', () => {
     assert.ok(msg.includes('stop'), 'stop message must say stop');
   });
 });
+
+describe('Batch 2 QA — detectNoProxySignal', () => {
+  it('"no proxies" detected', () => {
+    assert.strictEqual(detectNoProxySignal('Find 10 pubs that just opened, no proxies'), true);
+  });
+
+  it('"must be certain" detected', () => {
+    assert.strictEqual(detectNoProxySignal('Find cafes opened recently, must be certain'), true);
+  });
+
+  it('"don\'t guess" detected', () => {
+    assert.strictEqual(detectNoProxySignal("Find pubs in Leeds opened last year, don't guess"), true);
+  });
+
+  it('normal request without no-proxy signal', () => {
+    assert.strictEqual(detectNoProxySignal('Find 10 pubs in Manchester opened in the last 12 months'), false);
+  });
+
+  it('Test 3 scenario: original request has "no proxies" → detectNoProxySignal returns true, even though synthetic message loses that signal', () => {
+    const originalRequest = 'Find 10 cafes in Brighton that just opened, no proxies, must be certain';
+    const syntheticMsg = 'find cafes in Brighton';
+    assert.strictEqual(detectNoProxySignal(originalRequest), true);
+    assert.strictEqual(detectNoProxySignal(syntheticMsg), false);
+  });
+});
