@@ -21,6 +21,7 @@ import {
   type ConstraintContract,
   type AttributeConstraint,
   type SubjectivePredicateConstraint,
+  type NumericAmbiguityConstraint,
 } from './constraint-gate';
 import { type TimePredicateContract } from './time-predicate';
 
@@ -494,11 +495,12 @@ describe('Constraint Gate — subjective predicate extraction (Batch 1)', () => 
     }
   });
 
-  it('"Find best pubs in Leeds" → extracts subjective_predicate', () => {
+  it('"Find best pubs in Leeds" → extracts numeric_ambiguity (ranking)', () => {
     const contract = preExecutionConstraintGate('Find best pubs in Leeds');
     assert.strictEqual(contract.can_execute, false);
-    const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
-    assert.ok(sp, 'subjective_predicate constraint must exist');
+    const na = contract.constraints.find(c => c.type === 'numeric_ambiguity') as NumericAmbiguityConstraint;
+    assert.ok(na, 'numeric_ambiguity constraint must exist');
+    assert.strictEqual(na.category, 'ranking');
   });
 
   it('"Find good cafes" → extracts subjective_predicate', () => {
@@ -839,9 +841,9 @@ describe('detectSubjectiveTerms', () => {
     assert.ok(terms.includes('nice'));
   });
 
-  it('detects "best" from "Find best pubs in Leeds"', () => {
+  it('"best" no longer in subjective (moved to numeric_ambiguity)', () => {
     const terms = detectSubjectiveTerms('Find best pubs in Leeds');
-    assert.ok(terms.includes('best'));
+    assert.strictEqual(terms.length, 0, 'bare "best" is now numeric_ambiguity, not subjective');
   });
 
   it('detects "good" from "Find good cafes"', () => {
@@ -1007,12 +1009,12 @@ describe('Constraint Gate — Batch 1 spec contract tests', () => {
     assert.ok(sp.required_inputs_missing.includes('definition_of_nice'));
   });
 
-  it('"Find best bars in Soho" → CLARIFY', () => {
+  it('"Find best bars in Soho" → CLARIFY (numeric_ambiguity)', () => {
     const contract = preExecutionConstraintGate('Find best bars in Soho');
     assert.strictEqual(contract.can_execute, false);
-    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
-    assert.ok(sp);
-    assert.ok(sp.required_inputs_missing.includes('definition_of_best'));
+    const na = contract.constraints.find(c => c.type === 'numeric_ambiguity') as NumericAmbiguityConstraint;
+    assert.ok(na, 'best is now numeric_ambiguity');
+    assert.strictEqual(na.category, 'ranking');
   });
 
   it('"Find bars with good cocktails in Manchester" → CLARIFY (good is subjective)', () => {
@@ -1083,9 +1085,10 @@ describe('Constraint Gate — Batch 1 subjective follow-up resolution', () => {
     assert.strictEqual(resolved.can_execute, true);
   });
 
-  it('follow-up "quiet" resolves subjective constraint', () => {
+  it('follow-up "5 by reviews" resolves numeric_ambiguity ranking constraint', () => {
     const initial = preExecutionConstraintGate('Find best bars in Soho');
-    const resolved = resolveFollowUp(initial, 'quiet');
+    assert.strictEqual(initial.can_execute, false);
+    const resolved = resolveFollowUp(initial, 'best 5 by reviews');
     assert.strictEqual(resolved.can_execute, true);
   });
 
@@ -1168,5 +1171,201 @@ describe('Constraint Gate — subjective priority suppression', () => {
     assert.strictEqual(contract.stop_recommended, false, 'stop suppressed — subjective must resolve first');
     assert.strictEqual(contract.clarify_questions.length, 1);
     assert.ok(contract.clarify_questions[0].includes("'nice'"));
+  });
+});
+
+describe('Constraint Gate — Batch 3: numeric ambiguity detection', () => {
+  it('"Find a few pubs in Bristol" → CLARIFY (fuzzy_quantity)', () => {
+    const contract = preExecutionConstraintGate('Find a few pubs in Bristol');
+    assert.strictEqual(contract.can_execute, false);
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    const na = contract.constraints.find(c => c.type === 'numeric_ambiguity') as NumericAmbiguityConstraint;
+    assert.ok(na);
+    assert.strictEqual(na.category, 'fuzzy_quantity');
+    assert.strictEqual(na.label, 'a few');
+    assert.strictEqual(na.verifiability, 'unverifiable');
+    assert.strictEqual(na.hardness, 'soft');
+    assert.strictEqual(na.can_execute, false);
+    assert.ok(na.why_blocked.includes('undefined quantity'));
+  });
+
+  it('"Find top pubs in Bristol" → CLARIFY (ranking)', () => {
+    const contract = preExecutionConstraintGate('Find top pubs in Bristol');
+    assert.strictEqual(contract.can_execute, false);
+    const na = contract.constraints.find(c => c.type === 'numeric_ambiguity') as NumericAmbiguityConstraint;
+    assert.ok(na);
+    assert.strictEqual(na.category, 'ranking');
+    assert.strictEqual(na.label, 'top');
+  });
+
+  it('"Find top 5 pubs in Bristol" → RUN (count provided)', () => {
+    const contract = preExecutionConstraintGate('Find top 5 pubs in Bristol');
+    assert.strictEqual(contract.can_execute, true);
+    assert.ok(!contract.constraints.some(c => c.type === 'numeric_ambiguity'));
+  });
+
+  it('"Find best 10 cafes in London" → RUN (count provided)', () => {
+    const contract = preExecutionConstraintGate('Find best 10 cafes in London');
+    assert.strictEqual(contract.can_execute, true);
+    assert.ok(!contract.constraints.some(c => c.type === 'numeric_ambiguity'));
+  });
+
+  it('"Find cheap pubs in Bristol" → CLARIFY (numeric_adjective)', () => {
+    const contract = preExecutionConstraintGate('Find cheap pubs in Bristol');
+    assert.strictEqual(contract.can_execute, false);
+    const na = contract.constraints.find(c => c.type === 'numeric_ambiguity') as NumericAmbiguityConstraint;
+    assert.ok(na);
+    assert.strictEqual(na.category, 'numeric_adjective');
+    assert.strictEqual(na.label, 'cheap');
+  });
+
+  it('"Find best pubs in Bristol" → CLARIFY (ranking, not subjective)', () => {
+    const contract = preExecutionConstraintGate('Find best pubs in Bristol');
+    assert.strictEqual(contract.can_execute, false);
+    assert.ok(!contract.constraints.some(c => c.type === 'subjective_predicate'), 'best no longer subjective');
+    assert.ok(contract.constraints.some(c => c.type === 'numeric_ambiguity'), 'best is numeric_ambiguity');
+  });
+
+  it('"best rated" stays subjective', () => {
+    const contract = preExecutionConstraintGate('Find best rated pubs in Bristol');
+    assert.ok(contract.constraints.some(c => c.type === 'subjective_predicate'));
+  });
+
+  it('"Find many restaurants in Leeds" → CLARIFY', () => {
+    const contract = preExecutionConstraintGate('Find many restaurants in Leeds');
+    assert.strictEqual(contract.can_execute, false);
+    const na = contract.constraints.find(c => c.type === 'numeric_ambiguity') as NumericAmbiguityConstraint;
+    assert.ok(na);
+    assert.strictEqual(na.category, 'fuzzy_quantity');
+  });
+
+  it('"Find several bars in London" → CLARIFY', () => {
+    const contract = preExecutionConstraintGate('Find several bars in London');
+    assert.strictEqual(contract.can_execute, false);
+    const na = contract.constraints.find(c => c.type === 'numeric_ambiguity') as NumericAmbiguityConstraint;
+    assert.ok(na);
+    assert.strictEqual(na.category, 'fuzzy_quantity');
+  });
+
+  it('"Find large pubs in Manchester" → CLARIFY', () => {
+    const contract = preExecutionConstraintGate('Find large pubs in Manchester');
+    assert.strictEqual(contract.can_execute, false);
+    const na = contract.constraints.find(c => c.type === 'numeric_ambiguity') as NumericAmbiguityConstraint;
+    assert.ok(na);
+    assert.strictEqual(na.category, 'numeric_adjective');
+  });
+
+  it('"Find 10 pubs in Bristol" → RUN (explicit count, no ambiguity)', () => {
+    const contract = preExecutionConstraintGate('Find 10 pubs in Bristol');
+    assert.strictEqual(contract.can_execute, true);
+    assert.ok(!contract.constraints.some(c => c.type === 'numeric_ambiguity'));
+  });
+
+  it('"Find pubs in Bristol" → RUN (no quantity at all)', () => {
+    const contract = preExecutionConstraintGate('Find pubs in Bristol');
+    assert.strictEqual(contract.can_execute, true);
+  });
+});
+
+describe('Constraint Gate — Batch 3: numeric ambiguity priority ordering', () => {
+  it('subjective suppresses numeric_ambiguity', () => {
+    const contract = preExecutionConstraintGate('Find nice cheap pubs in Bristol');
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes("'nice'"), 'subjective first');
+    assert.ok(contract.constraints.some(c => c.type === 'numeric_ambiguity'), 'numeric stored');
+  });
+
+  it('numeric_ambiguity suppresses time predicate', () => {
+    const contract = preExecutionConstraintGate('Find a few pubs in Bristol that opened in the last 12 months');
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes('few'), 'numeric question first');
+    assert.ok(contract.constraints.some(c => c.type === 'time_predicate'), 'time stored');
+  });
+
+  it('numeric_ambiguity suppresses live music', () => {
+    const contract = preExecutionConstraintGate('Find cheap pubs in Bristol with live music');
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes('cheap'), 'numeric question first');
+    assert.ok(contract.constraints.some(c => c.type === 'attribute'), 'live music stored');
+  });
+
+  it('full chain: subjective → numeric → time → live music (4 turns)', () => {
+    const c1 = preExecutionConstraintGate('Find nice cheap pubs in Bristol that opened in the last 12 months with live music');
+    assert.strictEqual(c1.clarify_questions.length, 1);
+    assert.ok(c1.clarify_questions[0].includes("'nice'"), 'turn 1: subjective');
+
+    const c2 = resolveFollowUp(c1, 'lively');
+    assert.strictEqual(c2.clarify_questions.length, 1);
+    assert.ok(c2.clarify_questions[0].includes('cheap'), 'turn 2: numeric');
+
+    const c3 = resolveFollowUp(c2, 'under £5 per pint');
+    assert.strictEqual(c3.clarify_questions.length, 1);
+    assert.ok(c3.clarify_questions[0].includes('opening dates') || c3.clarify_questions[0].includes('proxy'), 'turn 3: time');
+
+    const c4 = resolveFollowUp(c3, 'Use news mentions proxy');
+    assert.strictEqual(c4.clarify_questions.length, 1);
+    assert.ok(c4.clarify_questions[0].includes('Live music') || c4.clarify_questions[0].includes('live music'), 'turn 4: live music');
+
+    const c5 = resolveFollowUp(c4, 'Verify via website');
+    assert.strictEqual(c5.can_execute, true, 'all 4 layers resolved');
+  });
+});
+
+describe('Constraint Gate — Batch 3: numeric ambiguity resolution', () => {
+  it('number resolves fuzzy quantity', () => {
+    const initial = preExecutionConstraintGate('Find a few pubs in Bristol');
+    const resolved = resolveFollowUp(initial, '5');
+    assert.strictEqual(resolved.can_execute, true);
+    const na = resolved.constraints.find(c => c.type === 'numeric_ambiguity') as NumericAmbiguityConstraint;
+    assert.strictEqual(na.can_execute, true);
+  });
+
+  it('count + metric resolves ranking', () => {
+    const initial = preExecutionConstraintGate('Find top pubs in Bristol');
+    const resolved = resolveFollowUp(initial, 'top 5 by rating');
+    assert.strictEqual(resolved.can_execute, true);
+  });
+
+  it('threshold resolves numeric adjective', () => {
+    const initial = preExecutionConstraintGate('Find cheap pubs in Bristol');
+    const resolved = resolveFollowUp(initial, 'under £5 per pint');
+    assert.strictEqual(resolved.can_execute, true);
+  });
+
+  it('non-numeric follow-up does NOT resolve', () => {
+    const initial = preExecutionConstraintGate('Find cheap pubs in Bristol');
+    const resolved = resolveFollowUp(initial, 'I want good ones');
+    assert.strictEqual(resolved.can_execute, false);
+  });
+
+  it('resolved numeric not re-surfaced', () => {
+    const initial = preExecutionConstraintGate('Find a few pubs in Bristol');
+    const resolved = resolveFollowUp(initial, '10');
+    assert.strictEqual(resolved.can_execute, true);
+    assert.ok(!resolved.clarify_questions.some(q => q.includes('few')), 'numeric question gone');
+  });
+
+  it('ranking: "by rating" alone does NOT resolve (no count)', () => {
+    const initial = preExecutionConstraintGate('Find top pubs in Bristol');
+    const resolved = resolveFollowUp(initial, 'by rating');
+    assert.strictEqual(resolved.can_execute, false, 'count is required for ranking');
+  });
+
+  it('ranking: "good ratings" does NOT resolve (no count)', () => {
+    const initial = preExecutionConstraintGate('Find best pubs in Bristol');
+    const resolved = resolveFollowUp(initial, 'good ratings');
+    assert.strictEqual(resolved.can_execute, false, 'count is required for ranking');
+  });
+
+  it('numeric_adjective: "rating based" does NOT resolve cheap', () => {
+    const initial = preExecutionConstraintGate('Find cheap pubs in Bristol');
+    const resolved = resolveFollowUp(initial, 'rating based');
+    assert.strictEqual(resolved.can_execute, false, 'threshold is required for numeric adjective');
+  });
+
+  it('fuzzy_quantity: "lots of them" does NOT resolve', () => {
+    const initial = preExecutionConstraintGate('Find a few pubs in Bristol');
+    const resolved = resolveFollowUp(initial, 'lots of them');
+    assert.strictEqual(resolved.can_execute, false, 'specific number is required');
   });
 });

@@ -37,7 +37,21 @@ export interface SubjectivePredicateConstraint {
   clarification_options: string[];
 }
 
-export type Constraint = TimePredicateContract | AttributeConstraint | SubjectivePredicateConstraint;
+export type NumericAmbiguityCategory = 'fuzzy_quantity' | 'ranking' | 'numeric_adjective';
+
+export interface NumericAmbiguityConstraint {
+  type: 'numeric_ambiguity';
+  label: string;
+  category: NumericAmbiguityCategory;
+  verifiability: 'unverifiable';
+  hardness: 'soft';
+  can_execute: boolean;
+  why_blocked: string;
+  clarification_question: string;
+  must_be_certain?: boolean;
+}
+
+export type Constraint = TimePredicateContract | AttributeConstraint | SubjectivePredicateConstraint | NumericAmbiguityConstraint;
 
 export interface ConstraintContract {
   constraints: Constraint[];
@@ -57,7 +71,7 @@ export interface PendingConstraintState {
 const pendingContracts = new Map<string, PendingConstraintState>();
 const PENDING_TTL_MS = 15 * 60 * 1000;
 
-const SUBJECTIVE_TERMS_PATTERN = /\b(?:best\s+rated|best\s+places|best|top|coolest|nicest|nicer|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|good\s+atmosphere|great\s+atmosphere|great(?!\s+(?:for|at|with))|cool(?!est)|lovely|decent|chill(?!est)|good(?!\s+(?:for\s+studying|guinness|beer))|popular|fancy|high[- ]?end|recommended|quality|trendy|better)\b/gi;
+const SUBJECTIVE_TERMS_PATTERN = /\b(?:best\s+rated|best\s+places|coolest|nicest|nicer|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|good\s+atmosphere|great\s+atmosphere|great(?!\s+(?:for|at|with))|cool(?!est)|lovely|decent|chill(?!est)|good(?!\s+(?:for\s+studying|guinness|beer))|popular|fancy|high[- ]?end|recommended|quality|trendy|better)\b/gi;
 
 const MEASURABLE_CRITERIA_PATTERN = /\b(?:live\s*music|craft\s*beer|real\s*ale|cask\s*ale|dog\s*friendly|family\s*friendly|late[- ]?\s*night|open\s*late|cheap|budget|expensive|premium|cosy|cozy|quiet|outdoor\s*seating|beer\s*garden|rooftop|waterfront|riverside|seafront|free\s*wifi|wheelchair|accessible|parking|vegan|vegetarian|gluten\s*free|halal|kosher|organic|independent|chain|gastropub|wine\s*bar|cocktail\s*bar|sports?\s*bar|micro\s*pub|tap\s*room|free\s*house|food\s*served|nightlife|lively|romantic|walkable|events|student|views|scenic|good\s+for\s+studying|good\s+guinness|good\s+beer|has\s+food|near\s+\w|within\s+\d+\s*(?:miles?|km|minutes?)|4\.\d\s*stars?|\d+\s*stars?)\b/i;
 
@@ -67,6 +81,96 @@ const SUBJECTIVE_CLARIFICATION_OPTIONS = [
 ];
 
 const MEASURABLE_FOLLOW_UP_PATTERN = /\b(?:lively|quiet|cosy|cozy|late[- ]?\s*night|open\s*late|live\s*music|good\s+for\s+food|food\s+served|beer\s*garden|dog\s*friendly|family\s*friendly|craft\s*beer|real\s*ale|rooftop|outdoor\s*seating|cocktail|cheap|budget|romantic|student|walkable|scenic|views|events|nightlife|sports?\s*bar|wheelchair|accessible)\b/i;
+
+const FUZZY_QUANTITY_PATTERN = /\b(?:a\s+few|few|many|most|several|loads\s+of|lots\s+of|bunch\s+of|handful\s+of|plenty\s+of|numerous|some(?!\s+(?:of\s+the|kind|type|sort)))\b/i;
+
+const RANKING_WITHOUT_COUNT_PATTERN = /\b(top|best)(?!\s+\d)\b/i;
+
+const RANKING_WITH_COUNT_PATTERN = /\b(?:top|best)\s+\d+\b/i;
+
+const RANKING_EXCLUSION_PATTERN = /\b(?:best\s+rated|best\s+places)\b/i;
+
+const NUMERIC_ADJECTIVE_PATTERN = /\b(?:cheap|expensive|large|big|small|tiny|huge)\b/i;
+
+const NUMERIC_ADJECTIVE_WITH_THRESHOLD_PATTERN = /\b(?:under|over|less\s+than|more\s+than|at\s+least|at\s+most|max(?:imum)?|min(?:imum)?)\s*[£$€]?\s*\d/i;
+
+const HAS_COUNT_PATTERN = /\b\d+\b/;
+const HAS_THRESHOLD_PATTERN = /(?:[£$€]\s*\d|\b\d+\s*(?:pound|£|quid|dollar|\$|euro|€)|under\s+[£$€]?\s*\d|over\s+[£$€]?\s*\d|less\s+than\s+[£$€]?\s*\d|more\s+than\s+[£$€]?\s*\d|at\s+least\s+[£$€]?\s*\d|at\s+most\s+[£$€]?\s*\d|\b\d+\s*(?:sq\s*ft|sqm|m²|seats?|capacity|people|covers|square))/i;
+
+function followUpResolvesNumericCategory(followUpMsg: string, category: NumericAmbiguityCategory): boolean {
+  const hasCount = HAS_COUNT_PATTERN.test(followUpMsg);
+  switch (category) {
+    case 'fuzzy_quantity':
+      return hasCount;
+    case 'ranking':
+      return hasCount;
+    case 'numeric_adjective':
+      return HAS_THRESHOLD_PATTERN.test(followUpMsg);
+    default:
+      return false;
+  }
+}
+
+function buildNumericAmbiguityQuestion(label: string, category: NumericAmbiguityCategory): string {
+  if (category === 'fuzzy_quantity') {
+    return `You said '${label}' — how many exactly? Give me a specific number (e.g. 5, 10, 20).`;
+  }
+  if (category === 'ranking') {
+    return `'${label}' by what measure, and how many? (e.g. top 5 by rating, best 10 by reviews)`;
+  }
+  return `What does '${label}' mean to you? Give me a specific threshold (e.g. under £10 per meal, under £5 per pint).`;
+}
+
+function extractNumericAmbiguity(msg: string): NumericAmbiguityConstraint | null {
+  const hasThreshold = NUMERIC_ADJECTIVE_WITH_THRESHOLD_PATTERN.test(msg);
+
+  const fuzzyMatch = msg.match(FUZZY_QUANTITY_PATTERN);
+  if (fuzzyMatch) {
+    const label = fuzzyMatch[0].trim().toLowerCase();
+    return {
+      type: 'numeric_ambiguity',
+      label,
+      category: 'fuzzy_quantity',
+      verifiability: 'unverifiable',
+      hardness: 'soft',
+      can_execute: false,
+      why_blocked: 'This request uses an undefined quantity or ranking',
+      clarification_question: buildNumericAmbiguityQuestion(label, 'fuzzy_quantity'),
+    };
+  }
+
+  if (RANKING_WITHOUT_COUNT_PATTERN.test(msg) && !RANKING_WITH_COUNT_PATTERN.test(msg) && !RANKING_EXCLUSION_PATTERN.test(msg)) {
+    const rankMatch = msg.match(RANKING_WITHOUT_COUNT_PATTERN);
+    const label = rankMatch![0].trim().toLowerCase();
+    return {
+      type: 'numeric_ambiguity',
+      label,
+      category: 'ranking',
+      verifiability: 'unverifiable',
+      hardness: 'soft',
+      can_execute: false,
+      why_blocked: 'This request uses an undefined quantity or ranking',
+      clarification_question: buildNumericAmbiguityQuestion(label, 'ranking'),
+    };
+  }
+
+  const adjMatch = msg.match(NUMERIC_ADJECTIVE_PATTERN);
+  if (adjMatch && !hasThreshold) {
+    const label = adjMatch[0].trim().toLowerCase();
+    return {
+      type: 'numeric_ambiguity',
+      label,
+      category: 'numeric_adjective',
+      verifiability: 'unverifiable',
+      hardness: 'soft',
+      can_execute: false,
+      why_blocked: 'This request uses an undefined quantity or ranking',
+      clarification_question: buildNumericAmbiguityQuestion(label, 'numeric_adjective'),
+    };
+  }
+
+  return null;
+}
 
 export function detectSubjectiveTerms(text: string): string[] {
   const matches = text.match(SUBJECTIVE_TERMS_PATTERN);
@@ -192,6 +296,11 @@ export function extractAllConstraints(msg: string): Constraint[] {
     constraints.push(subjectivePredicate);
   }
 
+  const numericAmbiguity = extractNumericAmbiguity(msg);
+  if (numericAmbiguity) {
+    constraints.push(numericAmbiguity);
+  }
+
   const timePredicate = buildTimePredicateContract(msg);
   if (timePredicate) {
     constraints.push(timePredicate);
@@ -231,6 +340,8 @@ export function isCertainVerifiable(constraint: Constraint): boolean {
 export function applyCertaintyGate(contract: ConstraintContract): ConstraintContract {
   const hasUnresolvedSubjective = contract.constraints.some(c => isSubjectivePredicateUnresolved(c));
   if (hasUnresolvedSubjective) return contract;
+  const hasUnresolvedNumeric = contract.constraints.some(c => isNumericAmbiguityUnresolved(c));
+  if (hasUnresolvedNumeric) return contract;
 
   const blocked = contract.constraints.filter(c => c.must_be_certain && !isCertainVerifiable(c));
   if (blocked.length === 0) return contract;
@@ -326,6 +437,10 @@ function isSubjectivePredicateUnresolved(c: Constraint): boolean {
   return c.type === 'subjective_predicate' && !c.can_execute;
 }
 
+function isNumericAmbiguityUnresolved(c: Constraint): boolean {
+  return c.type === 'numeric_ambiguity' && !c.can_execute;
+}
+
 function buildGateState(constraints: Constraint[], isNoProxy: boolean): ConstraintContract {
   const clarify_questions: string[] = [];
   const blockReasons: string[] = [];
@@ -333,6 +448,7 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
   let activeBlockFound = false;
 
   const hasUnresolvedSubjective = constraints.some(c => isSubjectivePredicateUnresolved(c));
+  const hasUnresolvedNumeric = constraints.some(c => isNumericAmbiguityUnresolved(c));
   const hasUnresolvedTime = constraints.some(c => isTimePredicateUnresolved(c));
 
   for (const c of constraints) {
@@ -345,6 +461,14 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
         activeBlockFound = true;
       }
     } else if (hasUnresolvedSubjective) {
+      continue;
+    } else if (c.type === 'numeric_ambiguity' && !c.can_execute) {
+      if (!activeBlockFound) {
+        blockReasons.push(c.why_blocked);
+        clarify_questions.push(c.clarification_question);
+        activeBlockFound = true;
+      }
+    } else if (hasUnresolvedNumeric) {
       continue;
     } else if (c.type === 'time_predicate') {
       if (isNoProxy || (c.verifiability === 'unverifiable' && c.hardness === 'hard')) {
@@ -375,6 +499,7 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
 
   const anyBlocked =
     constraints.some(c => isSubjectivePredicateUnresolved(c)) ||
+    constraints.some(c => isNumericAmbiguityUnresolved(c)) ||
     constraints.some(c => isTimePredicateUnresolved(c)) ||
     constraints.some(c => isLiveMusicUnresolved(c));
 
@@ -443,6 +568,7 @@ export function resolveFollowUp(
   const followUpHasMeasurable = MEASURABLE_FOLLOW_UP_PATTERN.test(followUpMsg);
 
   const hadUnresolvedSubjective = existingContract.constraints.some(c => isSubjectivePredicateUnresolved(c));
+  const hadUnresolvedNumeric = existingContract.constraints.some(c => isNumericAmbiguityUnresolved(c));
 
   const updatedConstraints = existingContract.constraints.map(c => {
     if (c.type === 'subjective_predicate' && !c.can_execute) {
@@ -458,6 +584,21 @@ export function resolveFollowUp(
     }
 
     if (hadUnresolvedSubjective) {
+      return c;
+    }
+
+    if (c.type === 'numeric_ambiguity' && !c.can_execute) {
+      if (followUpResolvesNumericCategory(followUpMsg, c.category)) {
+        return {
+          ...c,
+          can_execute: true,
+          why_blocked: '',
+        } as NumericAmbiguityConstraint;
+      }
+      return c;
+    }
+
+    if (hadUnresolvedNumeric) {
       return c;
     }
 
