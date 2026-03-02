@@ -1,0 +1,39 @@
+You are working in the wyshbone-ui repo.
+
+Goal: Fix user-facing language leakage and missing clarification UI rendering.
+
+Problems observed in production UI:
+1) Chat bubble is showing raw markdown/escaping characters like:
+   **, \\, \*\\*, \* etc.
+   Example seen: "Got it — I'll search for \5\ \pubs\ in **\\Bristol\\** ..."
+   This must never appear to users.
+
+2) Clarify-for-run flow is detected by backend (Live Activity shows ClarifySession handler: ask_more),
+   but the UI sometimes does NOT render the clarification panel/options, and instead shows a generic
+   "Search now" call-to-action. This breaks the relationship gating tests (landlord/owner/manager).
+
+3) Confirmations are too verbose and contain internal/debug echoes like parenthetical raw query:
+   "(afind pubs in bristol...)". Remove all of that from user-facing confirmations.
+
+Requirements:
+- User-facing chat text must be plain, clean English. No markdown tokens, no backslashes, no debug echoes.
+- If backend indicates the run is in clarification mode (ClarifySession / clarify_for_run / ask_more),
+  the UI MUST render the clarification panel with options, and MUST NOT show "Search now" as ready
+  unless clarification is satisfied.
+- Do NOT rely on the model to “not output markdown”. UI must robustly sanitize/format.
+
+Implementation expectations:
+- Identify the single place where chat bubble content is rendered. Ensure it either:
+  a) renders markdown correctly (no escaping), OR
+  b) strips markdown safely and displays plain text, consistently.
+- Ensure Clarify UI is driven by explicit state from the run/session payload. Fix any race condition
+  where the “ready to search” panel shows before clarification state is loaded.
+- Remove any code that appends raw user query in parentheses into confirmations.
+- Keep the output short and human.
+
+Deliverables:
+- Implement the fixes.
+- Provide a short note of which files you changed and why.
+- Ensure existing non-clarification searches still work.
+
+Do not add new features. This is a bug-fix pass only.
