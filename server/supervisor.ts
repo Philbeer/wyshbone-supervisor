@@ -61,12 +61,45 @@ function guardDelivery(conversationId: string, taskId: string, label: string): b
 
 const SUPERVISOR_COUNT_CLAIM_RE = /\b(found|delivered|discovered|located|identified)\b.*?\b\d+\b/i;
 
+function stripMarkdownTokens(msg: string): string {
+  let cleaned = msg;
+  cleaned = cleaned.replace(/\*\*/g, '');
+  cleaned = cleaned.replace(/\\+/g, '');
+  cleaned = cleaned.replace(/(?<!\w)\*(?!\s)/g, '');
+  cleaned = cleaned.replace(/(?<!\s)\*(?!\w)/g, '');
+  cleaned = cleaned.replace(/\s+([.,;:!?])/g, '$1');
+  cleaned = cleaned.replace(/\s{2,}/g, ' ');
+  return cleaned.trim();
+}
+
+function stripDebugEcho(msg: string): string {
+  return msg.replace(/\s*\([a-z]*(?:find|search|locate|list)\s[^)]{3,150}\)\s*/gi, ' ').trim();
+}
+
+function sanitizeMessageContent(msg: string): string {
+  let result = stripMarkdownTokens(msg);
+  result = stripDebugEcho(result);
+  result = result.replace(/\s+([.,;:!?])/g, '$1');
+  result = result.replace(/\s{2,}/g, ' ');
+  return result.trim();
+}
+
+function buildClarifyStateFromContract(contract: ConstraintContract): { status: 'ask_more' | 'ready_to_search'; draft: Record<string, unknown>; missingFields: string[]; turnCount: number; maxTurns: number } {
+  return {
+    status: contract.can_execute ? 'ready_to_search' : 'ask_more',
+    draft: { constraints: contract.constraints.map(c => ({ type: c.type, value: c.value, hardness: c.hardness })) },
+    missingFields: contract.clarify_questions.map((_, i) => `constraint_${i}`),
+    turnCount: 0,
+    maxTurns: 3,
+  };
+}
+
 function sanitizeSupervisorMessage(msg: string): string {
   if (SUPERVISOR_COUNT_CLAIM_RE.test(msg)) {
     console.warn(`[SUPERVISOR_MSG_GUARD] Blocked count-claiming message: "${msg.substring(0, 120)}…"`);
     return SUPERVISOR_NEUTRAL_MESSAGE;
   }
-  return msg;
+  return sanitizeMessageContent(msg);
 }
 
 interface UserContext {
@@ -807,7 +840,7 @@ class SupervisorService {
 
         await Promise.all([
           supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: stopMsg.substring(0, 200), message_id: messageId, clarify_gate: 'constraint_gate_stop' } }).eq('id', task.id),
-          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: stopMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'constraint_gate_stop', constraint_contract: resolvedContract }, created_at: Date.now() }).select().single(),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(stopMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'constraint_gate_stop', constraint_contract: resolvedContract, clarify_state: buildClarifyStateFromContract(resolvedContract) }, created_at: Date.now() }).select().single(),
         ]);
 
         await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'constraint_stop', endedAt: new Date(), metadata: { verdict: 'constraint_gate_stop', constraint_contract: resolvedContract } }).catch(() => {});
@@ -822,7 +855,7 @@ class SupervisorService {
 
         await Promise.all([
           supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyMsg.substring(0, 200), message_id: messageId, clarify_gate: 'constraint_gate_clarify' } }).eq('id', task.id),
-          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: clarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'constraint_gate_clarify', constraint_contract: resolvedContract }, created_at: Date.now() }).select().single(),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(clarifyMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'constraint_gate_clarify', constraint_contract: resolvedContract, clarify_state: buildClarifyStateFromContract(resolvedContract) }, created_at: Date.now() }).select().single(),
         ]);
 
         await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'constraint_gate_clarify', constraint_contract: resolvedContract } }).catch(() => {});
@@ -872,7 +905,7 @@ class SupervisorService {
 
         const [taskUpdateResult, msgResult] = await Promise.all([
           supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: directMsg.substring(0, 200), message_id: messageId, clarify_gate: 'meta_trust_during_session', build: buildStamp } }).eq('id', task.id),
-          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: directMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'meta_trust_during_session', reason: 'Meta/trust question answered without closing clarify session', clarify_state: clarifyState, build: buildStamp }, created_at: Date.now() }).select().single(),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(directMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'meta_trust_during_session', reason: 'Meta/trust question answered without closing clarify session', clarify_state: clarifyState, build: buildStamp }, created_at: Date.now() }).select().single(),
         ]);
 
         if (taskUpdateResult.error) console.error(`[CLARIFY_SESSION] task update failed: ${taskUpdateResult.error.message}`);
@@ -926,7 +959,7 @@ class SupervisorService {
 
           const [taskUpdateResult, msgResult] = await Promise.all([
             supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyMsg.substring(0, 200), message_id: messageId, clarify_gate: 'execute_blocked_incomplete' } }).eq('id', task.id),
-            supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: clarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'execute_blocked_incomplete', clarify_state: clarifyState }, created_at: Date.now() }).select().single(),
+            supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(clarifyMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'execute_blocked_incomplete', clarify_state: clarifyState }, created_at: Date.now() }).select().single(),
           ]);
 
           if (taskUpdateResult.error) console.error(`[CLARIFY_SESSION] task update failed: ${taskUpdateResult.error.message}`);
@@ -982,7 +1015,7 @@ class SupervisorService {
 
           const [taskUpdateResult, msgResult] = await Promise.all([
             supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyMsg.substring(0, 200), message_id: messageId, clarify_gate: 'clarify_turn_limit' } }).eq('id', task.id),
-            supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: clarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'clarify_turn_limit', clarify_state: clarifyState }, created_at: Date.now() }).select().single(),
+            supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(clarifyMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'clarify_turn_limit', clarify_state: clarifyState }, created_at: Date.now() }).select().single(),
           ]);
 
           if (taskUpdateResult.error) console.error(`[CLARIFY_SESSION] task update failed: ${taskUpdateResult.error.message}`);
@@ -1007,7 +1040,7 @@ class SupervisorService {
 
           const [taskUpdateResult, msgResult] = await Promise.all([
             supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyMsg.substring(0, 200), message_id: messageId, clarify_gate: 'clarify_session_continue' } }).eq('id', task.id),
-            supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: clarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'clarify_session_continue', session_summary: summary, clarify_state: clarifyState }, created_at: Date.now() }).select().single(),
+            supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(clarifyMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'clarify_session_continue', session_summary: summary, clarify_state: clarifyState }, created_at: Date.now() }).select().single(),
           ]);
 
           if (taskUpdateResult.error) console.error(`[CLARIFY_SESSION] task update failed: ${taskUpdateResult.error.message}`);
@@ -1043,7 +1076,7 @@ class SupervisorService {
 
         const [taskUpdateResult, msgResult] = await Promise.all([
           supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: directMsg.substring(0, 200), message_id: messageId, clarify_gate: 'direct_response' } }).eq('id', task.id),
-          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: directMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'direct_response', reason: clarifyGate.reason }, created_at: Date.now() }).select().single(),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(directMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'direct_response', reason: clarifyGate.reason }, created_at: Date.now() }).select().single(),
         ]);
 
         if (taskUpdateResult.error) console.error(`[CLARIFY_GATE] task update failed: ${taskUpdateResult.error.message}`);
@@ -1077,7 +1110,7 @@ class SupervisorService {
 
         const [taskUpdateResult, msgResult] = await Promise.all([
           supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyMsg.substring(0, 200), message_id: messageId, clarify_gate: 'clarify_before_run' } }).eq('id', task.id),
-          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: clarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'clarify_before_run', reason: clarifyGate.reason, questions: clarifyGate.questions, clarify_state: clarifyState }, created_at: Date.now() }).select().single(),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(clarifyMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'clarify_before_run', reason: clarifyGate.reason, questions: clarifyGate.questions, clarify_state: clarifyState }, created_at: Date.now() }).select().single(),
         ]);
 
         if (taskUpdateResult.error) console.error(`[CLARIFY_GATE] task update failed: ${taskUpdateResult.error.message}`);
@@ -1159,7 +1192,7 @@ class SupervisorService {
 
         await Promise.all([
           supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: outerGateClarifyMsg.substring(0, 200), message_id: outerGateMessageId, clarify_gate: outerGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify' } }).eq('id', task.id),
-          supabase!.from('messages').insert({ id: outerGateMessageId, conversation_id: task.conversation_id, role: 'assistant', content: outerGateClarifyMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: outerGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: outerGateResult }, created_at: Date.now() }).select().single(),
+          supabase!.from('messages').insert({ id: outerGateMessageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(outerGateClarifyMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: outerGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: outerGateResult, clarify_state: buildClarifyStateFromContract(outerGateResult) }, created_at: Date.now() }).select().single(),
         ]);
 
         console.log(`[CONSTRAINT_GATE_OUTER] BLOCKED — no agent_run created, no LLM calls, no tools invoked.`);
@@ -2111,7 +2144,7 @@ class SupervisorService {
 
       await Promise.all([
         supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: gateMsg.substring(0, 200), message_id: gateMessageId, clarify_gate: constraintGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify' } }).eq('id', task.id),
-        supabase!.from('messages').insert({ id: gateMessageId, conversation_id: conversationId, role: 'assistant', content: gateMsg, source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: chatRunId, clarify_gate: constraintGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: constraintGateResult }, created_at: Date.now() }).select().single(),
+        supabase!.from('messages').insert({ id: gateMessageId, conversation_id: conversationId, role: 'assistant', content: sanitizeMessageContent(gateMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: chatRunId, clarify_gate: constraintGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: constraintGateResult, clarify_state: buildClarifyStateFromContract(constraintGateResult) }, created_at: Date.now() }).select().single(),
       ]);
 
       const termState = constraintGateResult.stop_recommended ? 'constraint_stop' : 'clarification_needed';

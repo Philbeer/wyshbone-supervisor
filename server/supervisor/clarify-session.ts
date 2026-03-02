@@ -447,8 +447,13 @@ export function applyFollowUp(session: ClarifySession, result: FollowUpResult): 
 export function renderClarifySummary(session: ClarifySession): string {
   const parts: string[] = [];
 
-  const bt = session.collectedFields.businessType;
-  if (bt) parts.push(bt);
+  const VAGUE_QUANTITY_RE = /^(?:a few|few|some|several|many|a couple|a handful|lots of|plenty of)\b/i;
+
+  let bt = session.collectedFields.businessType;
+  if (bt) {
+    bt = bt.replace(VAGUE_QUANTITY_RE, '').trim();
+    if (bt) parts.push(bt);
+  }
 
   const loc = session.collectedFields.location;
   if (loc) parts.push(`in ${loc}`);
