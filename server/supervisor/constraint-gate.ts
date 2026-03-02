@@ -27,11 +27,13 @@ export interface AttributeConstraint {
 
 export interface SubjectivePredicateConstraint {
   type: 'subjective_predicate';
-  term: string;
-  verifiability: 'unverifiable';
-  hardness: 'hard';
+  label: string;
+  verifiability: 'proxy';
+  hardness: 'soft';
+  required_inputs_missing: string[];
   can_execute: false;
   why_blocked: string;
+  suggested_rephrase: string | null;
 }
 
 export type Constraint = TimePredicateContract | AttributeConstraint | SubjectivePredicateConstraint;
@@ -54,19 +56,42 @@ export interface PendingConstraintState {
 const pendingContracts = new Map<string, PendingConstraintState>();
 const PENDING_TTL_MS = 15 * 60 * 1000;
 
-const SUBJECTIVE_TERMS = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|good\s+atmosphere|great\s+atmosphere|great(?!\s+(?:for|at|with))|cool(?!est)|lovely|decent|chill(?!est)|good(?!\s+for\s+studying))\b/i;
+const SUBJECTIVE_TERMS_PATTERN = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|good\s+atmosphere|great\s+atmosphere|great(?!\s+(?:for|at|with))|cool(?!est)|lovely|decent|chill(?!est)|good(?!\s+(?:for\s+studying|guinness|beer))|popular|fancy|high[- ]?end|recommended|quality|trendy)\b/gi;
+
+const MEASURABLE_CRITERIA_PATTERN = /\b(?:live\s*music|craft\s*beer|real\s*ale|cask\s*ale|dog\s*friendly|family\s*friendly|late[- ]?\s*night|open\s*late|cheap|budget|expensive|premium|cosy|cozy|quiet|outdoor\s*seating|beer\s*garden|rooftop|waterfront|riverside|seafront|free\s*wifi|wheelchair|accessible|parking|vegan|vegetarian|gluten\s*free|halal|kosher|organic|independent|chain|gastropub|wine\s*bar|cocktail\s*bar|sports?\s*bar|micro\s*pub|tap\s*room|free\s*house|food\s*served|nightlife|lively|romantic|walkable|events|student|views|scenic|good\s+for\s+studying|good\s+guinness|good\s+beer|has\s+food|near\s+\w|within\s+\d+\s*(?:miles?|km|minutes?)|4\.\d\s*stars?|\d+\s*stars?)\b/i;
+
+export function detectSubjectiveTerms(text: string): string[] {
+  const matches = text.match(SUBJECTIVE_TERMS_PATTERN);
+  if (!matches) return [];
+  const unique = [...new Set(matches.map(m => m.trim().toLowerCase()))];
+  return unique;
+}
+
+export function hasMeasurableCriteria(text: string): boolean {
+  return MEASURABLE_CRITERIA_PATTERN.test(text);
+}
+
+function buildSuggestedRephrase(label: string, msg: string): string {
+  const cleaned = msg
+    .replace(new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `Try: "${cleaned ? cleaned + ' that are ' : 'Find '}cosy and quiet" or "lively with live music"`;
+}
 
 function extractSubjectivePredicate(msg: string): SubjectivePredicateConstraint | null {
-  const match = msg.match(SUBJECTIVE_TERMS);
-  if (!match) return null;
-  const term = match[0].trim();
+  const terms = detectSubjectiveTerms(msg);
+  if (terms.length === 0) return null;
+  const label = terms[0];
   return {
     type: 'subjective_predicate',
-    term,
-    verifiability: 'unverifiable',
-    hardness: 'hard',
+    label,
+    verifiability: 'proxy',
+    hardness: 'soft',
+    required_inputs_missing: ['subjective_definition'],
     can_execute: false,
-    why_blocked: `This description is subjective and needs clarification.`,
+    why_blocked: `Your request includes a subjective term ('${label}'). Tell me what you mean so I can search accurately.`,
+    suggested_rephrase: buildSuggestedRephrase(label, msg),
   };
 }
 
@@ -287,7 +312,7 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
   for (const c of constraints) {
     if (c.type === 'subjective_predicate') {
       blockReasons.push(c.why_blocked);
-      clarify_questions.push(`What do you mean by '${c.term}'? Pick 1–2 measurable attributes: cosy, lively, upscale, traditional, live music, craft beer, quiet, late-night, family-friendly, cheap, dog-friendly, outdoor seating, etc.`);
+      clarify_questions.push(`When you say '${c.label}', what do you mean? Pick one: cosy and quiet, lively and busy, trendy, upscale, cheap, good beer, good food, live music, or tell me your own criteria.`);
     } else if (c.type === 'time_predicate') {
       if (isNoProxy || (c.verifiability === 'unverifiable' && c.hardness === 'hard')) {
         stop_recommended = true;

@@ -9,7 +9,7 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
       const result = evaluateClarifyGate('find the best vibes near council things');
       assert.strictEqual(result.route, 'clarify_before_run');
       assert.ok(result.reason.includes('subjective'));
-      assert.ok(result.questions!.some(q => q.includes('measurable')));
+      assert.ok(result.questions!.some(q => q.includes('Pick one') || q.includes('measurable')));
       assert.ok(result.questions!.some(q => /location|place|city|town/i.test(q)));
       assert.ok(result.questions!.length >= 2, 'Should have at least two questions (location + meaning of vibes)');
     });
@@ -43,7 +43,7 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
       const result = evaluateClarifyGate('find the best cafes in bristol');
       assert.strictEqual(result.route, 'clarify_before_run');
       assert.ok(result.reason.includes('subjective'));
-      assert.ok(result.questions!.some(q => q.includes('measurable')));
+      assert.ok(result.questions!.some(q => q.includes('Pick one') || q.includes('measurable')));
       assert.ok(result.missingFields!.includes('semantic_constraint'), 'Should include semantic_constraint in missingFields');
     });
 

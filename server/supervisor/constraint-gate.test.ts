@@ -16,8 +16,11 @@ import {
   storePendingContract,
   getPendingContract,
   clearPendingContract,
+  detectSubjectiveTerms,
+  hasMeasurableCriteria,
   type ConstraintContract,
   type AttributeConstraint,
+  type SubjectivePredicateConstraint,
 } from './constraint-gate';
 import { type TimePredicateContract } from './time-predicate';
 
@@ -444,8 +447,11 @@ describe('Constraint Gate — subjective predicate extraction (Batch 1)', () => 
     assert.ok(sp, 'subjective_predicate constraint must exist');
     assert.strictEqual(sp!.type, 'subjective_predicate');
     if (sp!.type === 'subjective_predicate') {
-      assert.strictEqual(sp!.verifiability, 'unverifiable');
-      assert.strictEqual(sp!.hardness, 'hard');
+      assert.strictEqual(sp!.verifiability, 'proxy');
+      assert.strictEqual(sp!.hardness, 'soft');
+      assert.ok(sp!.required_inputs_missing.includes('subjective_definition'));
+      assert.ok(sp!.why_blocked.includes('subjective'));
+      assert.ok(sp!.suggested_rephrase !== null);
     }
   });
 
@@ -787,5 +793,139 @@ describe('applyCertaintyGate', () => {
     const result = applyCertaintyGate(contract);
     assert.strictEqual(result.can_execute, true);
     assert.strictEqual(result.stop_recommended, false);
+  });
+});
+
+describe('detectSubjectiveTerms', () => {
+  it('detects "nice" from "Find nice bars in Manchester"', () => {
+    const terms = detectSubjectiveTerms('Find nice bars in Manchester');
+    assert.ok(terms.includes('nice'));
+  });
+
+  it('detects "best" from "Find best pubs in Leeds"', () => {
+    const terms = detectSubjectiveTerms('Find best pubs in Leeds');
+    assert.ok(terms.includes('best'));
+  });
+
+  it('detects "good" from "Find good cafes"', () => {
+    const terms = detectSubjectiveTerms('Find good cafes');
+    assert.ok(terms.includes('good'));
+  });
+
+  it('detects multiple terms from "Find nice trendy bars"', () => {
+    const terms = detectSubjectiveTerms('Find nice trendy bars');
+    assert.ok(terms.includes('nice'));
+    assert.ok(terms.includes('trendy'));
+  });
+
+  it('detects expanded terms: popular, fancy, high-end, recommended, quality', () => {
+    assert.ok(detectSubjectiveTerms('popular bars').includes('popular'));
+    assert.ok(detectSubjectiveTerms('fancy restaurants').includes('fancy'));
+    assert.ok(detectSubjectiveTerms('high-end pubs').includes('high-end'));
+    assert.ok(detectSubjectiveTerms('recommended cafes').includes('recommended'));
+    assert.ok(detectSubjectiveTerms('quality pubs').includes('quality'));
+  });
+
+  it('returns empty for "lively bars in Manchester" (lively is measurable)', () => {
+    const terms = detectSubjectiveTerms('Find lively bars in Manchester');
+    assert.strictEqual(terms.length, 0);
+  });
+
+  it('returns empty for "cosy pubs with live music" (all measurable)', () => {
+    const terms = detectSubjectiveTerms('Find cosy pubs with live music');
+    assert.strictEqual(terms.length, 0);
+  });
+
+  it('does not false-positive on "good for studying"', () => {
+    const terms = detectSubjectiveTerms('Find cafes good for studying');
+    assert.strictEqual(terms.length, 0);
+  });
+
+  it('does not false-positive on "good guinness"', () => {
+    const terms = detectSubjectiveTerms('Find pubs with good guinness');
+    assert.strictEqual(terms.length, 0);
+  });
+});
+
+describe('hasMeasurableCriteria', () => {
+  it('detects "live music" as measurable', () => {
+    assert.ok(hasMeasurableCriteria('Find pubs with live music'));
+  });
+
+  it('detects "cosy" as measurable', () => {
+    assert.ok(hasMeasurableCriteria('Find cosy pubs'));
+  });
+
+  it('detects "dog friendly" as measurable', () => {
+    assert.ok(hasMeasurableCriteria('Find dog friendly cafes'));
+  });
+
+  it('detects "quiet" as measurable', () => {
+    assert.ok(hasMeasurableCriteria('Find quiet bars'));
+  });
+
+  it('detects "good guinness" as measurable', () => {
+    assert.ok(hasMeasurableCriteria('Find pubs with good guinness'));
+  });
+
+  it('returns false for "nice bars" (nice is not measurable)', () => {
+    assert.strictEqual(hasMeasurableCriteria('Find nice bars'), false);
+  });
+
+  it('returns false for plain "pubs in Manchester"', () => {
+    assert.strictEqual(hasMeasurableCriteria('Find pubs in Manchester'), false);
+  });
+});
+
+describe('Constraint Gate — Batch 1 Layer 2 regression tests', () => {
+  it('A) "Find nice bars in Manchester" → CLARIFY, asks what "nice" means, no RUN', () => {
+    const contract = preExecutionConstraintGate('Find nice bars in Manchester');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp);
+    assert.strictEqual(sp.label, 'nice');
+    assert.ok(sp.required_inputs_missing.includes('subjective_definition'));
+    assert.ok(contract.clarify_questions.some(q => q.includes("'nice'")));
+  });
+
+  it('B) "Find good pubs in Leeds" → CLARIFY', () => {
+    const contract = preExecutionConstraintGate('Find good pubs in Leeds');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp);
+    assert.strictEqual(sp.label, 'good');
+  });
+
+  it('C) "Find lively bars in Manchester" → RUN (no clarify)', () => {
+    const contract = preExecutionConstraintGate('Find lively bars in Manchester');
+    assert.strictEqual(contract.can_execute, true);
+    assert.strictEqual(contract.constraints.length, 0);
+  });
+
+  it('D) "Find nice pubs in Bristol with live music" → CLARIFY for "nice" (must not RUN)', () => {
+    const contract = preExecutionConstraintGate('Find nice pubs in Bristol with live music');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp, 'subjective_predicate must exist even with measurable live music');
+    assert.strictEqual(sp.label, 'nice');
+  });
+
+  it('E) "Find nice pubs in Bristol that opened in last 12 months" → CLARIFY both: subjective + time proxy', () => {
+    const contract = preExecutionConstraintGate('Find nice pubs in Bristol that opened in last 12 months');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    const tp = contract.constraints.find(c => c.type === 'time_predicate') as TimePredicateContract;
+    assert.ok(sp, 'subjective_predicate must exist');
+    assert.ok(tp, 'time_predicate must exist');
+    assert.ok(contract.clarify_questions.length >= 2, 'must ask for BOTH subjective definition AND time proxy');
+    assert.ok(contract.clarify_questions.some(q => q.includes("'nice'")), 'one question must ask about "nice"');
+    assert.ok(contract.clarify_questions.some(q => q.includes('proxy') || q.includes('opening dates') || q.includes('news mentions')), 'one question must ask about time proxy');
+  });
+
+  it('subjective_predicate includes suggested_rephrase', () => {
+    const contract = preExecutionConstraintGate('Find nice bars in Manchester');
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp.suggested_rephrase);
+    assert.ok(sp.suggested_rephrase!.length > 0);
   });
 });

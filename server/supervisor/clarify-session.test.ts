@@ -778,3 +778,85 @@ describe('Regression: meta/trust question during active clarify session', () => 
     assert.strictEqual(loc.value, 'Manchester');
   });
 });
+
+describe('Clarify Session — subjective follow-up blocking', () => {
+  function semanticSession(): ClarifySession {
+    return {
+      conversationId: 'test-subj-followup',
+      originalUserRequest: 'find nice pubs in Manchester',
+      missingFields: ['semantic_constraint'],
+      collectedFields: {
+        businessType: 'pubs',
+        location: 'Manchester',
+        attributes: [],
+        quantity: null,
+      },
+      turnCount: 1,
+      lastQuestions: ['When you say \'nice\', what do you mean?'],
+      businessTypeHint: 'pubs',
+    };
+  }
+
+  it('"nice" as follow-up when semantic_constraint missing → stillSubjective=true', () => {
+    const session = semanticSession();
+    const fu = classifyFollowUp('nice', session);
+    assert.strictEqual(fu.stillSubjective, true);
+    assert.strictEqual(fu.value, null);
+  });
+
+  it('"good" as follow-up when semantic_constraint missing → stillSubjective=true', () => {
+    const session = semanticSession();
+    const fu = classifyFollowUp('good', session);
+    assert.strictEqual(fu.stillSubjective, true);
+  });
+
+  it('"best" as follow-up when semantic_constraint missing → stillSubjective=true', () => {
+    const session = semanticSession();
+    const fu = classifyFollowUp('best', session);
+    assert.strictEqual(fu.stillSubjective, true);
+  });
+
+  it('"fancy" as follow-up when semantic_constraint missing → stillSubjective=true', () => {
+    const session = semanticSession();
+    const fu = classifyFollowUp('fancy', session);
+    assert.strictEqual(fu.stillSubjective, true);
+  });
+
+  it('"cosy" as follow-up when semantic_constraint missing → resolves (measurable)', () => {
+    const session = semanticSession();
+    const fu = classifyFollowUp('cosy', session);
+    assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+    assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    assert.strictEqual(fu.value, 'cosy');
+    assert.strictEqual(fu.stillSubjective, undefined);
+  });
+
+  it('"live music" as follow-up when semantic_constraint missing → resolves (measurable)', () => {
+    const session = semanticSession();
+    const fu = classifyFollowUp('live music', session);
+    assert.strictEqual(fu.classification, 'ANSWER_TO_MISSING_FIELD');
+    assert.strictEqual(fu.updatedField, 'semantic_constraint');
+    assert.strictEqual(fu.value, 'live music');
+    assert.strictEqual(fu.stillSubjective, undefined);
+  });
+
+  it('"nice" as REFINEMENT (no semantic_constraint missing) → stillSubjective=true', () => {
+    const session: ClarifySession = {
+      conversationId: 'test-refine',
+      originalUserRequest: 'find pubs in Manchester',
+      missingFields: [],
+      collectedFields: {
+        businessType: 'pubs',
+        location: 'Manchester',
+        attributes: [],
+        quantity: null,
+      },
+      turnCount: 1,
+      lastQuestions: [],
+      businessTypeHint: 'pubs',
+    };
+    const fu = classifyFollowUp('nice', session);
+    assert.strictEqual(fu.classification, 'REFINEMENT');
+    assert.strictEqual(fu.stillSubjective, true);
+  });
+});

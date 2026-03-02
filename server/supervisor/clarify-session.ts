@@ -25,8 +25,9 @@ export type FollowUpClass = 'ANSWER_TO_MISSING_FIELD' | 'REFINEMENT' | 'NEW_REQU
 export interface FollowUpResult {
   classification: FollowUpClass;
   updatedField?: MissingField;
-  value?: string;
+  value?: string | null;
   compoundExtras?: string;
+  stillSubjective?: boolean;
 }
 
 export interface ClarifyState {
@@ -144,8 +145,9 @@ const META_TRUST_PATTERNS = [
 const EXECUTE_INTENT = /^\s*(?:search now|run it|run the search|go ahead|yes proceed|proceed|do it|just search|start searching|execute|let's go|yes go|yes search|run now|go for it|yes run|ok search|okay search|ok run|okay run|yes please search|yes do it|start the search|kick it off|launch it|fire away)\s*[.!]?\s*$/i;
 
 const REFINEMENT_LIKE = /^[a-z\s-]+$/i;
+const SUBJECTIVE_FOLLOWUP = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|good\s+atmosphere|great\s+atmosphere|great(?!\s+(?:for|at|with))|cool(?!est)|lovely|decent|chill(?!est)|good(?!\s+(?:for\s+studying|guinness|beer))|popular|fancy|high[- ]?end|recommended|quality)\b/i;
 const BUSINESS_MODIFIERS = /\b(?:free\s*houses?|gastropubs?|wine\s*bars?|cocktail\s*bars?|sports?\s*bars?|craft\s*beer|real\s*ale|micro\s*pubs?|tap\s*rooms?|beer\s*gardens?|dog\s*friendly|family\s*friendly|live\s*music|food\s*served|cask\s*ale|independent|chain|premium|budget|organic|vegan|vegetarian|gluten\s*free|halal|kosher)\b/i;
-const MEASURABLE_CRITERIA = /\b(?:live\s*music|craft\s*beer|real\s*ale|cask\s*ale|dog\s*friendly|family\s*friendly|late[- ]?\s*night|cheap|budget|expensive|premium|cosy|cozy|quiet|outdoor\s*seating|beer\s*garden|rooftop|waterfront|riverside|seafront|free\s*wifi|wheelchair|accessible|parking|vegan|vegetarian|gluten\s*free|halal|kosher|organic|independent|chain|gastropub|wine\s*bar|cocktail\s*bar|sports?\s*bar|micro\s*pub|tap\s*room|free\s*house|food\s*served|nightlife|lively|romantic|trendy|walkable|events|student|views|scenic|good\s+for\s+studying)\b/i;
+const MEASURABLE_CRITERIA = /\b(?:live\s*music|craft\s*beer|real\s*ale|cask\s*ale|dog\s*friendly|family\s*friendly|late[- ]?\s*night|open\s*late|cheap|budget|expensive|premium|cosy|cozy|quiet|outdoor\s*seating|beer\s*garden|rooftop|waterfront|riverside|seafront|free\s*wifi|wheelchair|accessible|parking|vegan|vegetarian|gluten\s*free|halal|kosher|organic|independent|chain|gastropub|wine\s*bar|cocktail\s*bar|sports?\s*bar|micro\s*pub|tap\s*room|free\s*house|food\s*served|nightlife|lively|romantic|trendy|walkable|events|student|views|scenic|good\s+for\s+studying|good\s+guinness|good\s+beer|has\s+food)\b/i;
 
 function looksLikeLocation(msg: string): boolean {
   const trimmed = msg.trim();
@@ -362,7 +364,23 @@ export function classifyFollowUp(msg: string, session: ClarifySession): FollowUp
     };
   }
 
+  if (session.missingFields.includes('semantic_constraint') && SUBJECTIVE_FOLLOWUP.test(trimmed) && !MEASURABLE_CRITERIA.test(trimmed)) {
+    return {
+      classification: 'ANSWER_TO_MISSING_FIELD',
+      updatedField: 'semantic_constraint',
+      value: null,
+      stillSubjective: true,
+    };
+  }
+
   if (looksLikeRefinement(trimmed)) {
+    if (SUBJECTIVE_FOLLOWUP.test(trimmed) && !MEASURABLE_CRITERIA.test(trimmed)) {
+      return {
+        classification: 'REFINEMENT',
+        value: trimmed,
+        stillSubjective: true,
+      };
+    }
     return {
       classification: 'REFINEMENT',
       value: trimmed,
