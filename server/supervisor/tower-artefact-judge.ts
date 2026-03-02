@@ -120,6 +120,7 @@ export interface JudgeArtefactResult {
   judgement: ArtefactJudgementResponse;
   shouldStop: boolean;
   stubbed: boolean;
+  governanceStatus?: 'governed' | 'tower_unavailable';
 }
 
 export async function judgeArtefact(params: {
@@ -129,8 +130,10 @@ export async function judgeArtefact(params: {
   userId: string;
   conversationId?: string;
   successCriteria?: Record<string, unknown>;
+  stepIndex?: number;
+  planVersion?: number;
 }): Promise<JudgeArtefactResult> {
-  const { artefact, runId, goal, userId, conversationId, successCriteria } = params;
+  const { artefact, runId, goal, userId, conversationId, successCriteria, stepIndex, planVersion } = params;
 
   const request: ArtefactJudgementRequest = {
     runId,
@@ -140,8 +143,12 @@ export async function judgeArtefact(params: {
     artefactType: artefact.type,
   };
 
+  const idempotencyKey = `${runId}:${artefact.id}:${stepIndex ?? 0}:${planVersion ?? 1}`;
+
   let judgement: ArtefactJudgementResponse;
   let stubbed = false;
+  let towerAvailable = true;
+  let governanceStatus: 'governed' | 'tower_unavailable' = 'governed';
 
   if (isStubMode()) {
     judgement = stubJudgement(request);
@@ -149,8 +156,10 @@ export async function judgeArtefact(params: {
   } else {
     const baseUrl = getTowerBaseUrl();
     if (!baseUrl) {
-      const errorMsg = 'TOWER_BASE_URL / TOWER_URL not configured and stub mode is OFF — refusing to silently bypass Tower';
+      const errorMsg = 'TOWER_BASE_URL / TOWER_URL not configured and stub mode is OFF -- refusing to silently bypass Tower';
       console.error(`[TOWER_JUDGE] ${errorMsg}`);
+      towerAvailable = false;
+      governanceStatus = 'tower_unavailable';
 
       await logAFREvent({
         userId,
@@ -160,13 +169,14 @@ export async function judgeArtefact(params: {
         status: 'failed',
         taskGenerated: `Tower artefact judgement blocked: ${errorMsg}`,
         runType: 'plan',
-        metadata: { artefactId: artefact.id, error: errorMsg },
+        metadata: { artefactId: artefact.id, error: errorMsg, governance_status: governanceStatus },
       });
 
       return {
         judgement: { verdict: 'error', reasons: [errorMsg], metrics: {}, action: 'stop' },
         shouldStop: true,
         stubbed: false,
+        governanceStatus,
       };
     }
 
@@ -174,7 +184,9 @@ export async function judgeArtefact(params: {
       judgement = await callTowerJudgeArtefact(request);
     } catch (err: any) {
       const errorMsg = err.message || 'Tower judge-artefact call failed';
-      console.error(`[TOWER_JUDGE] Call failed (defaulting to continue): ${errorMsg}`);
+      console.error(`[TOWER_JUDGE] Tower unreachable -- STOPPING run (honest governance): ${errorMsg}`);
+      towerAvailable = false;
+      governanceStatus = 'tower_unavailable';
 
       await logAFREvent({
         userId,
@@ -182,15 +194,16 @@ export async function judgeArtefact(params: {
         conversationId,
         actionTaken: 'tower_judgement_failed',
         status: 'failed',
-        taskGenerated: `Tower artefact judgement failed: ${errorMsg}`,
+        taskGenerated: `Tower unreachable -- run stopped (governance_status=tower_unavailable): ${errorMsg}`,
         runType: 'plan',
-        metadata: { artefactId: artefact.id, error: errorMsg },
+        metadata: { artefactId: artefact.id, error: errorMsg, governance_status: governanceStatus },
       });
 
       return {
-        judgement: { verdict: 'error', reasons: [errorMsg], metrics: {}, action: 'continue' },
-        shouldStop: false,
+        judgement: { verdict: 'error', reasons: [errorMsg], metrics: {}, action: 'stop' },
+        shouldStop: true,
         stubbed: false,
+        governanceStatus,
       };
     }
   }
@@ -203,6 +216,7 @@ export async function judgeArtefact(params: {
       action: judgement.action,
       reasonsJson: judgement.reasons,
       metricsJson: judgement.metrics,
+      idempotencyKey,
     });
   } catch (err: any) {
     console.error(`[TOWER_JUDGE] Failed to persist judgement: ${err.message}`);
@@ -224,12 +238,14 @@ export async function judgeArtefact(params: {
       action: judgement.action,
       shortReason,
       stubbed,
+      governance_status: governanceStatus,
+      idempotency_key: idempotencyKey,
     },
   });
 
-  console.log(`[TOWER_JUDGE] Verdict: ${judgement.verdict} | Action: ${judgement.action} | Artefact: ${artefact.id}${stubbed ? ' (stub)' : ''}`);
+  console.log(`[TOWER_JUDGE] Verdict: ${judgement.verdict} | Action: ${judgement.action} | Artefact: ${artefact.id}${stubbed ? ' (stub)' : ''} | ikey=${idempotencyKey}`);
 
   const shouldStop = judgement.action === 'stop' || judgement.verdict === 'error' || (judgement.verdict === 'fail' && judgement.action !== 'change_plan');
 
-  return { judgement, shouldStop, stubbed };
+  return { judgement, shouldStop, stubbed, governanceStatus };
 }

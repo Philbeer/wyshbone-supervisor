@@ -26,7 +26,7 @@ import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField }
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, type ConstraintContract } from './supervisor/constraint-gate';
-import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1 } from './supervisor/learning-layer';
+import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 
@@ -1890,8 +1890,21 @@ class SupervisorService {
     let policyResult: PolicyApplicationResult | null = null;
     const runStartTime = Date.now();
     let runToolCallCount = 0;
+    let runTotalRetryCount = 0;
     let MAX_REPLANS = parseInt(process.env.MAX_REPLANS || '5', 10);
     let policyApplicationWritten = false;
+    let runGovernanceStatus: 'governed' | 'tower_unavailable' = 'governed';
+    const HARD_CAP_MAX_REPLANS = 10;
+    let learned_max_replans = MAX_REPLANS;
+    let effective_max_replans = MAX_REPLANS;
+
+    const runOverrides: RunOverrides = {};
+    if (requestData.mode_preset) runOverrides.mode_preset = requestData.mode_preset;
+    if (requestData.override_max_replans !== undefined) runOverrides.override_max_replans = requestData.override_max_replans;
+    if (requestData.ignore_learned_policy !== undefined) runOverrides.ignore_learned_policy = requestData.ignore_learned_policy;
+    const hasOverrides = Object.keys(runOverrides).length > 0;
+    if (hasOverrides) console.log(`[SUPERVISOR] Per-run overrides detected: ${JSON.stringify(runOverrides)}`);
+
     const policyInput = {
       request: originalUserGoal,
       vertical: businessType,
@@ -1900,22 +1913,27 @@ class SupervisorService {
       userValue: userRequestedCountFinal ?? undefined,
     };
     try {
-      policyResult = await applyPolicy(policyInput);
+      policyResult = await applyPolicy(policyInput, hasOverrides ? runOverrides : undefined);
 
       if (userSpecifiedCount) {
         const ep = policyResult.executionParams;
         if (ep.searchBudgetCount !== searchBudgetCount) {
-          console.log(`[LEARNING_LAYER] Overriding searchBudgetCount: ${searchBudgetCount} → ${ep.searchBudgetCount}`);
+          console.log(`[LEARNING_LAYER] Overriding searchBudgetCount: ${searchBudgetCount} -> ${ep.searchBudgetCount}`);
           searchBudgetCount = ep.searchBudgetCount;
           searchCount = ep.searchCount;
         }
         if (ep.maxReplans !== MAX_REPLANS) {
-          console.log(`[LEARNING_LAYER] Overriding MAX_REPLANS: ${MAX_REPLANS} → ${ep.maxReplans}`);
+          console.log(`[LEARNING_LAYER] Overriding MAX_REPLANS: ${MAX_REPLANS} -> ${ep.maxReplans}`);
           MAX_REPLANS = ep.maxReplans;
         }
       } else {
-        console.log(`[LEARNING_LAYER] Skipping execution param overrides — no user-specified count (default page 1 search)`);
+        console.log(`[LEARNING_LAYER] Skipping execution param overrides -- no user-specified count (default page 1 search)`);
       }
+
+      learned_max_replans = MAX_REPLANS;
+      effective_max_replans = Math.min(learned_max_replans, HARD_CAP_MAX_REPLANS);
+      MAX_REPLANS = effective_max_replans;
+      console.log(`[SUPERVISOR] Replan limits: learned=${learned_max_replans} hard_cap=${HARD_CAP_MAX_REPLANS} effective=${effective_max_replans}`);
 
       await persistPolicyApplication(chatRunId, policyInput, policyResult);
       policyApplicationWritten = true;
@@ -1935,6 +1953,10 @@ class SupervisorService {
         constraintBucket: hard_constraints,
         rationale: policyResult.rationale,
         querySuspectedMerged: gateResult.gate_flags.query_suspected_merged,
+        learned_max_replans,
+        hard_cap_max_replans: HARD_CAP_MAX_REPLANS,
+        effective_max_replans,
+        ...(hasOverrides ? { run_overrides: runOverrides } : {}),
       });
     } catch (policyErr: any) {
       console.warn(`[LEARNING_LAYER] Policy application failed (non-fatal, using defaults): ${policyErr.message}`);
@@ -2755,14 +2777,16 @@ class SupervisorService {
         conversationId,
       }).catch(() => {});
 
+      runGovernanceStatus = 'tower_unavailable';
+
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'run_stopped', status: 'failed',
-        taskGenerated: `Tower error — run stopped`,
-        runType: 'plan', metadata: { verdict: 'error', error: errMsg, leads_count: leads.length },
+        taskGenerated: `Tower unreachable -- run stopped (governance_status=tower_unavailable)`,
+        runType: 'plan', metadata: { verdict: 'error', error: errMsg, leads_count: leads.length, governance_status: 'tower_unavailable' },
       });
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: 'error', error: errMsg, leads_count: leads.length } });
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: 'error', error: errMsg, leads_count: leads.length, governance_status: 'tower_unavailable' } });
 
       const errorDsInput = {
         runId: chatRunId,
@@ -2776,7 +2800,7 @@ class SupervisorService {
         softRelaxations: [] as SoftRelaxation[],
         leads: leads.map(l => ({ entity_id: l.placeId, name: l.name, address: l.address })),
         finalVerdict: 'error',
-        stopReason: `Tower error: ${errMsg}`,
+        stopReason: `Tower unavailable: ${errMsg}`,
       };
       const errorDsPayload = await emitDeliverySummary(errorDsInput);
 
@@ -3546,6 +3570,7 @@ class SupervisorService {
         }
       }
       replansUsed++;
+      runTotalRetryCount++;
       planVersion++;
       const vLabel = `v${planVersion}`;
 
@@ -4524,6 +4549,12 @@ class SupervisorService {
         durationMs: runDuration,
         planVersionsUsed: planVersion,
         scopeKey: outcomeScopeKey,
+        totalRetryCount: runTotalRetryCount,
+        learned_max_replans,
+        hard_cap_max_replans: HARD_CAP_MAX_REPLANS,
+        effective_max_replans,
+        governance_status: runGovernanceStatus,
+        ...(hasOverrides ? { run_overrides: runOverrides } : {}),
       });
 
       const policyBundleUsed: PolicyBundleV1 = policyResult?.bundle ?? structuredClone(GLOBAL_DEFAULT_BUNDLE);
@@ -4590,8 +4621,13 @@ class SupervisorService {
           scope_key: finalScopeKey,
           applied_versions: finalSnapshot.applied_versions,
           applied_max_replans: finalSnapshot.applied_policies.stop_policy_v1.max_replans,
+          learned_max_replans,
+          hard_cap_max_replans: HARD_CAP_MAX_REPLANS,
+          effective_max_replans,
+          governance_status: runGovernanceStatus,
           why_short: finalSnapshot.why_short,
           written_to_db: policyApplicationWritten,
+          ...(hasOverrides ? { run_overrides: runOverrides } : {}),
         },
         userId: task.user_id,
         conversationId,

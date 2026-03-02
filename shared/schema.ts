@@ -190,10 +190,12 @@ export const towerJudgements = pgTable("tower_judgements", {
   action: text("action").notNull(),
   reasonsJson: jsonb("reasons_json"),
   metricsJson: jsonb("metrics_json"),
+  idempotencyKey: text("idempotency_key"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   runIdIdx: index("tower_judgements_run_id_idx").on(table.runId),
   artefactIdIdx: index("tower_judgements_artefact_id_idx").on(table.artefactId),
+  idempotencyKeyIdx: index("tower_judgements_idempotency_key_idx").on(table.idempotencyKey),
 }));
 
 export const insertTowerJudgementSchema = createInsertSchema(towerJudgements).omit({

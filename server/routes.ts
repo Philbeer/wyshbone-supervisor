@@ -2695,6 +2695,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   console.log('[DEBUG] Registered: POST /api/telemetry');
 
+  app.post('/api/policy/reset', async (req, res) => {
+    const { scope_key } = req.body;
+    if (!scope_key || typeof scope_key !== 'string') {
+      return res.status(400).json({ ok: false, error: 'scope_key is required (string)' });
+    }
+    try {
+      const { GLOBAL_DEFAULT_BUNDLE } = await import('./supervisor/learning-layer');
+      const existing = await storage.getLatestPolicyVersion(scope_key);
+      const nextVersion = existing ? existing.version + 1 : 1;
+      const pv = await storage.createPolicyVersion({
+        scopeKey: scope_key,
+        version: nextVersion,
+        policyData: {
+          ...structuredClone(GLOBAL_DEFAULT_BUNDLE) as unknown as Record<string, unknown>,
+          reset_reason: 'user_reset',
+        },
+        source: 'user_reset',
+      });
+      console.log(`[POLICY_RESET] Scope ${scope_key} reset to defaults as v${nextVersion} (id=${pv.id})`);
+      return res.json({ ok: true, policy_version_id: pv.id, version: nextVersion, scope_key });
+    } catch (err: any) {
+      console.error(`[POLICY_RESET] Failed: ${err.message}`);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  console.log('[DEBUG] Registered: POST /api/policy/reset');
+
   const httpServer = createServer(app);
   return httpServer;
 }

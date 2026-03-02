@@ -3,7 +3,8 @@
  * Tower judgement is mandatory after every step. No backfill, no polling.
  * Strict sequence: STEP_RESULT_WRITTEN -> TOWER_CALLED -> TOWER_JUDGEMENT_WRITTEN -> REACTION_TAKEN
  *
- * Bounded retries: MAX_RETRIES_PER_STEP (2) and MAX_PLAN_VERSIONS (2).
+ * Bounded retries: MAX_RETRIES_PER_STEP (2).
+ * Plan version limit: derived from learned policy (effective_max_replans), with a hard safety cap (HARD_CAP_MAX_REPLANS).
  */
 
 import type { Plan } from './types/plan';
@@ -37,7 +38,7 @@ import { judgeArtefact } from './tower-artefact-judge';
 import { buildToolPlan, persistToolPlanExplainer, type LeadContext } from './tool-planning-policy';
 
 const MAX_RETRIES_PER_STEP = 2;
-const MAX_PLAN_VERSIONS = 2;
+const HARD_CAP_MAX_REPLANS = 10;
 
 function deriveConstraintsFromFilters(filters: Record<string, string>): { hard: string[]; soft: string[] } {
   const hard: string[] = [];
@@ -256,7 +257,7 @@ function buildAdjustedArgs(
       adjusted.location = `${currentLocation} within 10km`;
       const desc = `Expanded search radius: "${currentLocation}" -> "${adjusted.location}"`;
       return { strategy: 'expand_radius_10km', description: desc, args: adjusted };
-    } else if (currentLocation.includes('10km') && planVersion <= MAX_PLAN_VERSIONS) {
+    } else if (currentLocation.includes('10km') && planVersion <= HARD_CAP_MAX_REPLANS) {
       adjusted.location = currentLocation.replace('within 10km', 'within 25km');
       const desc = `Expanded search radius further: "${currentLocation}" -> "${adjusted.location}"`;
       return { strategy: 'expand_radius_25km', description: desc, args: adjusted };
@@ -281,6 +282,7 @@ export interface PlanExecutionResult {
   error?: string;
   haltedByJudgement?: boolean;
   haltReason?: string;
+  totalRetryCount?: number;
 }
 
 async function safeUpdatePlanStatus(planId: string, status: string): Promise<void> {
@@ -333,6 +335,8 @@ async function judgeStepResultSync(
       userId,
       conversationId,
       successCriteria,
+      stepIndex,
+      planVersion: undefined,
     });
   } catch (towerErr: any) {
     const errMsg = towerErr.message || 'Tower call threw an exception';
@@ -421,14 +425,19 @@ async function judgeStepResultSync(
   };
 }
 
-export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
+export async function executePlan(plan: Plan, options?: { learnedMaxReplans?: number }): Promise<PlanExecutionResult> {
   const { planId, userId, conversationId, clientRequestId, goal, steps, skipJudgement, toolMetadata } = plan;
   if (!plan.jobId) {
-    const errMsg = `[PLAN_EXECUTOR] FATAL: No jobId provided — plan executor must receive a canonical runId. All execution must flow through the Supervisor with a pre-assigned runId.`;
+    const errMsg = `[PLAN_EXECUTOR] FATAL: No jobId provided -- plan executor must receive a canonical runId. All execution must flow through the Supervisor with a pre-assigned runId.`;
     console.error(errMsg);
     throw new Error(errMsg);
   }
   const runId = plan.jobId;
+
+  const learned_max_replans = options?.learnedMaxReplans ?? 2;
+  const hard_cap_max_replans = HARD_CAP_MAX_REPLANS;
+  const effective_max_replans = Math.min(learned_max_replans, hard_cap_max_replans);
+  console.log(`[PLAN_EXECUTOR] Replan limits: learned=${learned_max_replans} hard_cap=${hard_cap_max_replans} effective=${effective_max_replans}`);
 
   console.log(`[ID_MAP] jobId=${runId} planId=${planId} crid=${clientRequestId || 'none'} entry=executePlan`);
   console.log(`[PLAN_EXECUTOR] Starting execution of plan ${planId} (runId=${runId})`);
@@ -459,6 +468,8 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
   const successCriteria: TowerSuccessCriteria = { ...LEADGEN_SUCCESS_DEFAULTS };
   const runSummary = createRunSummary();
   let currentPlanVersion = 1;
+  let totalRetryCount = 0;
+  const buildResult = (r: PlanExecutionResult): PlanExecutionResult => ({ ...r, totalRetryCount });
 
   const shouldJudge = !skipJudgement;
 
@@ -611,7 +622,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           failProgress(planId, errorMessage);
           await safeUpdatePlanStatus(planId, 'failed');
 
-          return { success: false, stepsCompleted, totalSteps: steps.length, error: errorMessage };
+          return buildResult({ success: false, stepsCompleted, totalSteps: steps.length, error: errorMessage });
         }
 
         if (!result.success) {
@@ -693,7 +704,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           failProgress(planId, result.error);
           await safeUpdatePlanStatus(planId, 'failed');
 
-          return { success: false, stepsCompleted, totalSteps: steps.length, error: result.error };
+          return buildResult({ success: false, stepsCompleted, totalSteps: steps.length, error: result.error });
         }
 
         const leadsFound = (result.data?.places as any[])?.length
@@ -791,7 +802,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           }).catch(() => {});
           failProgress(planId, errMsg);
           await safeUpdatePlanStatus(planId, 'failed');
-          return { success: false, stepsCompleted, totalSteps: steps.length, error: errMsg };
+          return buildResult({ success: false, stepsCompleted, totalSteps: steps.length, error: errMsg });
         }
 
         let artefactToJudge = stepArtefact;
@@ -840,7 +851,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
             }).catch(() => {});
             failProgress(planId, errMsg);
             await safeUpdatePlanStatus(planId, 'failed');
-            return { success: false, stepsCompleted, totalSteps: steps.length, error: errMsg };
+            return buildResult({ success: false, stepsCompleted, totalSteps: steps.length, error: errMsg });
           }
         }
 
@@ -953,11 +964,12 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
                 leads: Array.from(leadsMap.values()).map(l => ({ entity_id: String(l.place_id || ''), name: String(l.name || ''), address: String(l.address || '') })),
                 finalVerdict: 'STOP', stopReason: haltReason,
               }).catch((dsErr: any) => console.error(`[PLAN_EXECUTOR] delivery_summary failed: ${dsErr.message}`));
-              return { success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason };
+              return buildResult({ success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason });
             }
 
             stepRetryCount++;
-            console.log(`[PLAN_EXECUTOR] [reaction] RETRY step ${i + 1} (attempt ${stepRetryCount + 1}/${MAX_RETRIES_PER_STEP + 1})`);
+            totalRetryCount++;
+            console.log(`[PLAN_EXECUTOR] [reaction] RETRY step ${i + 1} (attempt ${stepRetryCount + 1}/${MAX_RETRIES_PER_STEP + 1}) totalRetries=${totalRetryCount}`);
             await logAFREvent({
               userId, runId, conversationId, clientRequestId,
               actionTaken: 'supervisor_reaction', status: 'success',
@@ -971,17 +983,17 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
           }
 
           case 'change_plan': {
-            if (currentPlanVersion >= MAX_PLAN_VERSIONS) {
-              console.log(`[PLAN_EXECUTOR] [reaction] CHANGE_PLAN requested but max plan versions (${MAX_PLAN_VERSIONS}) exceeded — stopping`);
+            if (currentPlanVersion >= effective_max_replans) {
+              console.log(`[PLAN_EXECUTOR] [reaction] CHANGE_PLAN requested but effective_max_replans (${effective_max_replans}) exceeded (learned=${learned_max_replans} hard_cap=${hard_cap_max_replans}) -- stopping`);
               await logAFREvent({
                 userId, runId, conversationId, clientRequestId,
                 actionTaken: 'supervisor_reaction', status: 'failed',
-                taskGenerated: `Tower: CHANGE_PLAN rejected — max plan versions (${MAX_PLAN_VERSIONS}) exceeded`,
+                taskGenerated: `Tower: CHANGE_PLAN rejected -- effective_max_replans (${effective_max_replans}) exceeded`,
                 runType: 'plan',
-                metadata: { reaction: 'change_plan_rejected', step_index: i, plan_version: currentPlanVersion, max_plan_versions: MAX_PLAN_VERSIONS },
+                metadata: { reaction: 'change_plan_rejected', step_index: i, plan_version: currentPlanVersion, learned_max_replans, hard_cap_max_replans, effective_max_replans },
               }).catch(() => {});
 
-              const haltReason = `Max plan versions (${MAX_PLAN_VERSIONS}) exceeded at step ${i + 1}: ${step.label}`;
+              const haltReason = `Max plan versions (${effective_max_replans}) exceeded at step ${i + 1}: ${step.label}`;
 
               await createArtefact({
                 runId, type: 'run_stopped',
@@ -1003,7 +1015,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
                 leads: Array.from(leadsMap.values()).map(l => ({ entity_id: String(l.place_id || ''), name: String(l.name || ''), address: String(l.address || '') })),
                 finalVerdict: 'STOP', stopReason: haltReason,
               }).catch((dsErr: any) => console.error(`[PLAN_EXECUTOR] delivery_summary failed: ${dsErr.message}`));
-              return { success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason };
+              return buildResult({ success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason });
             }
 
             currentPlanVersion++;
@@ -1082,7 +1094,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
               leads: Array.from(leadsMap.values()).map(l => ({ entity_id: String(l.place_id || ''), name: String(l.name || ''), address: String(l.address || '') })),
               finalVerdict: 'STOP', stopReason: haltReason,
             }).catch((dsErr: any) => console.error(`[PLAN_EXECUTOR] delivery_summary failed: ${dsErr.message}`));
-            return { success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason };
+            return buildResult({ success: false, stepsCompleted, totalSteps: steps.length, error: haltReason, haltedByJudgement: true, haltReason });
           }
         }
 
@@ -1192,7 +1204,7 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       stopReason: null,
     });
 
-    return { success: true, stepsCompleted, totalSteps: steps.length };
+    return buildResult({ success: true, stepsCompleted, totalSteps: steps.length });
 
   } catch (error: any) {
     const errorMessage = error.message || 'Plan execution failed unexpectedly';
@@ -1226,14 +1238,14 @@ export async function executePlan(plan: Plan): Promise<PlanExecutionResult> {
       stopReason: errorMessage,
     }).catch((dsErr: any) => console.error(`[PLAN_EXECUTOR] delivery_summary emission failed: ${dsErr.message}`));
 
-    return { success: false, stepsCompleted, totalSteps: steps.length, error: errorMessage };
+    return buildResult({ success: false, stepsCompleted, totalSteps: steps.length, error: errorMessage });
   }
 }
 
-export function startPlanExecutionAsync(plan: Plan): void {
+export function startPlanExecutionAsync(plan: Plan, options?: { learnedMaxReplans?: number }): void {
   console.log(`[PLAN_EXECUTOR] Starting async execution for plan ${plan.planId}`);
 
-  executePlan(plan).then(result => {
+  executePlan(plan, options).then(result => {
     if (result.haltedByJudgement) {
       console.log(`[PLAN_EXECUTOR] Plan ${plan.planId} halted by Tower judgement: ${result.haltReason}`);
     } else if (result.success) {

@@ -43,6 +43,12 @@ export interface PolicyBundleV1 {
   };
 }
 
+export interface RunOverrides {
+  mode_preset?: 'faster' | 'balanced' | 'stricter';
+  override_max_replans?: number;
+  ignore_learned_policy?: boolean;
+}
+
 export interface PolicyApplicationSnapshot {
   scope_key: string;
   applied_at: string;
@@ -57,6 +63,7 @@ export interface PolicyApplicationSnapshot {
     stop_policy_v1: Pick<StopPolicyV1, 'max_replans' | 'search_budget_count' | 'search_count' | 'stop_when_verified_exact_is_zero_after_enrichment' | 'require_user_override_to_attempt_unverifiable_hard'>;
   };
   why_short: string[];
+  run_overrides?: RunOverrides;
 }
 
 export const GLOBAL_DEFAULT_BUNDLE: PolicyBundleV1 = {
@@ -281,13 +288,14 @@ function bundleToLegacyConstraints(bundle: PolicyBundleV1): PolicyConstraints {
   };
 }
 
-export async function applyPolicy(input: PolicyInput): Promise<PolicyApplicationResult> {
+export async function applyPolicy(input: PolicyInput, overrides?: RunOverrides): Promise<PolicyApplicationResult> {
   const scopeKey = deriveScopeKey(input.vertical, input.location, input.constraintBucket);
-  console.log(`[LEARNING_LAYER] applyPolicy scope_key=${scopeKey}`);
+  console.log(`[LEARNING_LAYER] applyPolicy scope_key=${scopeKey}${overrides ? ` overrides=${JSON.stringify(overrides)}` : ''}`);
 
   await ensureGlobalDefault();
 
-  let latestPolicy = await storage.getLatestPolicyVersion(scopeKey);
+  const skipLearned = overrides?.ignore_learned_policy === true;
+  let latestPolicy = skipLearned ? undefined : await storage.getLatestPolicyVersion(scopeKey);
   let whyShort: string[] = [];
   let applied = false;
 
@@ -296,7 +304,12 @@ export async function applyPolicy(input: PolicyInput): Promise<PolicyApplication
   const envMaxReplans = parseInt(process.env.MAX_REPLANS || '5', 10);
   const defaultMaxReplans = GLOBAL_DEFAULT_BUNDLE.policies.stop_policy_v1.max_replans;
 
-  if (!latestPolicy) {
+  if (skipLearned) {
+    bundle = structuredClone(GLOBAL_DEFAULT_BUNDLE);
+    whyShort.push('Learned policy ignored by run override (ignore_learned_policy=true).');
+    whyShort.push(`stop_policy_v1.max_replans=${bundle.policies.stop_policy_v1.max_replans} (default, learned policy skipped).`);
+    console.log(`[LEARNING_LAYER] ignore_learned_policy=true, using GLOBAL_DEFAULT for scope=${scopeKey}`);
+  } else if (!latestPolicy) {
     const globalDefault = await storage.getLatestPolicyVersion(GLOBAL_DEFAULT_SCOPE_KEY);
     bundle = globalDefault
       ? upgradeFlatPolicyToBundle(globalDefault.policyData as Record<string, unknown>)
@@ -314,9 +327,36 @@ export async function applyPolicy(input: PolicyInput): Promise<PolicyApplication
     console.log(`[LEARNING_LAYER] Applied policy v${latestPolicy.version} for scope=${scopeKey}`);
   }
 
+  if (overrides?.mode_preset) {
+    const mode = overrides.mode_preset;
+    if (mode === 'faster') {
+      bundle.policies.stop_policy_v1.max_replans = Math.min(bundle.policies.stop_policy_v1.max_replans, 1);
+      bundle.policies.stop_policy_v1.search_budget_count = Math.min(bundle.policies.stop_policy_v1.search_budget_count, 20);
+      bundle.policies.stop_policy_v1.search_count = Math.min(bundle.policies.stop_policy_v1.search_count, 20);
+      whyShort.push(`mode_preset=faster: max_replans capped to ${bundle.policies.stop_policy_v1.max_replans}, search_budget capped to ${bundle.policies.stop_policy_v1.search_budget_count}.`);
+    } else if (mode === 'stricter') {
+      bundle.policies.stop_policy_v1.stop_when_verified_exact_is_zero_after_enrichment = true;
+      whyShort.push(`mode_preset=stricter: stop_when_verified_exact_is_zero_after_enrichment forced true.`);
+    } else {
+      whyShort.push(`mode_preset=balanced: no adjustments.`);
+    }
+    console.log(`[LEARNING_LAYER] mode_preset=${mode} applied`);
+  }
+
+  if (overrides?.override_max_replans !== undefined) {
+    const overrideVal = Math.max(0, Math.min(3, overrides.override_max_replans));
+    const prev = bundle.policies.stop_policy_v1.max_replans;
+    bundle.policies.stop_policy_v1.max_replans = overrideVal;
+    whyShort.push(`override_max_replans=${overrideVal} (was ${prev}).`);
+    console.log(`[LEARNING_LAYER] override_max_replans: ${prev} -> ${overrideVal}`);
+  }
+
   const version = latestPolicy?.version ?? 0;
   const execParams = deriveExecutionParams(bundle);
   const snapshot = buildApplicationSnapshot(scopeKey, bundle, version, whyShort);
+  if (overrides) {
+    snapshot.run_overrides = overrides;
+  }
   const legacyConstraints = bundleToLegacyConstraints(bundle);
 
   return {
@@ -368,6 +408,10 @@ export interface DecisionLogEntry {
   constraintBucket: string[];
   rationale: string;
   querySuspectedMerged?: boolean;
+  learned_max_replans?: number;
+  hard_cap_max_replans?: number;
+  effective_max_replans?: number;
+  run_overrides?: RunOverrides;
 }
 
 export async function writeDecisionLog(entry: DecisionLogEntry): Promise<void> {
@@ -387,6 +431,10 @@ export async function writeDecisionLog(entry: DecisionLogEntry): Promise<void> {
       constraint_bucket: entry.constraintBucket,
       rationale: entry.rationale,
       ...(entry.querySuspectedMerged ? { query_suspected_merged: true } : {}),
+      ...(entry.learned_max_replans !== undefined ? { learned_max_replans: entry.learned_max_replans } : {}),
+      ...(entry.hard_cap_max_replans !== undefined ? { hard_cap_max_replans: entry.hard_cap_max_replans } : {}),
+      ...(entry.effective_max_replans !== undefined ? { effective_max_replans: entry.effective_max_replans } : {}),
+      ...(entry.run_overrides ? { run_overrides: entry.run_overrides } : {}),
     },
     userId: entry.userId,
     conversationId: entry.conversationId,
@@ -408,6 +456,12 @@ export interface OutcomeLogEntry {
   durationMs: number;
   planVersionsUsed: number;
   scopeKey: string;
+  totalRetryCount?: number;
+  learned_max_replans?: number;
+  hard_cap_max_replans?: number;
+  effective_max_replans?: number;
+  governance_status?: 'governed' | 'tower_unavailable';
+  run_overrides?: RunOverrides;
 }
 
 export async function writeOutcomeLog(entry: OutcomeLogEntry): Promise<void> {
@@ -427,6 +481,12 @@ export async function writeOutcomeLog(entry: OutcomeLogEntry): Promise<void> {
       duration_ms: entry.durationMs,
       plan_versions_used: entry.planVersionsUsed,
       scope_key: entry.scopeKey,
+      total_retry_count: entry.totalRetryCount ?? 0,
+      learned_max_replans: entry.learned_max_replans ?? null,
+      hard_cap_max_replans: entry.hard_cap_max_replans ?? null,
+      effective_max_replans: entry.effective_max_replans ?? null,
+      governance_status: entry.governance_status ?? 'governed',
+      ...(entry.run_overrides ? { run_overrides: entry.run_overrides } : {}),
     },
     userId: entry.userId,
     conversationId: entry.conversationId,

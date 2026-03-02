@@ -59,6 +59,9 @@ export interface TaskRequestData {
     topic?: string;
     prompt?: string;
   };
+  mode_preset?: 'faster' | 'balanced' | 'stricter';
+  override_max_replans?: number;
+  ignore_learned_policy?: boolean;
 }
 
 export interface TaskResult {

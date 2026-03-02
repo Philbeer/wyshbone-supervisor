@@ -506,11 +506,22 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createTowerJudgement(judgement: InsertTowerJudgement): Promise<TowerJudgement> {
+    if (judgement.idempotencyKey) {
+      const [existing] = await db
+        .select()
+        .from(towerJudgements)
+        .where(eq(towerJudgements.idempotencyKey, judgement.idempotencyKey))
+        .limit(1);
+      if (existing) {
+        console.log(`[Storage] Tower judgement deduplicated by idempotency_key=${judgement.idempotencyKey} for run ${judgement.runId}`);
+        return existing;
+      }
+    }
     const [result] = await db
       .insert(towerJudgements)
       .values(judgement)
       .returning();
-    console.log(`[Storage] Created tower judgement (verdict=${judgement.verdict}, action=${judgement.action}) for run ${judgement.runId}`);
+    console.log(`[Storage] Created tower judgement (verdict=${judgement.verdict}, action=${judgement.action}) for run ${judgement.runId}${judgement.idempotencyKey ? ` ikey=${judgement.idempotencyKey}` : ''}`);
     return result;
   }
 
