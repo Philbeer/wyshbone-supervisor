@@ -229,6 +229,9 @@ export function isCertainVerifiable(constraint: Constraint): boolean {
 }
 
 export function applyCertaintyGate(contract: ConstraintContract): ConstraintContract {
+  const hasUnresolvedSubjective = contract.constraints.some(c => isSubjectivePredicateUnresolved(c));
+  if (hasUnresolvedSubjective) return contract;
+
   const blocked = contract.constraints.filter(c => c.must_be_certain && !isCertainVerifiable(c));
   if (blocked.length === 0) return contract;
 
@@ -324,6 +327,8 @@ function isSubjectivePredicateUnresolved(c: Constraint): boolean {
 }
 
 function buildGateState(constraints: Constraint[], isNoProxy: boolean): ConstraintContract {
+  const hasUnresolvedSubjective = constraints.some(c => isSubjectivePredicateUnresolved(c));
+
   const clarify_questions: string[] = [];
   const blockReasons: string[] = [];
   let stop_recommended = false;
@@ -334,6 +339,8 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
       const termsDisplay = c.label.split(', ').map(t => `'${t}'`).join(' and ');
       const optionsList = c.clarification_options.join(', ');
       clarify_questions.push(`When you say ${termsDisplay}, what do you mean? Pick one or more: ${optionsList} — or tell me your own criteria.`);
+    } else if (hasUnresolvedSubjective) {
+      continue;
     } else if (c.type === 'time_predicate') {
       if (isNoProxy || (c.verifiability === 'unverifiable' && c.hardness === 'hard')) {
         stop_recommended = true;

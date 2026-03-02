@@ -490,14 +490,15 @@ describe('Constraint Gate — subjective predicate extraction (Batch 1)', () => 
     assert.ok(sp, 'subjective_predicate constraint must exist even alongside measurable attributes');
   });
 
-  it('"nice pubs opened recently" → both subjective_predicate AND time_predicate extracted', () => {
+  it('"nice pubs opened recently" → both subjective_predicate AND time_predicate extracted, but only subjective surfaced', () => {
     const contract = preExecutionConstraintGate('Find nice pubs opened recently');
     assert.strictEqual(contract.can_execute, false);
     const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
     const tp = contract.constraints.find(c => c.type === 'time_predicate');
     assert.ok(sp, 'subjective_predicate must exist');
-    assert.ok(tp, 'time_predicate must exist');
-    assert.ok(contract.clarify_questions.length >= 2, 'must ask clarification for BOTH');
+    assert.ok(tp, 'time_predicate must exist (stored, not surfaced yet)');
+    assert.strictEqual(contract.clarify_questions.length, 1, 'only subjective question surfaced — time suppressed');
+    assert.ok(contract.clarify_questions[0].includes("'nice'"), 'surfaced question must be about the subjective term');
   });
 
   it('"Find 10 pubs in Manchester" → no subjective_predicate (plain search)', () => {
@@ -911,16 +912,16 @@ describe('Constraint Gate — Batch 1 Layer 2 regression tests', () => {
     assert.strictEqual(sp.label, 'nice');
   });
 
-  it('E) "Find nice pubs in Bristol that opened in last 12 months" → CLARIFY both: subjective + time proxy', () => {
+  it('E) "Find nice pubs in Bristol that opened in last 12 months" → CLARIFY subjective only, time stored but suppressed', () => {
     const contract = preExecutionConstraintGate('Find nice pubs in Bristol that opened in last 12 months');
     assert.strictEqual(contract.can_execute, false);
     const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
     const tp = contract.constraints.find(c => c.type === 'time_predicate') as TimePredicateContract;
     assert.ok(sp, 'subjective_predicate must exist');
-    assert.ok(tp, 'time_predicate must exist');
-    assert.ok(contract.clarify_questions.length >= 2, 'must ask for BOTH subjective definition AND time proxy');
-    assert.ok(contract.clarify_questions.some(q => q.includes("'nice'")), 'one question must ask about "nice"');
-    assert.ok(contract.clarify_questions.some(q => q.includes('proxy') || q.includes('opening dates') || q.includes('news mentions')), 'one question must ask about time proxy');
+    assert.ok(tp, 'time_predicate must exist (stored, not surfaced)');
+    assert.strictEqual(contract.clarify_questions.length, 1, 'only subjective question surfaced');
+    assert.ok(contract.clarify_questions[0].includes("'nice'"), 'surfaced question must be about the subjective term');
+    assert.ok(!contract.clarify_questions.some(q => q.includes('proxy') || q.includes('news mentions')), 'time proxy question must NOT appear while subjective is unresolved');
   });
 
   it('subjective_predicate includes suggested_rephrase', () => {
@@ -1062,11 +1063,74 @@ describe('Constraint Gate — Batch 1 subjective follow-up resolution', () => {
   it('compound: subjective + time, resolving only subjective does NOT fully resolve', () => {
     const initial = preExecutionConstraintGate('Find nice pubs in Bristol that opened recently');
     assert.strictEqual(initial.can_execute, false);
+    assert.strictEqual(initial.clarify_questions.length, 1, 'only subjective question shown initially');
     const resolved = resolveFollowUp(initial, 'lively');
     assert.strictEqual(resolved.can_execute, false, 'time predicate still unresolved');
     const sp = resolved.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
     assert.strictEqual(sp.can_execute, true, 'subjective part resolved');
     const tp = resolved.constraints.find(c => c.type === 'time_predicate');
     assert.ok(tp, 'time predicate still present');
+    assert.ok(resolved.clarify_questions.length >= 1, 'time predicate question now surfaced after subjective resolved');
+    assert.ok(resolved.clarify_questions.some(q => q.includes('proxy') || q.includes('opening dates') || q.includes('news mentions')), 'time proxy question appears');
+  });
+});
+
+describe('Constraint Gate — subjective priority suppression', () => {
+  it('subjective + time: only subjective question surfaced, time suppressed', () => {
+    const contract = preExecutionConstraintGate('Find nice pubs in Bristol that opened in the last 12 months');
+    assert.strictEqual(contract.can_execute, false);
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes("'nice'"));
+    assert.ok(!contract.clarify_questions.some(q => q.includes('proxy') || q.includes('news mentions')));
+    assert.ok(contract.constraints.some(c => c.type === 'time_predicate'), 'time predicate stored in contract');
+  });
+
+  it('subjective + live music: only subjective question surfaced, live music suppressed', () => {
+    const contract = preExecutionConstraintGate('Find nice pubs in Bristol with live music');
+    assert.strictEqual(contract.can_execute, false);
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes("'nice'"));
+    assert.ok(!contract.clarify_questions.some(q => q.includes('Live music') || q.includes('website')));
+    assert.ok(contract.constraints.some(c => c.type === 'attribute'), 'live music attribute stored in contract');
+  });
+
+  it('subjective + time + live music: only subjective surfaced, others suppressed', () => {
+    const contract = preExecutionConstraintGate('Find nice pubs in Bristol that opened in the last 12 months with live music');
+    assert.strictEqual(contract.can_execute, false);
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes("'nice'"));
+    assert.ok(contract.constraints.some(c => c.type === 'time_predicate'), 'time stored');
+    assert.ok(contract.constraints.some(c => c.type === 'attribute'), 'attribute stored');
+  });
+
+  it('after subjective resolved, time predicate question surfaces', () => {
+    const initial = preExecutionConstraintGate('Find nice pubs in Bristol that opened in the last 12 months');
+    assert.strictEqual(initial.clarify_questions.length, 1);
+    const resolved = resolveFollowUp(initial, 'lively');
+    assert.strictEqual(resolved.can_execute, false, 'time predicate still blocks');
+    assert.ok(resolved.clarify_questions.some(q => q.includes('proxy') || q.includes('opening dates') || q.includes('news mentions')), 'time question now surfaces');
+    assert.ok(!resolved.clarify_questions.some(q => q.includes("'nice'")), 'subjective question gone');
+  });
+
+  it('after subjective resolved, live music question surfaces', () => {
+    const initial = preExecutionConstraintGate('Find nice pubs in Bristol with live music');
+    assert.strictEqual(initial.clarify_questions.length, 1);
+    const resolved = resolveFollowUp(initial, 'cosy');
+    assert.strictEqual(resolved.can_execute, false, 'live music still blocks');
+    assert.ok(resolved.clarify_questions.some(q => q.includes('website') || q.includes('Live music') || q.includes('live music')), 'live music question now surfaces');
+  });
+
+  it('no subjective: time + live music both surface as before', () => {
+    const contract = preExecutionConstraintGate('Find pubs in Bristol that opened in the last 12 months with live music');
+    assert.strictEqual(contract.can_execute, false);
+    assert.strictEqual(contract.clarify_questions.length, 2, 'both time and live music questions surface');
+  });
+
+  it('stop_recommended suppressed while subjective unresolved', () => {
+    const contract = preExecutionConstraintGate('Find nice pubs in Bristol that opened recently, no proxies');
+    assert.strictEqual(contract.can_execute, false);
+    assert.strictEqual(contract.stop_recommended, false, 'stop suppressed — subjective must resolve first');
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes("'nice'"));
   });
 });
