@@ -1,0 +1,67 @@
+Goal: produce REPORT_PART3_SUPERVISOR.md
+
+Prompt:
+
+You are auditing the Wyshbone Supervisor repo ONLY.
+
+Task:
+Create a single markdown file named REPORT_PART3_SUPERVISOR.md that reports the current implementation status for “Part 3: MVP Learning Plan” backend behaviour.
+
+Do NOT implement fixes. Report only.
+
+Include these sections (must be in this exact order):
+
+Executive summary (5 bullet points max)
+
+What learning or cross run persistence exists today
+
+Whether any “policy knobs” exist and where they come from
+
+Biggest correctness and reliability risks
+
+Learning ledger and persistence
+
+Identify any tables, collections, files, or artefacts used to store cross run signals
+
+List schema fields that match: query signature, constraint types, entity type, outcomes, run duration, replans, retries, final verdict, stop reason
+
+If no direct ledger exists, say so clearly
+
+Where run outcomes are written
+
+Identify the exact code paths that persist: run summary, artefacts, tower judgements, step results, plan results
+
+Include file paths and function names
+
+Any existing policy or tuning logic
+
+Find any code that changes behaviour based on prior runs, user history, flags, or config
+
+Include how it influences: search budget, verification depth, clarification strictness, replan ceiling, stop early decisions
+
+If behaviour is currently static, say so
+
+Interfaces to Tower
+
+Document how Supervisor calls Tower for judgements today
+
+What inputs are sent (goal, success criteria, artefact, history if any)
+
+What outputs are expected and how Supervisor reacts
+
+Data flow map (one page)
+
+From user request -> runnable vs clarify -> execution -> artefact created -> tower judgement -> supervisor reaction -> UI surfaced events
+
+Name every event type or artefact type involved
+
+Gaps vs Part 3 spec
+
+Table: “Part 3 requirement” vs “present now” vs “missing” vs “next concrete step”
+
+Appendix
+
+List relevant files and why they matter
+
+Deliverable:
+Write the report file to disk. Do not paste it into chat. Confirm completion and give the file path.
