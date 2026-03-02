@@ -28,12 +28,13 @@ export interface AttributeConstraint {
 export interface SubjectivePredicateConstraint {
   type: 'subjective_predicate';
   label: string;
-  verifiability: 'proxy';
+  verifiability: 'unverifiable';
   hardness: 'soft';
   required_inputs_missing: string[];
-  can_execute: false;
+  can_execute: boolean;
   why_blocked: string;
   suggested_rephrase: string | null;
+  clarification_options: string[];
 }
 
 export type Constraint = TimePredicateContract | AttributeConstraint | SubjectivePredicateConstraint;
@@ -56,9 +57,16 @@ export interface PendingConstraintState {
 const pendingContracts = new Map<string, PendingConstraintState>();
 const PENDING_TTL_MS = 15 * 60 * 1000;
 
-const SUBJECTIVE_TERMS_PATTERN = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|good\s+atmosphere|great\s+atmosphere|great(?!\s+(?:for|at|with))|cool(?!est)|lovely|decent|chill(?!est)|good(?!\s+(?:for\s+studying|guinness|beer))|popular|fancy|high[- ]?end|recommended|quality|trendy)\b/gi;
+const SUBJECTIVE_TERMS_PATTERN = /\b(?:best\s+rated|best\s+places|best|top|coolest|nicest|nicer|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|good\s+atmosphere|great\s+atmosphere|great(?!\s+(?:for|at|with))|cool(?!est)|lovely|decent|chill(?!est)|good(?!\s+(?:for\s+studying|guinness|beer))|popular|fancy|high[- ]?end|recommended|quality|trendy|better)\b/gi;
 
 const MEASURABLE_CRITERIA_PATTERN = /\b(?:live\s*music|craft\s*beer|real\s*ale|cask\s*ale|dog\s*friendly|family\s*friendly|late[- ]?\s*night|open\s*late|cheap|budget|expensive|premium|cosy|cozy|quiet|outdoor\s*seating|beer\s*garden|rooftop|waterfront|riverside|seafront|free\s*wifi|wheelchair|accessible|parking|vegan|vegetarian|gluten\s*free|halal|kosher|organic|independent|chain|gastropub|wine\s*bar|cocktail\s*bar|sports?\s*bar|micro\s*pub|tap\s*room|free\s*house|food\s*served|nightlife|lively|romantic|walkable|events|student|views|scenic|good\s+for\s+studying|good\s+guinness|good\s+beer|has\s+food|near\s+\w|within\s+\d+\s*(?:miles?|km|minutes?)|4\.\d\s*stars?|\d+\s*stars?)\b/i;
+
+const SUBJECTIVE_CLARIFICATION_OPTIONS = [
+  'Lively', 'Quiet', 'Cosy', 'Late-night', 'Live music',
+  'Good for food', 'Beer garden', 'Dog friendly',
+];
+
+const MEASURABLE_FOLLOW_UP_PATTERN = /\b(?:lively|quiet|cosy|cozy|late[- ]?\s*night|open\s*late|live\s*music|good\s+for\s+food|food\s+served|beer\s*garden|dog\s*friendly|family\s*friendly|craft\s*beer|real\s*ale|rooftop|outdoor\s*seating|cocktail|cheap|budget|romantic|student|walkable|scenic|views|events|nightlife|sports?\s*bar|wheelchair|accessible)\b/i;
 
 export function detectSubjectiveTerms(text: string): string[] {
   const matches = text.match(SUBJECTIVE_TERMS_PATTERN);
@@ -71,27 +79,38 @@ export function hasMeasurableCriteria(text: string): boolean {
   return MEASURABLE_CRITERIA_PATTERN.test(text);
 }
 
-function buildSuggestedRephrase(label: string, msg: string): string {
-  const cleaned = msg
-    .replace(new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return `Try: "${cleaned ? cleaned + ' that are ' : 'Find '}cosy and quiet" or "lively with live music"`;
+function extractLocationFromMsg(msg: string): string | null {
+  const locMatch = msg.match(/\bin\s+([A-Za-z][a-zA-Z.\s]+?)(?:\s+(?:that|which|with|and)\b|$)/i);
+  return locMatch ? locMatch[1].trim() : null;
+}
+
+function buildSuggestedRephrases(labels: string[], msg: string): string[] {
+  const location = extractLocationFromMsg(msg);
+  const locSuffix = location ? ` in ${location}` : '';
+  const entityMatch = msg.match(/\b(bars?|pubs?|cafes?|restaurants?|shops?|venues?)\b/i);
+  const entity = entityMatch ? entityMatch[1].toLowerCase() : 'bars';
+  return [
+    `Find lively ${entity}${locSuffix}`,
+    `Find cosy ${entity}${locSuffix} with live music`,
+  ];
 }
 
 function extractSubjectivePredicate(msg: string): SubjectivePredicateConstraint | null {
   const terms = detectSubjectiveTerms(msg);
   if (terms.length === 0) return null;
-  const label = terms[0];
+  const label = terms.join(', ');
+  const required_inputs_missing = terms.map(t => `definition_of_${t.replace(/\s+/g, '_')}`);
+  const rephrases = buildSuggestedRephrases(terms, msg);
   return {
     type: 'subjective_predicate',
     label,
-    verifiability: 'proxy',
+    verifiability: 'unverifiable',
     hardness: 'soft',
-    required_inputs_missing: ['subjective_definition'],
+    required_inputs_missing,
     can_execute: false,
-    why_blocked: `Your request includes a subjective term ('${label}'). Tell me what you mean so I can search accurately.`,
-    suggested_rephrase: buildSuggestedRephrase(label, msg),
+    why_blocked: `This request uses a subjective term that needs clarification`,
+    suggested_rephrase: rephrases.join(' | '),
+    clarification_options: SUBJECTIVE_CLARIFICATION_OPTIONS,
   };
 }
 
@@ -301,7 +320,7 @@ function isLiveMusicUnresolved(c: Constraint): boolean {
 }
 
 function isSubjectivePredicateUnresolved(c: Constraint): boolean {
-  return c.type === 'subjective_predicate';
+  return c.type === 'subjective_predicate' && !c.can_execute;
 }
 
 function buildGateState(constraints: Constraint[], isNoProxy: boolean): ConstraintContract {
@@ -310,9 +329,11 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
   let stop_recommended = false;
 
   for (const c of constraints) {
-    if (c.type === 'subjective_predicate') {
+    if (c.type === 'subjective_predicate' && !c.can_execute) {
       blockReasons.push(c.why_blocked);
-      clarify_questions.push(`When you say '${c.label}', what do you mean? Pick one: cosy and quiet, lively and busy, trendy, upscale, cheap, good beer, good food, live music, or tell me your own criteria.`);
+      const termsDisplay = c.label.split(', ').map(t => `'${t}'`).join(' and ');
+      const optionsList = c.clarification_options.join(', ');
+      clarify_questions.push(`When you say ${termsDisplay}, what do you mean? Pick one or more: ${optionsList} — or tell me your own criteria.`);
     } else if (c.type === 'time_predicate') {
       if (isNoProxy || (c.verifiability === 'unverifiable' && c.hardness === 'hard')) {
         stop_recommended = true;
@@ -358,6 +379,11 @@ export function preExecutionConstraintGate(msg: string): ConstraintContract {
     };
   }
 
+  const hasSubjective = constraints.some(c => c.type === 'subjective_predicate');
+  if (hasSubjective) {
+    console.log(`[CONSTRAINT_GATE] constraint_gate_triggered: subjective`);
+  }
+
   const isNoProxy = detectNoProxySignal(msg);
   const isMustBeCertain = detectMustBeCertain(msg);
 
@@ -392,7 +418,21 @@ export function resolveFollowUp(
   const windowInfo = detectWindowFromFollowUp(followUpMsg);
   const liveMusicChoice = detectLiveMusicChoice(followUpMsg);
 
+  const followUpHasMeasurable = MEASURABLE_FOLLOW_UP_PATTERN.test(followUpMsg);
+
   const updatedConstraints = existingContract.constraints.map(c => {
+    if (c.type === 'subjective_predicate' && !c.can_execute) {
+      if (followUpHasMeasurable) {
+        return {
+          ...c,
+          can_execute: true,
+          why_blocked: '',
+          required_inputs_missing: [],
+        } as SubjectivePredicateConstraint;
+      }
+      return c;
+    }
+
     if (c.type === 'time_predicate') {
       let updated = { ...c };
 

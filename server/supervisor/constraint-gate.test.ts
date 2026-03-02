@@ -447,11 +447,12 @@ describe('Constraint Gate — subjective predicate extraction (Batch 1)', () => 
     assert.ok(sp, 'subjective_predicate constraint must exist');
     assert.strictEqual(sp!.type, 'subjective_predicate');
     if (sp!.type === 'subjective_predicate') {
-      assert.strictEqual(sp!.verifiability, 'proxy');
+      assert.strictEqual(sp!.verifiability, 'unverifiable');
       assert.strictEqual(sp!.hardness, 'soft');
-      assert.ok(sp!.required_inputs_missing.includes('subjective_definition'));
+      assert.ok(sp!.required_inputs_missing.includes('definition_of_nice'));
       assert.ok(sp!.why_blocked.includes('subjective'));
       assert.ok(sp!.suggested_rephrase !== null);
+      assert.ok(sp!.clarification_options.length > 0, 'must include clarification options');
     }
   });
 
@@ -883,8 +884,8 @@ describe('Constraint Gate — Batch 1 Layer 2 regression tests', () => {
     assert.strictEqual(contract.can_execute, false);
     const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
     assert.ok(sp);
-    assert.strictEqual(sp.label, 'nice');
-    assert.ok(sp.required_inputs_missing.includes('subjective_definition'));
+    assert.ok(sp.label.includes('nice'));
+    assert.ok(sp.required_inputs_missing.includes('definition_of_nice'));
     assert.ok(contract.clarify_questions.some(q => q.includes("'nice'")));
   });
 
@@ -893,7 +894,7 @@ describe('Constraint Gate — Batch 1 Layer 2 regression tests', () => {
     assert.strictEqual(contract.can_execute, false);
     const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
     assert.ok(sp);
-    assert.strictEqual(sp.label, 'good');
+    assert.ok(sp.label.includes('good'));
   });
 
   it('C) "Find lively bars in Manchester" → RUN (no clarify)', () => {
@@ -927,5 +928,145 @@ describe('Constraint Gate — Batch 1 Layer 2 regression tests', () => {
     const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
     assert.ok(sp.suggested_rephrase);
     assert.ok(sp.suggested_rephrase!.length > 0);
+  });
+});
+
+describe('Constraint Gate — Batch 1 spec contract tests', () => {
+  it('"Find nice bars in Manchester" → CLARIFY (can_execute false, type subjective_predicate, required_inputs_missing includes definition_of_nice)', () => {
+    const contract = preExecutionConstraintGate('Find nice bars in Manchester');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp);
+    assert.strictEqual(sp.type, 'subjective_predicate');
+    assert.strictEqual(sp.verifiability, 'unverifiable');
+    assert.strictEqual(sp.hardness, 'soft');
+    assert.strictEqual(sp.can_execute, false);
+    assert.ok(sp.required_inputs_missing.includes('definition_of_nice'));
+    assert.ok(sp.why_blocked.includes('subjective'));
+  });
+
+  it('"Find good pubs in Leeds" → CLARIFY', () => {
+    const contract = preExecutionConstraintGate('Find good pubs in Leeds');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp);
+    assert.ok(sp.required_inputs_missing.includes('definition_of_good'));
+  });
+
+  it('"Find lively bars in Manchester" → RUN (no subjective constraints produced)', () => {
+    const contract = preExecutionConstraintGate('Find lively bars in Manchester');
+    assert.strictEqual(contract.can_execute, true);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
+    assert.strictEqual(sp, undefined);
+    assert.strictEqual(contract.constraints.length, 0);
+  });
+
+  it('"Find nice pubs in Bristol that opened last year" → CLARIFY for nice, and still contains the time predicate constraint', () => {
+    const contract = preExecutionConstraintGate('Find nice pubs in Bristol that opened in the last 12 months');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    const tp = contract.constraints.find(c => c.type === 'time_predicate');
+    assert.ok(sp, 'subjective predicate must exist');
+    assert.ok(tp, 'time predicate must still be present');
+    assert.ok(sp.required_inputs_missing.includes('definition_of_nice'));
+  });
+
+  it('"Find best bars in Soho" → CLARIFY', () => {
+    const contract = preExecutionConstraintGate('Find best bars in Soho');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp);
+    assert.ok(sp.required_inputs_missing.includes('definition_of_best'));
+  });
+
+  it('"Find bars with good cocktails in Manchester" → CLARIFY (good is subjective)', () => {
+    const contract = preExecutionConstraintGate('Find bars with good cocktails in Manchester');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp, 'good is subjective even though cocktails is a noun');
+    assert.ok(sp.required_inputs_missing.includes('definition_of_good'));
+  });
+
+  it('multiple subjective terms combine into one gate with all definitions missing', () => {
+    const contract = preExecutionConstraintGate('Find nice trendy bars in Manchester');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp);
+    assert.ok(sp.required_inputs_missing.includes('definition_of_nice'));
+    assert.ok(sp.required_inputs_missing.includes('definition_of_trendy'));
+  });
+
+  it('clarification_options includes minimum required options', () => {
+    const contract = preExecutionConstraintGate('Find nice bars in Manchester');
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp);
+    assert.ok(sp.clarification_options.includes('Lively'));
+    assert.ok(sp.clarification_options.includes('Quiet'));
+    assert.ok(sp.clarification_options.includes('Cosy'));
+    assert.ok(sp.clarification_options.includes('Late-night'));
+    assert.ok(sp.clarification_options.includes('Live music'));
+    assert.ok(sp.clarification_options.includes('Good for food'));
+    assert.ok(sp.clarification_options.includes('Beer garden'));
+    assert.ok(sp.clarification_options.includes('Dog friendly'));
+  });
+
+  it('suggested rephrase preserves user location', () => {
+    const contract = preExecutionConstraintGate('Find nice bars in Manchester');
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp.suggested_rephrase);
+    assert.ok(sp.suggested_rephrase!.includes('Manchester'), 'rephrase should preserve location');
+  });
+
+  it('variant terms detected: nicer, better, best rated', () => {
+    assert.ok(detectSubjectiveTerms('Find nicer bars').includes('nicer'));
+    assert.ok(detectSubjectiveTerms('Find better pubs').includes('better'));
+    assert.ok(detectSubjectiveTerms('Find best rated cafes').includes('best rated'));
+  });
+});
+
+describe('Constraint Gate — Batch 1 subjective follow-up resolution', () => {
+  it('follow-up with measurable criteria resolves subjective constraint', () => {
+    const initial = preExecutionConstraintGate('Find nice bars in Manchester');
+    assert.strictEqual(initial.can_execute, false);
+    const resolved = resolveFollowUp(initial, 'I mean lively bars');
+    const sp = resolved.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.ok(sp);
+    assert.strictEqual(sp.can_execute, true, 'subjective constraint must be resolved after measurable answer');
+    assert.strictEqual(resolved.can_execute, true);
+  });
+
+  it('follow-up without measurable criteria does NOT resolve subjective constraint', () => {
+    const initial = preExecutionConstraintGate('Find nice bars in Manchester');
+    const resolved = resolveFollowUp(initial, 'I mean really nice ones');
+    assert.strictEqual(resolved.can_execute, false);
+  });
+
+  it('follow-up "cosy" resolves subjective constraint', () => {
+    const initial = preExecutionConstraintGate('Find good pubs in Leeds');
+    const resolved = resolveFollowUp(initial, 'cosy');
+    assert.strictEqual(resolved.can_execute, true);
+  });
+
+  it('follow-up "quiet" resolves subjective constraint', () => {
+    const initial = preExecutionConstraintGate('Find best bars in Soho');
+    const resolved = resolveFollowUp(initial, 'quiet');
+    assert.strictEqual(resolved.can_execute, true);
+  });
+
+  it('follow-up "dog friendly" resolves subjective constraint', () => {
+    const initial = preExecutionConstraintGate('Find nice cafes in Bristol');
+    const resolved = resolveFollowUp(initial, 'dog friendly');
+    assert.strictEqual(resolved.can_execute, true);
+  });
+
+  it('compound: subjective + time, resolving only subjective does NOT fully resolve', () => {
+    const initial = preExecutionConstraintGate('Find nice pubs in Bristol that opened recently');
+    assert.strictEqual(initial.can_execute, false);
+    const resolved = resolveFollowUp(initial, 'lively');
+    assert.strictEqual(resolved.can_execute, false, 'time predicate still unresolved');
+    const sp = resolved.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.strictEqual(sp.can_execute, true, 'subjective part resolved');
+    const tp = resolved.constraints.find(c => c.type === 'time_predicate');
+    assert.ok(tp, 'time predicate still present');
   });
 });
