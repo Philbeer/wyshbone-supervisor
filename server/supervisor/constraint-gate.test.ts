@@ -18,10 +18,12 @@ import {
   clearPendingContract,
   detectSubjectiveTerms,
   hasMeasurableCriteria,
+  detectRelationshipStrategyChoice,
   type ConstraintContract,
   type AttributeConstraint,
   type SubjectivePredicateConstraint,
   type NumericAmbiguityConstraint,
+  type RelationshipPredicateConstraint,
 } from './constraint-gate';
 import { type TimePredicateContract } from './time-predicate';
 
@@ -1367,5 +1369,201 @@ describe('Constraint Gate — Batch 3: numeric ambiguity resolution', () => {
     const initial = preExecutionConstraintGate('Find a few pubs in Bristol');
     const resolved = resolveFollowUp(initial, 'lots of them');
     assert.strictEqual(resolved.can_execute, false, 'specific number is required');
+  });
+});
+
+describe('Constraint Gate — Batch 4: relationship predicate gating', () => {
+  it('"Find pubs in Bristol and the landlord name" → CLARIFY', () => {
+    const contract = preExecutionConstraintGate('Find pubs in Bristol and the landlord name');
+    assert.strictEqual(contract.can_execute, false);
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    const rp = contract.constraints.find(c => c.type === 'relationship_predicate');
+    assert.ok(rp, 'relationship_predicate constraint must exist');
+    assert.strictEqual(rp.type, 'relationship_predicate');
+    assert.strictEqual(rp.verifiability, 'proxy');
+    assert.strictEqual(rp.hardness, 'soft');
+    assert.strictEqual(rp.can_execute, false);
+    assert.ok(rp.why_blocked.includes('not reliably available'));
+    assert.ok(contract.clarify_questions[0].includes('Official sources only'));
+    assert.ok(contract.clarify_questions[0].includes('Skip relationship fields'));
+  });
+
+  it('"Find dentists in Texas and the practice manager" → CLARIFY', () => {
+    const contract = preExecutionConstraintGate('Find dentists in Texas and the practice manager');
+    assert.strictEqual(contract.can_execute, false);
+    const rp = contract.constraints.find(c => c.type === 'relationship_predicate');
+    assert.ok(rp, 'relationship_predicate constraint must exist');
+    assert.strictEqual(rp.can_execute, false);
+    assert.ok(contract.clarify_questions.length > 0);
+  });
+
+  it('"Find breweries in Sussex owned by AB InBev" → CLARIFY', () => {
+    const contract = preExecutionConstraintGate('Find breweries in Sussex owned by AB InBev');
+    assert.strictEqual(contract.can_execute, false);
+    const rp = contract.constraints.find(c => c.type === 'relationship_predicate');
+    assert.ok(rp, 'relationship_predicate constraint must exist');
+    assert.strictEqual(rp.can_execute, false);
+    assert.ok(contract.clarify_questions.length > 0);
+  });
+
+  it('after choosing "Skip if uncertain" → can_execute=true, strategy stored', () => {
+    const initial = preExecutionConstraintGate('Find pubs in Bristol and the landlord name');
+    assert.strictEqual(initial.can_execute, false);
+    const resolved = resolveFollowUp(initial, 'Option D — skip if uncertain');
+    assert.strictEqual(resolved.can_execute, true, 'must execute after strategy chosen');
+    const rp = resolved.constraints.find(c => c.type === 'relationship_predicate') as any;
+    assert.ok(rp);
+    assert.strictEqual(rp.chosen_relationship_strategy, 'skip_if_uncertain');
+    assert.strictEqual(rp.can_execute, true);
+  });
+
+  it('"Option A" resolves to official_only', () => {
+    const initial = preExecutionConstraintGate('Find pubs in Bristol and the owner name');
+    const resolved = resolveFollowUp(initial, 'Option A');
+    assert.strictEqual(resolved.can_execute, true);
+    const rp = resolved.constraints.find(c => c.type === 'relationship_predicate') as any;
+    assert.strictEqual(rp.chosen_relationship_strategy, 'official_only');
+  });
+
+  it('"Option B" resolves to best_effort_web', () => {
+    const initial = preExecutionConstraintGate('Find pubs in Bristol and the manager');
+    const resolved = resolveFollowUp(initial, 'Option B');
+    assert.strictEqual(resolved.can_execute, true);
+    const rp = resolved.constraints.find(c => c.type === 'relationship_predicate') as any;
+    assert.strictEqual(rp.chosen_relationship_strategy, 'best_effort_web');
+  });
+
+  it('"Option C" resolves to two_plus_sources', () => {
+    const initial = preExecutionConstraintGate('Find breweries in Sussex owned by AB InBev');
+    const resolved = resolveFollowUp(initial, 'Option C');
+    assert.strictEqual(resolved.can_execute, true);
+    const rp = resolved.constraints.find(c => c.type === 'relationship_predicate') as any;
+    assert.strictEqual(rp.chosen_relationship_strategy, 'two_plus_sources');
+  });
+
+  it('plain search without relationship → can_execute=true, no relationship constraint', () => {
+    const contract = preExecutionConstraintGate('Find pubs in Bristol');
+    assert.strictEqual(contract.can_execute, true);
+    assert.ok(!contract.constraints.some(c => c.type === 'relationship_predicate'));
+  });
+
+  it('detects "owned by" as relationship predicate', () => {
+    const contract = preExecutionConstraintGate('Find restaurants in London owned by Jamie Oliver');
+    assert.strictEqual(contract.can_execute, false);
+    const rp = contract.constraints.find(c => c.type === 'relationship_predicate');
+    assert.ok(rp);
+  });
+
+  it('detects "run by" as relationship predicate', () => {
+    const contract = preExecutionConstraintGate('Find hotels in Edinburgh run by Hilton');
+    assert.strictEqual(contract.can_execute, false);
+    const rp = contract.constraints.find(c => c.type === 'relationship_predicate');
+    assert.ok(rp);
+  });
+
+  it('detects "head brewer" role as relationship predicate', () => {
+    const contract = preExecutionConstraintGate('Find breweries in Kent and the head brewer');
+    assert.strictEqual(contract.can_execute, false);
+    const rp = contract.constraints.find(c => c.type === 'relationship_predicate');
+    assert.ok(rp);
+  });
+
+  it('detects "decision maker" role as relationship predicate', () => {
+    const contract = preExecutionConstraintGate('Find offices in Birmingham and the decision maker');
+    assert.strictEqual(contract.can_execute, false);
+    const rp = contract.constraints.find(c => c.type === 'relationship_predicate');
+    assert.ok(rp);
+  });
+
+  it('detects "freehouse" as relationship predicate', () => {
+    const contract = preExecutionConstraintGate('Find freehouse pubs in Devon');
+    assert.strictEqual(contract.can_execute, false);
+    const rp = contract.constraints.find(c => c.type === 'relationship_predicate');
+    assert.ok(rp);
+  });
+
+  it('detects "tied house" as relationship predicate', () => {
+    const contract = preExecutionConstraintGate('Find tied house pubs in Cornwall');
+    assert.strictEqual(contract.can_execute, false);
+    const rp = contract.constraints.find(c => c.type === 'relationship_predicate');
+    assert.ok(rp);
+  });
+});
+
+describe('Constraint Gate — Batch 4: relationship predicate priority ordering', () => {
+  it('subjective suppresses relationship predicate', () => {
+    const contract = preExecutionConstraintGate('Find nice pubs in Bristol and the landlord name');
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes("'nice'"), 'subjective first');
+    assert.ok(contract.constraints.some(c => c.type === 'relationship_predicate'), 'relationship stored');
+  });
+
+  it('numeric suppresses relationship predicate', () => {
+    const contract = preExecutionConstraintGate('Find a few pubs in Bristol and the landlord name');
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes('few'), 'numeric first');
+    assert.ok(contract.constraints.some(c => c.type === 'relationship_predicate'), 'relationship stored');
+  });
+
+  it('relationship predicate suppresses time predicate', () => {
+    const contract = preExecutionConstraintGate('Find pubs in Bristol and the landlord name that opened in the last 12 months');
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes('Official sources only') || contract.clarify_questions[0].includes('relationship'), 'relationship question first');
+    assert.ok(contract.constraints.some(c => c.type === 'time_predicate'), 'time stored');
+  });
+
+  it('after relationship resolved, time predicate surfaces', () => {
+    const initial = preExecutionConstraintGate('Find pubs in Bristol and the landlord name that opened in the last 12 months');
+    const resolved = resolveFollowUp(initial, 'Option D');
+    assert.strictEqual(resolved.can_execute, false, 'time predicate still blocks');
+    const rp = resolved.constraints.find(c => c.type === 'relationship_predicate') as any;
+    assert.strictEqual(rp.can_execute, true);
+    assert.ok(resolved.clarify_questions.some(q => q.includes('opening dates') || q.includes('proxy')), 'time question surfaces');
+  });
+
+  it('full chain: subjective → numeric → relationship → time (4 turns)', () => {
+    const c1 = preExecutionConstraintGate('Find nice cheap pubs in Bristol and the landlord name that opened in the last 12 months');
+    assert.strictEqual(c1.clarify_questions.length, 1);
+    assert.ok(c1.clarify_questions[0].includes("'nice'"), 'turn 1: subjective');
+
+    const c2 = resolveFollowUp(c1, 'lively');
+    assert.strictEqual(c2.clarify_questions.length, 1);
+    assert.ok(c2.clarify_questions[0].includes('cheap'), 'turn 2: numeric');
+
+    const c3 = resolveFollowUp(c2, 'under £5 per pint');
+    assert.strictEqual(c3.clarify_questions.length, 1);
+    assert.ok(c3.clarify_questions[0].includes('Official sources only') || c3.clarify_questions[0].includes('relationship'), 'turn 3: relationship');
+
+    const c4 = resolveFollowUp(c3, 'Option D');
+    assert.strictEqual(c4.clarify_questions.length, 1);
+    assert.ok(c4.clarify_questions[0].includes('opening dates') || c4.clarify_questions[0].includes('proxy'), 'turn 4: time');
+
+    const c5 = resolveFollowUp(c4, 'Use news mentions proxy');
+    assert.strictEqual(c5.can_execute, true, 'all layers resolved');
+  });
+
+  it('relationship predicate suppresses live music attribute', () => {
+    const contract = preExecutionConstraintGate('Find pubs in Bristol and the landlord name with live music');
+    assert.strictEqual(contract.clarify_questions.length, 1);
+    assert.ok(contract.clarify_questions[0].includes('Official sources only') || contract.clarify_questions[0].includes('relationship'), 'relationship question first, not live music');
+    assert.ok(contract.constraints.some(c => c.type === 'attribute'), 'live music stored');
+    assert.ok(contract.constraints.some(c => c.type === 'relationship_predicate'), 'relationship stored');
+  });
+
+  it('after relationship resolved, live music surfaces (no time predicate)', () => {
+    const contract = preExecutionConstraintGate('Find pubs in Bristol and the landlord name with live music');
+    const resolved = resolveFollowUp(contract, 'Option D');
+    assert.strictEqual(resolved.can_execute, false, 'live music still blocks');
+    assert.ok(resolved.clarify_questions.some(q => q.includes('Live music') || q.includes('live music') || q.includes('website')), 'live music question surfaces');
+  });
+
+  it('resolved relationship NOT re-surfaced', () => {
+    const initial = preExecutionConstraintGate('Find pubs in Bristol and the landlord name');
+    const resolved = resolveFollowUp(initial, 'Option A');
+    assert.strictEqual(resolved.can_execute, true);
+    assert.ok(!resolved.clarify_questions.some(q => q.includes('relationship') || q.includes('Official sources')));
+    const rp = resolved.constraints.find(c => c.type === 'relationship_predicate') as any;
+    assert.strictEqual(rp.can_execute, true);
+    assert.strictEqual(rp.chosen_relationship_strategy, 'official_only');
   });
 });

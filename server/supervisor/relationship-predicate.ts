@@ -31,7 +31,40 @@ export const RELATIONSHIP_PREDICATES = [
   'retained by',
   'commissioned by',
   'appointed by',
+  'owned by',
+  'run by',
+  'operated by',
+  'managed by',
+  'part of',
 ] as const;
+
+export const RELATIONSHIP_ROLE_PATTERNS = [
+  /\b(?:the\s+)?(?:landlord)(?:\s+(?:name|of|for))?\b/i,
+  /\b(?:the\s+)?(?:owner)(?:\s+(?:name|of|for))?\b/i,
+  /\b(?:the\s+)?(?:manager)(?:\s+(?:name|of|for))?\b/i,
+  /\b(?:the\s+)?(?:operator)(?:\s+(?:name|of|for))?\b/i,
+  /\b(?:the\s+)?(?:contact\s+person)(?:\s+(?:name|of|for))?\b/i,
+  /\b(?:the\s+)?(?:decision\s+maker)(?:\s+(?:name|of|for))?\b/i,
+  /\b(?:the\s+)?(?:gm|general\s+manager)(?:\s+(?:name|of|for))?\b/i,
+  /\b(?:the\s+)?(?:head\s+brewer)(?:\s+(?:name|of|for))?\b/i,
+  /\b(?:the\s+)?(?:practice\s+manager)(?:\s+(?:name|of|for))?\b/i,
+  /\bfreehouse\b/i,
+  /\bfree\s+house\b/i,
+  /\btied\s+house\b/i,
+  /\bgroup\b(?:\s+(?:that|which|who))?\b/i,
+  /\bchain\b(?:\s+(?:that|which|who))?\b/i,
+] as const;
+
+export function detectRelationshipRole(userMessage: string): { detected: boolean; role: string | null } {
+  const msgLower = userMessage.toLowerCase().trim();
+  for (const pattern of RELATIONSHIP_ROLE_PATTERNS) {
+    const match = msgLower.match(pattern);
+    if (match) {
+      return { detected: true, role: match[0].trim() };
+    }
+  }
+  return { detected: false, role: null };
+}
 
 export interface RelationshipPredicateResult {
   requires_relationship_evidence: boolean;

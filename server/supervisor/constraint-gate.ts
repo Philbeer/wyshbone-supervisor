@@ -12,6 +12,11 @@ import {
   inferHardness,
 } from './time-predicate';
 
+import {
+  detectRelationshipPredicate,
+  detectRelationshipRole,
+} from './relationship-predicate';
+
 export type LiveMusicVerification = 'website_verify' | 'best_effort' | null;
 export type TimePredicateResolution = 'news_mention' | 'recent_reviews' | 'best_effort' | null;
 
@@ -51,7 +56,23 @@ export interface NumericAmbiguityConstraint {
   must_be_certain?: boolean;
 }
 
-export type Constraint = TimePredicateContract | AttributeConstraint | SubjectivePredicateConstraint | NumericAmbiguityConstraint;
+export type RelationshipStrategy = 'official_only' | 'best_effort_web' | 'two_plus_sources' | 'skip_if_uncertain' | null;
+
+export interface RelationshipPredicateConstraint {
+  type: 'relationship_predicate';
+  label: string;
+  detected_role: string | null;
+  detected_predicate: string | null;
+  verifiability: 'proxy';
+  hardness: 'soft';
+  can_execute: boolean;
+  why_blocked: string;
+  clarify_question: string;
+  chosen_relationship_strategy: RelationshipStrategy;
+  must_be_certain?: boolean;
+}
+
+export type Constraint = TimePredicateContract | AttributeConstraint | SubjectivePredicateConstraint | NumericAmbiguityConstraint | RelationshipPredicateConstraint;
 
 export interface ConstraintContract {
   constraints: Constraint[];
@@ -169,6 +190,56 @@ function extractNumericAmbiguity(msg: string): NumericAmbiguityConstraint | null
     };
   }
 
+  return null;
+}
+
+const RELATIONSHIP_CLARIFY_QUESTION = `Relationship information (e.g. owner, landlord, manager) is not reliably available from public business listings. Which approach would you like?\n\nA) Official sources only — highest certainty, fewer results\nB) Best-effort public web — more results, lower certainty\nC) Require 2+ independent sources per relationship claim\nD) Skip relationship fields if uncertain — return venues only`;
+
+function extractRelationshipPredicate(msg: string): RelationshipPredicateConstraint | null {
+  const predResult = detectRelationshipPredicate(msg);
+  const roleResult = detectRelationshipRole(msg);
+
+  if (!predResult.requires_relationship_evidence && !roleResult.detected) return null;
+
+  const label = predResult.detected_predicate || roleResult.role || 'relationship';
+
+  return {
+    type: 'relationship_predicate',
+    label,
+    detected_role: roleResult.role,
+    detected_predicate: predResult.detected_predicate,
+    verifiability: 'proxy',
+    hardness: 'soft',
+    can_execute: false,
+    why_blocked: 'Relationship information (owner, landlord, manager, etc.) is not reliably available from public business listings.',
+    clarify_question: RELATIONSHIP_CLARIFY_QUESTION,
+    chosen_relationship_strategy: null,
+  };
+}
+
+const RELATIONSHIP_STRATEGY_PATTERNS: { pattern: RegExp; strategy: RelationshipStrategy }[] = [
+  { pattern: /\boption\s*[Aa]\b/i, strategy: 'official_only' },
+  { pattern: /\bofficial\s+(?:sources?\s+)?only\b/i, strategy: 'official_only' },
+  { pattern: /\boption\s*[Bb]\b/i, strategy: 'best_effort_web' },
+  { pattern: /\bbest[- ]?effort\s+(?:public\s+)?web\b/i, strategy: 'best_effort_web' },
+  { pattern: /\boption\s*[Cc]\b/i, strategy: 'two_plus_sources' },
+  { pattern: /\b2\+?\s*(?:independent\s+)?sources?\b/i, strategy: 'two_plus_sources' },
+  { pattern: /\btwo\s+(?:independent\s+)?sources?\b/i, strategy: 'two_plus_sources' },
+  { pattern: /\boption\s*[Dd]\b/i, strategy: 'skip_if_uncertain' },
+  { pattern: /\bskip\s+(?:relationship\s+)?(?:fields?\s+)?if\s+uncertain\b/i, strategy: 'skip_if_uncertain' },
+  { pattern: /\bskip\s+(?:if\s+)?uncertain\b/i, strategy: 'skip_if_uncertain' },
+  { pattern: /\breturn\s+venues?\s+only\b/i, strategy: 'skip_if_uncertain' },
+  { pattern: /\bvenues?\s+only\b/i, strategy: 'skip_if_uncertain' },
+  { pattern: /^[Aa]\s*\)\s*$/i, strategy: 'official_only' },
+  { pattern: /^[Bb]\s*\)\s*$/i, strategy: 'best_effort_web' },
+  { pattern: /^[Cc]\s*\)\s*$/i, strategy: 'two_plus_sources' },
+  { pattern: /^[Dd]\s*\)\s*$/i, strategy: 'skip_if_uncertain' },
+];
+
+export function detectRelationshipStrategyChoice(msg: string): RelationshipStrategy {
+  for (const entry of RELATIONSHIP_STRATEGY_PATTERNS) {
+    if (entry.pattern.test(msg)) return entry.strategy;
+  }
   return null;
 }
 
@@ -299,6 +370,11 @@ export function extractAllConstraints(msg: string): Constraint[] {
   const numericAmbiguity = extractNumericAmbiguity(msg);
   if (numericAmbiguity) {
     constraints.push(numericAmbiguity);
+  }
+
+  const relationshipPred = extractRelationshipPredicate(msg);
+  if (relationshipPred) {
+    constraints.push(relationshipPred);
   }
 
   const timePredicate = buildTimePredicateContract(msg);
@@ -441,6 +517,10 @@ function isNumericAmbiguityUnresolved(c: Constraint): boolean {
   return c.type === 'numeric_ambiguity' && !c.can_execute;
 }
 
+function isRelationshipPredicateUnresolved(c: Constraint): boolean {
+  return c.type === 'relationship_predicate' && !c.can_execute;
+}
+
 function buildGateState(constraints: Constraint[], isNoProxy: boolean): ConstraintContract {
   const clarify_questions: string[] = [];
   const blockReasons: string[] = [];
@@ -449,6 +529,7 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
 
   const hasUnresolvedSubjective = constraints.some(c => isSubjectivePredicateUnresolved(c));
   const hasUnresolvedNumeric = constraints.some(c => isNumericAmbiguityUnresolved(c));
+  const hasUnresolvedRelationship = constraints.some(c => isRelationshipPredicateUnresolved(c));
   const hasUnresolvedTime = constraints.some(c => isTimePredicateUnresolved(c));
 
   for (const c of constraints) {
@@ -469,6 +550,14 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
         activeBlockFound = true;
       }
     } else if (hasUnresolvedNumeric) {
+      continue;
+    } else if (c.type === 'relationship_predicate' && !c.can_execute) {
+      if (!activeBlockFound) {
+        blockReasons.push(c.why_blocked);
+        clarify_questions.push(c.clarify_question);
+        activeBlockFound = true;
+      }
+    } else if (hasUnresolvedRelationship) {
       continue;
     } else if (c.type === 'time_predicate') {
       if (isNoProxy || (c.verifiability === 'unverifiable' && c.hardness === 'hard')) {
@@ -500,6 +589,7 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
   const anyBlocked =
     constraints.some(c => isSubjectivePredicateUnresolved(c)) ||
     constraints.some(c => isNumericAmbiguityUnresolved(c)) ||
+    constraints.some(c => isRelationshipPredicateUnresolved(c)) ||
     constraints.some(c => isTimePredicateUnresolved(c)) ||
     constraints.some(c => isLiveMusicUnresolved(c));
 
@@ -599,6 +689,25 @@ export function resolveFollowUp(
     }
 
     if (hadUnresolvedNumeric) {
+      return c;
+    }
+
+    const hadUnresolvedRelationship = existingContract.constraints.some(c => isRelationshipPredicateUnresolved(c));
+
+    if (c.type === 'relationship_predicate' && !c.can_execute) {
+      const strategyChoice = detectRelationshipStrategyChoice(followUpMsg);
+      if (strategyChoice) {
+        return {
+          ...c,
+          can_execute: true,
+          why_blocked: '',
+          chosen_relationship_strategy: strategyChoice,
+        } as RelationshipPredicateConstraint;
+      }
+      return c;
+    }
+
+    if (hadUnresolvedRelationship) {
       return c;
     }
 
