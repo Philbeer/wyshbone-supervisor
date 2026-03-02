@@ -327,32 +327,48 @@ function isSubjectivePredicateUnresolved(c: Constraint): boolean {
 }
 
 function buildGateState(constraints: Constraint[], isNoProxy: boolean): ConstraintContract {
-  const hasUnresolvedSubjective = constraints.some(c => isSubjectivePredicateUnresolved(c));
-
   const clarify_questions: string[] = [];
   const blockReasons: string[] = [];
   let stop_recommended = false;
+  let activeBlockFound = false;
+
+  const hasUnresolvedSubjective = constraints.some(c => isSubjectivePredicateUnresolved(c));
+  const hasUnresolvedTime = constraints.some(c => isTimePredicateUnresolved(c));
 
   for (const c of constraints) {
     if (c.type === 'subjective_predicate' && !c.can_execute) {
-      blockReasons.push(c.why_blocked);
-      const termsDisplay = c.label.split(', ').map(t => `'${t}'`).join(' and ');
-      const optionsList = c.clarification_options.join(', ');
-      clarify_questions.push(`When you say ${termsDisplay}, what do you mean? Pick one or more: ${optionsList} — or tell me your own criteria.`);
+      if (!activeBlockFound) {
+        blockReasons.push(c.why_blocked);
+        const termsDisplay = c.label.split(', ').map(t => `'${t}'`).join(' and ');
+        const optionsList = c.clarification_options.join(', ');
+        clarify_questions.push(`When you say ${termsDisplay}, what do you mean? Pick one or more: ${optionsList} — or tell me your own criteria.`);
+        activeBlockFound = true;
+      }
     } else if (hasUnresolvedSubjective) {
       continue;
     } else if (c.type === 'time_predicate') {
       if (isNoProxy || (c.verifiability === 'unverifiable' && c.hardness === 'hard')) {
-        stop_recommended = true;
-        blockReasons.push(c.why_blocked || 'Opening dates cannot be verified from any available data source. This constraint cannot be satisfied.');
+        if (!activeBlockFound) {
+          stop_recommended = true;
+          blockReasons.push(c.why_blocked || 'Opening dates cannot be verified from any available data source. This constraint cannot be satisfied.');
+          activeBlockFound = true;
+        }
       } else if (!c.can_execute) {
-        clarify_questions.push(TIME_PREDICATE_QUESTION);
-        blockReasons.push(c.why_blocked || 'Time predicate requires proxy selection or best-effort acceptance.');
+        if (!activeBlockFound) {
+          clarify_questions.push(TIME_PREDICATE_QUESTION);
+          blockReasons.push(c.why_blocked || 'Time predicate requires proxy selection or best-effort acceptance.');
+          activeBlockFound = true;
+        }
       }
+    } else if (hasUnresolvedTime) {
+      continue;
     } else if (c.type === 'attribute' && c.attribute === 'live_music') {
       if (c.requires_clarification && c.chosen_verification === null) {
-        clarify_questions.push(LIVE_MUSIC_QUESTION);
-        blockReasons.push('Live music cannot be reliably verified from Places data alone.');
+        if (!activeBlockFound) {
+          clarify_questions.push(LIVE_MUSIC_QUESTION);
+          blockReasons.push('Live music cannot be reliably verified from Places data alone.');
+          activeBlockFound = true;
+        }
       }
     }
   }
@@ -424,8 +440,9 @@ export function resolveFollowUp(
   const bestEffort = detectBestEffort(followUpMsg);
   const windowInfo = detectWindowFromFollowUp(followUpMsg);
   const liveMusicChoice = detectLiveMusicChoice(followUpMsg);
-
   const followUpHasMeasurable = MEASURABLE_FOLLOW_UP_PATTERN.test(followUpMsg);
+
+  const hadUnresolvedSubjective = existingContract.constraints.some(c => isSubjectivePredicateUnresolved(c));
 
   const updatedConstraints = existingContract.constraints.map(c => {
     if (c.type === 'subjective_predicate' && !c.can_execute) {
@@ -440,7 +457,17 @@ export function resolveFollowUp(
       return c;
     }
 
+    if (hadUnresolvedSubjective) {
+      return c;
+    }
+
+    const hadUnresolvedTime = existingContract.constraints.some(c => isTimePredicateUnresolved(c));
+
     if (c.type === 'time_predicate') {
+      if (c.can_execute && c.chosen_proxy) {
+        return c;
+      }
+
       let updated = { ...c };
 
       if (mustBeCertain) {
@@ -494,6 +521,10 @@ export function resolveFollowUp(
       return updated;
     }
 
+    if (hadUnresolvedTime) {
+      return c;
+    }
+
     if (c.type === 'attribute' && c.attribute === 'live_music' && c.requires_clarification && c.chosen_verification === null) {
       if (mustBeCertain) {
         return { ...c, must_be_certain: true, hardness: 'hard', verifiability: 'unverifiable', can_execute: false };
@@ -501,7 +532,7 @@ export function resolveFollowUp(
       if (liveMusicChoice) {
         return { ...c, chosen_verification: liveMusicChoice, requires_clarification: false };
       }
-      if (bestEffort && !existingContract.constraints.some(x => x.type === 'time_predicate')) {
+      if (bestEffort) {
         return { ...c, chosen_verification: 'best_effort' as LiveMusicVerification, requires_clarification: false };
       }
     }

@@ -105,23 +105,24 @@ describe('Constraint Gate — preExecutionConstraintGate', () => {
     assert.ok(contract.why_blocked!.includes('cannot be'));
   });
 
-  it('Case 3: compound "opened in the last 12 months and have live music" → can_execute=false, BOTH in constraints', () => {
+  it('Case 3: compound "opened in the last 12 months and have live music" → can_execute=false, BOTH in constraints, time surfaced first', () => {
     const contract = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music');
     assert.strictEqual(contract.can_execute, false, 'must NOT execute — both need clarification');
     const tp = contract.constraints.find(c => c.type === 'time_predicate');
     const attr = contract.constraints.find(c => c.type === 'attribute');
     assert.ok(tp, 'time_predicate must be in constraints');
     assert.ok(attr, 'attribute must be in constraints');
-    assert.strictEqual(contract.clarify_questions.length, 2, 'must ask TWO questions (time + live music)');
+    assert.strictEqual(contract.clarify_questions.length, 1, 'only ONE question at a time — time predicate first');
+    assert.ok(contract.clarify_questions[0].includes('opening dates') || contract.clarify_questions[0].includes('guarantee') || contract.clarify_questions[0].includes('proxy'), 'first question must be about time predicate');
   });
 
-  it('Case 3 compound message includes both bullets in ONE bubble', () => {
-    const contract = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music');
-    const msg = buildConstraintGateMessage(contract);
-    assert.ok(msg.includes('1.'), 'must include bullet 1');
-    assert.ok(msg.includes('2.'), 'must include bullet 2');
-    assert.ok(msg.includes('opening dates') || msg.includes('guarantee'), 'must reference time predicate');
-    assert.ok(msg.includes('Live music') || msg.includes('live music'), 'must reference live music');
+  it('Case 3 compound: after resolving time, live music question surfaces next', () => {
+    const initial = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music');
+    assert.strictEqual(initial.clarify_questions.length, 1, 'one question at a time');
+    const resolved = resolveFollowUp(initial, 'Use news mentions proxy');
+    assert.strictEqual(resolved.can_execute, false, 'live music still unresolved');
+    assert.strictEqual(resolved.clarify_questions.length, 1, 'now live music question surfaces');
+    assert.ok(resolved.clarify_questions[0].includes('website') || resolved.clarify_questions[0].includes('Live music') || resolved.clarify_questions[0].includes('live music'), 'question must be about live music');
   });
 
   it('live music only → can_execute=false, asks verification question', () => {
@@ -334,21 +335,28 @@ describe('Constraint Gate — live music follow-up resolution', () => {
   });
 });
 
-describe('Constraint Gate — compound follow-up', () => {
-  it('compound: resolving BOTH time + live music in one follow-up', () => {
+describe('Constraint Gate — sequential compound follow-up', () => {
+  it('compound: time resolved first, then live music resolved second (two turns)', () => {
     const initial = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music');
     assert.strictEqual(initial.can_execute, false);
-    assert.strictEqual(initial.clarify_questions.length, 2);
+    assert.strictEqual(initial.clarify_questions.length, 1, 'only time question first');
 
-    const resolved = resolveFollowUp(initial, 'Use news mentions proxy. Verify live music via website.');
-    assert.strictEqual(resolved.can_execute, true, 'must resolve — both answered');
-    const tp = resolved.constraints.find(c => c.type === 'time_predicate') as TimePredicateContract;
+    const afterTime = resolveFollowUp(initial, 'Use news mentions proxy');
+    assert.strictEqual(afterTime.can_execute, false, 'live music still unresolved');
+    const tp = afterTime.constraints.find(c => c.type === 'time_predicate') as TimePredicateContract;
     assert.strictEqual(tp.chosen_proxy, 'news_mention');
-    const attr = resolved.constraints.find(c => c.type === 'attribute') as AttributeConstraint;
+    assert.strictEqual(tp.can_execute, true);
+    const attrMid = afterTime.constraints.find(c => c.type === 'attribute') as AttributeConstraint;
+    assert.strictEqual(attrMid.chosen_verification, null, 'live music not yet processed — was suppressed');
+    assert.strictEqual(afterTime.clarify_questions.length, 1, 'now live music question surfaces');
+
+    const afterLive = resolveFollowUp(afterTime, 'Verify via website');
+    assert.strictEqual(afterLive.can_execute, true, 'both resolved');
+    const attr = afterLive.constraints.find(c => c.type === 'attribute') as AttributeConstraint;
     assert.strictEqual(attr.chosen_verification, 'website_verify');
   });
 
-  it('compound: resolving time only → still blocked on live music', () => {
+  it('compound: resolving time only → still blocked on live music, live music untouched', () => {
     const initial = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music');
     const resolved = resolveFollowUp(initial, 'Use recent reviews proxy');
     assert.strictEqual(resolved.can_execute, false, 'live music still unresolved');
@@ -358,14 +366,45 @@ describe('Constraint Gate — compound follow-up', () => {
     assert.strictEqual(attr.chosen_verification, null, 'live music not yet resolved');
   });
 
-  it('compound: best-effort for time, verify for live music', () => {
+  it('compound: best-effort for time, then verify for live music (two turns)', () => {
     const initial = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music');
-    const resolved = resolveFollowUp(initial, 'C) for time. A) for live music.');
-    const tp = resolved.constraints.find(c => c.type === 'time_predicate') as TimePredicateContract;
+    const afterTime = resolveFollowUp(initial, 'C)');
+    const tp = afterTime.constraints.find(c => c.type === 'time_predicate') as TimePredicateContract;
     assert.strictEqual(tp.chosen_proxy, 'best_effort');
-    const attr = resolved.constraints.find(c => c.type === 'attribute') as AttributeConstraint;
+    assert.strictEqual(afterTime.can_execute, false, 'live music still unresolved');
+
+    const afterLive = resolveFollowUp(afterTime, 'A)');
+    const attr = afterLive.constraints.find(c => c.type === 'attribute') as AttributeConstraint;
     assert.strictEqual(attr.chosen_verification, 'website_verify');
-    assert.strictEqual(resolved.can_execute, true);
+    assert.strictEqual(afterLive.can_execute, true);
+  });
+});
+
+describe('Constraint Gate — resolved constraint stability', () => {
+  it('resolved time proxy is NOT overwritten by later best-effort for live music', () => {
+    const initial = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music');
+    const afterTime = resolveFollowUp(initial, 'Use news mentions proxy');
+    const tp1 = afterTime.constraints.find(c => c.type === 'time_predicate') as TimePredicateContract;
+    assert.strictEqual(tp1.chosen_proxy, 'news_mention');
+    assert.strictEqual(tp1.can_execute, true);
+
+    const afterLive = resolveFollowUp(afterTime, 'Best-effort, unverified is OK');
+    const tp2 = afterLive.constraints.find(c => c.type === 'time_predicate') as TimePredicateContract;
+    assert.strictEqual(tp2.chosen_proxy, 'news_mention', 'time proxy must NOT be overwritten');
+    const attr = afterLive.constraints.find(c => c.type === 'attribute') as AttributeConstraint;
+    assert.strictEqual(attr.chosen_verification, 'best_effort');
+    assert.strictEqual(afterLive.can_execute, true);
+  });
+
+  it('resolved subjective is NOT re-surfaced after resolution', () => {
+    const initial = preExecutionConstraintGate('Find nice pubs in Bristol that opened in the last 12 months');
+    assert.strictEqual(initial.clarify_questions.length, 1);
+    assert.ok(initial.clarify_questions[0].includes("'nice'"));
+
+    const afterSubj = resolveFollowUp(initial, 'lively');
+    assert.ok(!afterSubj.clarify_questions.some(q => q.includes("'nice'")), 'subjective question must not reappear');
+    const sp = afterSubj.constraints.find(c => c.type === 'subjective_predicate') as SubjectivePredicateConstraint;
+    assert.strictEqual(sp.can_execute, true, 'subjective marked resolved');
   });
 });
 
@@ -409,12 +448,11 @@ describe('Constraint Gate — message building', () => {
     assert.ok(msg.includes('B)'));
   });
 
-  it('compound clarification is ONE message with two bullets', () => {
+  it('compound clarification shows single question (sequential)', () => {
     const contract = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music');
     const msg = buildConstraintGateMessage(contract);
-    assert.ok(msg.includes('1.'), 'must have bullet 1');
-    assert.ok(msg.includes('2.'), 'must have bullet 2');
-    assert.ok(!msg.includes('3.'), 'must NOT have bullet 3 — only 2 questions');
+    assert.ok(msg.includes('one thing'), 'single question phrasing');
+    assert.ok(!msg.includes('1.'), 'must NOT have bullet list — only one question');
   });
 });
 
@@ -515,15 +553,12 @@ describe('Constraint Gate — subjective predicate extraction (Batch 1)', () => 
 });
 
 describe('Constraint Gate — acceptance tests (exact QA scenarios)', () => {
-  it('ACCEPTANCE: compound "Find 10 pubs in Bristol that opened in the last 12 months and have live music" → clarification, no searching, no tools', () => {
+  it('ACCEPTANCE: compound "Find 10 pubs in Bristol that opened in the last 12 months and have live music" → sequential clarification, no searching, no tools', () => {
     const contract = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music');
     assert.strictEqual(contract.can_execute, false, 'MUST NOT execute');
     assert.ok(contract.constraints.length >= 2, 'both constraints extracted');
-    assert.strictEqual(contract.clarify_questions.length, 2, 'both questions asked');
+    assert.strictEqual(contract.clarify_questions.length, 1, 'one question at a time — time predicate first');
     assert.strictEqual(contract.stop_recommended, false, 'not a stop — clarification needed');
-    const msg = buildConstraintGateMessage(contract);
-    assert.ok(msg.includes('1.'), 'compound message has bullet 1');
-    assert.ok(msg.includes('2.'), 'compound message has bullet 2');
   });
 
   it('ACCEPTANCE: time-only "Find 10 pubs in Manchester opened in last 12 months" → clarification, no searching', () => {
@@ -1090,7 +1125,7 @@ describe('Constraint Gate — subjective priority suppression', () => {
     assert.strictEqual(contract.can_execute, false);
     assert.strictEqual(contract.clarify_questions.length, 1);
     assert.ok(contract.clarify_questions[0].includes("'nice'"));
-    assert.ok(!contract.clarify_questions.some(q => q.includes('Live music') || q.includes('website')));
+    assert.ok(!contract.clarify_questions.some(q => q.includes('reliably verified') || q.includes('Verify via website')), 'live music verification question must not appear');
     assert.ok(contract.constraints.some(c => c.type === 'attribute'), 'live music attribute stored in contract');
   });
 
@@ -1120,10 +1155,11 @@ describe('Constraint Gate — subjective priority suppression', () => {
     assert.ok(resolved.clarify_questions.some(q => q.includes('website') || q.includes('Live music') || q.includes('live music')), 'live music question now surfaces');
   });
 
-  it('no subjective: time + live music both surface as before', () => {
+  it('no subjective: time + live music → only time surfaces first (sequential)', () => {
     const contract = preExecutionConstraintGate('Find pubs in Bristol that opened in the last 12 months with live music');
     assert.strictEqual(contract.can_execute, false);
-    assert.strictEqual(contract.clarify_questions.length, 2, 'both time and live music questions surface');
+    assert.strictEqual(contract.clarify_questions.length, 1, 'only time predicate question surfaces first');
+    assert.ok(contract.clarify_questions[0].includes('opening dates') || contract.clarify_questions[0].includes('guarantee') || contract.clarify_questions[0].includes('proxy'), 'time predicate question first');
   });
 
   it('stop_recommended suppressed while subjective unresolved', () => {
