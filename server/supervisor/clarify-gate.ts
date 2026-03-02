@@ -104,16 +104,20 @@ function isDirectResponse(msg: string): boolean {
 
 const KNOWN_REGIONS = /\b(?:UK|US|USA|England|Scotland|Wales|Ireland|London|Manchester|Birmingham|Bristol|Leeds|Sheffield|Liverpool|Newcastle|Edinburgh|Glasgow|Cardiff|Belfast|Sussex|East Sussex|West Sussex|Surrey|Kent|Essex|Devon|Cornwall|Norfolk|Suffolk|Yorkshire|Lancashire|Dorset|Hampshire|Somerset|Wiltshire|Berkshire|Oxfordshire|Cambridgeshire|Nottinghamshire|Derbyshire|Leicestershire|Warwickshire|Staffordshire|Shropshire|Herefordshire|Worcestershire|Gloucestershire|Lincolnshire|Rutland|Northamptonshire|Bedfordshire|Hertfordshire|Buckinghamshire|Middlesex|Merseyside|Tyneside|Berlin|Paris|Madrid|Barcelona|Rome|Milan|Amsterdam|Munich|Hamburg|Frankfurt|Vienna|Prague|Warsaw|Lisbon|Dublin|Brussels|Zurich|Geneva|Stockholm|Copenhagen|Oslo|Helsinki|Athens|Budapest|Bucharest|New York|Los Angeles|Chicago|Houston|Phoenix|Philadelphia|San Francisco|Seattle|Denver|Boston|Nashville|Portland|Las Vegas|Miami|Atlanta|Dallas|Austin|San Diego|San Jose|Sacramento|Orlando|Tampa|Minneapolis|St Louis|Pittsburgh|Cincinnati|Cleveland|Baltimore|Milwaukee|Raleigh|Charlotte|Memphis|Louisville|Richmond|Norfolk|Blackpool|Brighton|Bath|Oxford|Cambridge|Exeter|Plymouth|Norwich|Nottingham|Leicester|Derby|Reading|Southampton|Portsmouth|York|Chester|Durham|Carlisle|Lancaster|Worcester|Gloucester|Lincoln|Ipswich|Canterbury|Dover|Hastings|Eastbourne|Bournemouth|Swindon|Cheltenham|Coventry|Wolverhampton|Bolton|Preston|Stoke|Telford|Shrewsbury|Hereford)\b/i;
 
-const SUBJECTIVE_CRITERIA = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|good\s+atmosphere|great\s+atmosphere|good(?!\s+for\s+studying))\b/i;
+const SUBJECTIVE_CRITERIA = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|good\s+atmosphere|great\s+atmosphere|great(?!\s+(?:for|at|with))|cool(?!est)|lovely|decent|chill(?!est)|good(?!\s+for\s+studying))\b/i;
 
 const MEASURABLE_ATTRIBUTES = /\b(?:live\s*music|craft\s*beer|real\s*ale|cask\s*ale|dog\s*friendly|family\s*friendly|late[- ]?\s*night|cheap|budget|expensive|premium|cosy|cozy|quiet|outdoor\s*seating|beer\s*garden|rooftop|waterfront|riverside|seafront|free\s*wifi|wheelchair|accessible|parking|vegan|vegetarian|gluten\s*free|halal|kosher|organic|independent|chain|gastropub|wine\s*bar|cocktail\s*bar|sports?\s*bar|micro\s*pub|tap\s*room|free\s*house|food\s*served|nightlife|lively|romantic|trendy|walkable|events|student|views|scenic|good\s+for\s+studying)\b/i;
 
 const NONSENSE_LOCATION_WORDS = /\b(?:things?|stuff|whatsits?|thingamajigs?|doohickeys?|bits|pieces|whatnots?|whatchamacallits?|doodads?|gizmos?|widgets?|nonsense|blah|asdf|test|nowhere|somewhere|anywhere|whatever|idk|dunno|nothing|something)\b/i;
 
+function extractSubjectiveTerm(msg: string): string | null {
+  const match = msg.match(SUBJECTIVE_CRITERIA);
+  if (!match) return null;
+  return match[0].trim();
+}
+
 function hasSubjectiveCriteria(msg: string): boolean {
-  if (!SUBJECTIVE_CRITERIA.test(msg)) return false;
-  if (MEASURABLE_ATTRIBUTES.test(msg)) return false;
-  return true;
+  return SUBJECTIVE_CRITERIA.test(msg);
 }
 
 const VAGUE_PROXIMITY_NOUNS = /\b(?:council|local\s+authority|government|town\s+hall|civic\s+centre|civic\s+center|council\s+offices?|council\s+buildings?)\b/i;
@@ -322,7 +326,8 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
 
   if (hasSearchIntent(msg) && hasSubjectiveCriteria(msg)) {
     reasons.push('query contains subjective/unmeasurable criteria');
-    questions.push('What do you mean in measurable terms? Pick 1–2: live music, craft beer, cosy, quiet, late-night, family-friendly, cheap, dog-friendly, outdoor seating, etc.');
+    const subjectiveTerm = extractSubjectiveTerm(msg) || 'that';
+    questions.push(`What do you mean by '${subjectiveTerm}'? Pick 1–2 measurable attributes: cosy, lively, upscale, traditional, live music, craft beer, quiet, late-night, family-friendly, cheap, dog-friendly, outdoor seating, etc.`);
     missing.push('semantic_constraint');
   }
 
@@ -358,7 +363,7 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
     const btContainsSubjective = rawBT ? SUBJECTIVE_CRITERIA.test(rawBT) : false;
     let sanitisedBusinessType = rawBT;
     if (btContainsSubjective && rawBT) {
-      const SUBJECTIVE_GLOBAL = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey)\b/gi;
+      const SUBJECTIVE_GLOBAL = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|great|cool|lovely|decent|chill|good)\b/gi;
       let cleaned = rawBT.replace(SUBJECTIVE_GLOBAL, '').replace(/\b(?:the|a|an)\b/gi, '').replace(/\s+/g, ' ').trim();
       sanitisedBusinessType = cleaned.length > 1 ? cleaned : null;
     }

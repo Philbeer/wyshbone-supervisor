@@ -25,7 +25,16 @@ export interface AttributeConstraint {
   must_be_certain?: boolean;
 }
 
-export type Constraint = TimePredicateContract | AttributeConstraint;
+export interface SubjectivePredicateConstraint {
+  type: 'subjective_predicate';
+  term: string;
+  verifiability: 'unverifiable';
+  hardness: 'hard';
+  can_execute: false;
+  why_blocked: string;
+}
+
+export type Constraint = TimePredicateContract | AttributeConstraint | SubjectivePredicateConstraint;
 
 export interface ConstraintContract {
   constraints: Constraint[];
@@ -44,6 +53,22 @@ export interface PendingConstraintState {
 
 const pendingContracts = new Map<string, PendingConstraintState>();
 const PENDING_TTL_MS = 15 * 60 * 1000;
+
+const SUBJECTIVE_TERMS = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|good\s+atmosphere|great\s+atmosphere|great(?!\s+(?:for|at|with))|cool(?!est)|lovely|decent|chill(?!est)|good(?!\s+for\s+studying))\b/i;
+
+function extractSubjectivePredicate(msg: string): SubjectivePredicateConstraint | null {
+  const match = msg.match(SUBJECTIVE_TERMS);
+  if (!match) return null;
+  const term = match[0].trim();
+  return {
+    type: 'subjective_predicate',
+    term,
+    verifiability: 'unverifiable',
+    hardness: 'hard',
+    can_execute: false,
+    why_blocked: `This description is subjective and needs clarification.`,
+  };
+}
 
 const BLOCKING_ATTRIBUTES = new Set(['live_music']);
 
@@ -117,6 +142,11 @@ export function extractAttributes(msg: string): AttributeConstraint[] {
 
 export function extractAllConstraints(msg: string): Constraint[] {
   const constraints: Constraint[] = [];
+
+  const subjectivePredicate = extractSubjectivePredicate(msg);
+  if (subjectivePredicate) {
+    constraints.push(subjectivePredicate);
+  }
 
   const timePredicate = buildTimePredicateContract(msg);
   if (timePredicate) {
@@ -245,16 +275,20 @@ function isLiveMusicUnresolved(c: Constraint): boolean {
   return c.requires_clarification && c.chosen_verification === null;
 }
 
+function isSubjectivePredicateUnresolved(c: Constraint): boolean {
+  return c.type === 'subjective_predicate';
+}
+
 function buildGateState(constraints: Constraint[], isNoProxy: boolean): ConstraintContract {
   const clarify_questions: string[] = [];
   const blockReasons: string[] = [];
   let stop_recommended = false;
 
-  const hasTimePredicate = constraints.some(c => c.type === 'time_predicate');
-  const hasLiveMusic = constraints.some(c => c.type === 'attribute' && c.attribute === 'live_music');
-
   for (const c of constraints) {
-    if (c.type === 'time_predicate') {
+    if (c.type === 'subjective_predicate') {
+      blockReasons.push(c.why_blocked);
+      clarify_questions.push(`What do you mean by '${c.term}'? Pick 1–2 measurable attributes: cosy, lively, upscale, traditional, live music, craft beer, quiet, late-night, family-friendly, cheap, dog-friendly, outdoor seating, etc.`);
+    } else if (c.type === 'time_predicate') {
       if (isNoProxy || (c.verifiability === 'unverifiable' && c.hardness === 'hard')) {
         stop_recommended = true;
         blockReasons.push(c.why_blocked || 'Opening dates cannot be verified from any available data source. This constraint cannot be satisfied.');
@@ -271,6 +305,7 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
   }
 
   const anyBlocked =
+    constraints.some(c => isSubjectivePredicateUnresolved(c)) ||
     constraints.some(c => isTimePredicateUnresolved(c)) ||
     constraints.some(c => isLiveMusicUnresolved(c));
 

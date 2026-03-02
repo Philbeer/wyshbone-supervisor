@@ -47,9 +47,11 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
       assert.ok(result.missingFields!.includes('semantic_constraint'), 'Should include semantic_constraint in missingFields');
     });
 
-    it('"find best pubs with live music in Brighton" → agent_run (has measurable attribute)', () => {
+    it('"find best pubs with live music in Brighton" → clarify_before_run (subjective "best" still unresolved)', () => {
       const result = evaluateClarifyGate('find best pubs with live music in Brighton');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
+      assert.ok(result.missingFields!.includes('semantic_constraint'));
     });
 
     it('"find dog friendly cafes in Bath" → agent_run (measurable, no subjective)', () => {
@@ -191,61 +193,81 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
     });
   });
 
-  describe('Measurable attributes bypass subjective block (G6 Phase 5)', () => {
-    it('"find best bars with nightlife in Manchester" → agent_run', () => {
+  describe('Subjective terms always trigger clarification regardless of measurable attributes (Batch 1)', () => {
+    it('"find best bars with nightlife in Manchester" → clarify_before_run (subjective "best" unresolved)', () => {
       const result = evaluateClarifyGate('find best bars with nightlife in Manchester');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
     });
 
-    it('"find top lively pubs in Leeds" → agent_run', () => {
+    it('"find top lively pubs in Leeds" → clarify_before_run (subjective "top" unresolved)', () => {
       const result = evaluateClarifyGate('find top lively pubs in Leeds');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
     });
 
-    it('"find nicest romantic restaurants in Bath" → agent_run', () => {
+    it('"find nicest romantic restaurants in Bath" → clarify_before_run (subjective "nicest" unresolved)', () => {
       const result = evaluateClarifyGate('find nicest romantic restaurants in Bath');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
     });
 
-    it('"find best trendy cafes in Brighton" → agent_run', () => {
+    it('"find best trendy cafes in Brighton" → clarify_before_run (subjective "best" unresolved)', () => {
       const result = evaluateClarifyGate('find best trendy cafes in Brighton');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
     });
 
-    it('"find best walkable pubs in York" → agent_run', () => {
+    it('"find best walkable pubs in York" → clarify_before_run (subjective "best" unresolved)', () => {
       const result = evaluateClarifyGate('find best walkable pubs in York');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
     });
 
-    it('"find top student bars in Leeds" → agent_run', () => {
+    it('"find top student bars in Leeds" → clarify_before_run (subjective "top" unresolved)', () => {
       const result = evaluateClarifyGate('find top student bars in Leeds');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
     });
 
-    it('"find best cafes with views in Edinburgh" → agent_run', () => {
+    it('"find best cafes with views in Edinburgh" → clarify_before_run (subjective "best" unresolved)', () => {
       const result = evaluateClarifyGate('find best cafes with views in Edinburgh');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
     });
 
-    it('"find nicest scenic restaurants in Cornwall" → agent_run', () => {
+    it('"find nicest scenic restaurants in Cornwall" → clarify_before_run (subjective "nicest" unresolved)', () => {
       const result = evaluateClarifyGate('find nicest scenic restaurants in Cornwall');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
+    });
+
+    it('"find good pubs with live music in Bristol" → clarify_before_run (subjective "good" unresolved)', () => {
+      const result = evaluateClarifyGate('find good pubs with live music in Bristol');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
+    });
+
+    it('"find nice bars with outdoor seating in Leeds" → clarify_before_run (subjective "nice" unresolved)', () => {
+      const result = evaluateClarifyGate('find nice bars with outdoor seating in Leeds');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.reason.includes('subjective'));
     });
   });
 
-  describe('Negative tests: measurable attributes bypass subjective', () => {
-    it('"find cafes in Bristol that are quiet" → agent_run (quiet is measurable)', () => {
+  describe('Measurable-only queries still run (no false positives)', () => {
+    it('"find cafes in Bristol that are quiet" → agent_run (quiet is measurable, no subjective)', () => {
       const result = evaluateClarifyGate('find cafes in Bristol that are quiet');
       assert.strictEqual(result.route, 'agent_run');
     });
 
-    it('"find good pubs with live music in Bristol" → agent_run (live music is measurable)', () => {
-      const result = evaluateClarifyGate('find good pubs with live music in Bristol');
+    it('"find lively bars in Manchester" → agent_run (lively is measurable)', () => {
+      const result = evaluateClarifyGate('find lively bars in Manchester');
       assert.strictEqual(result.route, 'agent_run');
     });
 
-    it('"find nice bars with outdoor seating in Leeds" → agent_run (outdoor seating is measurable)', () => {
-      const result = evaluateClarifyGate('find nice bars with outdoor seating in Leeds');
+    it('"find cosy pubs with live music in Bristol" → agent_run (cosy + live music are measurable)', () => {
+      const result = evaluateClarifyGate('find cosy pubs with live music in Bristol');
       assert.strictEqual(result.route, 'agent_run');
     });
   });
@@ -302,6 +324,81 @@ describe('ClarifyGate — subjective criteria & nonsense locations (G6)', () => 
       assert.ok(result.missingFields!.includes('location'), 'Should include location in missingFields');
       assert.ok(result.missingFields!.includes('semantic_constraint'), 'Should include semantic_constraint in missingFields');
     });
+  });
+});
+
+describe('ClarifyGate — Batch 1 mandatory subjective predicate tests', () => {
+  it('"Find nice bars in Manchester" → CLARIFY', () => {
+    const result = evaluateClarifyGate('Find nice bars in Manchester');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.ok(result.reason.includes('subjective'));
+    assert.ok(result.missingFields!.includes('semantic_constraint'));
+  });
+
+  it('"Find best pubs in Leeds" → CLARIFY', () => {
+    const result = evaluateClarifyGate('Find best pubs in Leeds');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.ok(result.reason.includes('subjective'));
+    assert.ok(result.missingFields!.includes('semantic_constraint'));
+  });
+
+  it('"Find good cafes" → CLARIFY', () => {
+    const result = evaluateClarifyGate('Find good cafes');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.ok(result.reason.includes('subjective'));
+    assert.ok(result.missingFields!.includes('semantic_constraint'));
+  });
+
+  it('"Find lively bars in Manchester" → RUN (measurable, not subjective)', () => {
+    const result = evaluateClarifyGate('Find lively bars in Manchester');
+    assert.strictEqual(result.route, 'agent_run');
+  });
+
+  it('"Find cosy pubs with live music in Bristol" → RUN (measurable, not subjective)', () => {
+    const result = evaluateClarifyGate('Find cosy pubs with live music in Bristol');
+    assert.strictEqual(result.route, 'agent_run');
+  });
+
+  it('"Find nice pubs with live music in Bristol" → CLARIFY (subjective "nice" unresolved)', () => {
+    const result = evaluateClarifyGate('Find nice pubs with live music in Bristol');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.ok(result.reason.includes('subjective'));
+    assert.ok(result.missingFields!.includes('semantic_constraint'));
+  });
+
+  it('clarify question asks specifically about the detected subjective term', () => {
+    const result = evaluateClarifyGate('Find nice bars in Manchester');
+    assert.ok(result.questions!.some(q => q.includes("'nice'")), 'Should mention the specific subjective term');
+  });
+
+  it('"Find great cafes in Bristol" → CLARIFY (expanded subjective term "great")', () => {
+    const result = evaluateClarifyGate('Find great cafes in Bristol');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.ok(result.reason.includes('subjective'));
+  });
+
+  it('"Find cool bars in Leeds" → CLARIFY (expanded subjective term "cool")', () => {
+    const result = evaluateClarifyGate('Find cool bars in Leeds');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.ok(result.reason.includes('subjective'));
+  });
+
+  it('"Find lovely cafes in Bath" → CLARIFY (expanded subjective term "lovely")', () => {
+    const result = evaluateClarifyGate('Find lovely cafes in Bath');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.ok(result.reason.includes('subjective'));
+  });
+
+  it('"Find decent pubs in Manchester" → CLARIFY (expanded subjective term "decent")', () => {
+    const result = evaluateClarifyGate('Find decent pubs in Manchester');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.ok(result.reason.includes('subjective'));
+  });
+
+  it('"Find chill bars in Brighton" → CLARIFY (expanded subjective term "chill")', () => {
+    const result = evaluateClarifyGate('Find chill bars in Brighton');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.ok(result.reason.includes('subjective'));
   });
 });
 

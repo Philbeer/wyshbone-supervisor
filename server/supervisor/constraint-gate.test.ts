@@ -436,6 +436,76 @@ describe('Constraint Gate — edge cases', () => {
   });
 });
 
+describe('Constraint Gate — subjective predicate extraction (Batch 1)', () => {
+  it('"Find nice bars in Manchester" → extracts subjective_predicate, can_execute=false', () => {
+    const contract = preExecutionConstraintGate('Find nice bars in Manchester');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
+    assert.ok(sp, 'subjective_predicate constraint must exist');
+    assert.strictEqual(sp!.type, 'subjective_predicate');
+    if (sp!.type === 'subjective_predicate') {
+      assert.strictEqual(sp!.verifiability, 'unverifiable');
+      assert.strictEqual(sp!.hardness, 'hard');
+    }
+  });
+
+  it('"Find best pubs in Leeds" → extracts subjective_predicate', () => {
+    const contract = preExecutionConstraintGate('Find best pubs in Leeds');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
+    assert.ok(sp, 'subjective_predicate constraint must exist');
+  });
+
+  it('"Find good cafes" → extracts subjective_predicate', () => {
+    const contract = preExecutionConstraintGate('Find good cafes');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
+    assert.ok(sp, 'subjective_predicate constraint must exist');
+  });
+
+  it('"Find lively bars in Manchester" → no subjective_predicate, can_execute=true', () => {
+    const contract = preExecutionConstraintGate('Find lively bars in Manchester');
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
+    assert.strictEqual(sp, undefined, 'lively is measurable, not subjective');
+    assert.strictEqual(contract.can_execute, true);
+  });
+
+  it('"Find cosy pubs with live music" → no subjective_predicate (cosy is measurable)', () => {
+    const contract = preExecutionConstraintGate('Find cosy pubs with live music');
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
+    assert.strictEqual(sp, undefined, 'cosy is measurable, not subjective');
+  });
+
+  it('"Find nice pubs with live music" → subjective_predicate extracted (nice unresolved)', () => {
+    const contract = preExecutionConstraintGate('Find nice pubs with live music');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
+    assert.ok(sp, 'subjective_predicate constraint must exist even alongside measurable attributes');
+  });
+
+  it('"nice pubs opened recently" → both subjective_predicate AND time_predicate extracted', () => {
+    const contract = preExecutionConstraintGate('Find nice pubs opened recently');
+    assert.strictEqual(contract.can_execute, false);
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
+    const tp = contract.constraints.find(c => c.type === 'time_predicate');
+    assert.ok(sp, 'subjective_predicate must exist');
+    assert.ok(tp, 'time_predicate must exist');
+    assert.ok(contract.clarify_questions.length >= 2, 'must ask clarification for BOTH');
+  });
+
+  it('"Find 10 pubs in Manchester" → no subjective_predicate (plain search)', () => {
+    const contract = preExecutionConstraintGate('Find 10 pubs in Manchester');
+    const sp = contract.constraints.find(c => c.type === 'subjective_predicate');
+    assert.strictEqual(sp, undefined);
+    assert.strictEqual(contract.can_execute, true);
+  });
+
+  it('subjective_predicate clarify question mentions the detected term', () => {
+    const contract = preExecutionConstraintGate('Find nice bars in Manchester');
+    assert.ok(contract.clarify_questions.some(q => q.includes("'nice'")), 'Should reference the subjective term');
+  });
+});
+
 describe('Constraint Gate — acceptance tests (exact QA scenarios)', () => {
   it('ACCEPTANCE: compound "Find 10 pubs in Bristol that opened in the last 12 months and have live music" → clarification, no searching, no tools', () => {
     const contract = preExecutionConstraintGate('Find 10 pubs in Bristol that opened in the last 12 months and have live music');
