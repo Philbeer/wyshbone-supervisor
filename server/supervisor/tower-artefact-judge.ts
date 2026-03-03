@@ -23,6 +23,10 @@ export interface ArtefactJudgementResponse {
     current_value?: unknown;
     suggested_value?: unknown;
   }>;
+  learning_update?: {
+    query_shape_key: string;
+    updates: Record<string, unknown>;
+  };
 }
 
 function getTowerBaseUrl(): string | null {

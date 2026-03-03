@@ -47,6 +47,9 @@ import {
   type InsertPolicyVersion,
   type PolicyApplication,
   type InsertPolicyApplication,
+  learningStore,
+  type LearningStore,
+  type InsertLearningStore,
 } from "./schema";
 import { db } from "./db";
 import { eq, desc, isNull, and } from "drizzle-orm";
@@ -128,6 +131,9 @@ export interface IStorage {
     leads_list: Record<string, unknown> | null;
     agent_run: Record<string, unknown> | null;
   }>;
+  getLearningStoreEntry(queryShapeKey: string): Promise<LearningStore | undefined>;
+  createLearningStoreEntry(entry: InsertLearningStore): Promise<LearningStore>;
+  updateLearningStoreEntry(queryShapeKey: string, updates: Record<string, unknown>): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -791,6 +797,39 @@ export class DatabaseStorage implements IStorage {
       leads_list: leadsList as Record<string, unknown> | null,
       agent_run: agentRun as Record<string, unknown> | null,
     };
+  }
+
+  async getLearningStoreEntry(queryShapeKey: string): Promise<LearningStore | undefined> {
+    try {
+      const [result] = await db
+        .select()
+        .from(learningStore)
+        .where(eq(learningStore.queryShapeKey, queryShapeKey))
+        .limit(1);
+      return result || undefined;
+    } catch (err: any) {
+      if (err.message?.includes('does not exist') || err.message?.includes('relation')) {
+        console.warn(`[Storage] learning_store table not yet created, returning undefined`);
+        return undefined;
+      }
+      throw err;
+    }
+  }
+
+  async createLearningStoreEntry(entry: InsertLearningStore): Promise<LearningStore> {
+    const [result] = await db.insert(learningStore).values(entry).returning();
+    console.log(`[Storage] Created learning_store entry for shape_key=${entry.queryShapeKey}`);
+    return result;
+  }
+
+  async updateLearningStoreEntry(queryShapeKey: string, updates: Record<string, unknown>): Promise<void> {
+    const setObj: Record<string, unknown> = { ...updates };
+    setObj.updatedAt = new Date();
+    await db
+      .update(learningStore)
+      .set(setObj as any)
+      .where(eq(learningStore.queryShapeKey, queryShapeKey));
+    console.log(`[Storage] Updated learning_store entry for shape_key=${queryShapeKey}`);
   }
 }
 

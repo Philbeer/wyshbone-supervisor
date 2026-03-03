@@ -357,3 +357,27 @@ export const insertPolicyApplicationSchema = createInsertSchema(policyApplicatio
 
 export type InsertPolicyApplication = z.infer<typeof insertPolicyApplicationSchema>;
 export type PolicyApplication = typeof policyApplications.$inferSelect;
+
+export const learningStore = pgTable("learning_store", {
+  id: text("id").primaryKey().default(sql`gen_random_uuid()`),
+  queryShapeKey: text("query_shape_key").notNull().unique(),
+  defaultResultCount: integer("default_result_count").notNull().default(20),
+  verificationLevel: text("verification_level").notNull().default("standard"),
+  searchBudgetPages: integer("search_budget_pages").notNull().default(3),
+  radiusEscalation: text("radius_escalation").notNull().default("allowed"),
+  stopIfUnderfilled: integer("stop_if_underfilled").notNull().default(0),
+  fieldMetadata: jsonb("field_metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  queryShapeKeyIdx: index("idx_learning_store_query_shape_key").on(table.queryShapeKey),
+}));
+
+export const insertLearningStoreSchema = createInsertSchema(learningStore).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertLearningStore = z.infer<typeof insertLearningStoreSchema>;
+export type LearningStore = typeof learningStore.$inferSelect;

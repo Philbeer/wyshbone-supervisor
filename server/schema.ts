@@ -48,6 +48,8 @@ export const {
   insertTelemetryEventSchema,
   insertPolicyVersionSchema,
   insertPolicyApplicationSchema,
+  learningStore,
+  insertLearningStoreSchema,
 } = schema;
 
 export type {
@@ -81,4 +83,6 @@ export type {
   InsertPolicyVersion,
   PolicyApplication,
   InsertPolicyApplication,
+  LearningStore,
+  InsertLearningStore,
 } from '@shared/schema';

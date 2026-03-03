@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertUserSignalSchema, insertSuggestedLeadSchema } from "./schema";
 import type { Artefact, TowerJudgement, AgentRun } from "./schema";
+import { z } from "zod";
 import { fromError } from "zod-validation-error";
 import { supabase } from "./supabase";
 import { supervisor } from "./supervisor";
@@ -2722,6 +2723,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   console.log('[DEBUG] Registered: POST /api/policy/reset');
+
+  const learningUpdateSchema = z.object({
+    query_shape_key: z.string().min(1),
+    run_id: z.string().min(1),
+    updates: z.object({
+      default_result_count: z.number().int().positive().optional(),
+      verification_level: z.enum(['minimal', 'standard', 'strict']).optional(),
+      search_budget_pages: z.number().int().positive().optional(),
+      radius_escalation: z.enum(['off', 'allowed', 'aggressive']).optional(),
+      stop_if_underfilled: z.boolean().optional(),
+    }).refine(obj => Object.keys(obj).length > 0, { message: 'updates must contain at least one knob field' }),
+  });
+
+  app.post('/api/learning/update', async (req, res) => {
+    const parsed = learningUpdateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: fromError(parsed.error).toString() });
+    }
+    const { query_shape_key, run_id, updates } = parsed.data;
+    try {
+      const { handleLearningUpdate } = await import('./supervisor/learning-store');
+      await handleLearningUpdate({ query_shape_key, run_id, updates });
+      console.log(`[LEARNING_UPDATE] Ingested learning_update for shape_key=${query_shape_key} run_id=${run_id}`);
+      return res.json({ ok: true, query_shape_key, run_id, updated_fields: Object.keys(updates) });
+    } catch (err: any) {
+      console.error(`[LEARNING_UPDATE] Failed: ${err.message}`);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  console.log('[DEBUG] Registered: POST /api/learning/update');
 
   const httpServer = createServer(app);
   return httpServer;

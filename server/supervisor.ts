@@ -27,6 +27,8 @@ import { getClarifySession, didSessionExpire, createClarifySession, closeClarify
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, type ConstraintContract } from './supervisor/constraint-gate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
+import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './supervisor/query-shape-key';
+import { readLearningStore, mergePolicyKnobs, buildPolicyAppliedPayload, emitPolicyAppliedArtefact, handleLearningUpdate, BASELINE_DEFAULTS, type FinalPolicy, type PolicyAppliedArtefact, type LearningUpdatePayload } from './supervisor/learning-store';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 
@@ -1962,6 +1964,65 @@ class SupervisorService {
       console.warn(`[LEARNING_LAYER] Policy application failed (non-fatal, using defaults): ${policyErr.message}`);
     }
 
+    let queryShapeKey = '';
+    let finalPolicyPayload: PolicyAppliedArtefact | null = null;
+    try {
+      const shapeInput = deriveQueryShapeFromGoal({
+        business_type: businessType,
+        location: city,
+        country,
+        attribute_filter: attributeFilter,
+        constraints: structuredConstraints,
+      });
+      queryShapeKey = computeQueryShapeKey(shapeInput);
+      console.log(`[LEARNING_STORE] query_shape_key=${queryShapeKey}`);
+
+      const { knobs: learnedKnobs, fieldMetadata, exists: learnedExists } = await readLearningStore(queryShapeKey);
+      const userKnobOverrides = userSpecifiedCount && userRequestedCountFinal
+        ? { requested_count: userRequestedCountFinal }
+        : undefined;
+
+      const finalPolicy = mergePolicyKnobs(
+        BASELINE_DEFAULTS,
+        learnedExists ? learnedKnobs : null,
+        fieldMetadata,
+        userKnobOverrides,
+      );
+
+      if (learnedExists && finalPolicy.knobs.default_result_count !== BASELINE_DEFAULTS.default_result_count
+          && finalPolicy.source_of_each_field.default_result_count === 'learned'
+          && !userSpecifiedCount) {
+        const learnedCount = finalPolicy.knobs.default_result_count;
+        if (learnedCount !== searchBudgetCount) {
+          console.log(`[LEARNING_STORE] Applying learned default_result_count: ${searchBudgetCount} -> ${learnedCount}`);
+          searchBudgetCount = Math.max(learnedCount, searchBudgetCount);
+          searchCount = searchBudgetCount;
+        }
+      }
+
+      if (learnedExists && finalPolicy.knobs.search_budget_pages !== BASELINE_DEFAULTS.search_budget_pages
+          && finalPolicy.source_of_each_field.search_budget_pages === 'learned') {
+        const learnedPages = finalPolicy.knobs.search_budget_pages;
+        const pageSize = 20;
+        const learnedBudget = learnedPages * pageSize;
+        if (learnedBudget > searchBudgetCount) {
+          console.log(`[LEARNING_STORE] Applying learned search_budget_pages: budget ${searchBudgetCount} -> ${learnedBudget}`);
+          searchBudgetCount = learnedBudget;
+          searchCount = searchBudgetCount;
+        }
+      }
+
+      finalPolicyPayload = buildPolicyAppliedPayload(queryShapeKey, finalPolicy, fieldMetadata, learnedExists);
+      await emitPolicyAppliedArtefact({
+        runId: chatRunId,
+        userId: task.user_id,
+        conversationId,
+        policyApplied: finalPolicyPayload,
+      });
+    } catch (shapeErr: any) {
+      console.warn(`[LEARNING_STORE] query_shape_key / policy_applied failed (non-fatal): ${shapeErr.message}`);
+    }
+
     const v1Constraints = {
       business_type: businessType,
       location: city,
@@ -2725,6 +2786,7 @@ class SupervisorService {
       max_replan_versions: 2,
       requires_relationship_evidence: relationshipPredicate.requires_relationship_evidence,
       verified_relationship_count: 0,
+      ...(queryShapeKey ? { query_shape_key: queryShapeKey } : {}),
     };
     console.log(`[TOWER_PAYLOAD] v1 successCriteria: ${JSON.stringify(v1SuccessCriteria, null, 2)}`);
 
@@ -4054,6 +4116,21 @@ class SupervisorService {
       });
       console.log(`[REPLAN] [tower_verdict] verdict=${replanVerdict} (${vLabel})`);
 
+      if (replanTowerResult.judgement.learning_update && queryShapeKey) {
+        try {
+          const lu = replanTowerResult.judgement.learning_update;
+          const effectiveShapeKey = lu.query_shape_key || queryShapeKey;
+          console.log(`[LEARNING_STORE] Replan Tower emitted learning_update for shape_key=${effectiveShapeKey}`);
+          await handleLearningUpdate({
+            query_shape_key: effectiveShapeKey,
+            run_id: chatRunId,
+            updates: lu.updates as any,
+          });
+        } catch (luErr: any) {
+          console.warn(`[LEARNING_STORE] Replan learning_update processing failed (non-fatal): ${luErr.message}`);
+        }
+      }
+
       finalVerdict = replanVerdict;
       finalAction = replanAction;
       finalLeads = replanLeads;
@@ -4571,6 +4648,35 @@ class SupervisorService {
       );
     } catch (outcomeErr: any) {
       console.warn(`[LEARNING_LAYER] outcome_log or policy version write failed (non-fatal): ${outcomeErr.message}`);
+    }
+
+    if (towerResult && towerResult.judgement.learning_update && queryShapeKey) {
+      try {
+        const lu = towerResult.judgement.learning_update;
+        const effectiveShapeKey = lu.query_shape_key || queryShapeKey;
+        console.log(`[LEARNING_STORE] Tower emitted learning_update for shape_key=${effectiveShapeKey}`);
+        await handleLearningUpdate({
+          query_shape_key: effectiveShapeKey,
+          run_id: chatRunId,
+          updates: lu.updates as any,
+        });
+        await createArtefact({
+          runId: chatRunId,
+          type: 'learning_update_applied',
+          title: `Learning Update Applied: ${effectiveShapeKey}`,
+          summary: `Updated fields: [${Object.keys(lu.updates).join(', ')}] from Tower learning_update`,
+          payload: {
+            query_shape_key: effectiveShapeKey,
+            run_id: chatRunId,
+            updates: lu.updates,
+            source: 'tower_judgement_response',
+          },
+          userId: task.user_id,
+          conversationId,
+        });
+      } catch (luErr: any) {
+        console.warn(`[LEARNING_STORE] learning_update processing failed (non-fatal): ${luErr.message}`);
+      }
     }
 
     const finalScopeKey = policyResult?.scopeKey ?? `${businessType.toLowerCase()}::${city.toLowerCase()}::default`;
