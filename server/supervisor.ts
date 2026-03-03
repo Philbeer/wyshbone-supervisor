@@ -13,7 +13,7 @@ import { generateJobId } from './supervisor/jobs';
 import { redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-executor';
 import { buildToolPlan, persistToolPlanExplainer, getOrderedToolNames, type LeadContext, type ToolStepId, type ToolPlanExplainer } from './supervisor/tool-planning-policy';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
-import { extractChangePlanDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, type PlanV2Constraints } from './supervisor/replan-policy';
+import { buildShortfallDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, type PlanV2Constraints } from './supervisor/replan-policy';
 import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, buildRequestedCount, DEFAULT_LEADS_TARGET, sanitiseLocationString, detectExactnessMode, detectDoNotStop, type ParsedGoal, type StructuredConstraint, type RequestedCountCanonical, type ExactnessMode } from './supervisor/goal-to-constraints';
 import { emitSearchQueryCompiled, type SearchQueryCompiledPayload } from './supervisor/search-query-compiled';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
@@ -2792,194 +2792,31 @@ class SupervisorService {
       metadata: { artefactId: leadsListArtefact.id, artefactType: 'leads_list', leads_count: leads.length, used_stub: usedStub },
     });
 
-    // 8. AFR: tower_call_started
+    // 8. INVARIANT: Tower must NOT judge leads before verification is complete.
+    //    Tower will be called exactly once on the final_delivery artefact after CVL verification.
+    let towerJudgedBeforeVerification = false;
+
+    // 9. Local replan assessment (Tower deferred until after verification)
+    const v1Delivered = leads.length;
+    const v1HasShortfall = userSpecifiedCount && userRequestedCountFinal !== null && v1Delivered < userRequestedCountFinal;
+    const v1LocationIsSoft = soft_constraints.includes('location');
+    const localReplanNeeded = !!(v1HasShortfall && v1LocationIsSoft && !usedStub);
+    const localAction = localReplanNeeded ? 'change_plan' : 'accept';
+    console.log(`[TOWER_LOOP_CHAT] Local replan assessment: delivered=${v1Delivered} requested=${userRequestedCountFinal} shortfall=${v1HasShortfall} location_soft=${v1LocationIsSoft} replan_needed=${localReplanNeeded}`);
+
     await logAFREvent({
       userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-      actionTaken: 'tower_call_started', status: 'pending',
-      taskGenerated: `Calling Tower to judge leads_list artefact ${leadsListArtefact.id}`,
+      actionTaken: 'local_replan_assessment', status: 'success',
+      taskGenerated: `Local assessment: ${v1Delivered} leads delivered, replan_needed=${localReplanNeeded} (Tower deferred to final_delivery)`,
       runType: 'plan',
-      metadata: { artefactId: leadsListArtefact.id, goal },
+      metadata: { artefactId: leadsListArtefact.id, delivered: v1Delivered, requested: userRequestedCountFinal, replan_needed: localReplanNeeded, local_action: localAction },
     });
-    console.log(`[TOWER_LOOP_CHAT] [tower_call_started] artefactId=${leadsListArtefact.id}`);
 
-    // 9. Call Tower via judgeArtefact (persists tower_judgements row + emits tower_judgement AFR)
-    const v1SuccessCriteria = {
-      mission_type: 'leadgen',
-      target_count: rc.requested_count_effective,
-      requested_count_user: rc.requested_count_user,
-      requested_count_value: rc.requested_count_value,
-      requested_count_effective: rc.requested_count_effective,
-      user_specified_count: userSpecifiedCount,
-      ...(prefixFilter ? { prefix: prefixFilter } : {}),
-      ...(attributeFilter ? { attribute_filter: attributeFilter, attribute_note: 'attribute not injected into search query; CVL verifies post-search' } : {}),
-      plan_version: 1,
-      hard_constraints,
-      soft_constraints,
-      constraints: typedConstraints,
-      plan_constraints: {
-        business_type: businessType,
-        location: city,
-        country,
-        search_count: searchCount,
-        requested_count: rc.requested_count_effective,
-        requested_count_user: rc.requested_count_user,
-        requested_count_effective: rc.requested_count_effective,
-        prefix_filter: prefixFilter || null,
-        attribute_filter: attributeFilter || null,
-      },
-      max_replan_versions: 2,
-      requires_relationship_evidence: relationshipPredicate.requires_relationship_evidence,
-      verified_relationship_count: 0,
-      ...(queryShapeKey ? { query_shape_key: queryShapeKey } : {}),
-    };
-    console.log(`[TOWER_PAYLOAD] v1 successCriteria: ${JSON.stringify(v1SuccessCriteria, null, 2)}`);
-
-    let towerResult;
-    try {
-      towerResult = await judgeArtefact({
-        artefact: leadsListArtefact,
-        runId: chatRunId,
-        goal,
-        userId: task.user_id,
-        conversationId,
-        successCriteria: v1SuccessCriteria,
-      });
-    } catch (towerErr: any) {
-      const errMsg = towerErr.message || 'Tower call threw an exception';
-      console.error(`[TOWER_LOOP_CHAT] Tower call failed: ${errMsg}`);
-
-      const errorJudgementArtefact = await createArtefact({
-        runId: chatRunId,
-        type: 'tower_judgement',
-        title: `Tower Judgement: error`,
-        summary: `Tower unreachable/failed: ${errMsg}`,
-        payload: { verdict: 'error', action: 'stop', reasons: [errMsg], metrics: {}, delivered: leads.length, requested: userRequestedCountFinal, error: errMsg },
-        userId: task.user_id,
-        conversationId,
-      });
-
-      await logAFREvent({
-        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'tower_verdict', status: 'failed',
-        taskGenerated: `Tower error: ${errMsg}`,
-        runType: 'plan',
-        metadata: { artefactId: leadsListArtefact.id, verdict: 'error', error: errMsg, towerJudgementArtefactId: errorJudgementArtefact.id },
-      });
-
-      await this.postArtefactToUI({
-        runId: chatRunId,
-        clientRequestId,
-        type: 'tower_judgement',
-        payload: {
-          verdict: 'error',
-          action: 'stop',
-          reasons: [errMsg],
-          metrics: {},
-          delivered: leads.length,
-          requested: userRequestedCountFinal,
-          error: errMsg,
-        },
-        userId: task.user_id,
-        conversationId,
-      }).catch(() => {});
-
-      runGovernanceStatus = 'tower_unavailable';
-
-      await logAFREvent({
-        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'run_stopped', status: 'failed',
-        taskGenerated: `Tower unreachable -- run stopped (governance_status=tower_unavailable)`,
-        runType: 'plan', metadata: { verdict: 'error', error: errMsg, leads_count: leads.length, governance_status: 'tower_unavailable' },
-      });
-
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: 'error', error: errMsg, leads_count: leads.length, governance_status: 'tower_unavailable' } });
-
-      const errorDsInput = {
-        runId: chatRunId,
-        userId: task.user_id,
-        conversationId,
-        originalUserGoal,
-        requestedCount: userRequestedCountFinal,
-        hardConstraints: hard_constraints,
-        softConstraints: soft_constraints,
-        planVersions: [{ version: 1, changes_made: ['Initial plan'] }] as PlanVersionEntry[],
-        softRelaxations: [] as SoftRelaxation[],
-        leads: leads.map(l => ({ entity_id: l.placeId, name: l.name, address: l.address })),
-        finalVerdict: 'error',
-        stopReason: `Tower unavailable: ${errMsg}`,
-      };
-      const errorDsPayload = await emitDeliverySummary(errorDsInput);
-
-      if (goalId) {
-        try {
-          await storage.updateGoalStatus(goalId, 'STOPPED', { tower_error: errMsg });
-          console.log(`[TOWER_LOOP_CHAT] [goal_updated] goalId=${goalId} status=STOPPED`);
-        } catch (gErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to update goal status (non-fatal): ${gErr.message}`); }
-      }
-      try {
-        await writeBeliefs({ runId: chatRunId, goalId, deliverySummary: errorDsPayload });
-      } catch (bErr: any) { console.error(`[TOWER_LOOP_CHAT] Failed to write beliefs (non-fatal): ${bErr.message}`); }
-
-      console.log(`[TOWER_LOOP_CHAT] [complete] leads=${leads.length} verdict=error (Tower unavailable)`);
-      return {
-        response: SUPERVISOR_NEUTRAL_MESSAGE,
-        leadIds: createdLeadIds,
-        deliverySummary: errorDsPayload,
-        towerVerdict: 'error',
-        leads: leads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website, placeId: l.placeId })),
-      };
-    }
-
-    const verdict = towerResult.judgement.verdict;
-    const action = towerResult.judgement.action;
-    console.log(`[TOWER_LOOP_CHAT] [tower_judgement] verdict=${verdict} action=${action} stubbed=${towerResult.stubbed}`);
-
-    // 10. Create tower_judgement artefact (for UI display)
-    const towerJudgementArtefact = await createArtefact({
-      runId: chatRunId,
-      type: 'tower_judgement',
-      title: `Tower Judgement: ${verdict}`,
-      summary: `Verdict: ${verdict} | Action: ${action} | Delivered: ${leads.length} of ${displayCount}`,
-      payload: {
-        verdict,
-        action,
-        reasons: towerResult.judgement.reasons,
-        metrics: towerResult.judgement.metrics,
-        delivered: leads.length,
-        requested: userRequestedCountFinal,
-        artefact_id: leadsListArtefact.id,
-        used_stub: usedStub,
-      },
-      userId: task.user_id,
-      conversationId,
-    });
-    console.log(`[TOWER_LOOP_CHAT] [tower_judgement_artefact] id=${towerJudgementArtefact.id}`);
-
-    // 11. AFR: tower_verdict
-    await logAFREvent({
-      userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-      actionTaken: 'tower_verdict', status: towerResult.shouldStop ? 'failed' : 'success',
-      taskGenerated: `Tower verdict: ${verdict} — action: ${action}`,
-      runType: 'plan',
-      metadata: {
-        verdict,
-        action,
-        artefactId: leadsListArtefact.id,
-        towerJudgementArtefactId: towerJudgementArtefact.id,
-        delivered: leads.length,
-        requested: userRequestedCountFinal,
-        reasons: towerResult.judgement.reasons,
-        stubbed: towerResult.stubbed,
-      },
-    });
-    console.log(`[TOWER_LOOP_CHAT] [tower_verdict] verdict=${verdict}`);
-
-    // 12. Replan loop (bounded by MAX_REPLANS env var)
-    let finalVerdict = verdict;
-    let finalAction: string = action;
+    // 12. Replan loop (bounded by MAX_REPLANS env var) — driven by local count heuristics, not Tower
+    let finalVerdict = 'pending';
+    let finalAction: string = localAction;
     let finalLeads = leads;
     let finalLeadsListArtefact = leadsListArtefact;
-    let finalTowerResult = towerResult;
     let finalConstraints = { ...v1Constraints };
     let planVersion = 1;
     let replansUsed = 0;
@@ -3458,51 +3295,19 @@ class SupervisorService {
       });
       console.log(`[ATTR_VERIFY] artefact id=${attrVerifArtefact.id} — ${leadsWithAttr}/${finalLeads.length} leads verified, ${strongEvidence} strong evidence`);
 
-      try {
-        const attrTowerObs = await judgeArtefact({
-          artefact: attrVerifArtefact,
-          runId: chatRunId,
-          goal,
-          userId: task.user_id,
-          conversationId,
-        });
-
-        await createArtefact({
-          runId: chatRunId,
-          type: 'tower_judgement',
-          title: `Tower Judgement: ${attrTowerObs.judgement.verdict} (attribute verification)`,
-          summary: `Attribute verification verdict=${attrTowerObs.judgement.verdict} action=${attrTowerObs.judgement.action} | ${leadsWithAttr}/${finalLeads.length} leads with "${attrLabel}"`,
-          payload: {
-            verdict: attrTowerObs.judgement.verdict,
-            action: attrTowerObs.judgement.action,
-            reasons: attrTowerObs.judgement.reasons,
-            metrics: attrTowerObs.judgement.metrics,
-            judged_artefact_id: attrVerifArtefact.id,
-            stubbed: attrTowerObs.stubbed,
-            phase: 'attribute_verification',
-          },
-          userId: task.user_id,
-          conversationId,
-        });
-        console.log(`[ATTR_VERIFY] Tower verdict=${attrTowerObs.judgement.verdict} action=${attrTowerObs.judgement.action}`);
-
-        await logAFREvent({
-          userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-          actionTaken: 'attribute_verification_completed', status: 'success',
-          taskGenerated: `Attribute verification: ${leadsWithAttr}/${finalLeads.length} leads verified for "${attrLabel}" — Tower verdict: ${attrTowerObs.judgement.verdict}`,
-          runType: 'plan',
-          metadata: {
-            attributes: attrValues,
-            leads_with_attribute: leadsWithAttr,
-            total_leads: finalLeads.length,
-            strong_evidence: strongEvidence,
-            tower_verdict: attrTowerObs.judgement.verdict,
-            tower_action: attrTowerObs.judgement.action,
-          },
-        });
-      } catch (attrTowerErr: any) {
-        console.warn(`[ATTR_VERIFY] Tower judgement failed (non-fatal): ${attrTowerErr.message}`);
-      }
+      await logAFREvent({
+        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+        actionTaken: 'attribute_verification_completed', status: 'success',
+        taskGenerated: `Attribute verification: ${leadsWithAttr}/${finalLeads.length} leads verified for "${attrLabel}" (Tower deferred to final_delivery)`,
+        runType: 'plan',
+        metadata: {
+          attributes: attrValues,
+          leads_with_attribute: leadsWithAttr,
+          total_leads: finalLeads.length,
+          strong_evidence: strongEvidence,
+        },
+      });
+      console.log(`[ATTR_VERIFY] Completed: ${leadsWithAttr}/${finalLeads.length} leads with "${attrLabel}" (Tower deferred to final_delivery)`);
 
       if (leadsWithAttr === 0 || totalVerified === 0) {
         console.log(`[ATTR_VERIFY] No leads verified for hard attribute "${attrLabel}" — terminating with UNVERIFIABLE_HARD_CONSTRAINT`);
@@ -3528,62 +3333,11 @@ class SupervisorService {
 
         finalVerdict = 'stop';
         finalAction = 'stop';
-        finalTowerResult = {
-          ...finalTowerResult,
-          shouldStop: true,
-          judgement: {
-            ...finalTowerResult.judgement,
-            verdict: 'stop',
-            action: 'stop',
-          },
-        };
+        attributeVerificationStopped = true;
       }
     }
 
-    // 12a. Local safety net: if Tower said stop/fail but we have unused replan budget,
-    //      a quantifiable shortfall, and expandable soft constraints → override to change_plan
-    if (!attributeVerificationStopped && finalAction !== 'change_plan' && !usedStub && replansUsed < MAX_REPLANS && userSpecifiedCount) {
-      const delivered = finalLeads.length;
-      const target = userRequestedCountFinal!;
-      const hasShortfall = delivered < target;
-      const locationIsSoft = soft_constraints.includes('location');
-
-      if (hasShortfall && locationIsSoft) {
-        console.log(`[REPLAN_OVERRIDE] Tower returned action=${finalAction} verdict=${finalVerdict}, but shortfall detected (${delivered}/${target}) and location is soft — overriding to change_plan`);
-
-        await logAFREvent({
-          userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-          actionTaken: 'replan_override', status: 'pending',
-          taskGenerated: `Supervisor override: Tower ${finalAction}→change_plan (shortfall ${delivered}/${target}, location soft, replans ${replansUsed}/${MAX_REPLANS})`,
-          runType: 'plan',
-          metadata: {
-            original_verdict: finalVerdict,
-            original_action: finalAction,
-            delivered,
-            target,
-            replans_used: replansUsed,
-            max_replans: MAX_REPLANS,
-            soft_constraints,
-            override_reason: 'shortfall_with_expandable_location',
-          },
-        });
-
-        finalAction = 'change_plan';
-        finalTowerResult = {
-          ...finalTowerResult,
-          judgement: {
-            ...finalTowerResult.judgement,
-            action: 'change_plan',
-            gaps: [{ type: 'insufficient_count', severity: 'high', detail: `Delivered ${delivered} of ${target} requested` }],
-            suggested_changes: [
-              { field: 'location', action: 'expand', reason: `Shortfall: ${delivered}/${target} — expanding search radius (location is soft constraint)` },
-            ],
-          },
-          shouldStop: false,
-        };
-      }
-    }
-
+    // 12a. Replan loop — driven by local shortfall heuristics (no interim Tower calls)
     while (finalAction === 'change_plan' && !usedStub && !attributeVerificationStopped) {
       if (!isRunCurrentForConversation(conversationId, chatRunId)) {
         console.warn(`[SESSION_GUARD] Stale run detected at replan loop — aborting for runId=${chatRunId} conversation=${conversationId}`);
@@ -3635,15 +3389,15 @@ class SupervisorService {
         break;
       }
 
-      console.log(`[REPLAN] Tower returned change_plan — initiating replan ${replansUsed + 1}/${MAX_REPLANS} (mission_type=leadgen, current_plan_version=${planVersion})`);
+      console.log(`[REPLAN] Shortfall detected — initiating replan ${replansUsed + 1}/${MAX_REPLANS} (mission_type=leadgen, current_plan_version=${planVersion})`);
 
-      const directive = extractChangePlanDirective(finalTowerResult.judgement);
+      const directive = buildShortfallDirective(finalLeads.length, userRequestedCountFinal ?? rc.requested_count_effective);
       console.log(`[REPLAN] Directive — gaps: ${JSON.stringify(directive.gaps.map(g => g.type))} suggested_changes: ${JSON.stringify(directive.suggested_changes.map(sc => `${sc.action} ${sc.field}`))}`);
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'replan_initiated', status: 'pending',
-        taskGenerated: `Tower change_plan: replanning with ${directive.suggested_changes.length} suggested change(s) (replan ${replansUsed + 1}/${MAX_REPLANS})`,
+        taskGenerated: `Shortfall replan: replanning with ${directive.suggested_changes.length} suggested change(s) (replan ${replansUsed + 1}/${MAX_REPLANS})`,
         runType: 'plan',
         metadata: {
           plan_version: planVersion,
@@ -4089,119 +3843,10 @@ class SupervisorService {
       });
       console.log(`[REPLAN] [leads_list_${vLabel}] id=${replanLeadsListArtefact.id} delivered=${replanLeads.length}`);
 
-      await logAFREvent({
-        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'tower_call_started', status: 'pending',
-        taskGenerated: `Calling Tower to judge ${vLabel} leads_list artefact ${replanLeadsListArtefact.id}`,
-        runType: 'plan',
-        metadata: { artefactId: replanLeadsListArtefact.id, goal, plan_version: planVersion },
-      });
-      console.log(`[REPLAN] [tower_call_started] artefactId=${replanLeadsListArtefact.id} (${vLabel})`);
+      console.log(`[REPLAN] [leads_list_${vLabel}_persisted] id=${replanLeadsListArtefact.id} delivered=${replanLeads.length} (Tower deferred to final_delivery)`);
 
-      let replanTowerResult;
-      try {
-        replanTowerResult = await judgeArtefact({
-          artefact: replanLeadsListArtefact,
-          runId: chatRunId,
-          goal,
-          userId: task.user_id,
-          conversationId,
-          successCriteria: {
-            mission_type: 'leadgen',
-            target_count: rc.requested_count_effective,
-            requested_count_user: rc.requested_count_user,
-            requested_count_value: rc.requested_count_value,
-            requested_count_effective: rc.requested_count_effective,
-            user_specified_count: userSpecifiedCount,
-            accumulated_unique_count: accumulatedCandidates.size,
-            accumulated_matching_count: midReplanMatchInfo.matching.length,
-            ...(v2.prefix_filter ? { prefix: v2.prefix_filter } : {}),
-            plan_version: planVersion,
-            hard_constraints,
-            soft_constraints,
-            constraints: typedConstraints.map(tc => {
-              if (tc.field === 'location') return { ...tc, value: v2.location };
-              if (tc.field === 'prefix_filter' && !v2.prefix_filter) return { ...tc, value: null, hardness: 'soft' as const };
-              return tc;
-            }).filter(tc => tc.value !== null),
-            plan_constraints: {
-              business_type: v2.business_type,
-              location: v2.location,
-              country: v2.country,
-              search_count: v2.search_count,
-              requested_count_user: rc.requested_count_user,
-              requested_count_effective: rc.requested_count_effective,
-              search_budget_count: v2.search_budget_count,
-              prefix_filter: v2.prefix_filter || null,
-              radius_km: v2.radius_km,
-            },
-            max_replan_versions: MAX_REPLANS + 1,
-            requires_relationship_evidence: relationshipPredicate.requires_relationship_evidence,
-            verified_relationship_count: 0,
-          },
-        });
-      } catch (replanTowerErr: any) {
-        console.error(`[REPLAN] Tower ${vLabel} call failed: ${replanTowerErr.message}`);
-        replanTowerResult = {
-          judgement: { verdict: 'error', reasons: [replanTowerErr.message], metrics: {}, action: 'stop' as const },
-          shouldStop: true,
-          stubbed: false,
-        };
-      }
-
-      const replanVerdict = replanTowerResult.judgement.verdict;
-      const replanAction = replanTowerResult.judgement.action;
-      console.log(`[REPLAN] [tower_judgement] verdict=${replanVerdict} action=${replanAction} (${vLabel})`);
-
-      const replanTowerJudgementArtefact = await createArtefact({
-        runId: chatRunId,
-        type: 'tower_judgement',
-        title: `Tower Judgement ${vLabel}: ${replanVerdict}`,
-        summary: `${vLabel} Verdict: ${replanVerdict} | Action: ${replanAction} | Delivered: ${replanLeads.length} of ${displayCount ?? v2.requested_count}`,
-        payload: {
-          verdict: replanVerdict, action: replanAction,
-          reasons: replanTowerResult.judgement.reasons, metrics: replanTowerResult.judgement.metrics,
-          plan_version: planVersion, delivered: replanLeads.length, requested: v2.requested_count,
-          artefact_id: replanLeadsListArtefact.id, stubbed: replanTowerResult.stubbed,
-        },
-        userId: task.user_id,
-        conversationId,
-      });
-
-      await logAFREvent({
-        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'tower_verdict', status: replanTowerResult.shouldStop ? 'failed' : 'success',
-        taskGenerated: `Tower ${vLabel} verdict: ${replanVerdict} — action: ${replanAction}`,
-        runType: 'plan',
-        metadata: {
-          plan_version: planVersion, verdict: replanVerdict, action: replanAction,
-          artefactId: replanLeadsListArtefact.id, towerJudgementArtefactId: replanTowerJudgementArtefact.id,
-          delivered: replanLeads.length, requested: v2.requested_count,
-          stubbed: replanTowerResult.stubbed,
-        },
-      });
-      console.log(`[REPLAN] [tower_verdict] verdict=${replanVerdict} (${vLabel})`);
-
-      if (replanTowerResult.judgement.learning_update && queryShapeKey) {
-        try {
-          const lu = replanTowerResult.judgement.learning_update;
-          const effectiveShapeKey = lu.query_shape_key || queryShapeKey;
-          console.log(`[LEARNING_STORE] Replan Tower emitted learning_update for shape_key=${effectiveShapeKey}`);
-          await handleLearningUpdate({
-            query_shape_key: effectiveShapeKey,
-            run_id: chatRunId,
-            updates: lu.updates as any,
-          });
-        } catch (luErr: any) {
-          console.warn(`[LEARNING_STORE] Replan learning_update processing failed (non-fatal): ${luErr.message}`);
-        }
-      }
-
-      finalVerdict = replanVerdict;
-      finalAction = replanAction;
       finalLeads = replanLeads;
       finalLeadsListArtefact = replanLeadsListArtefact;
-      finalTowerResult = replanTowerResult;
       finalConstraints = { business_type: v2.business_type, location: v2.location, prefix_filter: v2.prefix_filter || null, requested_count: displayCount };
       businessType = v2.business_type;
       city = v2.location;
@@ -4229,12 +3874,9 @@ class SupervisorService {
         }
 
         if (newUnique === 0 && !shouldBreakAfterReplan) {
-          if (replanAction === 'change_plan') {
-            console.log(`[REPLAN] Zero new unique leads in ${vLabel} (accumulated matching=${postMatchingCount} total=${accumulatedCandidates.size}/${userRequestedCountFinal}) — but Tower action=change_plan, continuing replan loop.`);
-          } else {
-            console.log(`[REPLAN] Zero new unique leads in ${vLabel} (accumulated matching=${postMatchingCount} total=${accumulatedCandidates.size}/${userRequestedCountFinal}) — action=${replanAction}, stopping replan loop.`);
-            shouldBreakAfterReplan = true;
-          }
+          console.log(`[REPLAN] Zero new unique leads in ${vLabel} (accumulated matching=${postMatchingCount} total=${accumulatedCandidates.size}/${userRequestedCountFinal}) — no progress, stopping replan loop.`);
+          shouldBreakAfterReplan = true;
+          finalAction = 'accept';
         }
 
         try {
@@ -4268,20 +3910,19 @@ class SupervisorService {
       const replanCompletedMatchInfo = countMatchingLeads(accumulatedCandidates);
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'replan_completed', status: (finalVerdict === 'pass') ? 'success' : (replanTowerResult.shouldStop ? 'failed' : 'success'),
-        taskGenerated: `Replan ${replansUsed}/${MAX_REPLANS} completed: ${vLabel} delivered ${replanLeads.length}, accumulated_unique=${accumulatedCandidates.size}, accumulated_matching=${replanCompletedMatchInfo.matching.length}, verdict=${finalVerdict}`,
+        actionTaken: 'replan_completed', status: shouldBreakAfterReplan ? 'success' : 'pending',
+        taskGenerated: `Replan ${replansUsed}/${MAX_REPLANS} completed: ${vLabel} delivered ${replanLeads.length}, accumulated_unique=${accumulatedCandidates.size}, accumulated_matching=${replanCompletedMatchInfo.matching.length} (Tower deferred to final_delivery)`,
         runType: 'plan',
         metadata: {
           plan_version: planVersion, prior_delivered: priorLeadsCount, replan_delivered: replanLeads.length,
           accumulated_unique: accumulatedCandidates.size, accumulated_matching: replanCompletedMatchInfo.matching.length, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective,
-          replan_verdict: replanVerdict, replan_action: replanAction,
           replans_used: replansUsed, max_replans: MAX_REPLANS,
           strategy: replanResult.strategy_summary,
           radius_km: v2.radius_km, radius_rung: v2.radius_rung,
           blocked_changes: replanResult.blocked_changes,
         },
       });
-      console.log(`[REPLAN] [replan_completed] replan=${replansUsed}/${MAX_REPLANS} delivered=${replanLeads.length} accumulated_unique=${accumulatedCandidates.size} accumulated_matching=${replanCompletedMatchInfo.matching.length} verdict=${replanVerdict}`);
+      console.log(`[REPLAN] [replan_completed] replan=${replansUsed}/${MAX_REPLANS} delivered=${replanLeads.length} accumulated_unique=${accumulatedCandidates.size} accumulated_matching=${replanCompletedMatchInfo.matching.length}`);
 
       if (shouldBreakAfterReplan) {
         break;
@@ -4453,41 +4094,10 @@ class SupervisorService {
       console.warn(`[CVL] Verification pass failed (non-fatal, continuing with unverified counts): ${cvlErr.message}`);
     }
 
-    if (cvlVerification) {
-      const vCount = cvlVerification.verified_exact_count;
-      const hasHardUnverifiable = cvlVerification.summary.unverifiable_hard_constraints.length > 0;
-      const hardUnverifiableNames = cvlVerification.summary.unverifiable_hard_constraints.map(u => `"${u.value}"`).join(', ');
-
-      if (hasHardUnverifiable && finalVerdict === 'pass') {
-        console.log(`[CVL_OVERRIDE] Tower said pass but ${cvlVerification.summary.unverifiable_hard_constraints.length} hard constraint(s) unverifiable (${hardUnverifiableNames}); verified_exact_count=${vCount} — downgrading verdict to "stop" (hard constraints cannot be verified)`);
-        finalVerdict = 'stop';
-        finalAction = 'stop';
-      } else if (hasHardUnverifiable && finalVerdict !== 'pass') {
-        console.log(`[CVL_OVERRIDE] Hard unverifiable constraints (${hardUnverifiableNames}); verified_exact_count=${vCount} — verdict stays "${finalVerdict}"`);
-      } else if (userRequestedCountFinal !== null) {
-        if (vCount >= userRequestedCountFinal && finalVerdict !== 'pass') {
-          console.log(`[CVL_OVERRIDE] verified_exact_count (${vCount}) >= requested (${userRequestedCountFinal}), no hard unverifiable; overriding finalVerdict from "${finalVerdict}" to "pass"`);
-          finalVerdict = 'pass';
-          finalAction = 'accept';
-        } else if (vCount < userRequestedCountFinal && finalVerdict === 'pass') {
-          console.log(`[CVL_OVERRIDE] verified_exact_count (${vCount}) < requested (${userRequestedCountFinal}); Tower said pass but CVL says insufficient verified leads — downgrading to "stop"`);
-          finalVerdict = 'stop';
-          finalAction = 'stop';
-        }
-      }
-    }
-
-    // Regression guard: if early-stop set finalVerdict='pass', override stale shouldStop from prior Tower fail
-    const earlyStopOverride = finalVerdict === 'pass' && finalTowerResult.shouldStop;
-    if (earlyStopOverride) {
-      console.log(`[EarlyStop] satisfied user goal; overriding prior tower fail for terminal status (stale shouldStop=true, finalVerdict=pass)`);
-      finalTowerResult = { ...finalTowerResult, shouldStop: false };
-    }
+    const cvlVerifiedExactCount = cvlVerification?.verified_exact_count ?? null;
 
     if (runDeadlineExceeded) {
-      finalVerdict = finalVerdict === 'pass' ? 'pass' : 'timeout';
-      finalAction = 'stop';
-      console.log(`[RUN_DEADLINE] Run deadline exceeded — emitting terminal artefact. verdict=${finalVerdict} reason=${runDeadlineReason}`);
+      console.log(`[RUN_DEADLINE] Run deadline exceeded — emitting terminal artefact. reason=${runDeadlineReason}`);
       await createArtefact({
         runId: chatRunId,
         type: 'terminal',
@@ -4507,19 +4117,211 @@ class SupervisorService {
       }).catch((e: any) => console.warn(`[RUN_DEADLINE] Failed to emit terminal artefact: ${e.message}`));
     }
 
-    const isCvlOverrideStop = finalVerdict === 'stop' && !finalTowerResult.shouldStop;
-    const isHalted = (finalVerdict !== 'pass' && finalAction !== 'change_plan' && (finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'stop' || finalVerdict === 'timeout')) || (runDeadlineExceeded && finalVerdict !== 'pass');
-    if (isCvlOverrideStop) {
-      console.log(`[TOWER_LOOP_CHAT] CVL override detected: Tower passed but CVL downgraded to stop (hard-unverifiable constraints). isHalted=${isHalted}`);
+    // ── SINGLE AUTHORITATIVE TOWER CALL ──
+    // Create final_delivery artefact with leads + verification data, then call Tower exactly once.
+    // This is the ONLY Tower judgement for this run. The verdict is authoritative and final.
+    if (towerJudgedBeforeVerification) {
+      console.error(`[INVARIANT_VIOLATION] tower_judgement_before_verification=true — this should NEVER happen. A Tower call was made on leads before verification was complete.`);
     }
+
+    const finalDeliveryPayload = {
+      run_id: chatRunId,
+      delivered_leads: finalLeads.map(l => {
+        const lvMatch = cvlVerification?.leadVerifications.find(lv => lv.lead_place_id === l.placeId);
+        return {
+          name: l.name,
+          address: l.address,
+          phone: l.phone,
+          website: l.website,
+          placeId: l.placeId,
+          source: l.source,
+          verification: lvMatch ? {
+            verified_exact: lvMatch.verified_exact,
+            all_hard_satisfied: lvMatch.all_hard_satisfied,
+            location_confidence: lvMatch.location_confidence,
+            constraint_checks: lvMatch.constraint_checks,
+          } : null,
+        };
+      }),
+      requested_count: userRequestedCountFinal,
+      requested_count_effective: rc.requested_count_effective,
+      accumulated_unique: totalUniqueLeads,
+      accumulated_matching: totalMatchingLeads,
+      plan_versions_used: planVersion,
+      replans_used: replansUsed,
+      verification_summary: cvlVerification ? {
+        verified_exact_count: cvlVerification.verified_exact_count,
+        candidates_checked: cvlVerification.summary.candidates_checked,
+        hard_unknown_count: cvlVerification.summary.hard_unknown_count,
+        unverifiable_hard_constraints: cvlVerification.summary.unverifiable_hard_constraints,
+        location_breakdown: cvlVerification.summary.location_breakdown,
+      } : null,
+      attribute_verification: attributeVerificationAttempted ? {
+        attempted: true,
+        stopped: attributeVerificationStopped,
+        results_count: attrVerificationResults.length,
+        leads_with_attribute: new Set(attrVerificationResults.filter(r => r.attribute_found).map(r => r.lead_place_id)).size,
+      } : null,
+      hard_constraints,
+      soft_constraints,
+      constraints: typedConstraints,
+      used_stub: usedStub,
+      run_deadline_exceeded: runDeadlineExceeded,
+    };
+
+    const finalDeliveryArtefact = await createArtefact({
+      runId: chatRunId,
+      type: 'final_delivery',
+      title: `Final delivery: ${finalLeads.length} leads${cvlVerifiedExactCount !== null ? ` (${cvlVerifiedExactCount} verified exact)` : ''}`,
+      summary: `${finalLeads.length} leads delivered | requested=${userRequestedCountFinal ?? 'any'} | verified_exact=${cvlVerifiedExactCount ?? 'n/a'} | plans=${planVersion} | replans=${replansUsed}`,
+      payload: finalDeliveryPayload,
+      userId: task.user_id,
+      conversationId,
+    });
+    console.log(`[FINAL_DELIVERY] artefact id=${finalDeliveryArtefact.id} leads=${finalLeads.length} verified_exact=${cvlVerifiedExactCount}`);
+
+    await logAFREvent({
+      userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+      actionTaken: 'tower_call_started', status: 'pending',
+      taskGenerated: `Calling Tower to judge final_delivery artefact ${finalDeliveryArtefact.id} (single authoritative call)`,
+      runType: 'plan',
+      metadata: { artefactId: finalDeliveryArtefact.id, goal, leads_count: finalLeads.length, verified_exact: cvlVerifiedExactCount },
+    });
+
+    const finalSuccessCriteria = {
+      mission_type: 'leadgen',
+      target_count: rc.requested_count_effective,
+      requested_count_user: rc.requested_count_user,
+      requested_count_value: rc.requested_count_value,
+      requested_count_effective: rc.requested_count_effective,
+      user_specified_count: userSpecifiedCount,
+      plan_version: planVersion,
+      hard_constraints,
+      soft_constraints,
+      constraints: typedConstraints,
+      plan_constraints: {
+        business_type: businessType,
+        location: city,
+        country,
+        search_count: searchCount,
+        requested_count: rc.requested_count_effective,
+        prefix_filter: prefixFilter || null,
+        attribute_filter: attributeFilter || null,
+      },
+      max_replan_versions: MAX_REPLANS + 1,
+      requires_relationship_evidence: relationshipPredicate.requires_relationship_evidence,
+      verified_relationship_count: 0,
+      verified_exact_count: cvlVerifiedExactCount,
+      accumulated_unique_count: totalUniqueLeads,
+      accumulated_matching_count: totalMatchingLeads,
+      attribute_verification_stopped: attributeVerificationStopped,
+      run_deadline_exceeded: runDeadlineExceeded,
+      ...(queryShapeKey ? { query_shape_key: queryShapeKey } : {}),
+    };
+
+    let finalTowerResult;
+    try {
+      finalTowerResult = await judgeArtefact({
+        artefact: finalDeliveryArtefact,
+        runId: chatRunId,
+        goal,
+        userId: task.user_id,
+        conversationId,
+        successCriteria: finalSuccessCriteria,
+      });
+    } catch (towerErr: any) {
+      const errMsg = towerErr.message || 'Tower call threw an exception';
+      console.error(`[FINAL_DELIVERY] Tower call failed: ${errMsg}`);
+      runGovernanceStatus = 'tower_unavailable';
+      finalTowerResult = {
+        judgement: { verdict: 'error', reasons: [errMsg], metrics: {}, action: 'stop' as const },
+        shouldStop: true,
+        stubbed: false,
+      };
+    }
+
+    finalVerdict = finalTowerResult.judgement.verdict;
+    finalAction = finalTowerResult.judgement.action;
+    console.log(`[FINAL_DELIVERY] Tower verdict=${finalVerdict} action=${finalAction} stubbed=${finalTowerResult.stubbed}`);
+
+    // ENFORCE: if Tower returns stop/fail, the run ends as fail — cannot flip to pass
+    if (finalTowerResult.shouldStop || finalVerdict === 'stop' || finalVerdict === 'error' || finalVerdict === 'fail') {
+      console.log(`[FINAL_DELIVERY] Tower returned stop/fail verdict="${finalVerdict}" — enforcing as final. No override permitted.`);
+    }
+
+    // If run deadline exceeded and Tower didn't pass, mark as timeout
+    if (runDeadlineExceeded && finalVerdict !== 'pass') {
+      console.log(`[FINAL_DELIVERY] Run deadline exceeded and Tower verdict="${finalVerdict}" — overriding to timeout`);
+      finalVerdict = 'timeout';
+      finalAction = 'stop';
+    }
+
+    const finalTowerJudgementArtefact = await createArtefact({
+      runId: chatRunId,
+      type: 'tower_judgement',
+      title: `Tower Judgement (final_delivery): ${finalVerdict}`,
+      summary: `Final verdict: ${finalVerdict} | Action: ${finalAction} | Delivered: ${finalLeads.length} | Verified exact: ${cvlVerifiedExactCount ?? 'n/a'}`,
+      payload: {
+        verdict: finalVerdict,
+        action: finalAction,
+        reasons: finalTowerResult.judgement.reasons,
+        metrics: finalTowerResult.judgement.metrics,
+        delivered: finalLeads.length,
+        requested: userRequestedCountFinal,
+        accumulated_unique: totalUniqueLeads,
+        accumulated_matching: totalMatchingLeads,
+        verified_exact_count: cvlVerifiedExactCount,
+        artefact_id: finalDeliveryArtefact.id,
+        leads_list_artefact_id: finalLeadsListArtefact.id,
+        used_stub: usedStub,
+        stubbed: finalTowerResult.stubbed,
+        plan_version: planVersion,
+        phase: 'final_delivery',
+      },
+      userId: task.user_id,
+      conversationId,
+    });
+
+    await logAFREvent({
+      userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+      actionTaken: 'tower_verdict', status: finalTowerResult.shouldStop ? 'failed' : 'success',
+      taskGenerated: `Tower final_delivery verdict: ${finalVerdict} — action: ${finalAction}`,
+      runType: 'plan',
+      metadata: {
+        verdict: finalVerdict,
+        action: finalAction,
+        artefactId: finalDeliveryArtefact.id,
+        towerJudgementArtefactId: finalTowerJudgementArtefact.id,
+        delivered: finalLeads.length,
+        requested: userRequestedCountFinal,
+        verified_exact_count: cvlVerifiedExactCount,
+        stubbed: finalTowerResult.stubbed,
+        phase: 'final_delivery',
+      },
+    });
+
+    if (finalTowerResult.judgement.learning_update && queryShapeKey) {
+      try {
+        const lu = finalTowerResult.judgement.learning_update;
+        const effectiveShapeKey = lu.query_shape_key || queryShapeKey;
+        console.log(`[LEARNING_STORE] Final Tower emitted learning_update for shape_key=${effectiveShapeKey}`);
+        await handleLearningUpdate({
+          query_shape_key: effectiveShapeKey,
+          run_id: chatRunId,
+          updates: lu.updates as any,
+        });
+      } catch (luErr: any) {
+        console.warn(`[LEARNING_STORE] Final learning_update processing failed (non-fatal): ${luErr.message}`);
+      }
+    }
+
+    const isHalted = finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'stop' || finalVerdict === 'fail' || finalVerdict === 'timeout' || (runDeadlineExceeded && finalVerdict !== 'pass');
     if (isHalted) {
-      const haltReason = attributeVerificationStopped ? 'unverifiable_hard_constraint' : (runDeadlineExceeded ? runDeadlineReason.split(':')[0] : undefined);
+      const haltReason = attributeVerificationStopped ? 'unverifiable_hard_constraint' : (runDeadlineExceeded ? runDeadlineReason.split(':')[0] : (finalTowerResult.shouldStop ? 'tower_stop' : undefined));
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'run_halted', status: 'failed',
-        taskGenerated: attributeVerificationStopped
-          ? `Run halted: unverifiable hard constraint — attribute verification found no evidence. verdict=${finalVerdict}`
-          : `Tower loop chat halted: verdict=${finalVerdict} action=${finalAction} plan_version=${planVersion}`,
+        taskGenerated: `Run halted: verdict=${finalVerdict} action=${finalAction} plan_version=${planVersion} (Tower authoritative)`,
         runType: 'plan',
         metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective, plan_version: planVersion, replans_used: replansUsed, ...(haltReason ? { halt_reason: haltReason } : {}) },
       });
@@ -4532,14 +4334,12 @@ class SupervisorService {
         actionTaken: 'run_completed', status: 'success',
         taskGenerated: `Tower loop chat completed: ${totalMatchingLeads} matching of ${totalUniqueLeads} unique leads (accumulated across ${planVersion} plan versions), verdict=${finalVerdict}`,
         runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal', early_stop_override: true } : {}) },
+        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective, plan_version: planVersion, replans_used: replansUsed },
       });
-      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads} plan_version=${planVersion}${earlyStopOverride ? ' (early_stop_override)' : ''}`);
+      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads} plan_version=${planVersion}`);
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: false, plan_version: planVersion, replans_used: replansUsed, ...(earlyStopOverride ? { terminal_reason: 'early_stop_satisfied_user_goal' } : {}) } });
+      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: false, plan_version: planVersion, replans_used: replansUsed } });
     }
-
-    const cvlVerifiedExactCount = cvlVerification?.verified_exact_count ?? null;
 
     await this.postArtefactToUI({
       runId: chatRunId,
@@ -4555,10 +4355,11 @@ class SupervisorService {
         accumulated_unique: totalUniqueLeads,
         accumulated_matching: totalMatchingLeads,
         verified_exact_count: cvlVerifiedExactCount,
-        artefact_id: finalLeadsListArtefact.id,
+        artefact_id: finalDeliveryArtefact.id,
         used_stub: usedStub,
         stubbed: finalTowerResult.stubbed,
         plan_version: planVersion,
+        phase: 'final_delivery',
       },
       userId: task.user_id,
       conversationId,
@@ -4742,34 +4543,7 @@ class SupervisorService {
       console.warn(`[LEARNING_LAYER] outcome_log or policy version write failed (non-fatal): ${outcomeErr.message}`);
     }
 
-    if (towerResult && towerResult.judgement.learning_update && queryShapeKey) {
-      try {
-        const lu = towerResult.judgement.learning_update;
-        const effectiveShapeKey = lu.query_shape_key || queryShapeKey;
-        console.log(`[LEARNING_STORE] Tower emitted learning_update for shape_key=${effectiveShapeKey}`);
-        await handleLearningUpdate({
-          query_shape_key: effectiveShapeKey,
-          run_id: chatRunId,
-          updates: lu.updates as any,
-        });
-        await createArtefact({
-          runId: chatRunId,
-          type: 'learning_update_applied',
-          title: `Learning Update Applied: ${effectiveShapeKey}`,
-          summary: `Updated fields: [${Object.keys(lu.updates).join(', ')}] from Tower learning_update`,
-          payload: {
-            query_shape_key: effectiveShapeKey,
-            run_id: chatRunId,
-            updates: lu.updates,
-            source: 'tower_judgement_response',
-          },
-          userId: task.user_id,
-          conversationId,
-        });
-      } catch (luErr: any) {
-        console.warn(`[LEARNING_STORE] learning_update processing failed (non-fatal): ${luErr.message}`);
-      }
-    }
+    // Learning update from the final Tower call is already processed above (in the SINGLE AUTHORITATIVE TOWER CALL section)
 
     const finalScopeKey = policyResult?.scopeKey ?? `${businessType.toLowerCase()}::${city.toLowerCase()}::default`;
     const finalSnapshot = policyResult?.snapshot ?? buildApplicationSnapshot(

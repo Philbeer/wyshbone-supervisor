@@ -74,6 +74,24 @@ export interface PlanV2Result {
   cannot_expand_further: boolean;
 }
 
+export function buildShortfallDirective(
+  delivered: number,
+  target: number,
+): TowerChangePlanDirective {
+  return {
+    gaps: [{
+      type: 'insufficient_count',
+      severity: 'high',
+      detail: `Delivered ${delivered} of ${target} requested`,
+    }],
+    suggested_changes: [{
+      field: 'location',
+      action: 'expand',
+      reason: `Shortfall: ${delivered}/${target} — expanding search radius`,
+    }],
+  };
+}
+
 export function extractChangePlanDirective(
   judgement: ArtefactJudgementResponse,
 ): TowerChangePlanDirective {
