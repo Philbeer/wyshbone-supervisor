@@ -1,0 +1,70 @@
+You are working in Wyshbone Supervisor.
+
+Goal: Fix the stuck and underfill behaviour properly and make runs debuggable, without adding any UI hacks.
+
+Implement these changes:
+
+Fix goal parsing so location extraction cannot be contaminated by count or “return exactly” clauses.
+
+For input like: “Find 20 pubs in Arundel and return exactly 20 results. If fewer than 20 are found, do not stop.”
+
+interpreted_location must be exactly “Arundel”.
+
+interpreted_query must be exactly “pubs” (or “pub”).
+
+requested_count must be 20.
+
+“return exactly 20” must be treated as a preference, not a hard requirement, unless the user explicitly says “return none if you cannot return exactly 20”.
+
+“do not stop” must not create an infinite run. Ignore it and instead enforce budgets.
+
+Add a new artefact emitted once per run called search_query_compiled (or similar) that records:
+
+interpreted_location
+
+interpreted_query
+
+requested_count
+
+exactness_mode (hard or soft)
+
+search_mode (Text Search first)
+
+pages_budget_allowed and pages_budget_used
+
+radius_start, radius_current, radius_escalated (bool)
+
+candidate_count_from_google (before enrichment)
+
+final_returned_count
+
+stop_reason (underfilled, budget_exhausted, no_candidates, etc.)
+
+This artefact must be persisted like other artefacts and appear in AFR.
+
+Change semantics for “exactly N” and underfill:
+
+Always attempt within policy budgets.
+
+If underfilled, automatically try in this order (within budget):
+a) radius escalation
+b) query broadening synonyms (pub OR bar OR inn OR public house)
+c) one extra page if within pages budget
+
+Then stop and produce an honest delivery_summary explaining what was tried and why it stopped.
+
+Ensure the user-facing status / activity message uses interpreted_location + interpreted_query, not raw input substring. It should never display “Arundel And Return Exactly”.
+
+Acceptance tests:
+
+Run “Find 20 pubs in Arundel and return exactly 20…” results in interpreted_location=Arundel in the compiled artefact.
+
+Underfill is allowed and clearly explained, no infinite runs.
+
+The compiled artefact shows candidate_count_from_google and budgets so we can tell whether the issue is search or enrichment.
+
+Deliverable:
+
+Implement in the correct files, update any relevant types/schemas, add minimal unit tests if you have a test harness.
+
+Output the full diff summary and the key files changed.
