@@ -1,0 +1,74 @@
+You are working in the Wyshbone-Supervisor repo.
+
+Goal: Make learning provable and deterministic. Supervisor must apply learned knobs at run start, emit a policy_applied artefact every run, and persist updates only when Tower emits a learning_update artefact.
+
+Implement:
+
+Compute a stable query_shape_key at the start of every agent run.
+Definition (must be stable):
+
+Derived from: intent class (find venues/leads), entity type (venue vs org), country (or default country), and major constraint types (eg “pubs”, “dentists”, “coffee shops”). Do NOT include the exact city string. Do NOT include requested count. This should group similar queries like “pubs in Arundel” and “pubs in Manchester” into the same shape if that’s desired, or keep them separated by country+category if safer.
+
+Add a LearningStore (db table or KV store in Supervisor-owned storage) keyed by query_shape_key with small knobs only:
+
+default_result_count (int)
+
+verification_level (minimal|standard|strict)
+
+search_budget_pages (int)
+
+radius_escalation (off|allowed|aggressive)
+
+stop_if_underfilled (bool)
+
+On run start:
+
+Read LearningStore for this query_shape_key (if exists)
+
+Merge with baseline defaults + any explicit user overrides parsed from the user message (if you already extract policies)
+
+Produce final_policy
+
+Emit a policy_applied artefact on every run with:
+
+query_shape_key
+
+final_policy (all knobs)
+
+learned_used (bool)
+
+learned_fields_used (list)
+
+source_of_each_field: {field: default|user_override|learned}
+
+source_run_ids (if learned was used, include the run ids that produced the current values if you have them, otherwise store last_updated_run_id per field in LearningStore)
+
+Persist learning updates ONLY when Tower produces a learning_update artefact:
+
+Add handler: when learning_update arrives, update LearningStore for that key with the changed fields.
+
+Do NOT update learning store from anything else.
+
+Wire it into execution:
+
+Ensure the execution path actually uses final_policy to set requested count default, verification depth, replan ceilings/search budgets etc (where these knobs already exist).
+
+If a knob is not currently supported, store it anyway but mark it as “inactive” in policy_applied so UI can show it’s not actually applied yet.
+
+Acceptance tests:
+
+Run 1 underfills (eg requested 20, only got 7) and Tower emits learning_update (from Tower repo work). Run 2 with same shape key must apply updated knobs and set learned_used=true in policy_applied.
+
+If Tower emits no learning_update, learned_used should remain false and no learning claims should appear.
+
+Deliverables:
+
+LearningStore schema + read/write module
+
+query_shape_key function
+
+policy merge function
+
+policy_applied artefact emission
+
+learning_update ingestion + persistence
