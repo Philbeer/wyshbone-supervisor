@@ -4124,6 +4124,12 @@ class SupervisorService {
       console.error(`[INVARIANT_VIOLATION] tower_judgement_before_verification=true — this should NEVER happen. A Tower call was made on leads before verification was complete.`);
     }
 
+    const foundCountRaw = finalLeads.length;
+    if (userRequestedCountFinal !== null && finalLeads.length > userRequestedCountFinal) {
+      finalLeads = finalLeads.slice(0, userRequestedCountFinal);
+      console.log(`[FINAL_DELIVERY] Trimmed leads from ${foundCountRaw} to ${finalLeads.length} (requested_count=${userRequestedCountFinal})`);
+    }
+
     const finalDeliveryPayload = {
       run_id: chatRunId,
       delivered_leads: finalLeads.map(l => {
@@ -4144,6 +4150,8 @@ class SupervisorService {
         };
       }),
       requested_count: userRequestedCountFinal,
+      delivered_count: finalLeads.length,
+      found_count_raw: foundCountRaw,
       requested_count_effective: rc.requested_count_effective,
       accumulated_unique: totalUniqueLeads,
       accumulated_matching: totalMatchingLeads,

@@ -262,14 +262,18 @@ function deriveCanonicalStatus(
   requested: number | null,
   towerVerdict: string | null,
   hasHardUnverifiable: boolean,
+  deliveredTotal?: number,
 ): CanonicalVerdict {
   if (towerVerdict === 'ERROR') return 'ERROR';
   if (towerVerdict === 'STOP' || hasHardUnverifiable) return 'STOP';
   if (requested === null) {
+    if (verifiedExact > 0) return 'PASS';
+    if (towerVerdict === 'PASS' && (deliveredTotal ?? 0) > 0) return 'PARTIAL';
     return verifiedExact > 0 ? 'PASS' : 'STOP';
   }
   if (verifiedExact >= requested && requested > 0) return 'PASS';
   if (verifiedExact > 0) return 'PARTIAL';
+  if (towerVerdict === 'PASS' && (deliveredTotal ?? 0) > 0) return 'PARTIAL';
   return 'STOP';
 }
 
@@ -346,7 +350,8 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
     effectiveExactCount = 0;
   }
 
-  const status = deriveCanonicalStatus(effectiveExactCount, requestedCount, towerVerdict, hasHardUnverifiable);
+  const deliveredTotalForStatus = relationshipUnverified ? 0 : (exact.length + closest.length);
+  const status = deriveCanonicalStatus(effectiveExactCount, requestedCount, towerVerdict, hasHardUnverifiable, deliveredTotalForStatus);
   const trustStatus: TrustStatus = (status === 'PASS' || status === 'PARTIAL') ? 'TRUSTED' : 'UNTRUSTED';
 
   const cvlSummary: CvlSummary | null = hasCvl ? {

@@ -665,4 +665,69 @@ describe('buildDeliverySummaryPayload', () => {
       expect(result.relationship_context?.relationship_target).toBe('schools');
     });
   });
+
+  describe('terminal state consistency (Bug Fix 3)', () => {
+    it('Tower PASS with delivered leads → status PASS or PARTIAL, never STOP', () => {
+      const leads = Array.from({ length: 10 }, (_, i) =>
+        makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
+      );
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'pass',
+        requestedCount: 10,
+      }));
+      expect(result.status).not.toBe('STOP');
+      expect(['PASS', 'PARTIAL']).toContain(result.status);
+      expect(result.trust_status).toBe('TRUSTED');
+    });
+
+    it('Tower PASS with 0 verified exact but leads delivered → not STOP', () => {
+      const leads = Array.from({ length: 10 }, (_, i) =>
+        makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
+      );
+      const cvlVerifications = leads.map(l =>
+        makeCvlLv(l.place_id!, l.name, 'unknown', false)
+      );
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'pass',
+        requestedCount: 10,
+        cvlVerifiedExactCount: 0,
+        cvlLeadVerifications: cvlVerifications,
+      }));
+      expect(result.status).not.toBe('STOP');
+      expect(['PASS', 'PARTIAL']).toContain(result.status);
+    });
+
+    it('Tower STOP → status STOP regardless of lead count', () => {
+      const leads = Array.from({ length: 10 }, (_, i) =>
+        makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
+      );
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'stop',
+        requestedCount: 10,
+      }));
+      expect(result.status).toBe('STOP');
+      expect(result.trust_status).toBe('UNTRUSTED');
+    });
+
+    it('Tower PASS with verified exact >= requested → status PASS', () => {
+      const leads = Array.from({ length: 10 }, (_, i) =>
+        makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
+      );
+      const cvlVerifications = leads.map(l =>
+        makeCvlLv(l.place_id!, l.name, 'verified_geo', true)
+      );
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'pass',
+        requestedCount: 10,
+        cvlVerifiedExactCount: 10,
+        cvlLeadVerifications: cvlVerifications,
+      }));
+      expect(result.status).toBe('PASS');
+      expect(result.trust_status).toBe('TRUSTED');
+    });
+  });
 });

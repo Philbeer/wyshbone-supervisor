@@ -59,6 +59,9 @@ export const ParsedGoalSchema = z.object({
   name_filter: z.string().nullable().default(null),
   attribute_filter: z.string().nullable().default(null),
   tool_preference: z.string().nullable().default(null),
+  include_email: z.boolean().default(false),
+  include_phone: z.boolean().default(false),
+  include_website: z.boolean().default(false),
   constraints: z.array(StructuredConstraintSchema),
   success_criteria: SuccessCriteriaSchema,
 });
@@ -78,8 +81,16 @@ You must return a JSON object with these fields:
 - name_filter: if user wants names containing a specific word IN THE BUSINESS NAME (string or null). Only use this for explicit name-matching requests like "with the word swan in the name".
 - attribute_filter: if user wants businesses with a specific feature/attribute/amenity (string or null). Use this for venue features like "beer garden", "outdoor seating", "live music", "parking", "rooftop bar", "pool table", "function room" etc. These are NOT name filters — they describe what the venue HAS, not what it is called.
 - tool_preference: if user specifies a tool like "google places" (string or null)
+- include_email: true if user says "include email" or "with email" as a delivery requirement (boolean, default false). This is a DELIVERY REQUIREMENT, NOT a location or search term.
+- include_phone: true if user says "include phone" or "with phone number" as a delivery requirement (boolean, default false). This is a DELIVERY REQUIREMENT, NOT a location or search term.
+- include_website: true if user says "include website" or "with website" as a delivery requirement (boolean, default false). This is a DELIVERY REQUIREMENT, NOT a location or search term.
 - constraints: array of typed constraint objects
 - success_criteria: object defining what counts as success
+
+CRITICAL RULE — Delivery requirements vs location:
+- "find 10 pubs in Arundel and include email" → location="Arundel", include_email=true. "and include email" is a delivery requirement, NOT part of the location.
+- "find pubs in Brighton and include phone and website" → location="Brighton", include_phone=true, include_website=true
+- NEVER include "include email", "include phone", "include website", or "include contact details" in the location field.
 
 CONSTRAINT TYPES and how to detect them:
 - COUNT_MIN: when user says "find N" → { id: "c_count", type: "COUNT_MIN", field: "count", operator: ">=", value: N, hard: true, rationale: "User requested N results" }
@@ -203,6 +214,8 @@ export function sanitiseLocationString(raw: string): string {
   loc = loc.replace(/\.?\s*If\s+fewer\s+than\s+\d+\s+are\s+found[^]*$/gi, '');
   loc = loc.replace(/\s*,?\s*do\s+not\s+stop\.?$/gi, '');
   loc = loc.replace(/\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
+  loc = loc.replace(/\s+and\s+include\s+(?:email|phone|website|contact\s+details?)(?:\s+(?:and|,)\s+(?:email|phone|website|contact\s+details?))*\.?/gi, '');
+  loc = loc.replace(/\s+include\s+(?:email|phone|website|contact\s+details?)(?:\s+(?:and|,)\s+(?:email|phone|website|contact\s+details?))*\.?/gi, '');
   loc = loc.replace(/[.!]+$/, '');
   loc = loc.replace(/,\s*$/, '');
   return loc.trim();
@@ -221,12 +234,22 @@ export function detectDoNotStop(rawGoal: string): boolean {
   return /do\s+not\s+stop/i.test(rawGoal);
 }
 
+export function detectDeliveryRequirements(rawGoal: string): { include_email: boolean; include_phone: boolean; include_website: boolean } {
+  return {
+    include_email: /\b(?:include|with)\s+email\b/i.test(rawGoal),
+    include_phone: /\b(?:include|with)\s+phone\b/i.test(rawGoal),
+    include_website: /\b(?:include|with)\s+website\b/i.test(rawGoal),
+  };
+}
+
 function stripInstructionClauses(rawGoal: string): string {
   let msg = rawGoal;
   msg = msg.replace(/\.\s*If\s+fewer\s+than\s+\d+\s+are\s+found[^.]*\.?/gi, '.');
   msg = msg.replace(/\s+and\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
   msg = msg.replace(/\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
   msg = msg.replace(/,?\s*do\s+not\s+stop\.?/gi, '');
+  msg = msg.replace(/\s+and\s+include\s+(?:email|phone|website|contact\s+details?)(?:\s+(?:and|,)\s+(?:email|phone|website|contact\s+details?))*\.?/gi, '');
+  msg = msg.replace(/\s+include\s+(?:email|phone|website|contact\s+details?)(?:\s+(?:and|,)\s+(?:email|phone|website|contact\s+details?))*\.?/gi, '');
   return msg.trim();
 }
 
@@ -294,6 +317,10 @@ function regexFallback(rawGoal: string): ParsedGoal {
   const toolMatch = msg.match(/\b(?:with|using)\s+(google\s+places?\s+search|google\s+places?|google\s+maps?)\b/i);
   if (toolMatch) toolPreference = 'GOOGLE_PLACES';
 
+  const includeEmail = /\b(?:include|with)\s+email\b/i.test(rawGoal);
+  const includePhone = /\b(?:include|with)\s+phone\b/i.test(rawGoal);
+  const includeWebsite = /\b(?:include|with)\s+website\b/i.test(rawGoal);
+
   const searchBudgetCount = Math.min(50, Math.max(30, (requestedCountUser || 10) * 3));
 
   if (attributeFilter) {
@@ -360,6 +387,9 @@ function regexFallback(rawGoal: string): ParsedGoal {
     name_filter: nameFilter,
     attribute_filter: attributeFilter,
     tool_preference: toolPreference,
+    include_email: includeEmail,
+    include_phone: includePhone,
+    include_website: includeWebsite,
     constraints,
     success_criteria: {
       required_constraints: requiredIds,
@@ -388,6 +418,10 @@ export async function parseGoalToConstraints(rawUserGoal: string): Promise<Parse
     parsed.constraints = parsed.constraints.filter(c => c.type !== 'CATEGORY_EQUALS');
     parsed.success_criteria.required_constraints = parsed.success_criteria.required_constraints.filter(id => id !== 'c_category');
     parsed.success_criteria.optional_constraints = parsed.success_criteria.optional_constraints.filter(id => id !== 'c_category');
+
+    if (!parsed.include_email && /\b(?:include|with)\s+email\b/i.test(rawUserGoal)) parsed.include_email = true;
+    if (!parsed.include_phone && /\b(?:include|with)\s+phone\b/i.test(rawUserGoal)) parsed.include_phone = true;
+    if (!parsed.include_website && /\b(?:include|with)\s+website\b/i.test(rawUserGoal)) parsed.include_website = true;
 
     const elapsed = Date.now() - startMs;
     console.log(`[GOAL_PARSER] LLM parsed in ${elapsed}ms — business_type="${parsed.business_type}" location="${parsed.location}" count=${parsed.requested_count_user} constraints=${parsed.constraints.length} name_filter=${parsed.name_filter} prefix_filter=${parsed.prefix_filter}`);

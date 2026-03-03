@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { inferCountryFromLocation, sanitiseLocationString, detectExactnessMode, detectDoNotStop } from './goal-to-constraints';
+import { inferCountryFromLocation, sanitiseLocationString, detectExactnessMode, detectDoNotStop, detectDeliveryRequirements } from './goal-to-constraints';
 
 describe('inferCountryFromLocation', () => {
   it('returns US for "Texas"', () => {
@@ -83,6 +83,26 @@ describe('sanitiseLocationString', () => {
   it('preserves comma-separated location parts', () => {
     expect(sanitiseLocationString('Brighton, East Sussex')).toBe('Brighton, East Sussex');
   });
+
+  it('strips "and include email" from location', () => {
+    expect(sanitiseLocationString('Arundel and include email')).toBe('Arundel');
+  });
+
+  it('strips "and include phone" from location', () => {
+    expect(sanitiseLocationString('Arundel and include phone')).toBe('Arundel');
+  });
+
+  it('strips "and include website" from location', () => {
+    expect(sanitiseLocationString('Brighton and include website')).toBe('Brighton');
+  });
+
+  it('strips "and include email and phone" from location', () => {
+    expect(sanitiseLocationString('Arundel and include email and phone')).toBe('Arundel');
+  });
+
+  it('strips "include contact details" from location', () => {
+    expect(sanitiseLocationString('Arundel and include contact details')).toBe('Arundel');
+  });
 });
 
 describe('detectExactnessMode', () => {
@@ -110,5 +130,43 @@ describe('detectDoNotStop', () => {
 
   it('returns false when no "do not stop" present', () => {
     expect(detectDoNotStop('Find 20 pubs in Arundel')).toBe(false);
+  });
+});
+
+describe('detectDeliveryRequirements', () => {
+  it('detects "include email" in goal', () => {
+    const result = detectDeliveryRequirements('Find 10 pubs in Arundel and include email');
+    expect(result.include_email).toBe(true);
+    expect(result.include_phone).toBe(false);
+    expect(result.include_website).toBe(false);
+  });
+
+  it('detects "include phone" in goal', () => {
+    const result = detectDeliveryRequirements('Find pubs in Brighton and include phone');
+    expect(result.include_phone).toBe(true);
+  });
+
+  it('detects "include website" in goal', () => {
+    const result = detectDeliveryRequirements('Find pubs in Brighton and include website');
+    expect(result.include_website).toBe(true);
+  });
+
+  it('detects multiple delivery requirements', () => {
+    const result = detectDeliveryRequirements('Find 5 cafes in London and include email and include phone');
+    expect(result.include_email).toBe(true);
+    expect(result.include_phone).toBe(true);
+    expect(result.include_website).toBe(false);
+  });
+
+  it('returns all false when no delivery requirements', () => {
+    const result = detectDeliveryRequirements('Find 10 pubs in Arundel');
+    expect(result.include_email).toBe(false);
+    expect(result.include_phone).toBe(false);
+    expect(result.include_website).toBe(false);
+  });
+
+  it('detects "with email" as delivery requirement', () => {
+    const result = detectDeliveryRequirements('Find 10 pubs in Arundel with email');
+    expect(result.include_email).toBe(true);
   });
 });
