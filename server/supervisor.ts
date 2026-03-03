@@ -1240,6 +1240,10 @@ class SupervisorService {
     }
     if (!guardDelivery(task.conversation_id, task.id, 'final_message_after_tower_loop')) {
       console.warn(`[SESSION_GUARD] Dropping final message delivery for stale task=${task.id} conversation=${task.conversation_id} runId=${jobId}`);
+      await supabase!.from('supervisor_tasks').update({ status: 'failed', result: { error: 'session_guard_stale_run', run_id: jobId } }).eq('id', task.id).then(
+        () => console.log(`[SESSION_GUARD] Marked stale task=${task.id} as failed`),
+        (err: any) => console.warn(`[SESSION_GUARD] Failed to mark stale task as failed: ${err.message}`)
+      );
       return;
     }
 
@@ -1899,6 +1903,28 @@ class SupervisorService {
     const HARD_CAP_MAX_REPLANS = 10;
     let learned_max_replans = MAX_REPLANS;
     let effective_max_replans = MAX_REPLANS;
+
+    const MAX_RUN_DURATION_MS = parseInt(process.env.MAX_RUN_DURATION_MS || '180000', 10);
+    const MAX_TOOL_CALLS_PER_RUN = parseInt(process.env.MAX_TOOL_CALLS_PER_RUN || '150', 10);
+    let runDeadlineExceeded = false;
+    let runDeadlineReason = '';
+
+    const checkRunDeadline = (): boolean => {
+      const elapsed = Date.now() - runStartTime;
+      if (elapsed > MAX_RUN_DURATION_MS) {
+        runDeadlineExceeded = true;
+        runDeadlineReason = `wall_clock_timeout: ${Math.round(elapsed / 1000)}s > ${Math.round(MAX_RUN_DURATION_MS / 1000)}s limit`;
+        console.warn(`[RUN_DEADLINE] ${runDeadlineReason} runId=${chatRunId}`);
+        return true;
+      }
+      if (runToolCallCount > MAX_TOOL_CALLS_PER_RUN) {
+        runDeadlineExceeded = true;
+        runDeadlineReason = `max_tool_calls: ${runToolCallCount} > ${MAX_TOOL_CALLS_PER_RUN} limit`;
+        console.warn(`[RUN_DEADLINE] ${runDeadlineReason} runId=${chatRunId}`);
+        return true;
+      }
+      return false;
+    };
 
     const runOverrides: RunOverrides = {};
     if (requestData.mode_preset) runOverrides.mode_preset = requestData.mode_preset;
@@ -2603,6 +2629,7 @@ class SupervisorService {
             }
 
             try {
+              runToolCallCount++;
               const enrichResult = await executeAction({
                 toolName: tool,
                 toolArgs: enrichToolArgs,
@@ -2686,13 +2713,19 @@ class SupervisorService {
         };
 
         console.log(`[ENRICHMENT] Processing ${enrichableLeads.length} leads with concurrency=${ENRICH_CONCURRENCY}`);
+        let enrichedCount = 0;
         for (let batchStart = 0; batchStart < enrichableLeads.length; batchStart += ENRICH_CONCURRENCY) {
+          if (checkRunDeadline()) {
+            console.warn(`[ENRICHMENT] Deadline exceeded after enriching ${enrichedCount}/${enrichableLeads.length} leads — stopping enrichment early`);
+            break;
+          }
           const batch = enrichableLeads.slice(batchStart, batchStart + ENRICH_CONCURRENCY);
           console.log(`[ENRICHMENT] Batch ${Math.floor(batchStart / ENRICH_CONCURRENCY) + 1}: leads ${batchStart + 1}–${batchStart + batch.length} of ${enrichableLeads.length}`);
           await Promise.allSettled(batch.map((lead, i) => enrichOneLead(lead, batchStart + i)));
+          enrichedCount += batch.length;
         }
 
-        console.log(`[ENRICHMENT] Enrichment phase complete: ${enrichableLeads.length} leads enriched, tools_used=${toolTracker.tools_used.join(',')}`);
+        console.log(`[ENRICHMENT] Enrichment phase complete: ${enrichedCount} leads enriched${runDeadlineExceeded ? ' (truncated by deadline)' : ''}, tools_used=${toolTracker.tools_used.join(',')}`);
       } else {
         console.log(`[ENRICHMENT] No enrichment steps in plan (path: ${enrichToolPlan.selected_path})`);
       }
@@ -3145,6 +3178,10 @@ class SupervisorService {
 
       let attrLeadIndex = 0;
       for (const lead of finalLeads) {
+        if (checkRunDeadline()) {
+          console.warn(`[ATTR_VERIFY] Run deadline exceeded at lead ${attrLeadIndex + 1}/${finalLeads.length} — stopping verification early`);
+          break;
+        }
         for (const attrValue of attrValues) {
           const attrKey = attrValue.toLowerCase().replace(/\s+/g, '_');
           const keywords = getKeywordsForAttribute(attrValue);
@@ -3227,6 +3264,7 @@ class SupervisorService {
 
           const scanPagesForAttribute = async (visitUrl: string): Promise<{ matched: boolean; pages: any[] }> => {
             try {
+              runToolCallCount++;
               const wvResult = await executeAction({
                 toolName: 'WEB_VISIT',
                 toolArgs: { url: visitUrl, max_pages: 3, same_domain_only: true, page_hints: ['home', 'events', 'whats-on', 'entertainment', 'what-s-on'] },
@@ -3539,6 +3577,12 @@ class SupervisorService {
       if (!isRunCurrentForConversation(conversationId, chatRunId)) {
         console.warn(`[SESSION_GUARD] Stale run detected at replan loop — aborting for runId=${chatRunId} conversation=${conversationId}`);
         return { response: '', leadIds: [], deliverySummary: null, towerVerdict: null, leads: [] };
+      }
+      if (checkRunDeadline()) {
+        console.warn(`[REPLAN] Run deadline exceeded before replan ${replansUsed + 1} — forcing stop. ${runDeadlineReason}`);
+        finalAction = 'stop';
+        finalVerdict = 'timeout';
+        break;
       }
       if (replansUsed >= MAX_REPLANS) {
         console.log(`[REPLAN] max_replans_exceeded — replans_used=${replansUsed} MAX_REPLANS=${MAX_REPLANS} plan_version=${planVersion}`);
@@ -3947,6 +3991,7 @@ class SupervisorService {
               }
 
               try {
+                runToolCallCount++;
                 const enrichResult = await executeAction({
                   toolName: tool,
                   toolArgs: enrichToolArgs,
@@ -3972,11 +4017,17 @@ class SupervisorService {
           };
 
           console.log(`[REPLAN_ENRICH] Processing ${replanEnrichableLeads.length} leads with concurrency=${REPLAN_ENRICH_CONCURRENCY}`);
+          let replanEnrichedCount = 0;
           for (let batchStart = 0; batchStart < replanEnrichableLeads.length; batchStart += REPLAN_ENRICH_CONCURRENCY) {
+            if (checkRunDeadline()) {
+              console.warn(`[REPLAN_ENRICH] Deadline exceeded after enriching ${replanEnrichedCount}/${replanEnrichableLeads.length} — stopping`);
+              break;
+            }
             const batch = replanEnrichableLeads.slice(batchStart, batchStart + REPLAN_ENRICH_CONCURRENCY);
             await Promise.allSettled(batch.map((lead, i) => replanEnrichOneLead(lead, batchStart + i)));
+            replanEnrichedCount += batch.length;
           }
-          console.log(`[REPLAN_ENRICH] Enrichment complete: ${replanEnrichableLeads.length} leads enriched (${vLabel})`);
+          console.log(`[REPLAN_ENRICH] Enrichment complete: ${replanEnrichedCount} leads enriched${runDeadlineExceeded ? ' (truncated)' : ''} (${vLabel})`);
         }
       }
 
@@ -4418,13 +4469,36 @@ class SupervisorService {
       finalTowerResult = { ...finalTowerResult, shouldStop: false };
     }
 
+    if (runDeadlineExceeded) {
+      finalVerdict = finalVerdict === 'pass' ? 'pass' : 'timeout';
+      finalAction = 'stop';
+      console.log(`[RUN_DEADLINE] Run deadline exceeded — emitting terminal artefact. verdict=${finalVerdict} reason=${runDeadlineReason}`);
+      await createArtefact({
+        runId: chatRunId,
+        type: 'terminal',
+        title: `Run stopped: ${runDeadlineReason.split(':')[0]}`,
+        summary: `Run exceeded bounded limit (${runDeadlineReason}). Delivering ${finalLeads.length} leads found so far. Tool calls: ${runToolCallCount}. Elapsed: ${Math.round((Date.now() - runStartTime) / 1000)}s.`,
+        payload: {
+          reason: runDeadlineReason.split(':')[0],
+          detail: runDeadlineReason,
+          delivered: finalLeads.length,
+          tool_calls: runToolCallCount,
+          elapsed_ms: Date.now() - runStartTime,
+          max_duration_ms: MAX_RUN_DURATION_MS,
+          max_tool_calls: MAX_TOOL_CALLS_PER_RUN,
+        },
+        userId: task.user_id,
+        conversationId,
+      }).catch((e: any) => console.warn(`[RUN_DEADLINE] Failed to emit terminal artefact: ${e.message}`));
+    }
+
     const isCvlOverrideStop = finalVerdict === 'stop' && !finalTowerResult.shouldStop;
-    const isHalted = finalVerdict !== 'pass' && finalAction !== 'change_plan' && (finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'stop');
+    const isHalted = (finalVerdict !== 'pass' && finalAction !== 'change_plan' && (finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'stop' || finalVerdict === 'timeout')) || (runDeadlineExceeded && finalVerdict !== 'pass');
     if (isCvlOverrideStop) {
       console.log(`[TOWER_LOOP_CHAT] CVL override detected: Tower passed but CVL downgraded to stop (hard-unverifiable constraints). isHalted=${isHalted}`);
     }
     if (isHalted) {
-      const haltReason = attributeVerificationStopped ? 'unverifiable_hard_constraint' : undefined;
+      const haltReason = attributeVerificationStopped ? 'unverifiable_hard_constraint' : (runDeadlineExceeded ? runDeadlineReason.split(':')[0] : undefined);
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'run_halted', status: 'failed',
@@ -4555,6 +4629,9 @@ class SupervisorService {
       : (isHalted
         ? `Tower verdict: ${finalVerdict}, action: ${finalAction}`
         : (replanBudgetExhausted ? `max_replans_exceeded (${replansUsed}/${MAX_REPLANS})` : null));
+    const effectiveStopReason = runDeadlineExceeded && !dsStopReason
+      ? `Run stopped: ${runDeadlineReason} (${finalLeads.length} leads delivered)`
+      : dsStopReason;
     const mainDsInput = {
       runId: chatRunId,
       userId: task.user_id,
@@ -4567,7 +4644,7 @@ class SupervisorService {
       softRelaxations: dsSoftRelaxations,
       leads: dsLeads,
       finalVerdict: dsVerdict,
-      stopReason: dsStopReason,
+      stopReason: effectiveStopReason,
       cvlVerifiedExactCount: cvlVerifiedExactCount,
       cvlUnverifiableCount: cvlVerification?.summary?.unverifiable_count ?? null,
       cvlRequestedCountUser: cvlVerification?.summary?.requested_count_user ?? null,
@@ -4744,7 +4821,8 @@ class SupervisorService {
       console.error(`[LEARNING_LAYER] policy_application_snapshot artefact FAILED for run_id=${chatRunId}: ${snapErr.message}`);
     }
 
-    console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub}`);
+    const runElapsedMs = Date.now() - runStartTime;
+    console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub} elapsed_ms=${runElapsedMs} tool_calls=${runToolCallCount}${runDeadlineExceeded ? ` deadline_exceeded=${runDeadlineReason}` : ''}`);
 
     return {
       response: chatResponse,
