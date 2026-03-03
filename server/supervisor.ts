@@ -3673,6 +3673,7 @@ class SupervisorService {
       let replanUsedStub = false;
       const replanStepStartedAt = Date.now();
       let replanStepError: string | undefined;
+      let replanSearchDebug: Record<string, unknown> | null = null;
 
       try {
         const replanSearchResult = await executeAction({
@@ -3686,7 +3687,7 @@ class SupervisorService {
         });
 
         runToolCallCount++;
-        const replanSearchDebug = (replanSearchResult.data?.search_debug as Record<string, unknown>) ?? null;
+        replanSearchDebug = (replanSearchResult.data?.search_debug as Record<string, unknown>) ?? null;
         if (replanSearchResult.success && replanSearchResult.data?.places && Array.isArray(replanSearchResult.data.places)) {
           const places = replanSearchResult.data.places as any[];
           for (const p of places) {

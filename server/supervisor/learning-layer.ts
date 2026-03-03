@@ -266,7 +266,25 @@ export function mergePolicy(base: PolicyConstraints, stored: Record<string, unkn
 
 async function ensureGlobalDefault(): Promise<PolicyVersion> {
   const existing = await storage.getLatestPolicyVersion(GLOBAL_DEFAULT_SCOPE_KEY);
-  if (existing) return existing;
+  if (existing) {
+    const storedBundle = existing.policyData as Record<string, unknown>;
+    const storedPolicies = storedBundle?.policies as Record<string, unknown> | undefined;
+    const storedStop = storedPolicies?.stop_policy_v1 as Record<string, unknown> | undefined;
+    const storedBudget = storedStop?.search_budget_count;
+    const expectedBudget = GLOBAL_DEFAULT_BUNDLE.policies.stop_policy_v1.search_budget_count;
+    if (typeof storedBudget === 'number' && storedBudget < expectedBudget) {
+      console.warn(`[LEARNING_LAYER] GLOBAL_DEFAULT corrupted: search_budget_count=${storedBudget}, expected=${expectedBudget}. Repairing...`);
+      const repaired = await storage.createPolicyVersion({
+        scopeKey: GLOBAL_DEFAULT_SCOPE_KEY,
+        version: existing.version + 1,
+        policyData: GLOBAL_DEFAULT_BUNDLE as unknown as Record<string, unknown>,
+        source: 'system_repair',
+      });
+      console.log(`[LEARNING_LAYER] GLOBAL_DEFAULT repaired to v${repaired.version}`);
+      return repaired;
+    }
+    return existing;
+  }
 
   console.log(`[LEARNING_LAYER] Seeding GLOBAL_DEFAULT policy bundle`);
   return storage.createPolicyVersion({
@@ -310,13 +328,10 @@ export async function applyPolicy(input: PolicyInput, overrides?: RunOverrides):
     whyShort.push(`stop_policy_v1.max_replans=${bundle.policies.stop_policy_v1.max_replans} (default, learned policy skipped).`);
     console.log(`[LEARNING_LAYER] ignore_learned_policy=true, using GLOBAL_DEFAULT for scope=${scopeKey}`);
   } else if (!latestPolicy) {
-    const globalDefault = await storage.getLatestPolicyVersion(GLOBAL_DEFAULT_SCOPE_KEY);
-    bundle = globalDefault
-      ? upgradeFlatPolicyToBundle(globalDefault.policyData as Record<string, unknown>)
-      : structuredClone(GLOBAL_DEFAULT_BUNDLE);
+    bundle = structuredClone(GLOBAL_DEFAULT_BUNDLE);
     whyShort.push('Default learning bundle applied (no learned updates yet).');
     whyShort.push(`stop_policy_v1.max_replans=${bundle.policies.stop_policy_v1.max_replans} (default, env MAX_REPLANS=${envMaxReplans}).`);
-    console.log(`[LEARNING_LAYER] No stored policy for scope=${scopeKey}, using GLOBAL_DEFAULT`);
+    console.log(`[LEARNING_LAYER] No stored policy for scope=${scopeKey}, using GLOBAL_DEFAULT (code constant)`);
   } else {
     const rawData = latestPolicy.policyData as Record<string, unknown>;
     bundle = upgradeFlatPolicyToBundle(rawData);
@@ -525,6 +540,13 @@ export async function writeOutcomePolicyVersion(
   }
   if (outcomeMetrics.stopReason?.includes('zero') || outcomeMetrics.deliveredCount === 0) {
     adjusted.policies.stop_policy_v1.stop_when_verified_exact_is_zero_after_enrichment = true;
+  }
+
+  const globalMin = GLOBAL_DEFAULT_BUNDLE.policies.stop_policy_v1.search_budget_count;
+  if (adjusted.policies.stop_policy_v1.search_budget_count < globalMin) {
+    console.warn(`[LEARNING_LAYER] search_budget_count=${adjusted.policies.stop_policy_v1.search_budget_count} below global minimum ${globalMin}, clamping`);
+    adjusted.policies.stop_policy_v1.search_budget_count = globalMin;
+    adjusted.policies.stop_policy_v1.search_count = globalMin;
   }
 
   const newVersion = currentVersion + 1;

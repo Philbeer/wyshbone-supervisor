@@ -507,22 +507,45 @@ export class DatabaseStorage implements IStorage {
 
   async createTowerJudgement(judgement: InsertTowerJudgement): Promise<TowerJudgement> {
     if (judgement.idempotencyKey) {
-      const [existing] = await db
-        .select()
-        .from(towerJudgements)
-        .where(eq(towerJudgements.idempotencyKey, judgement.idempotencyKey))
-        .limit(1);
-      if (existing) {
-        console.log(`[Storage] Tower judgement deduplicated by idempotency_key=${judgement.idempotencyKey} for run ${judgement.runId}`);
-        return existing;
+      try {
+        const [existing] = await db
+          .select()
+          .from(towerJudgements)
+          .where(eq(towerJudgements.idempotencyKey, judgement.idempotencyKey))
+          .limit(1);
+        if (existing) {
+          console.log(`[Storage] Tower judgement deduplicated by idempotency_key=${judgement.idempotencyKey} for run ${judgement.runId}`);
+          return existing;
+        }
+      } catch (dedupErr: any) {
+        if (dedupErr.message?.includes('idempotency_key') && dedupErr.message?.includes('does not exist')) {
+          console.warn(`[Storage] idempotency_key column not yet migrated — skipping dedup check`);
+        } else {
+          throw dedupErr;
+        }
       }
     }
-    const [result] = await db
-      .insert(towerJudgements)
-      .values(judgement)
-      .returning();
-    console.log(`[Storage] Created tower judgement (verdict=${judgement.verdict}, action=${judgement.action}) for run ${judgement.runId}${judgement.idempotencyKey ? ` ikey=${judgement.idempotencyKey}` : ''}`);
-    return result;
+    try {
+      const [result] = await db
+        .insert(towerJudgements)
+        .values(judgement)
+        .returning();
+      console.log(`[Storage] Created tower judgement (verdict=${judgement.verdict}, action=${judgement.action}) for run ${judgement.runId}${judgement.idempotencyKey ? ` ikey=${judgement.idempotencyKey}` : ''}`);
+      return result;
+    } catch (insertErr: any) {
+      if (insertErr.message?.includes('idempotency_key') && insertErr.message?.includes('does not exist')) {
+        console.warn(`[Storage] idempotency_key column not yet migrated — retrying insert without it`);
+        const withoutIkey = { ...judgement };
+        delete (withoutIkey as any).idempotencyKey;
+        const [result] = await db
+          .insert(towerJudgements)
+          .values(withoutIkey)
+          .returning();
+        console.log(`[Storage] Created tower judgement (verdict=${judgement.verdict}, action=${judgement.action}) for run ${judgement.runId} (without idempotency_key)`);
+        return result;
+      }
+      throw insertErr;
+    }
   }
 
   async getTowerJudgementsByRunId(runId: string): Promise<TowerJudgement[]> {
