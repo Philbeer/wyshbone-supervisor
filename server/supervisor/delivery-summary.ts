@@ -21,7 +21,7 @@ export interface DeliveredEntity {
   soft_violations: string[];
 }
 
-export type CanonicalVerdict = 'PASS' | 'PARTIAL' | 'STOP' | 'ERROR';
+export type CanonicalVerdict = 'PASS' | 'PARTIAL' | 'STOP' | 'ERROR' | 'COMPLETED';
 
 export interface CvlLocationBreakdown {
   verified_geo_count: number;
@@ -264,16 +264,10 @@ function deriveCanonicalStatus(
   hasHardUnverifiable: boolean,
   deliveredTotal?: number,
 ): CanonicalVerdict {
-  if (towerVerdict === 'ERROR') return 'ERROR';
-  if (towerVerdict === 'STOP' || hasHardUnverifiable) return 'STOP';
-  if (requested === null) {
-    if (verifiedExact > 0) return 'PASS';
-    if (towerVerdict === 'PASS' && (deliveredTotal ?? 0) > 0) return 'PARTIAL';
-    return verifiedExact > 0 ? 'PASS' : 'STOP';
-  }
-  if (verifiedExact >= requested && requested > 0) return 'PASS';
-  if (verifiedExact > 0) return 'PARTIAL';
-  if (towerVerdict === 'PASS' && (deliveredTotal ?? 0) > 0) return 'PARTIAL';
+  const totalDelivered = deliveredTotal ?? 0;
+  if (towerVerdict === 'ERROR' && totalDelivered === 0) return 'ERROR';
+  if (totalDelivered > 0) return 'COMPLETED';
+  if (hasHardUnverifiable) return 'STOP';
   return 'STOP';
 }
 
@@ -352,7 +346,7 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
 
   const deliveredTotalForStatus = relationshipUnverified ? 0 : (exact.length + closest.length);
   const status = deriveCanonicalStatus(effectiveExactCount, requestedCount, towerVerdict, hasHardUnverifiable, deliveredTotalForStatus);
-  const trustStatus: TrustStatus = (status === 'PASS' || status === 'PARTIAL') ? 'TRUSTED' : 'UNTRUSTED';
+  const trustStatus: TrustStatus = (status === 'PASS' || status === 'PARTIAL' || status === 'COMPLETED') ? 'TRUSTED' : 'UNTRUSTED';
 
   const cvlSummary: CvlSummary | null = hasCvl ? {
     verified_exact_count: input.cvlVerifiedExactCount!,

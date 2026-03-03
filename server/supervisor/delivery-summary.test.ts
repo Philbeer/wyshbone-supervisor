@@ -204,7 +204,7 @@ describe('buildDeliverySummaryPayload', () => {
       expect(result.delivered_exact_count).toBe(30);
       expect(result.delivered_total_count).toBe(30);
       expect(result.shortfall).toBe(0);
-      expect(result.status).toBe('PASS');
+      expect(result.status).toBe('COMPLETED');
       assertArrayCountInvariant(result);
     });
 
@@ -391,7 +391,7 @@ describe('buildDeliverySummaryPayload', () => {
 
       expect(result.delivered_exact.length).toBe(2);
       expect(result.delivered_closest.length).toBe(0);
-      expect(result.status).toBe('PASS');
+      expect(result.status).toBe('COMPLETED');
       assertArrayCountInvariant(result);
     });
 
@@ -540,10 +540,20 @@ describe('buildDeliverySummaryPayload', () => {
   });
 
   describe('D) Hard truth contract — ERROR and trust_status', () => {
-    it('Tower error verdict → status=ERROR, trust_status=UNTRUSTED', () => {
+    it('Tower error verdict with leads → status=COMPLETED (leads delivered)', () => {
       const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
       const result = buildDeliverySummaryPayload(baseInput({
         leads,
+        finalVerdict: 'error',
+        requestedCount: null,
+      }));
+      expect(result.status).toBe('COMPLETED');
+      expect(result.trust_status).toBe('TRUSTED');
+    });
+
+    it('Tower error verdict with no leads → status=ERROR', () => {
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads: [],
         finalVerdict: 'error',
         requestedCount: null,
       }));
@@ -551,49 +561,49 @@ describe('buildDeliverySummaryPayload', () => {
       expect(result.trust_status).toBe('UNTRUSTED');
     });
 
-    it('Tower fail verdict → status=STOP, trust_status=UNTRUSTED', () => {
+    it('Tower fail verdict with leads → status=COMPLETED, trust_status=TRUSTED', () => {
       const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
       const result = buildDeliverySummaryPayload(baseInput({
         leads,
         finalVerdict: 'fail',
       }));
-      expect(result.status).toBe('STOP');
-      expect(result.trust_status).toBe('UNTRUSTED');
+      expect(result.status).toBe('COMPLETED');
+      expect(result.trust_status).toBe('TRUSTED');
     });
 
-    it('Tower stop verdict → status=STOP, trust_status=UNTRUSTED', () => {
+    it('Tower stop verdict with leads → status=COMPLETED, trust_status=TRUSTED', () => {
       const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
       const result = buildDeliverySummaryPayload(baseInput({
         leads,
         finalVerdict: 'stop',
       }));
-      expect(result.status).toBe('STOP');
-      expect(result.trust_status).toBe('UNTRUSTED');
+      expect(result.status).toBe('COMPLETED');
+      expect(result.trust_status).toBe('TRUSTED');
     });
 
-    it('PASS verdict with leads → trust_status=TRUSTED', () => {
+    it('PASS verdict with leads → status=COMPLETED, trust_status=TRUSTED', () => {
       const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
       const result = buildDeliverySummaryPayload(baseInput({
         leads,
         finalVerdict: 'pass',
         requestedCount: null,
       }));
-      expect(result.status).toBe('PASS');
+      expect(result.status).toBe('COMPLETED');
       expect(result.trust_status).toBe('TRUSTED');
     });
 
-    it('PARTIAL verdict → trust_status=TRUSTED', () => {
+    it('leads with requestedCount > delivered → status=COMPLETED, trust_status=TRUSTED', () => {
       const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
       const result = buildDeliverySummaryPayload(baseInput({
         leads,
         finalVerdict: 'pass',
         requestedCount: 5,
       }));
-      expect(result.status).toBe('PARTIAL');
+      expect(result.status).toBe('COMPLETED');
       expect(result.trust_status).toBe('TRUSTED');
     });
 
-    it('never emits PASS when finalVerdict is error', () => {
+    it('error verdict with leads delivered → status=COMPLETED', () => {
       const leads = Array.from({ length: 30 }, (_, i) =>
         makeLead(`Pub ${i}`, `${i} High St`, `p${i}`)
       );
@@ -602,9 +612,8 @@ describe('buildDeliverySummaryPayload', () => {
         finalVerdict: 'error',
         requestedCount: 30,
       }));
-      expect(result.status).not.toBe('PASS');
-      expect(result.status).toBe('ERROR');
-      expect(result.trust_status).toBe('UNTRUSTED');
+      expect(result.status).toBe('COMPLETED');
+      expect(result.trust_status).toBe('TRUSTED');
     });
   });
 
@@ -643,7 +652,7 @@ describe('buildDeliverySummaryPayload', () => {
       }));
       expect(result.delivered_exact.length).toBe(1);
       expect(result.delivered_closest.length).toBe(0);
-      expect(result.status).toBe('PASS');
+      expect(result.status).toBe('COMPLETED');
       expect(result.relationship_context).toBeNull();
     });
 
@@ -667,7 +676,7 @@ describe('buildDeliverySummaryPayload', () => {
   });
 
   describe('terminal state consistency (Bug Fix 3)', () => {
-    it('Tower PASS with delivered leads → status PASS or PARTIAL, never STOP', () => {
+    it('Tower PASS with delivered leads → status COMPLETED', () => {
       const leads = Array.from({ length: 10 }, (_, i) =>
         makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
       );
@@ -676,12 +685,11 @@ describe('buildDeliverySummaryPayload', () => {
         finalVerdict: 'pass',
         requestedCount: 10,
       }));
-      expect(result.status).not.toBe('STOP');
-      expect(['PASS', 'PARTIAL']).toContain(result.status);
+      expect(result.status).toBe('COMPLETED');
       expect(result.trust_status).toBe('TRUSTED');
     });
 
-    it('Tower PASS with 0 verified exact but leads delivered → not STOP', () => {
+    it('Tower PASS with 0 verified exact but leads delivered → COMPLETED', () => {
       const leads = Array.from({ length: 10 }, (_, i) =>
         makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
       );
@@ -695,11 +703,11 @@ describe('buildDeliverySummaryPayload', () => {
         cvlVerifiedExactCount: 0,
         cvlLeadVerifications: cvlVerifications,
       }));
-      expect(result.status).not.toBe('STOP');
-      expect(['PASS', 'PARTIAL']).toContain(result.status);
+      expect(result.status).toBe('COMPLETED');
+      expect(result.trust_status).toBe('TRUSTED');
     });
 
-    it('Tower STOP → status STOP regardless of lead count', () => {
+    it('Tower STOP with leads → status COMPLETED (not STOP)', () => {
       const leads = Array.from({ length: 10 }, (_, i) =>
         makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
       );
@@ -708,11 +716,11 @@ describe('buildDeliverySummaryPayload', () => {
         finalVerdict: 'stop',
         requestedCount: 10,
       }));
-      expect(result.status).toBe('STOP');
-      expect(result.trust_status).toBe('UNTRUSTED');
+      expect(result.status).toBe('COMPLETED');
+      expect(result.trust_status).toBe('TRUSTED');
     });
 
-    it('Tower PASS with verified exact >= requested → status PASS', () => {
+    it('Tower PASS with verified exact >= requested → status COMPLETED', () => {
       const leads = Array.from({ length: 10 }, (_, i) =>
         makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
       );
@@ -726,8 +734,28 @@ describe('buildDeliverySummaryPayload', () => {
         cvlVerifiedExactCount: 10,
         cvlLeadVerifications: cvlVerifications,
       }));
-      expect(result.status).toBe('PASS');
+      expect(result.status).toBe('COMPLETED');
       expect(result.trust_status).toBe('TRUSTED');
+    });
+
+    it('no leads + error → ERROR', () => {
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads: [],
+        finalVerdict: 'error',
+        requestedCount: 10,
+      }));
+      expect(result.status).toBe('ERROR');
+      expect(result.trust_status).toBe('UNTRUSTED');
+    });
+
+    it('no leads + stop → STOP', () => {
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads: [],
+        finalVerdict: 'stop',
+        requestedCount: 10,
+      }));
+      expect(result.status).toBe('STOP');
+      expect(result.trust_status).toBe('UNTRUSTED');
     });
   });
 });

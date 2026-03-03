@@ -105,7 +105,7 @@ function DeliverySummaryCard({ payload }: { payload: DeliverySummaryPayload }) {
             variant={isPassed ? "secondary" : "destructive"}
             data-testid="badge-delivery-verdict"
           >
-            {isPassed ? "PASS" : "STOP"}
+            {isPassed ? "COMPLETED" : "STOP"}
           </Badge>
         </div>
       </CardHeader>

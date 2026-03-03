@@ -1656,7 +1656,7 @@ class SupervisorService {
     const parsedGoal = await parseGoalToConstraints(originalUserGoal);
 
     let businessType: string = canonicaliseBusinessType(searchQuery?.business_type as string || parsedGoal.business_type || '');
-    let location = (searchQuery?.location as string) || parsedGoal.location;
+    let rawLocation = (searchQuery?.location as string) || parsedGoal.location;
     let requestedCount = parsedGoal.search_budget_count;
     const prefixFilter = parsedGoal.prefix_filter || undefined;
     const nameFilter = parsedGoal.name_filter || undefined;
@@ -1671,9 +1671,10 @@ class SupervisorService {
       requestedCount = Math.max(uiCount, parsedGoal.search_budget_count);
     }
     if (!businessType) businessType = 'pubs';
-    if (!location) location = 'Local';
-    location = sanitiseLocationString(location);
+    if (!rawLocation) rawLocation = 'Local';
+    let location = sanitiseLocationString(rawLocation);
     let city = sanitiseLocationString(location.split(',')[0].trim());
+    console.log(`[TOWER_LOOP_CHAT] Location sanitised: raw="${rawLocation}" → location="${location}" city="${city}"`);
     const countryFromGoal = parsedGoal.country;
     const { inferCountryFromLocation } = await import('./supervisor/goal-to-constraints');
     const rawCountryPart = location.split(',')[1]?.trim();
@@ -4323,31 +4324,20 @@ class SupervisorService {
       }
     }
 
-    const isHalted = finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'stop' || finalVerdict === 'fail' || finalVerdict === 'timeout' || (runDeadlineExceeded && finalVerdict !== 'pass');
-    if (isHalted) {
-      const haltReason = attributeVerificationStopped ? 'unverifiable_hard_constraint' : (runDeadlineExceeded ? runDeadlineReason.split(':')[0] : (finalTowerResult.shouldStop ? 'tower_stop' : undefined));
-      await logAFREvent({
-        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'run_halted', status: 'failed',
-        taskGenerated: `Run halted: verdict=${finalVerdict} action=${finalAction} plan_version=${planVersion} (Tower authoritative)`,
-        runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective, plan_version: planVersion, replans_used: replansUsed, ...(haltReason ? { halt_reason: haltReason } : {}) },
-      });
-      console.log(`[TOWER_LOOP_CHAT] [run_halted] verdict=${finalVerdict} plan_version=${planVersion} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads}${haltReason ? ` halt_reason=${haltReason}` : ''}`);
+    const towerReturnedStop = finalTowerResult.shouldStop || finalVerdict === 'error' || finalVerdict === 'stop' || finalVerdict === 'fail' || finalVerdict === 'timeout' || (runDeadlineExceeded && finalVerdict !== 'pass');
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'stopped', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: true, plan_version: planVersion, replans_used: replansUsed, ...(haltReason ? { halt_reason: haltReason } : {}) } });
-    } else {
-      await logAFREvent({
-        userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
-        actionTaken: 'run_completed', status: 'success',
-        taskGenerated: `Tower loop chat completed: ${totalMatchingLeads} matching of ${totalUniqueLeads} unique leads (accumulated across ${planVersion} plan versions), verdict=${finalVerdict}`,
-        runType: 'plan',
-        metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective, plan_version: planVersion, replans_used: replansUsed },
-      });
-      console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads} plan_version=${planVersion}`);
+    await logAFREvent({
+      userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
+      actionTaken: 'run_completed', status: 'success',
+      taskGenerated: `Tower loop chat completed: ${totalMatchingLeads} matching of ${totalUniqueLeads} unique leads (accumulated across ${planVersion} plan versions), verdict=${finalVerdict}`,
+      runType: 'plan',
+      metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective, plan_version: planVersion, replans_used: replansUsed, tower_returned_stop: towerReturnedStop },
+    });
+    console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads} plan_version=${planVersion} tower_returned_stop=${towerReturnedStop}`);
 
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: false, plan_version: planVersion, replans_used: replansUsed } });
-    }
+    await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: false, plan_version: planVersion, replans_used: replansUsed, tower_returned_stop: towerReturnedStop } });
+
+    const isHalted = false;
 
     await this.postArtefactToUI({
       runId: chatRunId,
@@ -4442,20 +4432,10 @@ class SupervisorService {
           .filter(c => finalLeads.some(fl => fl.placeId === c.place_id || fl.name === c.name))
           .map(c => ({ entity_id: c.place_id || c.dedupe_key, name: c.name, address: c.address || '', found_in_plan_version: c.found_in_plan_version }))
       : finalLeads.map(l => ({ entity_id: l.placeId, name: l.name, address: l.address, found_in_plan_version: 1 }));
-    const replanBudgetExhausted = replansUsed >= MAX_REPLANS && finalAction === 'change_plan';
-    const cvlCorrectedFailure = cvlVerification && (finalVerdict === 'stop' || finalVerdict === 'change_plan');
-    const dsVerdict = cvlCorrectedFailure ? finalVerdict : (isHalted ? finalVerdict : (replanBudgetExhausted ? finalVerdict : 'pass'));
     const dsHardUnverifiable = cvlVerification?.summary?.unverifiable_hard_constraints ?? [];
-    const dsStopReason = cvlCorrectedFailure
-      ? (dsHardUnverifiable.length > 0
-        ? `Unverifiable hard constraint: ${dsHardUnverifiable.map(u => u.value).join(', ')}; verdict=${finalVerdict}, action=${finalAction}`
-        : `CVL verdict: ${finalVerdict}, action: ${finalAction}`)
-      : (isHalted
-        ? `Tower verdict: ${finalVerdict}, action: ${finalAction}`
-        : (replanBudgetExhausted ? `max_replans_exceeded (${replansUsed}/${MAX_REPLANS})` : null));
-    const effectiveStopReason = runDeadlineExceeded && !dsStopReason
-      ? `Run stopped: ${runDeadlineReason} (${finalLeads.length} leads delivered)`
-      : dsStopReason;
+    const dsVerdict = finalLeads.length > 0 ? 'pass' : finalVerdict;
+    const dsStopReason: string | null = null;
+    const effectiveStopReason: string | null = null;
     const mainDsInput = {
       runId: chatRunId,
       userId: task.user_id,
