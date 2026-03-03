@@ -207,17 +207,42 @@ export function inferCountryFromLocation(location: string): string {
   return 'UK';
 }
 
+const DELIVERY_TOKENS_PATTERN = '(?:email|phone|website|contact\\s+details?)';
+const DELIVERY_CHAIN = `(?:\\s+(?:and|,)\\s+${DELIVERY_TOKENS_PATTERN})*`;
+
+const LOCATION_INSTRUCTION_PATTERNS: RegExp[] = [
+  /\s+and\s+return\s+exactly\s+\d+\s+results?\.?/gi,
+  /\s+and\s+return\s+exactly\s+\d+\.?/gi,
+  /\.?\s*If\s+fewer\s+than\s+\d+\s+are\s+found[^]*$/gi,
+  /\s*,?\s*do\s+not\s+stop\.?$/gi,
+  /\s+return\s+exactly\s+\d+\s+results?\.?/gi,
+  new RegExp(`\\s+and\\s+includ(?:e|ing)\\s+${DELIVERY_TOKENS_PATTERN}${DELIVERY_CHAIN}\\.?`, 'gi'),
+  new RegExp(`\\s+includ(?:e|ing)\\s+${DELIVERY_TOKENS_PATTERN}${DELIVERY_CHAIN}\\.?`, 'gi'),
+  new RegExp(`[\\s,;\\-]+includ(?:e|ing)\\s+${DELIVERY_TOKENS_PATTERN}${DELIVERY_CHAIN}\\.?`, 'gi'),
+  new RegExp(`\\(\\s*includ(?:e|ing)\\s+${DELIVERY_TOKENS_PATTERN}${DELIVERY_CHAIN}\\s*\\)`, 'gi'),
+  new RegExp(`\\s+with\\s+${DELIVERY_TOKENS_PATTERN}${DELIVERY_CHAIN}\\.?`, 'gi'),
+];
+
+const INSTRUCTION_KEYWORD_RE = /\b(include|including|email|phone|website|contact\s+details?)\b/i;
+
 export function sanitiseLocationString(raw: string): string {
   let loc = raw.trim();
-  loc = loc.replace(/\s+and\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
-  loc = loc.replace(/\s+and\s+return\s+exactly\s+\d+\.?/gi, '');
-  loc = loc.replace(/\.?\s*If\s+fewer\s+than\s+\d+\s+are\s+found[^]*$/gi, '');
-  loc = loc.replace(/\s*,?\s*do\s+not\s+stop\.?$/gi, '');
-  loc = loc.replace(/\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
-  loc = loc.replace(/\s+and\s+include\s+(?:email|phone|website|contact\s+details?)(?:\s+(?:and|,)\s+(?:email|phone|website|contact\s+details?))*\.?/gi, '');
-  loc = loc.replace(/\s+include\s+(?:email|phone|website|contact\s+details?)(?:\s+(?:and|,)\s+(?:email|phone|website|contact\s+details?))*\.?/gi, '');
+  for (const pattern of LOCATION_INSTRUCTION_PATTERNS) {
+    pattern.lastIndex = 0;
+    loc = loc.replace(pattern, '');
+  }
   loc = loc.replace(/[.!]+$/, '');
-  loc = loc.replace(/,\s*$/, '');
+  loc = loc.replace(/[,;:\-&]+\s*$/, '');
+  loc = loc.trim();
+  if (INSTRUCTION_KEYWORD_RE.test(loc)) {
+    const cityOnly = loc.split(/[,;]/)[0].trim();
+    if (!INSTRUCTION_KEYWORD_RE.test(cityOnly) && cityOnly.length > 0) {
+      loc = cityOnly;
+    } else {
+      loc = loc.replace(/\b(?:and\s+)?(?:includ(?:e|ing)|with)\s+(?:email|phone|website|contact\s+details?)(?:\s+(?:and|,)\s+(?:email|phone|website|contact\s+details?))*/gi, '').trim();
+    }
+  }
+  loc = loc.replace(/[,;:\-&]+\s*$/, '');
   return loc.trim();
 }
 
@@ -248,8 +273,10 @@ function stripInstructionClauses(rawGoal: string): string {
   msg = msg.replace(/\s+and\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
   msg = msg.replace(/\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
   msg = msg.replace(/,?\s*do\s+not\s+stop\.?/gi, '');
-  msg = msg.replace(/\s+and\s+include\s+(?:email|phone|website|contact\s+details?)(?:\s+(?:and|,)\s+(?:email|phone|website|contact\s+details?))*\.?/gi, '');
-  msg = msg.replace(/\s+include\s+(?:email|phone|website|contact\s+details?)(?:\s+(?:and|,)\s+(?:email|phone|website|contact\s+details?))*\.?/gi, '');
+  for (const pattern of LOCATION_INSTRUCTION_PATTERNS) {
+    pattern.lastIndex = 0;
+    msg = msg.replace(pattern, '');
+  }
   return msg.trim();
 }
 

@@ -1656,8 +1656,14 @@ class SupervisorService {
     const parsedGoal = await parseGoalToConstraints(originalUserGoal);
 
     let businessType: string = canonicaliseBusinessType(searchQuery?.business_type as string || parsedGoal.business_type || '');
-    let rawLocation = (searchQuery?.location as string) || parsedGoal.location;
-    let requestedCount = parsedGoal.search_budget_count;
+    let rawLocation = parsedGoal.location;
+    if (!rawLocation && searchQuery?.location) {
+      const candidateLoc = sanitiseLocationString(searchQuery.location as string);
+      if (candidateLoc.length > 0) {
+        rawLocation = candidateLoc;
+      }
+    }
+    let searchBudgetCountFromGoal = parsedGoal.search_budget_count;
     const prefixFilter = parsedGoal.prefix_filter || undefined;
     const nameFilter = parsedGoal.name_filter || undefined;
     const attributeFilter = parsedGoal.attribute_filter || undefined;
@@ -1674,7 +1680,7 @@ class SupervisorService {
     const userRequestedCount = parsedGoal.requested_count_user ?? undefined;
     if (searchQuery?.count) {
       const uiCount = Math.min(Number(searchQuery.count), 200);
-      requestedCount = Math.max(uiCount, parsedGoal.search_budget_count);
+      searchBudgetCountFromGoal = Math.max(uiCount, parsedGoal.search_budget_count);
     }
     if (!businessType) businessType = 'pubs';
     if (!rawLocation) rawLocation = 'Local';
@@ -1725,13 +1731,13 @@ class SupervisorService {
     }
     if (!userSpecifiedCount) {
       assumptions.push(`No count specified by user — will return Google page 1 results (up to ~20)`);
-    } else if (requestedCount < 30) {
-      assumptions.push(`Will request wider candidate set from Google Places (30-50), then verify via CVL and trim to ${requestedCount}`);
+    } else if (searchBudgetCountFromGoal < 30) {
+      assumptions.push(`Will request wider candidate set from Google Places (30-50), then verify via CVL and trim to ${userRequestedCount}`);
     }
     assumptions.push(`Location "${city}" will be used as-is in the Google Places text query`);
 
     const userRequestedCountFinal: number | null = rc.requested_count_value;
-    let searchBudgetCount = userSpecifiedCount ? Math.min(50, Math.max(30, requestedCount)) : DEFAULT_LEADS_TARGET;
+    let searchBudgetCount = userSpecifiedCount ? Math.min(50, Math.max(30, searchBudgetCountFromGoal)) : DEFAULT_LEADS_TARGET;
     let searchCount = searchBudgetCount;
     const postProcessing: string[] = [];
     if (prefixFilter) postProcessing.push(`Filter names starting with "${prefixFilter}"`);
@@ -2415,9 +2421,9 @@ class SupervisorService {
           console.log(`[TOWER_LOOP_CHAT] Name contains filter "${nameFilter}": ${before} → ${leads.length}`);
         }
 
-        if (leads.length > requestedCount) {
-          leads = leads.slice(0, requestedCount);
-          console.log(`[TOWER_LOOP_CHAT] Trimmed to requested count: ${leads.length}`);
+        if (leads.length > searchBudgetCount) {
+          leads = leads.slice(0, searchBudgetCount);
+          console.log(`[TOWER_LOOP_CHAT] Trimmed to search budget: ${leads.length} (user requested=${userRequestedCountFinal ?? 'any'})`);
         }
       } else {
         console.log(`[TOWER_LOOP_CHAT] SEARCH_PLACES returned 0 results or failed — using stub leads`);
@@ -2502,7 +2508,7 @@ class SupervisorService {
             step_index: 0,
             step_status: towerLoopStepStatus,
             inputs_summary: compactInputs({ query: businessType, location: city, country, maxResults: searchCount }),
-            outputs_summary: { leads_count: leads.length, used_stub: usedStub, prefix_filter: prefixFilter || null, name_filter: nameFilter || null, attribute_filter: attributeFilter || null, requested_count: requestedCount, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}), ...(searchDebug ? { search_debug: searchDebug } : {}) },
+            outputs_summary: { leads_count: leads.length, used_stub: usedStub, prefix_filter: prefixFilter || null, name_filter: nameFilter || null, attribute_filter: attributeFilter || null, search_budget_count: searchBudgetCount, ...(towerLoopStepError ? { fallback_error: towerLoopStepError } : {}), ...(searchDebug ? { search_debug: searchDebug } : {}) },
             ...safeOutputsRaw({ leads: safeLeads } as Record<string, unknown>),
             timings: {
               started_at: new Date(towerLoopStepStartedAt).toISOString(),
@@ -2754,6 +2760,7 @@ class SupervisorService {
     }
 
     // 6. Create leads_list artefact (persisted to DB)
+    const leadsForDelivery = userRequestedCountFinal !== null ? leads.slice(0, userRequestedCountFinal) : leads;
     const v1Label = buildConstraintLabel(v1Constraints, v1Constraints, 1);
     const leadsListPayload = {
       original_user_goal: originalUserGoal,
@@ -2761,7 +2768,7 @@ class SupervisorService {
       hard_constraints,
       soft_constraints,
       plan_artefact_id: planArtefact.id,
-      delivered_count: leads.length,
+      delivered_count: leadsForDelivery.length,
       target_count: rc.requested_count_effective,
       success_criteria: successCriteria,
       structured_constraints: structuredConstraints,
@@ -2778,14 +2785,15 @@ class SupervisorService {
       requested_count_internal: searchBudgetCount,
       relaxed_constraints: v1Label.relaxed_constraints,
       constraint_diffs: v1Label.constraint_diffs,
-      leads: leads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website })),
+      leads: leadsForDelivery.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website })),
     };
 
+    const leadsListDeliveredCount = leadsForDelivery.length;
     const leadsListArtefact = await createArtefact({
       runId: chatRunId,
       type: 'leads_list',
-      title: artefactTitle('Leads list:', leads.length, v1Constraints, 1),
-      summary: artefactSummary('Delivered ', leads.length, displayCount, v1Constraints, 1, usedStub ? '(stub fallback)' : undefined),
+      title: artefactTitle('Leads list:', leadsListDeliveredCount, v1Constraints, 1),
+      summary: artefactSummary('Delivered ', leadsListDeliveredCount, displayCount, v1Constraints, 1, usedStub ? '(stub fallback)' : undefined),
       payload: leadsListPayload,
       userId: task.user_id,
       conversationId,
@@ -2800,6 +2808,23 @@ class SupervisorService {
       runType: 'plan',
       metadata: { artefactId: leadsListArtefact.id, artefactType: 'leads_list', leads_count: leads.length, used_stub: usedStub },
     });
+
+    await createArtefact({
+      runId: chatRunId,
+      type: 'count_diagnostic',
+      title: `Count diagnostic: user=${userRequestedCountFinal ?? 'any'} budget=${searchBudgetCount} google=${leads.length} delivered=${leadsListDeliveredCount}`,
+      summary: `userRequestedCountFinal=${userRequestedCountFinal}, searchBudgetCount=${searchBudgetCount}, candidateCountFromGoogle=${leads.length}, deliveredCountAfterTrim=${leadsListDeliveredCount}`,
+      payload: {
+        userRequestedCountFinal,
+        searchBudgetCount,
+        candidateCountFromGoogle: leads.length,
+        deliveredCountAfterTrim: leadsListDeliveredCount,
+        parsedGoalSearchBudget: parsedGoal.search_budget_count,
+        parsedGoalRequestedCountUser: parsedGoal.requested_count_user,
+      },
+      userId: task.user_id,
+      conversationId,
+    }).catch(err => console.error(`[COUNT_DIAGNOSTIC] failed to persist:`, err));
 
     // 8. INVARIANT: Tower must NOT judge leads before verification is complete.
     //    Tower will be called exactly once on the final_delivery artefact after CVL verification.
@@ -2835,7 +2860,7 @@ class SupervisorService {
       base_location: city,
       country,
       search_count: searchBudgetCount,
-      requested_count: requestedCount,
+      requested_count: searchBudgetCount,
       requested_count_user: rc.requested_count_value, requested_count_effective: rc.requested_count_effective,
       search_budget_count: searchBudgetCount,
       prefix_filter: prefixFilter,
@@ -4448,11 +4473,12 @@ class SupervisorService {
       conversationId,
     }).catch(() => {});
 
-    const dsLeads = accumulatedCandidates.size > 0
+    const dsLeadsRaw = accumulatedCandidates.size > 0
       ? Array.from(accumulatedCandidates.values())
           .filter(c => finalLeads.some(fl => fl.placeId === c.place_id || fl.name === c.name))
           .map(c => ({ entity_id: c.place_id || c.dedupe_key, name: c.name, address: c.address || '', found_in_plan_version: c.found_in_plan_version }))
       : finalLeads.map(l => ({ entity_id: l.placeId, name: l.name, address: l.address, found_in_plan_version: 1 }));
+    const dsLeads = userRequestedCountFinal !== null ? dsLeadsRaw.slice(0, userRequestedCountFinal) : dsLeadsRaw;
     const dsHardUnverifiable = cvlVerification?.summary?.unverifiable_hard_constraints ?? [];
     const dsVerdict = finalLeads.length > 0 ? 'pass' : finalVerdict;
     const dsStopReason: string | null = null;
