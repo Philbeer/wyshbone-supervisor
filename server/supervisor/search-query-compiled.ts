@@ -21,6 +21,7 @@ export interface SearchQueryCompiledPayload {
   query_broadening_terms: string | null;
   replans_used: number;
   max_replans: number;
+  contact_requests?: { email: boolean; phone: boolean; website: boolean };
 }
 
 export async function emitSearchQueryCompiled(params: {

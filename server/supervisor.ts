@@ -1664,6 +1664,12 @@ class SupervisorService {
     const toolPreference = parsedGoal.tool_preference || undefined;
     const structuredConstraints = parsedGoal.constraints;
     const successCriteria = parsedGoal.success_criteria;
+    const contactRequests = {
+      email: parsedGoal.include_email,
+      phone: parsedGoal.include_phone,
+      website: parsedGoal.include_website,
+    };
+    const hasContactRequests = contactRequests.email || contactRequests.phone || contactRequests.website;
 
     const userRequestedCount = parsedGoal.requested_count_user ?? undefined;
     if (searchQuery?.count) {
@@ -2297,7 +2303,8 @@ class SupervisorService {
 
     const planPayload = {
       run_id: chatRunId,
-      original_user_goal: originalUserGoal,
+      original_user_goal: normalizedGoal,
+      raw_user_input: originalUserGoal,
       normalized_goal: normalizedGoal,
       hard_constraints,
       soft_constraints,
@@ -2313,6 +2320,7 @@ class SupervisorService {
       search_budget_count: searchBudgetCount,
       name_filter: nameFilter || null,
       attribute_filter: attributeFilter || null,
+      ...(hasContactRequests ? { contact_requests: contactRequests, contact_requests_note: 'Enrichment-only. NOT search constraints. Do not fail if contact info is incomplete.' } : {}),
       created_at: new Date().toISOString(),
     };
 
@@ -4174,6 +4182,15 @@ class SupervisorService {
       hard_constraints,
       soft_constraints,
       constraints: typedConstraints,
+      ...(hasContactRequests ? {
+        contact_requests: contactRequests,
+        contact_enrichment: {
+          requested: contactRequests,
+          leads_with_website: finalLeads.filter(l => l.website).length,
+          leads_with_phone: finalLeads.filter(l => l.phone).length,
+          note: 'Enrichment metric only — not a pass/fail criterion',
+        },
+      } : {}),
       used_stub: usedStub,
       run_deadline_exceeded: runDeadlineExceeded,
     };
@@ -4226,6 +4243,10 @@ class SupervisorService {
       attribute_verification_stopped: attributeVerificationStopped,
       run_deadline_exceeded: runDeadlineExceeded,
       ...(queryShapeKey ? { query_shape_key: queryShapeKey } : {}),
+      ...(hasContactRequests ? {
+        contact_requests: contactRequests,
+        contact_requests_note: 'Enrichment-only delivery preferences. NOT hard or soft constraints. Do NOT fail the run if contact info (email/phone/website) is missing or incomplete. Only fail if business_type, location, or count hard constraints are unmet.',
+      } : {}),
     };
 
     let finalTowerResult;
@@ -4623,11 +4644,12 @@ class SupervisorService {
       candidate_count_from_google: candidateCountFromGoogle,
       final_returned_count: finalLeads.length,
       stop_reason: compiledStopReason,
-      original_goal: originalUserGoal,
+      original_goal: normalizedGoal,
       query_broadening_applied: queryBroadeningApplied,
       query_broadening_terms: queryBroadeningTerms,
       replans_used: replansUsed,
       max_replans: MAX_REPLANS,
+      ...(hasContactRequests ? { contact_requests: contactRequests } : {}),
     };
 
     try {

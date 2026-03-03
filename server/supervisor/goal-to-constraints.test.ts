@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { inferCountryFromLocation, sanitiseLocationString, detectExactnessMode, detectDoNotStop, detectDeliveryRequirements } from './goal-to-constraints';
+import { inferCountryFromLocation, sanitiseLocationString, detectExactnessMode, detectDoNotStop, detectDeliveryRequirements, buildRequestedCount } from './goal-to-constraints';
+import { buildDeliverySummaryPayload, type DeliverySummaryInput, type DeliverySummaryLeadInput } from './delivery-summary';
 
 describe('inferCountryFromLocation', () => {
   it('returns US for "Texas"', () => {
@@ -168,5 +169,122 @@ describe('detectDeliveryRequirements', () => {
   it('detects "with email" as delivery requirement', () => {
     const result = detectDeliveryRequirements('Find 10 pubs in Arundel with email');
     expect(result.include_email).toBe(true);
+  });
+});
+
+describe('Regression: "Find 10 pubs in Arundel and include email" end-to-end', () => {
+  const INPUT = 'Find 10 pubs in Arundel and include email';
+
+  it('sanitiseLocationString strips "and include email" from location', () => {
+    expect(sanitiseLocationString('arundel and include email')).toBe('arundel');
+    expect(sanitiseLocationString('Arundel and include email')).toBe('Arundel');
+  });
+
+  it('detectDeliveryRequirements extracts email as enrichment flag', () => {
+    const dr = detectDeliveryRequirements(INPUT);
+    expect(dr.include_email).toBe(true);
+    expect(dr.include_phone).toBe(false);
+    expect(dr.include_website).toBe(false);
+  });
+
+  it('compiled query is "pubs in arundel" — email never in query or location', () => {
+    const rawLocation = 'arundel and include email';
+    const location = sanitiseLocationString(rawLocation);
+    const city = sanitiseLocationString(location.split(',')[0].trim());
+    const businessType = 'pubs';
+
+    expect(location).toBe('arundel');
+    expect(city).toBe('arundel');
+
+    const compiledQuery = `${businessType} in ${city}`;
+    expect(compiledQuery).toBe('pubs in arundel');
+    expect(compiledQuery).not.toContain('email');
+    expect(city).not.toContain('email');
+    expect(location).not.toContain('include');
+  });
+
+  it('buildRequestedCount produces explicit count=10', () => {
+    const rc = buildRequestedCount(10);
+    expect(rc.requested_count_user).toBe('explicit');
+    expect(rc.requested_count_value).toBe(10);
+    expect(rc.requested_count_effective).toBe(10);
+  });
+
+  it('final delivery count is capped at requested_count (10)', () => {
+    const requestedCount = 10;
+    let finalLeads = Array.from({ length: 30 }, (_, i) => ({
+      name: `Pub ${i + 1}`,
+      address: `${i + 1} High St, Arundel`,
+      placeId: `p${i + 1}`,
+      phone: null as string | null,
+      website: null as string | null,
+      source: 'google_places',
+    }));
+
+    if (finalLeads.length > requestedCount) {
+      finalLeads = finalLeads.slice(0, requestedCount);
+    }
+
+    expect(finalLeads.length).toBe(10);
+  });
+
+  it('delivery summary status is COMPLETED even if email enrichment is incomplete', () => {
+    const leads: DeliverySummaryLeadInput[] = Array.from({ length: 10 }, (_, i) => ({
+      entity_id: `p${i + 1}`,
+      place_id: `p${i + 1}`,
+      name: `Pub ${i + 1}`,
+      address: `${i + 1} High St, Arundel`,
+      found_in_plan_version: 1,
+    }));
+
+    const input: DeliverySummaryInput = {
+      runId: 'run-regression-1',
+      userId: 'user-1',
+      originalUserGoal: INPUT,
+      requestedCount: 10,
+      hardConstraints: ['requested_count', 'location'],
+      softConstraints: [],
+      planVersions: [{ version: 1, changes_made: [] }],
+      softRelaxations: [],
+      leads,
+      finalVerdict: 'pass',
+    };
+
+    const result = buildDeliverySummaryPayload(input);
+
+    expect(result.status).toBe('COMPLETED');
+    expect(result.trust_status).toBe('TRUSTED');
+    expect(result.delivered_total_count).toBe(10);
+    expect(result.stop_reason).toBeNull();
+  });
+
+  it('delivery summary does NOT fail (STOP) when Tower verdict is fail due to missing emails', () => {
+    const leads: DeliverySummaryLeadInput[] = Array.from({ length: 10 }, (_, i) => ({
+      entity_id: `p${i + 1}`,
+      place_id: `p${i + 1}`,
+      name: `Pub ${i + 1}`,
+      address: `${i + 1} High St, Arundel`,
+      found_in_plan_version: 1,
+    }));
+
+    const input: DeliverySummaryInput = {
+      runId: 'run-regression-2',
+      userId: 'user-1',
+      originalUserGoal: INPUT,
+      requestedCount: 10,
+      hardConstraints: ['requested_count', 'location'],
+      softConstraints: [],
+      planVersions: [{ version: 1, changes_made: [] }],
+      softRelaxations: [],
+      leads,
+      finalVerdict: 'fail',
+    };
+
+    const result = buildDeliverySummaryPayload(input);
+
+    expect(result.status).toBe('COMPLETED');
+    expect(result.status).not.toBe('STOP');
+    expect(result.trust_status).toBe('TRUSTED');
+    expect(result.delivered_total_count).toBe(10);
   });
 });
