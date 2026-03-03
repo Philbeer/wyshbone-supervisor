@@ -14,7 +14,8 @@ import { redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-e
 import { buildToolPlan, persistToolPlanExplainer, getOrderedToolNames, type LeadContext, type ToolStepId, type ToolPlanExplainer } from './supervisor/tool-planning-policy';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
 import { extractChangePlanDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, type PlanV2Constraints } from './supervisor/replan-policy';
-import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, buildRequestedCount, DEFAULT_LEADS_TARGET, type ParsedGoal, type StructuredConstraint, type RequestedCountCanonical } from './supervisor/goal-to-constraints';
+import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, buildRequestedCount, DEFAULT_LEADS_TARGET, sanitiseLocationString, detectExactnessMode, detectDoNotStop, type ParsedGoal, type StructuredConstraint, type RequestedCountCanonical, type ExactnessMode } from './supervisor/goal-to-constraints';
+import { emitSearchQueryCompiled, type SearchQueryCompiledPayload } from './supervisor/search-query-compiled';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
 import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type DeliverySummaryPayload } from './supervisor/delivery-summary';
 import { writeBeliefs } from './supervisor/belief-writer';
@@ -1671,7 +1672,8 @@ class SupervisorService {
     }
     if (!businessType) businessType = 'pubs';
     if (!location) location = 'Local';
-    let city = location.split(',')[0].trim();
+    location = sanitiseLocationString(location);
+    let city = sanitiseLocationString(location.split(',')[0].trim());
     const countryFromGoal = parsedGoal.country;
     const { inferCountryFromLocation } = await import('./supervisor/goal-to-constraints');
     const rawCountryPart = location.split(',')[1]?.trim();
@@ -1680,6 +1682,14 @@ class SupervisorService {
     const rc: RequestedCountCanonical = buildRequestedCount(parsedGoal.requested_count_user);
     const userSpecifiedCount = rc.requested_count_user === 'explicit';
     const displayCount = rc.requested_count_value;
+    const exactnessMode: ExactnessMode = detectExactnessMode(originalUserGoal);
+    const doNotStopDetected = detectDoNotStop(originalUserGoal);
+    if (doNotStopDetected) {
+      console.log(`[SUPERVISOR] "do not stop" detected in goal — ignoring, enforcing budgets instead`);
+    }
+    let candidateCountFromGoogle = 0;
+    let queryBroadeningApplied = false;
+    let queryBroadeningTerms: string | null = null;
 
     if (attributeFilter) {
       const attrRegex = new RegExp(`\\s+with\\s+(?:a\\s+)?${attributeFilter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
@@ -2369,6 +2379,7 @@ class SupervisorService {
       searchDebug = (searchResult.data?.search_debug as Record<string, unknown>) ?? null;
       if (searchResult.success && searchResult.data?.places && Array.isArray(searchResult.data.places)) {
         const places = searchResult.data.places as any[];
+        candidateCountFromGoogle = places.length;
         for (const p of places) {
           leads.push({
             name: p.name || p.displayName?.text || 'Unknown Business',
@@ -2979,7 +2990,7 @@ class SupervisorService {
       country,
       search_count: searchBudgetCount,
       requested_count: requestedCount,
-      requested_count_user: rc.requested_count_user, requested_count_effective: rc.requested_count_effective,
+      requested_count_user: rc.requested_count_value, requested_count_effective: rc.requested_count_effective,
       search_budget_count: searchBudgetCount,
       prefix_filter: prefixFilter,
       radius_rung: 0,
@@ -3685,6 +3696,10 @@ class SupervisorService {
       for (const adj of replanResult.adjustments_applied) {
         console.log(`[REPLAN]   ${adj.action} ${adj.field}: ${JSON.stringify(adj.from)} → ${JSON.stringify(adj.to)} (${adj.reason})`);
         dsChanges.push(`${adj.action} ${adj.field}: ${JSON.stringify(adj.from)} → ${JSON.stringify(adj.to)}`);
+        if (adj.field === 'business_type' && adj.action === 'broaden' && typeof adj.to === 'string' && adj.to.includes(' OR ')) {
+          queryBroadeningApplied = true;
+          queryBroadeningTerms = String(adj.to);
+        }
         if (soft_constraints.includes(adj.field)) {
           dsSoftRelaxations.push({
             constraint: adj.field,
@@ -4823,6 +4838,46 @@ class SupervisorService {
 
     const runElapsedMs = Date.now() - runStartTime;
     console.log(`[TOWER_LOOP_CHAT] [complete] leads=${finalLeads.length} verdict=${finalVerdict} halted=${isHalted} plan_version=${planVersion} stub=${usedStub} elapsed_ms=${runElapsedMs} tool_calls=${runToolCallCount}${runDeadlineExceeded ? ` deadline_exceeded=${runDeadlineReason}` : ''}`);
+
+    let compiledStopReason = 'completed';
+    if (runDeadlineExceeded) compiledStopReason = 'budget_exhausted';
+    else if (replansUsed >= MAX_REPLANS) compiledStopReason = 'budget_exhausted';
+    else if (candidateCountFromGoogle === 0) compiledStopReason = 'no_candidates';
+    else if (userSpecifiedCount && finalLeads.length < (userRequestedCountFinal ?? 0)) compiledStopReason = 'underfilled';
+    else if (finalVerdict === 'stop' || finalVerdict === 'STOP') compiledStopReason = 'tower_stop';
+
+    const searchQueryCompiledPayload: SearchQueryCompiledPayload = {
+      interpreted_location: city,
+      interpreted_query: businessType,
+      requested_count: userRequestedCountFinal,
+      exactness_mode: exactnessMode,
+      do_not_stop_ignored: doNotStopDetected,
+      search_mode: 'Text Search first',
+      pages_budget_allowed: Math.ceil(searchBudgetCount / 20),
+      pages_budget_used: replansUsed + 1,
+      radius_start: 0,
+      radius_current: currentConstraints.radius_km ?? 0,
+      radius_escalated: (currentConstraints.radius_rung ?? 0) > 0,
+      candidate_count_from_google: candidateCountFromGoogle,
+      final_returned_count: finalLeads.length,
+      stop_reason: compiledStopReason,
+      original_goal: originalUserGoal,
+      query_broadening_applied: queryBroadeningApplied,
+      query_broadening_terms: queryBroadeningTerms,
+      replans_used: replansUsed,
+      max_replans: MAX_REPLANS,
+    };
+
+    try {
+      await emitSearchQueryCompiled({
+        runId: chatRunId,
+        userId: task.user_id,
+        conversationId,
+        payload: searchQueryCompiledPayload,
+      });
+    } catch (sqcErr: any) {
+      console.error(`[SEARCH_QUERY_COMPILED] Failed: ${sqcErr.message}`);
+    }
 
     return {
       response: chatResponse,

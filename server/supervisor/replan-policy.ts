@@ -1,6 +1,31 @@
 import type { ArtefactJudgementResponse } from './tower-artefact-judge';
 import { RADIUS_LADDER_KM } from './agent-loop';
 
+const QUERY_SYNONYM_MAP: Record<string, string> = {
+  'pubs': 'bar OR inn OR public house',
+  'pub': 'bar OR inn OR public house',
+  'bars': 'pub OR lounge OR tavern',
+  'bar': 'pub OR lounge OR tavern',
+  'restaurants': 'eatery OR bistro OR dining',
+  'restaurant': 'eatery OR bistro OR dining',
+  'cafes': 'coffee shop OR cafe OR tea room',
+  'cafe': 'coffee shop OR cafe OR tea room',
+  'coffee shops': 'cafe OR cafes OR tea room',
+  'hotels': 'inn OR guest house OR bed and breakfast',
+  'hotel': 'inn OR guest house OR bed and breakfast',
+  'gyms': 'fitness centre OR health club OR gym',
+  'gym': 'fitness centre OR health club OR gym',
+  'dentists': 'dental practice OR dental surgery OR dental clinic',
+  'dentist': 'dental practice OR dental surgery OR dental clinic',
+  'hairdressers': 'hair salon OR barber OR beauty salon',
+  'hairdresser': 'hair salon OR barber OR beauty salon',
+};
+
+export function getQueryBroadeningTerms(businessType: string): string | null {
+  const key = businessType.toLowerCase().trim();
+  return QUERY_SYNONYM_MAP[key] ?? null;
+}
+
 export interface TowerGap {
   type: string;
   severity: 'critical' | 'high' | 'medium' | 'low';
@@ -28,6 +53,7 @@ export interface PlanV2Constraints {
   search_count: number;
   requested_count: number;
   requested_count_user: number | null;
+  requested_count_effective: number;
   search_budget_count: number;
   prefix_filter: string | undefined;
   radius_rung: number;
@@ -349,6 +375,22 @@ export function applyLeadgenReplanPolicy(
       no_progress = false;
     } else {
       cannot_expand_further = true;
+    }
+  }
+
+  if (no_progress && !next.business_type.includes(' OR ') && !isConstraintHard('business_type', hardConstraints)) {
+    const synonyms = getQueryBroadeningTerms(next.business_type);
+    if (synonyms) {
+      const broadened = `${next.business_type} OR ${synonyms}`;
+      adjustments.push({
+        field: 'business_type',
+        action: 'broaden',
+        from: next.business_type,
+        to: broadened,
+        reason: 'Underfill recovery: broadening query with synonyms',
+      });
+      next.business_type = broadened;
+      no_progress = false;
     }
   }
 

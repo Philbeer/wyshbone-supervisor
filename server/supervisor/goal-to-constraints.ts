@@ -72,7 +72,7 @@ You must return a JSON object with these fields:
 - requested_count_user: the number the user explicitly asked for (number or null if not specified). Do NOT invent a count — if the user says "find pubs in london" without a number, set this to null.
 - search_budget_count: always max(30, requested_count_user * 3 or 30), capped at 50 — we pull a wider candidate set for post-search verification
 - business_type: the CORE type of business ONLY (e.g. "pubs", "dentists", "restaurants"). NEVER include attribute qualifiers here. "pubs with beer garden" → business_type="pubs", attribute_filter="beer garden". "restaurants with outdoor seating" → business_type="restaurants", attribute_filter="outdoor seating".
-- location: the location (e.g. "arundel", "london")
+- location: the geographic location ONLY (e.g. "arundel", "london"). NEVER include count instructions, "return exactly" clauses, or "do not stop" phrases in the location. For "Find 20 pubs in Arundel and return exactly 20 results", the location is ONLY "Arundel", not "Arundel and return exactly 20 results".
 - country: country code or name. ALWAYS infer the country from the location. For US states (e.g. Texas, California, New York, Florida, etc.) or US cities, use "US". For UK locations (e.g. London, Sussex, Manchester, Kent, etc.), use "UK". For other countries, use the appropriate country code. If truly ambiguous, default to "UK".
 - prefix_filter: if user wants names starting with a specific letter/prefix (string or null)
 - name_filter: if user wants names containing a specific word IN THE BUSINESS NAME (string or null). Only use this for explicit name-matching requests like "with the word swan in the name".
@@ -196,8 +196,43 @@ export function inferCountryFromLocation(location: string): string {
   return 'UK';
 }
 
+export function sanitiseLocationString(raw: string): string {
+  let loc = raw.trim();
+  loc = loc.replace(/\s+and\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
+  loc = loc.replace(/\s+and\s+return\s+exactly\s+\d+\.?/gi, '');
+  loc = loc.replace(/\.?\s*If\s+fewer\s+than\s+\d+\s+are\s+found[^]*$/gi, '');
+  loc = loc.replace(/\s*,?\s*do\s+not\s+stop\.?$/gi, '');
+  loc = loc.replace(/\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
+  loc = loc.replace(/[.!]+$/, '');
+  loc = loc.replace(/,\s*$/, '');
+  return loc.trim();
+}
+
+export type ExactnessMode = 'hard' | 'soft';
+
+export function detectExactnessMode(rawGoal: string): ExactnessMode {
+  const lower = rawGoal.toLowerCase();
+  if (/return\s+none\s+if\s+you\s+cannot\s+return\s+exactly/i.test(lower)) return 'hard';
+  if (/must\s+be\s+exactly\s+\d+/i.test(lower)) return 'hard';
+  return 'soft';
+}
+
+export function detectDoNotStop(rawGoal: string): boolean {
+  return /do\s+not\s+stop/i.test(rawGoal);
+}
+
+function stripInstructionClauses(rawGoal: string): string {
+  let msg = rawGoal;
+  msg = msg.replace(/\.\s*If\s+fewer\s+than\s+\d+\s+are\s+found[^.]*\.?/gi, '.');
+  msg = msg.replace(/\s+and\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
+  msg = msg.replace(/\s+return\s+exactly\s+\d+\s+results?\.?/gi, '');
+  msg = msg.replace(/,?\s*do\s+not\s+stop\.?/gi, '');
+  return msg.trim();
+}
+
 function regexFallback(rawGoal: string): ParsedGoal {
-  const msg = rawGoal.trim();
+  const cleaned = stripInstructionClauses(rawGoal);
+  const msg = cleaned.trim();
   const constraints: StructuredConstraint[] = [];
   const requiredIds: string[] = [];
   const optionalIds: string[] = [];
@@ -210,9 +245,16 @@ function regexFallback(rawGoal: string): ParsedGoal {
   let nameFilter: string | null = null;
   let toolPreference: string | null = null;
 
-  const countMatch = msg.match(/\bfind\s+(\d+)\s+/i);
+  const countMatch = rawGoal.match(/\bfind\s+(\d+)\s+/i);
   if (countMatch) {
     requestedCountUser = Math.min(parseInt(countMatch[1], 10), 200);
+  }
+
+  if (!requestedCountUser) {
+    const returnExactlyMatch = rawGoal.match(/return\s+exactly\s+(\d+)/i);
+    if (returnExactlyMatch) {
+      requestedCountUser = Math.min(parseInt(returnExactlyMatch[1], 10), 200);
+    }
   }
 
   const numTypeMatch = msg.match(/\bfind\s+(?:\d+\s+)?([a-zA-Z\s]+?)(?:\s+in\b)/i);
@@ -220,9 +262,9 @@ function regexFallback(rawGoal: string): ParsedGoal {
     businessType = numTypeMatch[1].trim().replace(/^\d+\s*/, '') || 'pubs';
   }
 
-  const inMatch = msg.match(/\bin\s+([A-Z][a-zA-Z\s,]+?)(?:\s+(?:that|who|which|with|using)\b|$)/i);
+  const inMatch = msg.match(/\bin\s+([A-Z][a-zA-Z\s,]+?)(?:\s+(?:that|who|which|with|using|and)\b|$)/i);
   if (inMatch) {
-    const loc = inMatch[1].trim().replace(/,\s*$/, '');
+    const loc = sanitiseLocationString(inMatch[1]);
     const parts = loc.split(',');
     location = parts[0].trim();
     if (parts[1]) {
@@ -335,6 +377,13 @@ export async function parseGoalToConstraints(rawUserGoal: string): Promise<Parse
     raw.original_goal = rawUserGoal;
 
     const parsed = ParsedGoalSchema.parse(raw);
+
+    parsed.location = sanitiseLocationString(parsed.location);
+
+    const locConstraint = parsed.constraints.find(c => c.type === 'LOCATION_EQUALS' || c.type === 'LOCATION_NEAR');
+    if (locConstraint && typeof locConstraint.value === 'string') {
+      locConstraint.value = sanitiseLocationString(locConstraint.value);
+    }
 
     parsed.constraints = parsed.constraints.filter(c => c.type !== 'CATEGORY_EQUALS');
     parsed.success_criteria.required_constraints = parsed.success_criteria.required_constraints.filter(id => id !== 'c_category');
