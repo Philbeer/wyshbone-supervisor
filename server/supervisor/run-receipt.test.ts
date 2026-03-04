@@ -64,6 +64,26 @@ function makeContactExtractArtefact(id: string, name: string, emails: string[], 
   };
 }
 
+function makeStepResultContactExtract(id: string, name: string, placeId: string, emails: string[], phones: string[]) {
+  return {
+    id,
+    type: 'step_result' as const,
+    title: `Step result: CONTACT_EXTRACT – "${name}"`,
+    payloadJson: {
+      step_type: 'CONTACT_EXTRACT',
+      step_title: `CONTACT_EXTRACT – ${name}`,
+      lead_place_id: placeId,
+      lead_name: name,
+      contact_extract_outputs: {
+        contacts: {
+          emails,
+          phones,
+        },
+      },
+    },
+  };
+}
+
 describe('buildRunReceiptFromArtefacts', () => {
   it('produces correct proven counts with matched contact artefacts', () => {
     const input = makeInput();
@@ -209,5 +229,68 @@ describe('buildRunReceiptFromArtefacts', () => {
     expect(receipt.replans_used).toBe(0);
     expect(receipt.delivered_leads).toHaveLength(10);
     expect(receipt.delivered_leads[0]).toEqual({ name: 'The Red Lion', place_id: 'place_1' });
+  });
+
+  it('detects CONTACT_EXTRACT from step_result artefacts (production format)', () => {
+    const input = makeInput({
+      deliveredLeads: [
+        { name: 'The Red Lion', placeId: 'place_1', website: 'https://redlion.co.uk' },
+        { name: 'The Black Rabbit', placeId: 'place_2', website: 'https://blackrabbit.co.uk' },
+        { name: 'The Kings Arms', placeId: 'place_3', website: null },
+      ],
+    });
+    const artefacts = [
+      makeLeadPackArtefact('lp1', 'The Red Lion', 'place_1', ['admin@redlion.co.uk'], ['01903 882214']),
+      makeLeadPackArtefact('lp2', 'The Black Rabbit', 'place_2', [], []),
+      makeStepResultContactExtract('sr-ce1', 'The Red Lion', 'place_1', ['admin@redlion.co.uk'], ['01903 882214']),
+      makeStepResultContactExtract('sr-ce2', 'The Black Rabbit', 'place_2', ['info@blackrabbit.co.uk'], ['01903 882638']),
+    ];
+
+    const receipt = buildRunReceiptFromArtefacts(input, artefacts);
+
+    expect(receipt.contact_extraction_attempted_count).toBe(2);
+    expect(receipt.contact_sources_used).toContain('contact_extract');
+    expect(receipt.contact_sources_used).toContain('lead_pack');
+    expect(receipt.contacts_proven).toBe(true);
+    expect(receipt.unique_email_count).toBe(2);
+    expect(receipt.unique_phone_count).toBe(2);
+    expect(receipt.debug.artefact_ids_used.contact_extract).toEqual(['sr-ce1', 'sr-ce2']);
+  });
+
+  it('handles mixed contact_extract and step_result artefact types', () => {
+    const input = makeInput({
+      deliveredLeads: [
+        { name: 'The Red Lion', placeId: 'place_1', website: 'https://redlion.co.uk' },
+        { name: 'The Black Rabbit', placeId: 'place_2', website: 'https://blackrabbit.co.uk' },
+      ],
+    });
+    const artefacts = [
+      makeContactExtractArtefact('ce1', 'The Red Lion', ['admin@redlion.co.uk'], []),
+      makeStepResultContactExtract('sr-ce1', 'The Black Rabbit', 'place_2', ['info@blackrabbit.co.uk'], ['01903 882638']),
+    ];
+
+    const receipt = buildRunReceiptFromArtefacts(input, artefacts);
+
+    expect(receipt.contact_extraction_attempted_count).toBe(2);
+    expect(receipt.contacts_proven).toBe(true);
+    expect(receipt.unique_email_count).toBe(2);
+    expect(receipt.unique_phone_count).toBe(1);
+  });
+
+  it('counts step_result CONTACT_EXTRACT as attempted even when no contacts found', () => {
+    const input = makeInput({
+      deliveredLeads: [
+        { name: 'The Red Lion', placeId: 'place_1', website: 'https://redlion.co.uk' },
+      ],
+    });
+    const artefacts = [
+      makeStepResultContactExtract('sr-ce1', 'The Red Lion', 'place_1', [], []),
+    ];
+
+    const receipt = buildRunReceiptFromArtefacts(input, artefacts);
+
+    expect(receipt.contact_extraction_attempted_count).toBe(1);
+    expect(receipt.contacts_proven).toBe(false);
+    expect(receipt.debug.artefact_ids_used.contact_extract).toEqual(['sr-ce1']);
   });
 });

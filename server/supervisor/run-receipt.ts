@@ -106,15 +106,28 @@ export function buildRunReceiptFromArtefacts(
   const leadPackArtefacts = allArtefacts.filter(a => a.type === 'lead_pack');
   const contactExtractArtefacts = allArtefacts.filter(a => a.type === 'contact_extract');
 
+  const stepResultContactExtracts = allArtefacts.filter(a => {
+    if (a.type !== 'step_result') return false;
+    const p = a.payloadJson as any;
+    return p?.step_type === 'CONTACT_EXTRACT';
+  });
+
+  const allContactExtractArtefacts = [...contactExtractArtefacts, ...stepResultContactExtracts];
+
   const matchedLeadPacks = leadPackArtefacts.filter(a =>
     matchesDeliveredLead(a.title, a.payloadJson, input.deliveredLeads),
   );
-  const matchedContactExtracts = contactExtractArtefacts.filter(a => {
+  const matchedContactExtracts = allContactExtractArtefacts.filter(a => {
     const p = a.payloadJson as any;
     if (matchesDeliveredLead(a.title, p, input.deliveredLeads)) return true;
     const parentStepTitle = p?.step_title || a.title || '';
     for (const dl of input.deliveredLeads) {
       if (parentStepTitle.includes(dl.name)) return true;
+    }
+    if (p?.lead_place_id && input.deliveredLeads.some(dl => dl.placeId === p.lead_place_id)) return true;
+    if (p?.lead_name) {
+      const norm = p.lead_name.trim().toLowerCase();
+      if (input.deliveredLeads.some(dl => dl.name.trim().toLowerCase() === norm)) return true;
     }
     return false;
   });
@@ -130,7 +143,7 @@ export function buildRunReceiptFromArtefacts(
 
   for (const ce of matchedContactExtracts) {
     const p = ce.payloadJson as any;
-    const contacts = p?.outputs?.contacts || p?.contacts;
+    const contacts = p?.outputs?.contacts || p?.contacts || p?.contact_extract_outputs?.contacts;
     if (contacts?.emails) {
       contactSourcesUsed.add('contact_extract');
       for (const e of contacts.emails) {

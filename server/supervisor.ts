@@ -2788,12 +2788,7 @@ class SupervisorService {
 
               const enrichStepFinishedAt = Date.now();
               try {
-                const enrichStepArtefact = await createArtefact({
-                  runId: chatRunId,
-                  type: 'step_result',
-                  title: `Step result: ${tool} – "${lead.name}"`,
-                  summary: `${enrichResult.success ? 'success' : 'fail'} – ${enrichResult.summary}`,
-                  payload: {
+                const enrichStepPayload: Record<string, unknown> = {
                     run_id: chatRunId, plan_version: 1, plan_artefact_id: planArtefact.id,
                     step_id: `${tool.toLowerCase()}_lead_${leadIdx}`,
                     step_title: `${tool} – ${lead.name}`, step_type: tool, step_index: globalStepIdx,
@@ -2802,7 +2797,23 @@ class SupervisorService {
                     inputs_summary: compactInputs(enrichToolArgs),
                     outputs_summary: { success: enrichResult.success, summary: enrichResult.summary },
                     timings: { started_at: new Date(enrichStepStartedAt).toISOString(), finished_at: new Date(enrichStepFinishedAt).toISOString(), duration_ms: enrichStepFinishedAt - enrichStepStartedAt },
-                  },
+                };
+                if (tool === 'CONTACT_EXTRACT' && enrichResult.success && enrichResult.data) {
+                  const ceOutputs = (enrichResult.data?.envelope as any)?.outputs;
+                  if (ceOutputs) {
+                    enrichStepPayload.contact_extract_outputs = {
+                      contacts: ceOutputs.contacts || { emails: [], phones: [] },
+                    };
+                    enrichStepPayload.lead_place_id = lead.placeId;
+                    enrichStepPayload.lead_name = lead.name;
+                  }
+                }
+                const enrichStepArtefact = await createArtefact({
+                  runId: chatRunId,
+                  type: 'step_result',
+                  title: `Step result: ${tool} – "${lead.name}"`,
+                  summary: `${enrichResult.success ? 'success' : 'fail'} – ${enrichResult.summary}`,
+                  payload: enrichStepPayload,
                   userId: task.user_id, conversationId,
                 });
 
