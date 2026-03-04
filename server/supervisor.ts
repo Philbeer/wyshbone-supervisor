@@ -166,6 +166,7 @@ class SupervisorService {
     console.log('🤖 Supervisor service started - monitoring for new signals...');
 
     await this.recoverOrphanedTasks();
+    await this.recoverOrphanedAgentRuns();
     this.startBackgroundClaimer();
     await this.poll();
   }
@@ -325,7 +326,7 @@ class SupervisorService {
       const { data: stuckTasks, error } = await supabase
         .from('supervisor_tasks')
         .select('id, user_id, conversation_id, request_data, created_at, status, run_id, client_request_id')
-        .eq('status', 'processing')
+        .in('status', ['processing', 'claimed'])
         .limit(50);
 
       if (error) {
@@ -339,7 +340,7 @@ class SupervisorService {
         return;
       }
 
-      console.log(`[RECOVERY] Found ${stuckTasks.length} orphaned task(s) in 'processing' state — evaluating for requeue`);
+      console.log(`[RECOVERY] Found ${stuckTasks.length} orphaned task(s) in 'processing'/'claimed' state — evaluating for requeue`);
 
       let requeued = 0;
       let skipped = 0;
@@ -363,6 +364,54 @@ class SupervisorService {
     }
   }
 
+  private async recoverOrphanedAgentRuns(): Promise<void> {
+    if (!supabase) return;
+
+    try {
+      const staleThreshold = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+      const { data: stuckRuns, error } = await supabase
+        .from('agent_runs')
+        .select('id, status, started_at, metadata')
+        .eq('status', 'executing')
+        .lt('started_at', staleThreshold)
+        .limit(20);
+
+      if (error) {
+        if (error.code === 'PGRST205' || error.code === '42P01') return;
+        console.error(`[RECOVERY_RUNS] Failed to query stuck agent_runs: ${error.message}`);
+        return;
+      }
+
+      if (!stuckRuns || stuckRuns.length === 0) {
+        console.log('[RECOVERY_RUNS] No orphaned agent_runs found on startup');
+        return;
+      }
+
+      console.log(`[RECOVERY_RUNS] Found ${stuckRuns.length} agent_run(s) stuck in 'executing' state (started > 3min ago)`);
+
+      let recovered = 0;
+      for (const run of stuckRuns) {
+        try {
+          const existingMeta = (run.metadata as Record<string, any>) || {};
+          await storage.updateAgentRun(run.id, {
+            status: 'failed',
+            terminalState: null,
+            error: 'Run was interrupted by a server restart and could not be recovered',
+            endedAt: new Date(),
+            metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'server_restart', recovered_at: new Date().toISOString() },
+          });
+          console.log(`[RECOVERY_RUNS] Marked agent_run ${run.id} as failed (server_restart_orphan)`);
+          recovered++;
+        } catch (err: any) {
+          console.error(`[RECOVERY_RUNS] Failed to recover agent_run ${run.id}: ${err.message}`);
+        }
+      }
+      console.log(`[RECOVERY_RUNS] Startup agent_runs recovery complete: ${recovered} recovered`);
+    } catch (err: any) {
+      console.error(`[RECOVERY_RUNS] Agent runs recovery failed (non-fatal): ${err.message}`);
+    }
+  }
+
   private async sweepStaleTasks(): Promise<void> {
     if (!supabase) return;
 
@@ -372,7 +421,7 @@ class SupervisorService {
       const { data: staleTasks, error } = await supabase
         .from('supervisor_tasks')
         .select('id, user_id, conversation_id, request_data, created_at, status, run_id, client_request_id')
-        .eq('status', 'processing')
+        .in('status', ['processing', 'claimed'])
         .lt('created_at', cutoffEpoch)
         .limit(20);
 
