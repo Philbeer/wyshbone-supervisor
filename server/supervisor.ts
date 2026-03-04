@@ -2923,6 +2923,8 @@ class SupervisorService {
       lead_name: string;
       lead_place_id: string;
       attribute: string;
+      attribute_raw: string;
+      matched_variant: string | null;
       search_query: string;
       web_search_success: boolean;
       url_visited: string | null;
@@ -2983,10 +2985,9 @@ class SupervisorService {
 
       type UnknownReason =
         | 'no_relevant_pages_found'
-        | 'pages_crawled_no_keywords'
+        | 'no_match_in_visited_pages'
         | 'official_site_blocked'
         | 'only_weak_third_party_mentions'
-        | 'unsupported_attribute'
         | 'no_website_from_places';
 
       const ATTR_TRACE = process.env.ATTR_VERIFY_TRACE === '1';
@@ -3010,10 +3011,10 @@ class SupervisorService {
       }
       console.log(`[ATTR_VERIFY] Cached WEB_VISIT data: ${cachedWebVisitPages.size}/${finalLeads.length} leads have existing page text`);
 
-      const ATTRIBUTE_KEYWORD_MAP: Record<string, string[]> = {
-        'live music': ['live music', 'live band', 'live bands', 'open mic', 'gigs', 'gig', 'music night', 'music nights', 'music listings', 'live entertainment', 'live acoustic'],
-        'beer garden': ['beer garden'],
-        'dog friendly': ['dog friendly', 'dogs welcome', 'dog-friendly', 'well-behaved dogs', 'well behaved dogs'],
+      const ATTRIBUTE_SYNONYM_MAP: Record<string, string[]> = {
+        'live music': ['live band', 'live bands', 'open mic', 'gigs', 'gig', 'music night', 'music nights', 'music listings', 'live entertainment', 'live acoustic'],
+        'beer garden': ['outdoor seating area', 'garden terrace'],
+        'dog friendly': ['dogs welcome', 'well-behaved dogs', 'well behaved dogs', 'four-legged friends welcome'],
       };
 
       const NEGATIVE_KEYWORD_MAP: Record<string, string[]> = {
@@ -3022,12 +3023,48 @@ class SupervisorService {
         'dog friendly': ['no dogs', 'dogs not allowed', 'no pets'],
       };
 
-      function getKeywordsForAttribute(attrValue: string): string[] | null {
+      function generateMatchVariants(attrRaw: string): string[] {
+        const base = attrRaw.toLowerCase().trim().replace(/[''""]/g, '');
+        const variants = new Set<string>();
+        variants.add(base);
+        const stripped = base.replace(/[^a-z0-9\s&-]/g, '').trim();
+        if (stripped && stripped !== base) variants.add(stripped);
+        const hyphenToSpace = base.replace(/-/g, ' ');
+        if (hyphenToSpace !== base) variants.add(hyphenToSpace);
+        const spaceToHyphen = base.replace(/\s+/g, '-');
+        if (spaceToHyphen !== base) variants.add(spaceToHyphen);
+        const withAnd = base.replace(/\s*&\s*/g, ' and ');
+        if (withAnd !== base) variants.add(withAnd);
+        const withAmpersand = base.replace(/\s+and\s+/gi, ' & ');
+        if (withAmpersand !== base) variants.add(withAmpersand);
+        const words = base.split(/\s+/);
+        if (words.length > 0) {
+          const lastWord = words[words.length - 1];
+          const prefix = words.slice(0, -1).join(' ');
+          const prefixStr = prefix ? prefix + ' ' : '';
+          if (lastWord.endsWith('s')) {
+            const singular = lastWord.slice(0, -1);
+            if (singular.length > 1) variants.add(prefixStr + singular);
+            if (lastWord.endsWith('ies')) {
+              variants.add(prefixStr + lastWord.slice(0, -3) + 'y');
+            }
+          } else {
+            variants.add(prefixStr + lastWord + 's');
+            if (lastWord.endsWith('y')) {
+              variants.add(prefixStr + lastWord.slice(0, -1) + 'ies');
+            }
+          }
+        }
+        return Array.from(variants);
+      }
+
+      function getMatchVariantsWithSynonyms(attrValue: string): string[] {
+        const genericVariants = generateMatchVariants(attrValue);
         const key = attrValue.toLowerCase().trim();
-        if (ATTRIBUTE_KEYWORD_MAP[key]) return ATTRIBUTE_KEYWORD_MAP[key];
-        const underscored = key.replace(/_/g, ' ');
-        if (ATTRIBUTE_KEYWORD_MAP[underscored]) return ATTRIBUTE_KEYWORD_MAP[underscored];
-        return null;
+        const synonyms = ATTRIBUTE_SYNONYM_MAP[key] || ATTRIBUTE_SYNONYM_MAP[key.replace(/_/g, ' ')] || [];
+        const all = new Set(genericVariants);
+        for (const syn of synonyms) all.add(syn);
+        return Array.from(all);
       }
 
       function getNegativeKeywords(attrValue: string): string[] {
@@ -3062,7 +3099,7 @@ class SupervisorService {
         }
         for (const attrValue of attrValues) {
           const attrKey = attrValue.toLowerCase().replace(/\s+/g, '_');
-          const keywords = getKeywordsForAttribute(attrValue);
+          const keywords = getMatchVariantsWithSynonyms(attrValue);
           const negativeKeywords = getNegativeKeywords(attrValue);
           const searchQuery = `${lead.name} ${city} ${attrValue}`;
           let webSearchSuccess = false;
@@ -3081,59 +3118,11 @@ class SupervisorService {
           let unknownReason: UnknownReason = 'no_relevant_pages_found';
           let negativeFound = false;
           let matchSource: 'title' | 'body' | 'search_snippet' | null = null;
+          let matchedVariant: string | null = null;
 
           const leadWebsite = lead.website as string | null;
 
-          if (ATTR_TRACE) console.log(`[ATTR_TRACE] lead="${lead.name}" placeId=${lead.placeId} attr="${attrValue}" website=${leadWebsite || 'none'}`);
-
-          if (!keywords) {
-            evidenceVerdict = 'unknown';
-            evidenceConfidence = 'low';
-            unknownReason = 'unsupported_attribute';
-            evidenceRationale = `Attribute "${attrValue}" is not in the supported verification set. Verdict defaults to unknown.`;
-            console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": UNSUPPORTED — skipping verification, verdict=unknown`);
-
-            attrVerificationResults.push({
-              lead_name: lead.name,
-              lead_place_id: lead.placeId,
-              attribute: attrValue,
-              search_query: searchQuery,
-              web_search_success: false,
-              url_visited: null,
-              web_visit_success: false,
-              snippets: [],
-              attribute_found: false,
-              evidence_strength: 'none',
-              verdict: evidenceVerdict,
-              confidence: evidenceConfidence,
-              rationale: evidenceRationale,
-            });
-
-            await createArtefact({
-              runId: chatRunId,
-              type: 'attribute_evidence',
-              title: `Attribute evidence: ${lead.name} — ${attrValue} → unknown`,
-              summary: evidenceRationale,
-              payload: {
-                run_id: chatRunId,
-                lead_place_id: lead.placeId,
-                lead_name: lead.name,
-                attribute_key: attrKey,
-                attribute_label: attrValue,
-                verdict: 'unknown' as const,
-                confidence: 'low' as const,
-                unknown_reason: unknownReason,
-                evidence: { source_url: null, quote: null, source_type: 'other' as const },
-                rationale: evidenceRationale,
-                keywords_used: [],
-                negative_checked: [],
-              },
-              userId: task.user_id,
-              conversationId,
-            }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] artefact failed for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
-
-            continue;
-          }
+          if (ATTR_TRACE) console.log(`[ATTR_TRACE] lead="${lead.name}" placeId=${lead.placeId} attr="${attrValue}" variants=${keywords.length} website=${leadWebsite || 'none'}`);
 
           attrLeadIndex++;
 
@@ -3172,13 +3161,14 @@ class SupervisorService {
               const posPageMatch = textMatchesKeywords(scanTextLower, keywords);
               if (posPageMatch.matched) {
                 evidenceStrength = 'strong';
+                matchedVariant = posPageMatch.matchedKeyword;
                 const titleLower = (page.title || '').toLowerCase();
                 const inTitle = titleLower.includes(posPageMatch.matchedKeyword!);
                 matchSource = inTitle ? 'title' : 'body';
                 const idx = scanTextLower.indexOf(posPageMatch.matchedKeyword!);
-                const contextStart = Math.max(0, idx - 60);
-                const contextEnd = Math.min(scanText.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 60);
-                const pageSnippet = `...${scanText.slice(contextStart, contextEnd)}...`.slice(0, 200);
+                const contextStart = Math.max(0, idx - 80);
+                const contextEnd = Math.min(scanText.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 80);
+                const pageSnippet = `...${scanText.slice(contextStart, contextEnd)}...`.slice(0, 240);
                 snippets.push(pageSnippet);
                 evidenceQuote = pageSnippet;
                 evidenceSourceUrl = pageUrl;
@@ -3195,7 +3185,7 @@ class SupervisorService {
                 attributeFound = true;
                 unknownReason = undefined as any;
 
-                if (ATTR_TRACE) console.log(`[ATTR_TRACE] cachedPageScan: matched=true keyword="${posPageMatch.matchedKeyword}" matchSource=${matchSource} url=${pageUrl}`);
+                if (ATTR_TRACE) console.log(`[ATTR_TRACE] cachedPageScan: matched=true variant="${posPageMatch.matchedKeyword}" matchSource=${matchSource} url=${pageUrl}`);
                 break;
               } else {
                 if (ATTR_TRACE) console.log(`[ATTR_TRACE] cachedPageScan: matched=false url=${pageUrl} title="${page.title}" textLen=${((page.text_clean || page.cleaned_text || '') as string).length}`);
@@ -3203,8 +3193,8 @@ class SupervisorService {
             }
 
             if (!attributeFound && !negativeFound) {
-              unknownReason = 'pages_crawled_no_keywords';
-              evidenceRationale = `Existing WEB_VISIT pages for ${lead.name} were scanned but no keywords for "${attrValue}" found in title or content.`;
+              unknownReason = 'no_match_in_visited_pages';
+              evidenceRationale = `Existing WEB_VISIT pages for ${lead.name} were scanned but no match for "${attrValue}" (or variants) found in title or content.`;
             }
           } else if (leadWebsite) {
             unknownReason = 'no_relevant_pages_found';
@@ -3220,6 +3210,8 @@ class SupervisorService {
             lead_name: lead.name,
             lead_place_id: lead.placeId,
             attribute: attrValue,
+            attribute_raw: attrValue,
+            matched_variant: matchedVariant,
             search_query: searchQuery,
             web_search_success: webSearchSuccess,
             url_visited: urlVisited,
@@ -3232,7 +3224,6 @@ class SupervisorService {
             rationale: evidenceRationale,
           });
 
-          // F) Always write attribute_evidence artefact per lead+attribute
           await createArtefact({
             runId: chatRunId,
             type: 'attribute_evidence',
@@ -3244,8 +3235,10 @@ class SupervisorService {
               lead_name: lead.name,
               attribute_key: attrKey,
               attribute_label: attrValue,
+              attribute_raw: attrValue,
               verdict: evidenceVerdict,
               confidence: evidenceConfidence,
+              ...(matchedVariant ? { matched_variant: matchedVariant } : {}),
               ...(evidenceVerdict === 'unknown' ? { unknown_reason: unknownReason } : {}),
               evidence: {
                 source_url: evidenceSourceUrl,
@@ -3253,7 +3246,7 @@ class SupervisorService {
                 source_type: evidenceSourceType,
               },
               rationale: evidenceRationale,
-              keywords_used: keywords,
+              variants_searched: keywords,
               negative_checked: negativeKeywords,
               ...(matchSource ? { match_source: matchSource } : {}),
             },
@@ -3261,7 +3254,7 @@ class SupervisorService {
             conversationId,
           }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] Failed to create attribute_evidence artefact for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
 
-          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType} strategy=${leadWebsite ? 'website-only' : 'no-website'}${evidenceVerdict === 'unknown' ? ` reason=${unknownReason}` : ''}${matchSource ? ` match=${matchSource}` : ''} url=${urlVisited || 'none'}`);
+          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType}${matchedVariant ? ` variant="${matchedVariant}"` : ''} strategy=${leadWebsite ? 'cached-pages' : 'no-website'}${evidenceVerdict === 'unknown' ? ` reason=${unknownReason}` : ''}${matchSource ? ` match=${matchSource}` : ''} url=${urlVisited || 'none'}`);
         }
       }
 
