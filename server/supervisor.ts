@@ -728,9 +728,40 @@ class SupervisorService {
     console.log(`[SUPERVISOR] Task ${task.id}: resolved IDs — run_id=${uiRunId} crid=${clientRequestId} source=${source}`);
 
     const jobId = uiRunId;
+    const userInput = String(requestData.user_message || '').substring(0, 200);
     console.log(`[ID_MAP] jobId=${jobId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${task.id} entry=processChatTask`);
     console.log(`[SUPERVISOR] Processing chat task ${task.id} (${task.task_type}) jobId=${jobId} uiRunId=${uiRunId} clientRequestId=${clientRequestId}`);
 
+    const nowMs = Date.now();
+    let runPersistedEarly = false;
+    try {
+      await storage.createAgentRun({
+        id: jobId,
+        clientRequestId,
+        userId: task.user_id,
+        createdAt: nowMs,
+        updatedAt: nowMs,
+        status: 'executing',
+        metadata: {
+          feature_flag: 'TOWER_LOOP_CHAT_MODE',
+          original_user_goal: userInput,
+          early_persist: true,
+        },
+      });
+      runPersistedEarly = true;
+      console.log(`[RUN_PERSIST] Early agent_run created — runId=${jobId} crid=${clientRequestId} stage=processChatTask_entry`);
+    } catch (earlyCreateErr: any) {
+      const earlyMsg = earlyCreateErr.message || '';
+      if (earlyMsg.includes('duplicate key') || earlyMsg.includes('unique constraint')) {
+        runPersistedEarly = true;
+        console.log(`[RUN_PERSIST] agent_run already exists (retry/resume) — runId=${jobId} crid=${clientRequestId}`);
+        await storage.updateAgentRun(jobId, { status: 'executing', error: null, terminalState: null }).catch(() => {});
+      } else {
+        console.error(`[RUN_PERSIST] Failed to create early agent_run (non-fatal, will retry later): ${earlyMsg}`);
+      }
+    }
+
+    try {
     this.bridgeRunToUI(uiRunId, jobId, clientRequestId, task.conversation_id, task.user_id).catch((e: any) =>
       console.error(`[RUN_BRIDGE] bridgeRunToUI failed: ${e.message}`)
     );
@@ -739,6 +770,7 @@ class SupervisorService {
       task.user_id, jobId, task.id, task.task_type, task.conversation_id
     ).catch(() => {});
 
+    console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=ownership_guard`);
     const { data: statusCheck } = await supabase
       .from('supervisor_tasks')
       .select('status')
@@ -768,11 +800,13 @@ class SupervisorService {
         conversationId: task.conversation_id,
       }).catch((e: any) => console.warn(`[GUARD] Failed to emit diagnostic artefact: ${e.message}`));
 
+      await storage.updateAgentRun(jobId, { status: 'completed', terminalState: null, endedAt: new Date(), metadata: { verdict: 'ownership_guard', guard_reason: guardReason } }).catch(() => {});
       return;
     }
 
     registerActiveTask(task.conversation_id, task.id, jobId);
 
+    console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=build_user_context`);
     const userContext = await this.buildUserContext(task.user_id);
     let rawMsg = String(requestData.user_message || '');
 
@@ -1105,6 +1139,7 @@ class SupervisorService {
       }
     }
 
+    console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=clarify_gate`);
     if (!sessionCompletedToRun && (!existingSession || !getClarifySession(task.conversation_id))) {
       const clarifyGate = evaluateClarifyGate(rawMsg);
       console.log(`[CLARIFY_GATE] route=${clarifyGate.route} reason="${clarifyGate.reason}"${clarifyGate.triggerCategory ? ` triggerCategory=${clarifyGate.triggerCategory}` : ''}${clarifyGate.questions ? ` questions=${JSON.stringify(clarifyGate.questions)}` : ''}`);
@@ -1174,7 +1209,8 @@ class SupervisorService {
       }
     }
 
-    // OUTER CONSTRAINT GATE — runs BEFORE executeTowerLoopChat to prevent agent_run creation, LLM calls, or any observable side-effects
+    console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=constraint_gate`);
+    // OUTER CONSTRAINT GATE — runs BEFORE executeTowerLoopChat
     const outerGateMsg = String((task.request_data as any).user_message || '').trim();
     const outerGateAlreadyResolved = !!(task.request_data as any)._constraint_gate_resolved;
     if (!outerGateAlreadyResolved && outerGateMsg.length > 0) {
@@ -1253,6 +1289,7 @@ class SupervisorService {
       }
     }
 
+    console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=executeTowerLoopChat`);
     let towerResult: { response: string; leadIds: string[]; deliverySummary: DeliverySummaryPayload | null; towerVerdict: string | null; leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string }> };
     let runFailed = false;
     let failureReason = '';
@@ -1362,6 +1399,73 @@ class SupervisorService {
     }
 
     console.log(`[FINAL_MESSAGE] final_message_created run_id=${jobId} conversation_id=${task.conversation_id} message_id=${messageResult.data.id} task_status=${taskStatus} status=${runFailed ? 'FAIL' : 'OK'}`);
+
+    } catch (topLevelErr: any) {
+      const stage = 'processChatTask_top_level';
+      const errMsg = topLevelErr instanceof Error ? topLevelErr.message : String(topLevelErr);
+      const errStack = topLevelErr instanceof Error ? topLevelErr.stack?.substring(0, 500) : undefined;
+      console.error(`[RUN_ERROR] runId=${jobId} crid=${clientRequestId} stage=${stage} error="${errMsg}"`);
+
+      await storage.updateAgentRun(jobId, {
+        status: 'failed',
+        terminalState: null,
+        error: `Unhandled error: ${errMsg.substring(0, 300)}`,
+        endedAt: new Date(),
+        metadata: { run_error: true, stage, error_message: errMsg.substring(0, 300) },
+      }).catch((updateErr: any) => {
+        console.error(`[RUN_ERROR] Failed to mark agent_run ${jobId} as failed: ${updateErr.message}`);
+      });
+
+      await createArtefact({
+        runId: jobId,
+        type: 'run_error',
+        title: `Run error: ${errMsg.substring(0, 100)}`,
+        summary: `Unhandled exception at stage=${stage}: ${errMsg.substring(0, 200)}`,
+        payload: {
+          run_id: jobId,
+          client_request_id: clientRequestId,
+          stage,
+          error_message: errMsg.substring(0, 500),
+          stack: errStack,
+          user_input: userInput,
+          task_id: task.id,
+        },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch((artErr: any) => {
+        console.error(`[RUN_ERROR] Failed to persist run_error artefact for runId=${jobId}: ${artErr.message}`);
+      });
+
+      logAFREvent({
+        userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
+        clientRequestId,
+        actionTaken: 'run_error_top_level', status: 'failed',
+        taskGenerated: `Top-level error: ${errMsg.substring(0, 120)}`,
+        runType: 'plan',
+        metadata: { taskId: task.id, stage, error: errMsg.substring(0, 200) },
+      }).catch(() => {});
+
+      const errorReplyMsg = `I encountered an unexpected error processing your request. Please try again.`;
+      const errorMsgId = randomUUID();
+      await supabase!.from('messages').insert({
+        id: errorMsgId,
+        conversation_id: task.conversation_id,
+        role: 'assistant',
+        content: errorReplyMsg,
+        source: 'supervisor',
+        metadata: { supervisor_task_id: task.id, run_id: jobId, run_error: true, stage, error: errMsg.substring(0, 100) },
+        created_at: Date.now(),
+      }).catch((msgErr: any) => {
+        console.error(`[RUN_ERROR] Failed to send error message to user for runId=${jobId}: ${msgErr.message}`);
+      });
+
+      await supabase!.from('supervisor_tasks').update({
+        status: 'failed',
+        error: `run_error: ${errMsg.substring(0, 200)}`,
+      }).eq('id', task.id).catch(() => {});
+
+      throw topLevelErr;
+    }
   }
 
   // ensureTowerJudgement: REMOVED — inline observation is mandatory. No safety nets.
@@ -1703,6 +1807,7 @@ class SupervisorService {
 
     const originalUserGoal = rawMsg.trim();
 
+    console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=parse_goal_to_constraints`);
     const parsedGoal = await parseGoalToConstraints(originalUserGoal);
 
     let businessType: string = canonicaliseBusinessType(searchQuery?.business_type as string || parsedGoal.business_type || '');
@@ -2218,71 +2323,22 @@ class SupervisorService {
     const perPlanAdded: Array<{ plan_version: number; added_matching: number; added_total: number }> = [];
 
     console.log(`[TOWER_LOOP_CHAT] Starting — businessType="${businessType}" location="${city}" requested_count_user=${userRequestedCountFinal} search_budget_count=${searchBudgetCount} goal="${goal}" MAX_REPLANS=${MAX_REPLANS}`);
+    console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=executeTowerLoopChat_start`);
 
-    // 1. Create agent_run row (upsert — handles retries with same run_id/client_request_id)
-    const nowMs = Date.now();
-    try {
-      await storage.createAgentRun({
-        id: chatRunId,
-        clientRequestId,
-        userId: task.user_id,
-        createdAt: nowMs,
-        updatedAt: nowMs,
-        status: 'executing',
-        metadata: {
-          feature_flag: 'TOWER_LOOP_CHAT_MODE',
-          original_user_goal: originalUserGoal,
-          normalized_goal: normalizedGoal,
-          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective } }] },
-        },
-      });
-      console.log(`[TOWER_LOOP_CHAT] [agent_run_create] runId=${chatRunId}`);
-    } catch (createErr: any) {
-      const errMsg = createErr.message || '';
-      if (errMsg.includes('duplicate key') || errMsg.includes('unique constraint')) {
-        const isPkeyConflict = errMsg.includes('agent_runs_pkey');
-        const isCridConflict = errMsg.includes('client_request_id');
-        console.log(`[TOWER_LOOP_CHAT] agent_run duplicate: pkey=${isPkeyConflict} crid=${isCridConflict} runId=${chatRunId} crid=${clientRequestId}`);
-
-        const retryMeta = {
-          feature_flag: 'TOWER_LOOP_CHAT_MODE',
-          retry_reuse: true,
-          original_user_goal: originalUserGoal,
-          normalized_goal: normalizedGoal,
-          plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective } }] },
-        };
-
-        if (isPkeyConflict) {
-          await storage.updateAgentRun(chatRunId, {
-            status: 'executing', error: null, terminalState: null, metadata: retryMeta,
-          });
-        } else if (isCridConflict && supabase) {
-          const { data: existingRun } = await supabase
-            .from('agent_runs')
-            .select('id')
-            .eq('client_request_id', clientRequestId)
-            .maybeSingle();
-          
-          if (existingRun) {
-            console.log(`[TOWER_LOOP_CHAT] Reusing existing agent_run ${existingRun.id} for crid=${clientRequestId}`);
-            chatRunId = existingRun.id;
-            await storage.updateAgentRun(existingRun.id, {
-              status: 'executing', error: null, terminalState: null,
-              metadata: { ...retryMeta, original_run_id: task.request_data.run_id },
-            });
-          } else {
-            console.error(`[TOWER_LOOP_CHAT] crid conflict but no existing run found — cannot proceed`);
-            throw createErr;
-          }
-        } else {
-          await storage.updateAgentRun(chatRunId, {
-            status: 'executing', error: null, terminalState: null, metadata: retryMeta,
-          });
-        }
-      } else {
-        throw createErr;
-      }
-    }
+    await storage.updateAgentRun(chatRunId, {
+      status: 'executing',
+      error: null,
+      terminalState: null,
+      metadata: {
+        feature_flag: 'TOWER_LOOP_CHAT_MODE',
+        original_user_goal: originalUserGoal,
+        normalized_goal: normalizedGoal,
+        plan: { version: 1, steps: [{ tool: 'SEARCH_PLACES', args: { query: businessType, location: city, country, maxResults: searchCount, target_count: rc.requested_count_effective } }] },
+      },
+    }).catch((updateErr: any) => {
+      console.warn(`[TOWER_LOOP_CHAT] Failed to update agent_run with full metadata (non-fatal): ${updateErr.message}`);
+    });
+    console.log(`[TOWER_LOOP_CHAT] [agent_run_enriched] runId=${chatRunId} (early-persisted, now enriched with parsed goal)`);
 
     let goalId: string | null = null;
     try {
@@ -2421,6 +2477,7 @@ class SupervisorService {
     });
     console.log(`[TOWER_LOOP_CHAT] [step_started] step=1 tool=SEARCH_PLACES`);
 
+    console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=search_places`);
     // 4a. Execute SEARCH_PLACES via action-executor with stub fallback
     let leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string; source: string; lat: number | null; lng: number | null }> = [];
     let usedStub = false;
@@ -2603,6 +2660,7 @@ class SupervisorService {
       }
     }
 
+    console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=enrichment`);
     // 5c. Build enrichment plan AFTER discovery using actual lead data, then execute
     const accumulatedStepData: Record<string, Record<string, unknown>> = {};
     if (!usedStub && leads.length > 0) {
@@ -2962,6 +3020,7 @@ class SupervisorService {
     //   If a HARD HAS_ATTRIBUTE constraint exists that CVL cannot verify from Places data,
     //   and we have candidate leads, visit lead.website via WEB_VISIT per lead to attempt
     //   attribute verification before wasting replans on quantity expansion.
+    console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=attribute_verification_check`);
     let attributeVerificationAttempted = false;
     let attributeVerificationStopped = false;
     const hardAttributeConstraints = structuredConstraints.filter(
@@ -4223,6 +4282,7 @@ class SupervisorService {
       run_deadline_exceeded: runDeadlineExceeded,
     };
 
+    console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=final_delivery`);
     const finalDeliveryArtefact = await createArtefact({
       runId: chatRunId,
       type: 'final_delivery',
@@ -4296,6 +4356,16 @@ class SupervisorService {
         shouldStop: true,
         stubbed: false,
       };
+
+      await createArtefact({
+        runId: chatRunId,
+        type: 'tower_unavailable',
+        title: 'Tower judgement unavailable',
+        summary: `Tower API call failed: ${errMsg.substring(0, 200)}. Run will stop gracefully.`,
+        payload: { run_id: chatRunId, stage: 'final_delivery', error_message: errMsg.substring(0, 500), governance_status: 'tower_unavailable', stop_reason: 'tower_unreachable' },
+        userId: task.user_id,
+        conversationId,
+      }).catch((artErr: any) => console.warn(`[TOWER_UNAVAILABLE] Failed to persist tower_unavailable artefact: ${artErr.message}`));
     }
 
     finalVerdict = finalTowerResult.judgement.verdict;
