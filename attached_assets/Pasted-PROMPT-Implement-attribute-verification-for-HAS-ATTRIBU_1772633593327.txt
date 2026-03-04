@@ -1,0 +1,65 @@
+PROMPT: Implement attribute verification for HAS_ATTRIBUTE using website text
+We currently extract HAS_ATTRIBUTE constraints (eg “live music”, “beer garden”, “dog friendly”) but they remain unverified because we do not populate attributeEvidence from WEB_VISIT output text. As a result, all leads show Unverified and the system cannot satisfy attribute constrained requests.
+
+Implement attribute verification so HAS_ATTRIBUTE can become yes/no/unknown per lead.
+
+Constraints:
+
+No new external APIs.
+
+Use existing WEB_VISIT fetched page text/content.
+
+Keep behaviour honest: if website was not visited or text missing, return unknown not yes.
+
+Do not change lead discovery (SEARCH_PLACES) except minimal plumbing.
+
+Full file rewrites allowed. No partial edits.
+
+Requirements:
+
+When constraints include HAS_ATTRIBUTE, attempt to verify those attributes for each lead with a website.
+
+Build a structured evidence map keyed by place_id:
+attributeEvidence[placeId][attribute] = { status: "yes"|"unknown"|"no", snippet?: string, url?: string }
+
+Implement a simple matcher for each attribute:
+
+“live music” matches: "live music", "music night", "live bands", "gig", "open mic" (start minimal, can expand later)
+
+Return yes only with an evidence snippet and source url
+
+Prefer unknown over no unless you have strong negative evidence
+
+CVL verifyOneConstraint for HAS_ATTRIBUTE must consult this evidence map and return yes or unknown (and no if supported).
+
+DeliverySummary must treat hard HAS_ATTRIBUTE with unknown as not exact.
+
+Emit an artefact so we can audit:
+
+type: attribute_verification
+
+includes per lead place_id, attribute, status, snippet, url
+
+If user explicitly says “on their website”, do not ask proxy clarification. That instruction is already the verification method.
+
+Acceptance test:
+Input: “find pubs in arundel that say they have live music on their website”
+Expected:
+
+At least some leads become verified yes if the website mentions live music.
+
+Others remain unknown, not incorrectly marked yes.
+
+Delivery summary shows exact vs closest meaningfully, not 20 unverified.
+
+attribute_verification artefact exists for the run.
+
+Output:
+
+Files changed
+
+Where evidence map is built
+
+Where CVL reads it
+
+Sample of the new attribute_verification artefact payload

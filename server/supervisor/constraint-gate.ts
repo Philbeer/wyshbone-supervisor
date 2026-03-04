@@ -334,7 +334,7 @@ const PROXY_SELECTION_PATTERNS: { pattern: RegExp; proxyId: string }[] = [
 
 const BEST_EFFORT_PATTERNS = /\b(?:best[- ]?effort|unverified\s+(?:is\s+)?(?:ok|fine|acceptable|good)|don'?t\s+(?:need\s+to\s+)?verify|skip\s+verif|proceed\s+(?:unverified|without\s+verif)|that'?s?\s+(?:ok|fine)|option\s*(?:3|three|[Cc])\b|[Cc]\))/i;
 
-const LIVE_MUSIC_VERIFY_PATTERNS = /(?:\bverify\s+(?:[\w\s]*?)(?:via|through|using)\s+(?:website|listings?|web)\b|\bverify\s+via\s+(?:website|listings?|web)\b|\bcheck\s+(?:website|listings?)\b|\bwebsite\s+verif|\boption\s*(?:1|one)\b|\b[Aa]\b\s*\)|\b[Aa]\b\s*(?:for\s+live))/i;
+const LIVE_MUSIC_VERIFY_PATTERNS = /(?:\bverify\s+(?:[\w\s]*?)(?:via|through|using)\s+(?:website|listings?|web)\b|\bverify\s+via\s+(?:website|listings?|web)\b|\bcheck\s+(?:website|listings?)\b|\bwebsite\s+verif|\boption\s*(?:1|one)\b|\b[Aa]\b\s*\)|\b[Aa]\b\s*(?:for\s+live)|\bon\s+(?:their|the)\s+website\b|\bsay\s+(?:they\s+)?(?:have|offer|do)\b.*\bon\s+(?:their|the)\s+website\b|\bfrom\s+(?:their|the)\s+website\b|\baccording\s+to\s+(?:their|the)\s+website\b|\bwebsite\s+(?:says?|mentions?|lists?|shows?)\b)/i;
 const LIVE_MUSIC_BEST_EFFORT_PATTERNS = /(?:\bbest[- ]?effort\b|\bunverified\s+(?:is\s+)?(?:ok|fine|acceptable|good)\b|\bdon'?t\s+(?:need\s+to\s+)?verify\b|\bskip\s+verif|\boption\s*(?:2|two)\b|\b[Bb]\b\s*\)|\b[Bb]\b\s*(?:for\s+live))/i;
 
 export function extractAttributes(msg: string): AttributeConstraint[] {
@@ -620,6 +620,19 @@ export function preExecutionConstraintGate(msg: string): ConstraintContract {
   const hasSubjective = constraints.some(c => c.type === 'subjective_predicate');
   if (hasSubjective) {
     console.log(`[CONSTRAINT_GATE] constraint_gate_triggered: subjective`);
+  }
+
+  const initialLiveMusicChoice = detectLiveMusicChoice(msg);
+  if (initialLiveMusicChoice) {
+    for (const c of constraints) {
+      if (c.type === 'attribute' && c.attribute === 'live_music' && c.requires_clarification) {
+        c.chosen_verification = initialLiveMusicChoice;
+        c.requires_clarification = false;
+        c.can_execute = true;
+        c.why_blocked = '';
+        console.log(`[CONSTRAINT_GATE] Auto-resolved live_music from initial message: chosen_verification=${initialLiveMusicChoice}`);
+      }
+    }
   }
 
   const isNoProxy = detectNoProxySignal(msg);
