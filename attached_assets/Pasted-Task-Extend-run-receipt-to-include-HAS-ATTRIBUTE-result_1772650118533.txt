@@ -1,0 +1,43 @@
+Task: Extend run_receipt to include HAS_ATTRIBUTE results (additive, no regressions).
+
+Context:
+- System already verifies attributes via website text and the UI modal shows the matched set (eg “VERIFIED 3” for live music).
+- run_receipt currently only summarises contacts by scanning lead_pack/contact_extract and does not include attribute outcomes.
+- We want run_receipt to include attribute outcomes for the run so the chat bubble can narrate it.
+
+Hard requirements:
+- Keep artefact type/name: run_receipt.
+- Do NOT change existing run_receipt fields or counting behaviour for emails/phones.
+- Add fields only (additive).
+- No new external calls. Use existing stored artefacts for runId.
+
+Steps:
+1) Find which artefact type(s) contain the attribute verification truth that powers the Results modal’s “VERIFIED X”.
+   - Search the supervisor code and/or artefact payloads for strings: "attribute_raw", "matched_variant", "attributeEvidence", "attribute_verification", "HAS_ATTRIBUTE".
+   - Identify the exact artefact type(s) and payload shape.
+
+2) Update emitRunReceipt() to also summarise attribute verification:
+   - Add run_receipt.outcomes.attributes = [
+       {
+         attribute_raw: string,
+         matched_count: number,
+         matched_place_ids: string[],
+         unknown_count: number,
+         evidence_refs: Array<{ place_id: string, url: string, snippet?: string, matched_variant?: string }>
+       }
+     ]
+   - Only count a lead as matched if status is YES with evidence (url at minimum).
+   - Everything else should be UNKNOWN (prefer unknown over no).
+
+3) Ensure it works for arbitrary attribute strings (no live-music special casing here):
+   - Attribute key must be the raw constraint value (attribute_raw).
+   - Evidence should attach under that key even if matcher used variants.
+
+Acceptance:
+- For run_id a8e3d55a-d6be-49f4-8edc-cdd68e933d9d, run_receipt.outcomes.attributes must include attribute_raw="live music" and matched_count=3, with place_ids matching the modal’s 3.
+- Existing run_receipt email/phone counts must remain unchanged.
+
+Output:
+- Files changed
+- The artefact types used as input for the attribute summary
+- Example run_receipt JSON snippet for the live music run showing outcomes.attributes

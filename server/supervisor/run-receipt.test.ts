@@ -293,4 +293,167 @@ describe('buildRunReceiptFromArtefacts', () => {
     expect(receipt.contacts_proven).toBe(false);
     expect(receipt.debug.artefact_ids_used.contact_extract).toEqual(['sr-ce1']);
   });
+
+  it('includes attribute outcomes from attribute_evidence artefacts', () => {
+    const input = makeInput({
+      deliveredLeads: [
+        { name: 'The Red Lion', placeId: 'place_1', website: 'https://redlion.co.uk' },
+        { name: 'The Black Rabbit', placeId: 'place_2', website: 'https://blackrabbit.co.uk' },
+        { name: 'The Kings Arms', placeId: 'place_3', website: null },
+      ],
+    });
+    const artefacts: any[] = [
+      {
+        id: 'ae1', type: 'attribute_evidence',
+        title: 'Attribute evidence: The Red Lion — live music → yes',
+        payloadJson: {
+          lead_place_id: 'place_1', lead_name: 'The Red Lion',
+          attribute_raw: 'live music', verdict: 'yes', matched_variant: 'live music',
+          evidence: { source_url: 'https://redlion.co.uk/events', quote: 'Live music every Friday' },
+        },
+      },
+      {
+        id: 'ae2', type: 'attribute_evidence',
+        title: 'Attribute evidence: The Black Rabbit — live music → yes',
+        payloadJson: {
+          lead_place_id: 'place_2', lead_name: 'The Black Rabbit',
+          attribute_raw: 'live music', verdict: 'yes', matched_variant: 'live-music',
+          evidence: { source_url: 'https://blackrabbit.co.uk/music', quote: 'We host live-music nights' },
+        },
+      },
+      {
+        id: 'ae3', type: 'attribute_evidence',
+        title: 'Attribute evidence: The Kings Arms — live music → unknown',
+        payloadJson: {
+          lead_place_id: 'place_3', lead_name: 'The Kings Arms',
+          attribute_raw: 'live music', verdict: 'unknown',
+          evidence: { source_url: '', quote: '' },
+        },
+      },
+    ];
+
+    const receipt = buildRunReceiptFromArtefacts(input, artefacts);
+
+    expect(receipt.outcomes).toBeDefined();
+    expect(receipt.outcomes!.attributes).toHaveLength(1);
+    const attr = receipt.outcomes!.attributes[0];
+    expect(attr.attribute_raw).toBe('live music');
+    expect(attr.matched_count).toBe(2);
+    expect(attr.matched_place_ids).toEqual(['place_1', 'place_2']);
+    expect(attr.unknown_count).toBe(1);
+    expect(attr.evidence_refs).toHaveLength(2);
+    expect(attr.evidence_refs[0].url).toBe('https://redlion.co.uk/events');
+    expect(attr.evidence_refs[0].snippet).toBe('Live music every Friday');
+    expect(attr.evidence_refs[0].matched_variant).toBe('live music');
+    expect(attr.evidence_refs[1].matched_variant).toBe('live-music');
+    expect(receipt.debug.artefact_ids_used.attribute_evidence).toEqual(['ae1', 'ae2', 'ae3']);
+    expect(receipt.narrative_lines.some(l => l.includes('verified 2') && l.includes('"live music"'))).toBe(true);
+  });
+
+  it('excludes attribute evidence for non-delivered leads', () => {
+    const input = makeInput({
+      deliveredLeads: [
+        { name: 'The Red Lion', placeId: 'place_1', website: 'https://redlion.co.uk' },
+      ],
+    });
+    const artefacts: any[] = [
+      {
+        id: 'ae1', type: 'attribute_evidence',
+        title: 'Attribute evidence: The Red Lion — beer garden → yes',
+        payloadJson: {
+          lead_place_id: 'place_1', attribute_raw: 'beer garden', verdict: 'yes',
+          evidence: { source_url: 'https://redlion.co.uk', quote: 'our beer garden' },
+        },
+      },
+      {
+        id: 'ae2', type: 'attribute_evidence',
+        title: 'Attribute evidence: Non-Delivered Pub — beer garden → yes',
+        payloadJson: {
+          lead_place_id: 'place_999', attribute_raw: 'beer garden', verdict: 'yes',
+          evidence: { source_url: 'https://otherpub.co.uk', quote: 'beer garden' },
+        },
+      },
+    ];
+
+    const receipt = buildRunReceiptFromArtefacts(input, artefacts);
+
+    expect(receipt.outcomes!.attributes).toHaveLength(1);
+    expect(receipt.outcomes!.attributes[0].matched_count).toBe(1);
+    expect(receipt.outcomes!.attributes[0].matched_place_ids).toEqual(['place_1']);
+    expect(receipt.debug.artefact_ids_used.attribute_evidence).toEqual(['ae1']);
+  });
+
+  it('does not include outcomes when no attribute artefacts exist', () => {
+    const input = makeInput();
+    const receipt = buildRunReceiptFromArtefacts(input, []);
+
+    expect(receipt.outcomes).toBeUndefined();
+  });
+
+  it('falls back to attribute_verification summary artefact when no per-lead evidence exists', () => {
+    const input = makeInput({
+      deliveredLeads: [
+        { name: 'The Red Lion', placeId: 'place_1', website: 'https://redlion.co.uk' },
+        { name: 'The Black Rabbit', placeId: 'place_2', website: 'https://blackrabbit.co.uk' },
+      ],
+    });
+    const artefacts: any[] = [
+      {
+        id: 'av1', type: 'attribute_verification',
+        title: 'Attribute verification: 1/2 checks found evidence for "craft beer"',
+        payloadJson: {
+          results: [
+            { lead_place_id: 'place_1', attribute_raw: 'craft beer', attribute_found: true, url_visited: 'https://redlion.co.uk/beers', snippets: ['Wide range of craft beers'], matched_variant: 'craft beer' },
+            { lead_place_id: 'place_2', attribute_raw: 'craft beer', attribute_found: false, url_visited: 'https://blackrabbit.co.uk', snippets: [] },
+          ],
+        },
+      },
+    ];
+
+    const receipt = buildRunReceiptFromArtefacts(input, artefacts);
+
+    expect(receipt.outcomes).toBeDefined();
+    expect(receipt.outcomes!.attributes).toHaveLength(1);
+    const attr = receipt.outcomes!.attributes[0];
+    expect(attr.attribute_raw).toBe('craft beer');
+    expect(attr.matched_count).toBe(1);
+    expect(attr.matched_place_ids).toEqual(['place_1']);
+    expect(attr.unknown_count).toBe(1);
+    expect(attr.evidence_refs[0].snippet).toBe('Wide range of craft beers');
+  });
+
+  it('handles multiple different attributes in same run', () => {
+    const input = makeInput({
+      deliveredLeads: [
+        { name: 'The Red Lion', placeId: 'place_1', website: 'https://redlion.co.uk' },
+      ],
+    });
+    const artefacts: any[] = [
+      {
+        id: 'ae1', type: 'attribute_evidence',
+        title: 'Attribute evidence: The Red Lion — live music → yes',
+        payloadJson: {
+          lead_place_id: 'place_1', attribute_raw: 'live music', verdict: 'yes',
+          evidence: { source_url: 'https://redlion.co.uk/events', quote: 'live music' },
+        },
+      },
+      {
+        id: 'ae2', type: 'attribute_evidence',
+        title: 'Attribute evidence: The Red Lion — beer garden → unknown',
+        payloadJson: {
+          lead_place_id: 'place_1', attribute_raw: 'beer garden', verdict: 'unknown',
+          evidence: { source_url: '', quote: '' },
+        },
+      },
+    ];
+
+    const receipt = buildRunReceiptFromArtefacts(input, artefacts);
+
+    expect(receipt.outcomes!.attributes).toHaveLength(2);
+    const lm = receipt.outcomes!.attributes.find(a => a.attribute_raw === 'live music')!;
+    const bg = receipt.outcomes!.attributes.find(a => a.attribute_raw === 'beer garden')!;
+    expect(lm.matched_count).toBe(1);
+    expect(bg.matched_count).toBe(0);
+    expect(bg.unknown_count).toBe(1);
+  });
 });

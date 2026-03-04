@@ -6,6 +6,21 @@ export interface DeliveredLeadRef {
   place_id: string;
 }
 
+export interface AttributeEvidenceRef {
+  place_id: string;
+  url: string;
+  snippet?: string;
+  matched_variant?: string;
+}
+
+export interface AttributeOutcome {
+  attribute_raw: string;
+  matched_count: number;
+  matched_place_ids: string[];
+  unknown_count: number;
+  evidence_refs: AttributeEvidenceRef[];
+}
+
 export interface RunReceiptPayload {
   run_id: string;
   goal: string | null;
@@ -31,6 +46,10 @@ export interface RunReceiptPayload {
   email_list_sample: string[];
   phone_list_sample: string[];
 
+  outcomes?: {
+    attributes: AttributeOutcome[];
+  };
+
   narrative_lines: string[];
 
   debug: {
@@ -38,6 +57,7 @@ export interface RunReceiptPayload {
     artefact_ids_used: {
       lead_pack: string[];
       contact_extract: string[];
+      attribute_evidence: string[];
     };
     notes: string[];
   };
@@ -190,6 +210,97 @@ export function buildRunReceiptFromArtefacts(
   const emailCount = contactsProven ? uniqueEmails.size : null;
   const phoneCount = contactsProven ? uniquePhones.size : null;
 
+  const attributeEvidenceArtefacts = allArtefacts.filter(a => a.type === 'attribute_evidence');
+  const attributeVerificationArtefacts = allArtefacts.filter(a => a.type === 'attribute_verification');
+
+  const deliveredPlaceIds = new Set(input.deliveredLeads.map(dl => dl.placeId));
+
+  const attrOutcomeMap = new Map<string, {
+    matched_place_ids: Set<string>;
+    unknown_count: number;
+    evidence_refs: AttributeEvidenceRef[];
+  }>();
+
+  for (const ae of attributeEvidenceArtefacts) {
+    const p = ae.payloadJson as any;
+    const attrRaw: string = p?.attribute_raw || p?.attribute_label || '';
+    const placeId: string = p?.lead_place_id || '';
+    const verdict: string = p?.verdict || 'unknown';
+
+    if (!attrRaw || !placeId || !deliveredPlaceIds.has(placeId)) continue;
+
+    const key = attrRaw.toLowerCase();
+    if (!attrOutcomeMap.has(key)) {
+      attrOutcomeMap.set(key, { matched_place_ids: new Set(), unknown_count: 0, evidence_refs: [] });
+    }
+    const entry = attrOutcomeMap.get(key)!;
+
+    if (verdict === 'yes') {
+      const sourceUrl = p?.evidence?.source_url || '';
+      if (sourceUrl) {
+        entry.matched_place_ids.add(placeId);
+        entry.evidence_refs.push({
+          place_id: placeId,
+          url: sourceUrl,
+          ...(p?.evidence?.quote ? { snippet: String(p.evidence.quote).substring(0, 300) } : {}),
+          ...(p?.matched_variant ? { matched_variant: p.matched_variant } : {}),
+        });
+      } else {
+        entry.unknown_count++;
+      }
+    } else {
+      entry.unknown_count++;
+    }
+  }
+
+  if (attrOutcomeMap.size === 0) {
+    for (const av of attributeVerificationArtefacts) {
+      const p = av.payloadJson as any;
+      const results: any[] = p?.results || [];
+      for (const r of results) {
+        const attrRaw: string = r?.attribute_raw || r?.attribute || '';
+        const placeId: string = r?.lead_place_id || '';
+        if (!attrRaw || !placeId || !deliveredPlaceIds.has(placeId)) continue;
+
+        const key = attrRaw.toLowerCase();
+        if (!attrOutcomeMap.has(key)) {
+          attrOutcomeMap.set(key, { matched_place_ids: new Set(), unknown_count: 0, evidence_refs: [] });
+        }
+        const entry = attrOutcomeMap.get(key)!;
+
+        if (r?.attribute_found && r?.url_visited) {
+          entry.matched_place_ids.add(placeId);
+          const snippet = Array.isArray(r?.snippets) && r.snippets.length > 0 ? String(r.snippets[0]).substring(0, 300) : undefined;
+          entry.evidence_refs.push({
+            place_id: placeId,
+            url: r.url_visited,
+            ...(snippet ? { snippet } : {}),
+            ...(r?.matched_variant ? { matched_variant: r.matched_variant } : {}),
+          });
+        } else {
+          entry.unknown_count++;
+        }
+      }
+    }
+  }
+
+  const attributeOutcomes: AttributeOutcome[] = [];
+  for (const [key, entry] of attrOutcomeMap) {
+    const firstArtefact = attributeEvidenceArtefacts.find(a => {
+      const p = a.payloadJson as any;
+      return (p?.attribute_raw || p?.attribute_label || '').toLowerCase() === key;
+    });
+    const rawLabel = (firstArtefact?.payloadJson as any)?.attribute_raw || key;
+
+    attributeOutcomes.push({
+      attribute_raw: rawLabel,
+      matched_count: entry.matched_place_ids.size,
+      matched_place_ids: Array.from(entry.matched_place_ids),
+      unknown_count: entry.unknown_count,
+      evidence_refs: entry.evidence_refs,
+    });
+  }
+
   const narrativeLines = buildNarrativeLines({
     businessType: input.businessType,
     location: input.location,
@@ -200,9 +311,10 @@ export function buildRunReceiptFromArtefacts(
     contactsProven,
     emailCount,
     phoneCount,
+    attributeOutcomes,
   });
 
-  return {
+  const result: RunReceiptPayload = {
     run_id: input.runId,
     goal: input.goal,
     mission_type: 'leadgen',
@@ -230,14 +342,24 @@ export function buildRunReceiptFromArtefacts(
     narrative_lines: narrativeLines,
 
     debug: {
-      counting_method: 'Matched lead_pack and contact_extract artefacts to delivered leads by place_id, then by normalised name, then by artefact title substring. Emails extracted from contact_extract.outputs.contacts.emails (string[]) and lead_pack.outputs.lead_pack.contacts.emails[*].value. Phones extracted similarly. De-duplicated after normalisation.',
+      counting_method: 'Matched lead_pack and contact_extract artefacts to delivered leads by place_id, then by normalised name, then by artefact title substring. Emails extracted from contact_extract.outputs.contacts.emails (string[]) and lead_pack.outputs.lead_pack.contacts.emails[*].value. Phones extracted similarly. De-duplicated after normalisation. Attribute outcomes from attribute_evidence artefacts (verdict=yes with source_url → matched, else unknown).',
       artefact_ids_used: {
         lead_pack: matchedLeadPacks.map(a => a.id),
         contact_extract: matchedContactExtracts.map(a => a.id),
+        attribute_evidence: attributeEvidenceArtefacts.filter(a => {
+          const p = a.payloadJson as any;
+          return deliveredPlaceIds.has(p?.lead_place_id || '');
+        }).map(a => a.id),
       },
       notes,
     },
   };
+
+  if (attributeOutcomes.length > 0) {
+    result.outcomes = { attributes: attributeOutcomes };
+  }
+
+  return result;
 }
 
 function buildNarrativeLines(ctx: {
@@ -250,6 +372,7 @@ function buildNarrativeLines(ctx: {
   contactsProven: boolean;
   emailCount: number | null;
   phoneCount: number | null;
+  attributeOutcomes?: AttributeOutcome[];
 }): string[] {
   const lines: string[] = [];
 
@@ -275,6 +398,16 @@ function buildNarrativeLines(ctx: {
     lines.push(`I found ${emailPart} and ${phonePart} from those websites.`);
   } else {
     lines.push('Contact details varied by venue.');
+  }
+
+  if (ctx.attributeOutcomes && ctx.attributeOutcomes.length > 0) {
+    for (const ao of ctx.attributeOutcomes) {
+      if (ao.matched_count > 0) {
+        lines.push(`I verified ${ao.matched_count} of the ${ctx.deliveredCount} ${ctx.businessType} mention "${ao.attribute_raw}" on their website.`);
+      } else {
+        lines.push(`I could not verify "${ao.attribute_raw}" from any of the websites checked.`);
+      }
+    }
   }
 
   return lines;
