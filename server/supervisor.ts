@@ -18,6 +18,7 @@ import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNam
 import { emitSearchQueryCompiled, type SearchQueryCompiledPayload } from './supervisor/search-query-compiled';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
 import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type DeliverySummaryPayload } from './supervisor/delivery-summary';
+import { emitRunReceipt } from './supervisor/run-receipt';
 import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
@@ -4516,6 +4517,24 @@ class SupervisorService {
       } : undefined,
     };
     const mainDsPayload = await emitDeliverySummary(mainDsInput);
+
+    try {
+      await emitRunReceipt({
+        runId: chatRunId,
+        userId: task.user_id,
+        conversationId,
+        goal: originalUserGoal,
+        businessType,
+        location: city,
+        requestedCount: userRequestedCountFinal,
+        deliveredLeads: finalLeads.map(l => ({ name: l.name, placeId: l.placeId, website: l.website })),
+        candidateCountFromGoogle,
+        planVersionsUsed: planVersion,
+        replansUsed: replansUsed,
+      });
+    } catch (receiptErr: any) {
+      console.error(`[RUN_RECEIPT] Failed to emit run receipt (non-fatal): ${receiptErr.message}`);
+    }
 
     if (goalId) {
       try {
