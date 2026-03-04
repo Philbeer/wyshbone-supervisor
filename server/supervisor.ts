@@ -418,6 +418,12 @@ class SupervisorService {
     try {
       const cutoffEpoch = Date.now() - SupervisorService.STALE_TASK_TIMEOUT_MS;
 
+      const activeRunIds = new Set<string>();
+      for (const t of this.pendingClaimedQueue) {
+        const rid = t.run_id || t.request_data?.run_id;
+        if (rid) activeRunIds.add(rid);
+      }
+
       const { data: staleTasks, error } = await supabase
         .from('supervisor_tasks')
         .select('id, user_id, conversation_id, request_data, created_at, status, run_id, client_request_id')
@@ -431,19 +437,63 @@ class SupervisorService {
         return;
       }
 
-      if (!staleTasks || staleTasks.length === 0) return;
+      if (!staleTasks || staleTasks.length === 0) {
+        await this.sweepOrphanedAgentRuns();
+        return;
+      }
 
       console.log(`[STALE_SWEEP] Found ${staleTasks.length} stale task(s) processing for >${SupervisorService.STALE_TASK_TIMEOUT_MS / 1000}s`);
 
       for (const task of staleTasks) {
+        const taskRunId = task.run_id || task.request_data?.run_id;
+        if (taskRunId && activeRunIds.has(taskRunId)) {
+          console.log(`[STALE_SWEEP] Skipping task ${task.id} — run ${taskRunId} is actively queued`);
+          continue;
+        }
         try {
           await this.evaluateAndRecoverTask(task, 'stale_sweep');
         } catch (err: any) {
           console.error(`[STALE_SWEEP] Task ${task.id}: unexpected error — ${err.message}`);
         }
       }
+
+      await this.sweepOrphanedAgentRuns();
     } catch (err: any) {
       console.error(`[STALE_SWEEP] Sweep failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  private async sweepOrphanedAgentRuns(): Promise<void> {
+    if (!supabase) return;
+    try {
+      const staleThreshold = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+      const { data: stuckRuns, error } = await supabase
+        .from('agent_runs')
+        .select('id, status, started_at, metadata')
+        .eq('status', 'executing')
+        .lt('started_at', staleThreshold)
+        .limit(10);
+
+      if (error || !stuckRuns || stuckRuns.length === 0) return;
+
+      console.log(`[STALE_SWEEP] Found ${stuckRuns.length} orphaned agent_run(s) stuck in 'executing'`);
+      for (const run of stuckRuns) {
+        try {
+          const existingMeta = (run.metadata as Record<string, any>) || {};
+          await storage.updateAgentRun(run.id, {
+            status: 'failed',
+            terminalState: null,
+            error: 'Run was orphaned — no active processing detected after timeout',
+            endedAt: new Date(),
+            metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'stale_sweep', recovered_at: new Date().toISOString() },
+          });
+          console.log(`[STALE_SWEEP] Marked orphaned agent_run ${run.id} as failed`);
+        } catch (err: any) {
+          console.error(`[STALE_SWEEP] Failed to recover agent_run ${run.id}: ${err.message}`);
+        }
+      }
+    } catch (err: any) {
+      console.error(`[STALE_SWEEP] Orphan agent_run sweep failed (non-fatal): ${err.message}`);
     }
   }
 
