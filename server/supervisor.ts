@@ -24,7 +24,7 @@ import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput, type AttributeEvidenceMap } from './supervisor/cvl';
 import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-plan-gate';
-import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField } from './supervisor/clarify-gate';
+import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField, type ClarifyTriggerCategory } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, type ConstraintContract } from './supervisor/constraint-gate';
@@ -1058,14 +1058,14 @@ class SupervisorService {
 
     if (!sessionCompletedToRun && (!existingSession || !getClarifySession(task.conversation_id))) {
       const clarifyGate = evaluateClarifyGate(rawMsg);
-      console.log(`[CLARIFY_GATE] route=${clarifyGate.route} reason="${clarifyGate.reason}"${clarifyGate.questions ? ` questions=${JSON.stringify(clarifyGate.questions)}` : ''}`);
+      console.log(`[CLARIFY_GATE] route=${clarifyGate.route} reason="${clarifyGate.reason}"${clarifyGate.triggerCategory ? ` triggerCategory=${clarifyGate.triggerCategory}` : ''}${clarifyGate.questions ? ` questions=${JSON.stringify(clarifyGate.questions)}` : ''}`);
 
       await createArtefact({
         runId: jobId,
         type: 'diagnostic',
         title: `Clarify gate: ${clarifyGate.route}`,
         summary: clarifyGate.reason,
-        payload: { route: clarifyGate.route, reason: clarifyGate.reason, questions: clarifyGate.questions ?? null, missingFields: clarifyGate.missingFields ?? null },
+        payload: { route: clarifyGate.route, reason: clarifyGate.reason, triggerCategory: clarifyGate.triggerCategory ?? null, questions: clarifyGate.questions ?? null, missingFields: clarifyGate.missingFields ?? null },
         userId: task.user_id,
         conversationId: task.conversation_id,
       }).catch((e: any) => console.warn(`[CLARIFY_GATE] Failed to emit artefact: ${e.message}`));

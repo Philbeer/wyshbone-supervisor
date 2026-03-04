@@ -2,11 +2,14 @@ import { RELATIONSHIP_PREDICATES } from './relationship-predicate';
 
 export type ClarifyRoute = 'direct_response' | 'clarify_before_run' | 'agent_run';
 
+export type ClarifyTriggerCategory = 'empty' | 'multiple_requests' | 'malformed' | 'unknown';
+
 export type ClarifyMissingField = 'location' | 'entity_type' | 'relationship_clarification' | 'semantic_constraint';
 
 export interface ClarifyGateResult {
   route: ClarifyRoute;
   reason: string;
+  triggerCategory?: ClarifyTriggerCategory;
   questions?: string[];
   missingFields?: ClarifyMissingField[];
   parsedFields?: {
@@ -230,6 +233,25 @@ function hasFalsePriorContext(msg: string): boolean {
   return false;
 }
 
+function isNonsenseInput(msg: string): boolean {
+  const trimmed = msg.trim();
+
+  if (hasSearchIntent(trimmed)) return false;
+  if (KNOWN_REGIONS.test(trimmed)) return false;
+
+  const COMMON_WORDS = /\b(?:find|search|list|show|get|look|locate|discover|identify|give|pull|fetch|source|the|a|an|in|on|at|to|for|of|with|and|or|but|is|are|was|were|be|been|being|have|has|had|do|does|did|will|would|shall|should|can|could|may|might|must|need|me|my|i|you|your|we|our|they|their|it|its|this|that|these|those|not|no|yes|please|thanks|thank|near|around|across|throughout|within|from|by|about|how|what|where|when|why|who|which|if|then|than|also|just|only|very|so|too|all|any|some|each|every|much|many|more|most|other|new|old|best|good|nice|great|big|small|long|short|high|low|first|last|next|open|close|make|take|come|go|see|know|think|want|tell|ask|use|try|put|call|keep|let|begin|start|end|stop|help|turn|move|play|run|work|live|feel|say|hear|read|write|eat|drink|buy|sell|pay|send|set|sit|stand|cut|hold|bring|carry|pick|drop|fall|rise|grow|change|follow|lead|leave|add|meet|serve|wait|stay|pass|spend|build|talk|walk|drive|fly|draw|break|teach|learn|look|study|plan|check|join|wish|watch|cook|sing|dance|swim|fight|push|pull|rest|sleep|wake|clean|wash|cross|cover|press|reach|lift|throw|catch|hang|feed|fit|fill|pour|mix|spread|lay|raise|lower|wear|light|heat|cool|test|fix|repair|save|apply|note|view|share|post|sign|sort|mark|name|form|link|count|match|rate|fund|track|place|point|state|order|charge|claim|report|present|offer|support|create|design|develop|manage|provide|include|consider|appear|expect|suggest|require|produce|affect|promise|handle|express|concern|involve|receive|notice|choose|deliver|pubs?|cafes?|bars?|restaurants?|shops?|hotels?|offices?|stores?|venues?|clubs?|salons?|studios?|breweries|bakeries|agencies|clinics?|pharmacies|gyms?|spas?|gardens?|markets?|galleries|theatres?|theaters?|cinemas?|libraries|museums?|schools?|churches|mosques?|temples?|companies|businesses|organisations?|organizations?|providers?|firms?|establishments?|places?|email|phone|website|music|food|beer|wine|coffee|tea|dog|friendly|family|outdoor|indoor|seating|parking|wifi|vegan|vegetarian|organic|independent|chain|craft|real|ale|cask|micro|tap|room|free|house|sports?|cocktail|gastro|late|night|quiet|cosy|cozy|lively|romantic|scenic|budget|cheap|expensive|premium|luxury)\b/i;
+
+  const words = trimmed.split(/\s+/);
+  const recognisableCount = words.filter(w => COMMON_WORDS.test(w) || KNOWN_REGIONS.test(w) || /^\d+$/.test(w)).length;
+  const ratio = recognisableCount / words.length;
+
+  if (words.length >= 3 && ratio < 0.25) return true;
+
+  if (words.length <= 2 && !/[a-zA-Z]{2,}/.test(trimmed)) return true;
+
+  return false;
+}
+
 const TEMPORAL_DISQUALIFIERS = /\b(?:months?|years?|days?|weeks?|hours?|minutes?|ago|since|last|past|recent|recently|old|new|opened|closed|started|founded|established)\b/i;
 const COUNT_NEAR_SEARCH = /\b(?:find|show|get|give me|list|pull|fetch|source|locate|discover|identify)\s+(\d+)\b/i;
 const COUNT_BEFORE_NOUN = /\b(\d+)\s+(?!months?\b|years?\b|days?\b|weeks?\b|hours?\b|minutes?\b)\w+/i;
@@ -290,6 +312,17 @@ function extractLocation(msg: string): string | null {
 export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   const msg = userMessage.trim();
 
+  if (!msg || msg.length === 0) {
+    return {
+      route: 'clarify_before_run',
+      reason: 'Clarification needed: input is empty.',
+      triggerCategory: 'empty',
+      questions: ['It looks like your message was empty. What would you like me to search for?'],
+      missingFields: [],
+      parsedFields: { businessType: null, location: null, count: null, timeFilter: null },
+    };
+  }
+
   if (isDirectResponse(msg)) {
     return {
       route: 'direct_response',
@@ -297,85 +330,39 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
     };
   }
 
-  const questions: string[] = [];
-  const reasons: string[] = [];
-  const missing: ClarifyMissingField[] = [];
-
-  if (hasFalsePriorContext(msg)) {
-    reasons.push('references prior context that may not exist');
-    questions.push('I don\'t have memory of a previous conversation on this topic. Could you restate what you\'re looking for?');
+  if (isNonsenseInput(msg)) {
+    return {
+      route: 'clarify_before_run',
+      reason: 'Clarification needed: input appears to be nonsense or unintelligible.',
+      triggerCategory: 'malformed',
+      questions: ['I couldn\'t understand that message. Could you rephrase what you\'re looking for? For example: "Find 10 pubs in Brighton"'],
+      missingFields: [],
+      parsedFields: { businessType: null, location: null, count: null, timeFilter: null },
+    };
   }
 
-  if (isMalformedInput(msg)) {
-    reasons.push('input appears malformed or contains multiple concatenated requests');
-    questions.push('It looks like your message may contain multiple requests joined together. Could you separate them so I handle each one correctly?');
-  }
+  const malformed = isMalformedInput(msg);
+  const mixed = hasMixedIntent(msg);
 
-  if (hasMixedIntent(msg)) {
-    reasons.push('message contains mixed intent (question + search, or multiple searches)');
-    if (!questions.some(q => q.includes('multiple requests'))) {
-      questions.push('Your message seems to contain more than one request. Could you tell me which one to tackle first?');
+  if (malformed || mixed) {
+    const questions: string[] = [];
+
+    if (malformed) {
+      questions.push('It looks like your message may contain multiple requests joined together. Could you separate them so I handle each one correctly?');
     }
-  }
-
-  if (hasRelationshipPredicate(msg)) {
-    reasons.push('contains a relationship predicate that cannot be verified by search alone');
-    questions.push('You\'re asking about a relationship between entities (e.g. "works with", "supplies"). I can find businesses in a location, but I can\'t verify relationships between them. Would you like me to search for the target entity type in a specific location instead?');
-    missing.push('relationship_clarification');
-  }
-
-  if (hasSearchIntent(msg) && hasSubjectiveCriteria(msg)) {
-    reasons.push('query contains subjective/unmeasurable criteria');
-    const subjectiveTerm = extractSubjectiveTerm(msg) || 'that';
-    questions.push(`When you say '${subjectiveTerm}', what do you mean? Pick one: cosy and quiet, lively and busy, trendy, upscale, cheap, good beer, good food, live music, or tell me your own criteria.`);
-    missing.push('semantic_constraint');
-  }
-
-  const vagueProximity = detectVagueProximityWithRealLocation(msg);
-  if (vagueProximity) {
-    reasons.push('location contains a vague proximity reference alongside a real location');
-    questions.push(`"${vagueProximity.vaguePhrase}" is vague — do you mean within a specific distance of a particular council building, or just generally in ${vagueProximity.realLocation}? Which building do you mean?`);
-    questions.push(`Just to confirm — is ${vagueProximity.realLocation} the right area to search?`);
-  } else if (hasSearchIntent(msg) && hasNonsenseLocation(msg)) {
-    reasons.push('location appears invalid or nonsensical');
-    questions.push('That phrase isn\'t a real place I can search. Please provide a concrete location — a city, town, postcode, or area.');
-    missing.push('location');
-  }
-
-  if (hasVagueEntityType(msg) && !hasRelationshipPredicate(msg)) {
-    reasons.push('entity type is vague without a sector qualifier');
-    questions.push('Could you be more specific about the type of business? For example, instead of "organisations", could you specify a sector like "care providers" or "marketing agencies"?');
-    missing.push('entity_type');
-  }
-
-  if (isMissingLocation(msg) && hasLeadFindingVerb(msg) && !hasNonsenseLocation(msg)) {
-    reasons.push('no clear location specified');
-    questions.push('Which city, region, or country should I search in?');
-    missing.push('location');
-  }
-
-  if (questions.length > 0) {
-    const rawLoc = extractLocation(msg);
-    const locationIsInvalid = missing.includes('location');
-    const sanitisedLocation = locationIsInvalid ? null : rawLoc;
-
-    const rawBT = extractBusinessType(msg);
-    const btContainsSubjective = rawBT ? SUBJECTIVE_CRITERIA.test(rawBT) : false;
-    let sanitisedBusinessType = rawBT;
-    if (btContainsSubjective && rawBT) {
-      const SUBJECTIVE_GLOBAL = /\b(?:best|top|coolest|nicest|most\s+fun|most\s+popular|most\s+interesting|greatest|finest|ultimate|amazing|awesome|incredible|fantastic|perfect|ideal|favourite|favorite|chillest|trendiest|hippest|dopest|sickest|vibes?|vibe-?y|vibey|nice|great|cool|lovely|decent|chill|good|popular|fancy|high[- ]?end|recommended|quality|trendy)\b/gi;
-      let cleaned = rawBT.replace(SUBJECTIVE_GLOBAL, '').replace(/\b(?:the|a|an)\b/gi, '').replace(/\s+/g, ' ').trim();
-      sanitisedBusinessType = cleaned.length > 1 ? cleaned : null;
+    if (mixed && !malformed) {
+      questions.push('Your message seems to contain more than one request. Could you tell me which one to tackle first?');
     }
 
     return {
       route: 'clarify_before_run',
-      reason: `Clarification needed: ${reasons.join('; ')}.`,
+      reason: `Clarification needed: ${malformed ? 'input appears malformed or contains multiple concatenated requests' : 'message contains multiple searches'}.`,
+      triggerCategory: 'multiple_requests',
       questions: questions.slice(0, 3),
-      missingFields: missing,
+      missingFields: [],
       parsedFields: {
-        businessType: sanitisedBusinessType,
-        location: sanitisedLocation,
+        businessType: extractBusinessType(msg),
+        location: extractLocation(msg),
         count: extractCount(msg),
         timeFilter: extractTimeFilter(msg),
       },
