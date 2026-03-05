@@ -1,5 +1,6 @@
 import { extractCanonicalIntent, type IntentExtractionResult } from './intent-extractor';
 import { createArtefact } from './artefacts';
+import { logAFREvent } from './afr-logger';
 
 export type IntentExtractorMode = 'off' | 'shadow' | 'active' | 'strict';
 
@@ -7,6 +8,35 @@ export function getIntentExtractorMode(): IntentExtractorMode {
   const raw = (process.env.INTENT_EXTRACTOR_MODE || 'off').toLowerCase().trim();
   if (raw === 'shadow' || raw === 'active' || raw === 'strict') return raw;
   return 'off';
+}
+
+export function isProbeEnabled(): boolean {
+  return (process.env.INTENT_EXTRACTOR_PROBE || '').toLowerCase().trim() === 'true';
+}
+
+export async function emitProbe(
+  actionTaken: string,
+  userId: string,
+  runId: string,
+  conversationId: string | undefined,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  if (!isProbeEnabled()) return;
+  try {
+    await logAFREvent({
+      userId,
+      runId,
+      conversationId,
+      actionTaken,
+      status: 'success',
+      taskGenerated: `Probe: ${actionTaken}`,
+      runType: 'plan',
+      metadata,
+    });
+    console.log(`[PROBE] ${actionTaken} emitted for runId=${runId}`);
+  } catch (err: any) {
+    console.warn(`[PROBE] ${actionTaken} emit failed: ${err.message}`);
+  }
 }
 
 export interface ShadowIntentResult {

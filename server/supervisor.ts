@@ -27,7 +27,7 @@ import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-
 import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField, type ClarifyTriggerCategory } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
-import { runIntentExtractorShadow, getIntentExtractorMode } from './supervisor/intent-shadow';
+import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
 import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './supervisor/query-shape-key';
@@ -783,6 +783,15 @@ class SupervisorService {
     console.log(`[ID_MAP] jobId=${jobId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${task.id} entry=processChatTask`);
     console.log(`[SUPERVISOR] Processing chat task ${task.id} (${task.task_type}) jobId=${jobId} uiRunId=${uiRunId} clientRequestId=${clientRequestId}`);
 
+    await emitProbe('intent_extractor_probe', task.user_id, jobId, task.conversation_id, {
+      run_id: jobId,
+      conversation_id: task.conversation_id ?? null,
+      user_id: task.user_id,
+      raw_msg: userInput,
+      intent_extractor_mode: getIntentExtractorMode(),
+      ts: Date.now(),
+    });
+
     const nowMs = Date.now();
     let runPersistedEarly = false;
     try {
@@ -871,43 +880,24 @@ class SupervisorService {
       metadata: { taskId: task.id, task_type: task.task_type },
     }).catch(() => {});
 
-    const extractorMode = getIntentExtractorMode();
-    const probeTs = Date.now();
-    await createArtefact({
-      runId: jobId,
-      type: 'intent_extractor_probe',
-      title: 'Intent extractor probe: BEFORE',
-      summary: `mode=${extractorMode} about_to_call_extractor=true`,
-      payload: { run_id: jobId, task_id: task.id, conversation_id: task.conversation_id, mode: extractorMode, about_to_call_extractor: true, ts: probeTs },
-      userId: task.user_id,
-      conversationId: task.conversation_id,
-    }).catch((e: any) => console.warn(`[INTENT_EXTRACTOR_PROBE] before-artefact emit failed: ${e.message}`));
-
-    let extractorResult: { ran: boolean; extraction: any; error: string | null } = { ran: false, extraction: null, error: null };
-    let extractorProbeError: string | null = null;
+    let shadowResult: { ran: boolean; extraction: any; error: string | null } = { ran: false, extraction: null, error: null };
+    let shadowProbeError: string | null = null;
     try {
-      extractorResult = await runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id);
+      shadowResult = await runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id);
     } catch (e: any) {
-      extractorProbeError = e.message;
+      shadowProbeError = e.message;
       console.warn(`[INTENT_EXTRACTOR_SHADOW] top-level error (non-fatal): ${e.message}`);
     }
 
-    await createArtefact({
-      runId: jobId,
-      type: 'intent_extractor_probe',
-      title: 'Intent extractor probe: AFTER',
-      summary: `ran=${extractorResult.ran} validation_ok=${extractorResult.extraction?.validation?.ok ?? false} error=${extractorProbeError ?? extractorResult.error ?? 'none'}`,
-      payload: {
-        run_id: jobId,
-        extractor_ran: extractorResult.ran,
-        artefact_written_run_id: jobId,
-        validation_ok: extractorResult.extraction?.validation?.ok ?? false,
-        error: extractorProbeError ?? extractorResult.error ?? null,
-        duration_ms: extractorResult.extraction?.duration_ms ?? 0,
-      },
-      userId: task.user_id,
-      conversationId: task.conversation_id,
-    }).catch((e: any) => console.warn(`[INTENT_EXTRACTOR_PROBE] after-artefact emit failed: ${e.message}`));
+    await emitProbe('intent_extractor_after_probe', task.user_id, jobId, task.conversation_id, {
+      run_id: jobId,
+      extractor_ran: shadowResult.ran,
+      validation_ok: shadowResult.extraction?.validation?.ok ?? false,
+      error: shadowProbeError ?? shadowResult.error ?? null,
+      duration_ms: shadowResult.extraction?.duration_ms ?? 0,
+      intent_extractor_mode: getIntentExtractorMode(),
+      ts: Date.now(),
+    });
 
     const isFactoryDemo = rawMsg.trim().toLowerCase() === 'run the injection moulding demo';
 
@@ -1294,6 +1284,16 @@ class SupervisorService {
         if (msgResult.error) console.error(`[CLARIFY_GATE] message insert failed: ${msgResult.error.message}`);
 
         await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'clarify_before_run', clarify_state: clarifyState } }).catch(() => {});
+
+        await emitProbe('clarify_before_run_probe', task.user_id, jobId, task.conversation_id, {
+          run_id: jobId,
+          conversation_id: task.conversation_id ?? null,
+          user_id: task.user_id,
+          missing_fields: missingFields,
+          trigger_category: clarifyGate.triggerCategory ?? null,
+          ts: Date.now(),
+        });
+
         return;
       }
     }
