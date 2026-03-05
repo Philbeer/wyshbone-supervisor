@@ -778,8 +778,17 @@ class SupervisorService {
     const source = task.run_id ? 'column' : requestData.run_id ? 'request_data' : 'fallback';
     console.log(`[SUPERVISOR] Task ${task.id}: resolved IDs — run_id=${uiRunId} crid=${clientRequestId} source=${source}`);
 
-    const jobId = uiRunId;
+    let jobId = uiRunId;
     const userInput = String(requestData.user_message || '').substring(0, 200);
+
+    const pendingClarifySession = getClarifySession(task.conversation_id);
+    const pendingConstraintState = getPendingContract(task.conversation_id);
+    const originRunId = pendingClarifySession?.originRunId || pendingConstraintState?.originRunId || null;
+    if (originRunId) {
+      console.log(`[CLARIFY_RESUME] Found origin run_id=${originRunId} for conversation=${task.conversation_id} — reusing (was ${jobId}, source=${pendingClarifySession?.originRunId ? 'clarify_session' : 'constraint_gate'})`);
+      jobId = originRunId;
+    }
+
     console.log(`[ID_MAP] jobId=${jobId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${task.id} entry=processChatTask`);
     console.log(`[SUPERVISOR] Processing chat task ${task.id} (${task.task_type}) jobId=${jobId} uiRunId=${uiRunId} clientRequestId=${clientRequestId}`);
 
@@ -798,6 +807,7 @@ class SupervisorService {
       await storage.createAgentRun({
         id: jobId,
         clientRequestId,
+        conversationId: task.conversation_id ?? undefined,
         userId: task.user_id,
         createdAt: nowMs,
         updatedAt: nowMs,
@@ -1075,7 +1085,7 @@ class SupervisorService {
       }
 
       if (!resolvedContract.can_execute) {
-        storePendingContract(task.conversation_id, pendingConstraint.originalMessage, resolvedContract);
+        storePendingContract(task.conversation_id, pendingConstraint.originalMessage, resolvedContract, jobId);
         const clarifyMsg = buildConstraintGateMessage(resolvedContract);
         const messageId = randomUUID();
 
@@ -1084,8 +1094,8 @@ class SupervisorService {
           supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(clarifyMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'constraint_gate_clarify', constraint_contract: resolvedContract, clarify_state: buildClarifyStateFromContract(resolvedContract) }, created_at: Date.now() }).select().single(),
         ]);
 
-        await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'constraint_gate_clarify', constraint_contract: resolvedContract } }).catch(() => {});
-        console.log(`[CONSTRAINT_GATE] Still blocked — asking again`);
+        await storage.updateAgentRun(jobId, { status: 'paused', terminalState: 'clarification_needed', metadata: { verdict: 'constraint_gate_clarify', constraint_contract: resolvedContract } }).catch(() => {});
+        console.log(`[CONSTRAINT_GATE] Still blocked — asking again — run paused`);
         return;
       }
 
@@ -1137,8 +1147,8 @@ class SupervisorService {
         if (taskUpdateResult.error) console.error(`[CLARIFY_SESSION] task update failed: ${taskUpdateResult.error.message}`);
         if (msgResult.error) console.error(`[CLARIFY_SESSION] message insert failed: ${msgResult.error.message}`);
 
-        await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'direct_response', endedAt: new Date(), metadata: { verdict: 'meta_trust_during_session', clarify_state: clarifyState, build: buildStamp } }).catch(() => {});
-        console.log(`[CLARIFY_SESSION] META_TRUST answered — build=${buildStamp} conversation=${task.conversation_id} — session preserved`);
+        await storage.updateAgentRun(jobId, { status: 'paused', terminalState: 'clarification_needed', metadata: { verdict: 'meta_trust_during_session', clarify_state: clarifyState, build: buildStamp } }).catch(() => {});
+        console.log(`[CLARIFY_SESSION] META_TRUST answered — build=${buildStamp} conversation=${task.conversation_id} — session preserved, run paused`);
         return;
       }
 
@@ -1191,8 +1201,8 @@ class SupervisorService {
           if (taskUpdateResult.error) console.error(`[CLARIFY_SESSION] task update failed: ${taskUpdateResult.error.message}`);
           if (msgResult.error) console.error(`[CLARIFY_SESSION] message insert failed: ${msgResult.error.message}`);
 
-          await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'execute_blocked_incomplete', clarify_state: clarifyState } }).catch(() => {});
-          console.log(`[CLARIFY_SESSION] EXECUTE_NOW blocked — missing fields: [${existingSession.missingFields.join(',')}]`);
+          await storage.updateAgentRun(jobId, { status: 'paused', terminalState: 'clarification_needed', metadata: { verdict: 'execute_blocked_incomplete', clarify_state: clarifyState } }).catch(() => {});
+          console.log(`[CLARIFY_SESSION] EXECUTE_NOW blocked — missing fields: [${existingSession.missingFields.join(',')}] — run paused`);
           return;
         }
       }
@@ -1247,8 +1257,8 @@ class SupervisorService {
           if (taskUpdateResult.error) console.error(`[CLARIFY_SESSION] task update failed: ${taskUpdateResult.error.message}`);
           if (msgResult.error) console.error(`[CLARIFY_SESSION] message insert failed: ${msgResult.error.message}`);
 
-          await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'clarify_turn_limit', clarify_state: clarifyState } }).catch(() => {});
-          console.log(`[CLARIFY_SESSION] Turn limit reached for conversation=${task.conversation_id} — offering choices`);
+          await storage.updateAgentRun(jobId, { status: 'paused', terminalState: 'clarification_needed', metadata: { verdict: 'clarify_turn_limit', clarify_state: clarifyState } }).catch(() => {});
+          console.log(`[CLARIFY_SESSION] Turn limit reached for conversation=${task.conversation_id} — offering choices — run paused`);
           return;
 
         } else {
@@ -1272,7 +1282,7 @@ class SupervisorService {
           if (taskUpdateResult.error) console.error(`[CLARIFY_SESSION] task update failed: ${taskUpdateResult.error.message}`);
           if (msgResult.error) console.error(`[CLARIFY_SESSION] message insert failed: ${msgResult.error.message}`);
 
-          await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'clarify_session_continue', clarify_state: clarifyState } }).catch(() => {});
+          await storage.updateAgentRun(jobId, { status: 'paused', terminalState: 'clarification_needed', metadata: { verdict: 'clarify_session_continue', clarify_state: clarifyState } }).catch(() => {});
           return;
         }
       }
@@ -1325,10 +1335,11 @@ class SupervisorService {
           rawMsg,
           missingFields as any[],
           { businessType: parsedBT, location: parsedLoc, count: parsedCount, timeFilter: parsedTimeFilter },
+          jobId,
         );
         incrementTurnCount(newSession);
         const clarifyState = buildClarifyState(newSession);
-        console.log(`[CLARIFY_SESSION] Created session for conversation=${task.conversation_id} original="${rawMsg.substring(0, 60)}" missing=[${missingFields.join(',')}] bt="${parsedBT}" loc="${parsedLoc}" count=${parsedCount} timeFilter="${parsedTimeFilter}"`);
+        console.log(`[CLARIFY_SESSION] Created session for conversation=${task.conversation_id} originRunId=${jobId} original="${rawMsg.substring(0, 60)}" missing=[${missingFields.join(',')}] bt="${parsedBT}" loc="${parsedLoc}" count=${parsedCount} timeFilter="${parsedTimeFilter}"`);
 
         const clarifyQuestions = clarifyGate.questions || ['Could you provide more detail about what you need?'];
         const clarifyMsg = clarifyQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n') + '\n\nYou can also say "search now" to run with what I have, or ask me something else.';
@@ -1343,7 +1354,8 @@ class SupervisorService {
         if (taskUpdateResult.error) console.error(`[CLARIFY_GATE] task update failed: ${taskUpdateResult.error.message}`);
         if (msgResult.error) console.error(`[CLARIFY_GATE] message insert failed: ${msgResult.error.message}`);
 
-        await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'clarify_before_run', clarify_state: clarifyState } }).catch(() => {});
+        await storage.updateAgentRun(jobId, { status: 'paused', terminalState: 'clarification_needed', metadata: { verdict: 'clarify_before_run', clarify_state: clarifyState } }).catch(() => {});
+        console.log(`[CLARIFY_GATE] Run paused (not completed) — runId=${jobId} status=paused terminalState=clarification_needed`);
 
         await emitProbe('clarify_before_run_probe', task.user_id, jobId, task.conversation_id, {
           run_id: jobId,
@@ -1423,7 +1435,7 @@ class SupervisorService {
           conversationId: task.conversation_id,
         }).catch((e: any) => console.warn(`[CONSTRAINT_GATE_OUTER] Failed to emit artefact: ${e.message}`));
 
-        storePendingContract(task.conversation_id, sessionOriginalRequest || outerGateMsg, outerGateResult);
+        storePendingContract(task.conversation_id, sessionOriginalRequest || outerGateMsg, outerGateResult, jobId);
 
         const outerGateClarifyMsg = buildConstraintGateMessage(outerGateResult);
         const outerGateMessageId = randomUUID();
@@ -1433,7 +1445,11 @@ class SupervisorService {
           supabase!.from('messages').insert({ id: outerGateMessageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(outerGateClarifyMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: outerGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: outerGateResult, clarify_state: buildClarifyStateFromContract(outerGateResult) }, created_at: Date.now() }).select().single(),
         ]);
 
-        console.log(`[CONSTRAINT_GATE_OUTER] BLOCKED — no agent_run created, no LLM calls, no tools invoked.`);
+        const outerTermState = outerGateResult.stop_recommended ? 'constraint_stop' : 'clarification_needed';
+        const outerPauseOrComplete = outerTermState === 'clarification_needed' ? 'paused' : 'completed';
+        const outerEndedAt = outerPauseOrComplete === 'completed' ? new Date() : undefined;
+        await storage.updateAgentRun(jobId, { status: outerPauseOrComplete, terminalState: outerTermState, ...(outerEndedAt ? { endedAt: outerEndedAt } : {}), metadata: { verdict: outerGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: outerGateResult } }).catch(() => {});
+        console.log(`[CONSTRAINT_GATE_OUTER] BLOCKED — status=${outerPauseOrComplete} terminalState=${outerTermState}`);
         return;
       }
     }
@@ -2144,9 +2160,8 @@ class SupervisorService {
       }).catch(() => {});
 
       await storage.updateAgentRun(chatRunId, {
-        status: 'completed',
+        status: 'paused',
         terminalState: 'clarification_needed',
-        endedAt: new Date(),
         metadata: { verdict: 'clarification_needed', gate_flags: gateResult.gate_flags },
       });
 
@@ -2565,7 +2580,7 @@ class SupervisorService {
         conversationId,
       }).catch((e: any) => console.warn(`[CONSTRAINT_GATE] Failed to emit artefact: ${e.message}`));
 
-      storePendingContract(conversationId, originalUserGoal, constraintGateResult);
+      storePendingContract(conversationId, originalUserGoal, constraintGateResult, chatRunId);
 
       const gateMsg = buildConstraintGateMessage(constraintGateResult);
       const gateMessageId = randomUUID();
@@ -2576,8 +2591,10 @@ class SupervisorService {
       ]);
 
       const termState = constraintGateResult.stop_recommended ? 'constraint_stop' : 'clarification_needed';
-      await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: termState, endedAt: new Date(), metadata: { verdict: constraintGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: constraintGateResult } }).catch(() => {});
-      console.log(`[CONSTRAINT_GATE] Blocked execution — terminalState=${termState}`);
+      const pauseOrComplete = termState === 'clarification_needed' ? 'paused' : 'completed';
+      const endedAtIfComplete = pauseOrComplete === 'completed' ? new Date() : undefined;
+      await storage.updateAgentRun(chatRunId, { status: pauseOrComplete, terminalState: termState, ...(endedAtIfComplete ? { endedAt: endedAtIfComplete } : {}), metadata: { verdict: constraintGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify', constraint_contract: constraintGateResult } }).catch(() => {});
+      console.log(`[CONSTRAINT_GATE] Blocked execution — terminalState=${termState} status=${pauseOrComplete}`);
 
       return {
         response: gateMsg,

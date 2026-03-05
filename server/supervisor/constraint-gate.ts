@@ -90,6 +90,7 @@ export interface PendingConstraintState {
   conversationId: string;
   originalMessage: string;
   contract: ConstraintContract;
+  originRunId: string | null;
   createdAt: number;
 }
 
@@ -951,11 +952,12 @@ export function resolveFollowUp(
   return gateResult;
 }
 
-export function storePendingContract(conversationId: string, originalMessage: string, contract: ConstraintContract): void {
+export function storePendingContract(conversationId: string, originalMessage: string, contract: ConstraintContract, originRunId?: string | null): void {
   pendingContracts.set(conversationId, {
     conversationId,
     originalMessage,
     contract,
+    originRunId: originRunId ?? null,
     createdAt: Date.now(),
   });
 }

@@ -3,6 +3,7 @@ export type MissingField = 'location' | 'entity_type' | 'relationship_clarificat
 export interface ClarifySession {
   conversationId: string;
   originalUserRequest: string;
+  originRunId: string | null;
   missingFields: MissingField[];
   collectedFields: {
     businessType: string | null;
@@ -55,10 +56,12 @@ export function createClarifySession(
   originalUserRequest: string,
   missingFields: MissingField[],
   initialFields: Partial<ClarifySession['collectedFields']>,
+  originRunId?: string | null,
 ): ClarifySession {
   const session: ClarifySession = {
     conversationId,
     originalUserRequest,
+    originRunId: originRunId ?? null,
     missingFields: [...missingFields],
     collectedFields: {
       businessType: initialFields.businessType ?? null,
