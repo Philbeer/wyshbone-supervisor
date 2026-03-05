@@ -1311,46 +1311,36 @@ class SupervisorService {
         const hasLlmArtefacts = earlyParsedGoal !== null;
 
         const intentPreviewPayload = {
-          user_message: rawMsg.substring(0, 500),
-          parsed_fields: { businessType: previewBT, location: previewLoc, count: previewCount, timeFilter: previewTime },
-          gate_route: clarifyGate.route,
+          businessType: previewBT,
+          location: previewLoc,
+          count: previewCount,
+          timeFilter: previewTime,
+          route: clarifyGate.route,
           trigger_category: clarifyGate.triggerCategory ?? null,
           has_llm_artefacts: hasLlmArtefacts,
           extraction_method: 'regex',
+          user_message: rawMsg.substring(0, 500),
         };
 
         this.postArtefactToUI({
           runId: jobId,
           clientRequestId,
-          type: 'intent_preview',
-          payload: intentPreviewPayload,
+          type: 'diagnostic',
+          payload: { ...intentPreviewPayload, title: 'Intent preview' },
           userId: task.user_id,
           conversationId: task.conversation_id,
         }).catch(() => {});
 
-        try {
-          await createArtefact({
-            runId: jobId,
-            type: 'intent_preview',
-            title: `Intent preview: ${previewBT || 'unknown entity'} in ${previewLoc || 'unknown location'}`,
-            summary: `Lightweight regex extraction (no LLM) | bt=${previewBT ?? '?'} loc=${previewLoc ?? '?'} count=${previewCount ?? 'any'} time=${previewTime ?? 'none'} | llm_artefacts=${hasLlmArtefacts}`,
-            payload: intentPreviewPayload as Record<string, unknown>,
-            userId: task.user_id,
-            conversationId: task.conversation_id,
-          });
-          console.log(`[INTENT_PREVIEW] Emitted intent_preview for clarify_before_run — runId=${jobId} bt=${previewBT} loc=${previewLoc} count=${previewCount} time=${previewTime} llm=${hasLlmArtefacts}`);
-        } catch (previewErr: any) {
-          console.error(`[INTENT_PREVIEW] DB write failed (UI post already sent): ${previewErr.message}`);
-          await createArtefact({
-            runId: jobId,
-            type: 'diagnostic',
-            title: 'Intent preview failed',
-            summary: `intent_preview artefact write failed: ${previewErr.message}`,
-            payload: { error: previewErr.message, gate_route: clarifyGate.route, fallback: true },
-            userId: task.user_id,
-            conversationId: task.conversation_id,
-          }).catch((diagErr: any) => console.error(`[INTENT_PREVIEW] Diagnostic fallback also failed: ${diagErr.message}`));
-        }
+        await createArtefact({
+          runId: jobId,
+          type: 'diagnostic',
+          title: 'Intent preview',
+          summary: `bt=${previewBT ?? '?'} | loc=${previewLoc ?? '?'} | count=${previewCount ?? 'any'} | time=${previewTime ?? 'none'} | llm_artefacts=${hasLlmArtefacts}`,
+          payload: intentPreviewPayload as Record<string, unknown>,
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch((previewErr: any) => console.error(`[INTENT_PREVIEW] DB write failed: ${previewErr.message}`));
+        console.log(`[INTENT_PREVIEW] Emitted diagnostic 'Intent preview' for clarify_before_run — runId=${jobId} bt=${previewBT} loc=${previewLoc} count=${previewCount} time=${previewTime}`);
       }
 
       if (clarifyGate.route === 'direct_response') {
