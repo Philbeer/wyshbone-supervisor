@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { evaluateClarifyGate } from './clarify-gate';
+import { evaluateClarifyGate, extractBusinessType, extractLocation, extractCount, extractTimeFilter } from './clarify-gate';
 
 describe('ClarifyGate — tightened gate: only empty, nonsense, or multiple concatenated requests trigger clarify', () => {
 
@@ -324,6 +324,102 @@ describe('ClarifyGate — tightened gate: only empty, nonsense, or multiple conc
     it('"restaurants" → agent_run (single word but valid noun)', () => {
       const result = evaluateClarifyGate('restaurants');
       assert.strictEqual(result.route, 'agent_run');
+    });
+  });
+});
+
+describe('Intent preview extractors — regex-based field extraction for intent_preview artefacts', () => {
+
+  describe('extractBusinessType', () => {
+    it('extracts entity from "find gyms in London"', () => {
+      assert.strictEqual(extractBusinessType('find gyms in London'), 'gyms');
+    });
+
+    it('extracts entity from "list restaurants in Manchester"', () => {
+      assert.strictEqual(extractBusinessType('list restaurants in Manchester'), 'restaurants');
+    });
+
+    it('extracts entity with count from "find 10 micropubs in Brighton"', () => {
+      assert.strictEqual(extractBusinessType('find 10 micropubs in Brighton'), 'micropubs');
+    });
+
+    it('strips time filter from entity: "find gyms in London that opened in the last 6 months"', () => {
+      const bt = extractBusinessType('find gyms in London that opened in the last 6 months');
+      assert.strictEqual(bt, 'gyms');
+    });
+
+    it('returns null for empty string', () => {
+      assert.strictEqual(extractBusinessType(''), null);
+    });
+  });
+
+  describe('extractLocation', () => {
+    it('extracts "London" from "find gyms in London"', () => {
+      assert.strictEqual(extractLocation('find gyms in London'), 'London');
+    });
+
+    it('extracts "West Sussex" from "find pubs in West Sussex"', () => {
+      assert.strictEqual(extractLocation('find pubs in West Sussex'), 'West Sussex');
+    });
+
+    it('returns null when no location present', () => {
+      assert.strictEqual(extractLocation('find pubs'), null);
+    });
+  });
+
+  describe('extractCount', () => {
+    it('extracts 10 from "find 10 pubs in Leeds"', () => {
+      assert.strictEqual(extractCount('find 10 pubs in Leeds'), 10);
+    });
+
+    it('returns null when no count present', () => {
+      assert.strictEqual(extractCount('find pubs in Leeds'), null);
+    });
+
+    it('does not extract temporal numbers: "last 6 months" should not return 6', () => {
+      const count = extractCount('find gyms in London that opened in the last 6 months');
+      assert.strictEqual(count, null);
+    });
+  });
+
+  describe('extractTimeFilter', () => {
+    it('extracts "last 6 months" from "opened in the last 6 months"', () => {
+      const tf = extractTimeFilter('find gyms in London that opened in the last 6 months');
+      assert.ok(tf !== null, 'timeFilter should not be null');
+      assert.ok(tf!.includes('last'), `timeFilter "${tf}" should contain "last"`);
+      assert.ok(tf!.includes('6'), `timeFilter "${tf}" should contain "6"`);
+      assert.ok(tf!.includes('month'), `timeFilter "${tf}" should contain "month"`);
+    });
+
+    it('returns null when no time filter present', () => {
+      assert.strictEqual(extractTimeFilter('find pubs in Bristol'), null);
+    });
+  });
+
+  describe('clarify_before_run produces preview-compatible parsedFields', () => {
+    it('multiple_requests route includes parsedFields with extracted data', () => {
+      const result = evaluateClarifyGate('find pubs in Leeds and also find cafes in Bristol');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.parsedFields, 'parsedFields should exist');
+      assert.ok(result.parsedFields!.businessType !== undefined, 'businessType should be defined');
+      assert.ok(result.parsedFields!.location !== undefined, 'location should be defined');
+    });
+
+    it('empty input route includes parsedFields (all null)', () => {
+      const result = evaluateClarifyGate('');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.ok(result.parsedFields, 'parsedFields should exist');
+      assert.strictEqual(result.parsedFields!.businessType, null);
+      assert.strictEqual(result.parsedFields!.location, null);
+    });
+
+    it('extractors work independently on clarify_before_run messages', () => {
+      const msg = 'find pubs in LeedsShow me cafes in Bristol';
+      const result = evaluateClarifyGate(msg);
+      assert.strictEqual(result.route, 'clarify_before_run');
+      const bt = extractBusinessType(msg);
+      const loc = extractLocation(msg);
+      assert.ok(bt !== null || loc !== null, 'at least one field should be extracted from malformed input');
     });
   });
 });

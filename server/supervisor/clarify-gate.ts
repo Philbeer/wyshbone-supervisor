@@ -309,6 +309,8 @@ function extractLocation(msg: string): string | null {
   return null;
 }
 
+export { extractBusinessType, extractLocation, extractCount, extractTimeFilter };
+
 export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   const msg = userMessage.trim();
 
