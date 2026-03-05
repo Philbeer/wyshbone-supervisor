@@ -17,6 +17,7 @@
 import { randomUUID } from 'crypto';
 import { logAFREvent } from './afr-logger';
 import { supabase } from '../supabase';
+import { storage } from '../storage';
 import { runNightlyMaintenance } from './jobs/handlers/nightly-maintenance';
 import { runXeroSync } from './jobs/handlers/xero-sync';
 import { runMonitorWorker, acquireMonitorWorkerLock, releaseMonitorWorkerLock, isMonitorWorkerRunning } from './jobs/handlers/monitor-worker';
@@ -590,6 +591,45 @@ export async function startJob(request: StartJobRequest): Promise<string> {
         console.warn(`[SUPERVISOR_REDIRECT] Failed to insert supervisor_task: ${insertErr.message}`);
       } else {
         console.log(`[SUPERVISOR_REDIRECT] Created supervisor_task ${taskId} run_id=${canonicalRunId}`);
+
+        const nowMs = Date.now();
+        try {
+          await storage.createAgentRun({
+            id: canonicalRunId,
+            clientRequestId: request.clientRequestId || `crid_${canonicalRunId}`,
+            userId,
+            createdAt: nowMs,
+            updatedAt: nowMs,
+            status: 'pending',
+            metadata: {
+              source: 'startJob_deep_research',
+              original_user_goal: fullUserMessage.substring(0, 200),
+            },
+          });
+          console.log(`[SUPERVISOR_REDIRECT] Created agent_run ${canonicalRunId} at entrypoint (before poll)`);
+        } catch (runErr: any) {
+          const msg = runErr.message || '';
+          if (msg.includes('duplicate key') || msg.includes('unique constraint')) {
+            console.log(`[SUPERVISOR_REDIRECT] agent_run ${canonicalRunId} already exists — skipping create`);
+          } else {
+            console.warn(`[SUPERVISOR_REDIRECT] Failed to create agent_run (non-fatal): ${msg}`);
+          }
+        }
+
+        logAFREvent({
+          userId,
+          runId: canonicalRunId,
+          conversationId: request.payload?.conversation_id || undefined,
+          clientRequestId: request.clientRequestId || undefined,
+          actionTaken: 'user_message_received',
+          status: 'success',
+          taskGenerated: `Message received: "${fullUserMessage.substring(0, 80)}"`,
+          runType: 'plan',
+          metadata: {
+            user_message: fullUserMessage.substring(0, 200),
+            source: 'startJob_deep_research',
+          },
+        }).catch((e: any) => console.warn(`[SUPERVISOR_REDIRECT] Failed to log user_message_received: ${e.message}`));
       }
     }
 

@@ -526,6 +526,47 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (error) throw error;
 
       console.log(`[DEBUG] simulate-chat-task: created supervisor_task ${taskId} — message="${goalText.substring(0, 80)}"`);
+
+      const nowMs = Date.now();
+      try {
+        await storage.createAgentRun({
+          id: runId,
+          clientRequestId,
+          userId,
+          createdAt: nowMs,
+          updatedAt: nowMs,
+          status: 'pending',
+          metadata: {
+            source: 'simulate_chat_task',
+            original_user_goal: goalText.substring(0, 200),
+          },
+        });
+        console.log(`[DEBUG] simulate-chat-task: created agent_run ${runId} at entrypoint`);
+      } catch (runErr: any) {
+        const msg = runErr.message || '';
+        if (msg.includes('duplicate key') || msg.includes('unique constraint')) {
+          console.log(`[DEBUG] simulate-chat-task: agent_run ${runId} already exists`);
+        } else {
+          console.warn(`[DEBUG] simulate-chat-task: agent_run create failed (non-fatal): ${msg}`);
+        }
+      }
+
+      const { logAFREvent } = await import('./supervisor/afr-logger');
+      logAFREvent({
+        userId,
+        runId,
+        conversationId,
+        clientRequestId,
+        actionTaken: 'user_message_received',
+        status: 'success',
+        taskGenerated: `Message received: "${goalText.substring(0, 80)}"`,
+        runType: 'plan',
+        metadata: {
+          user_message: goalText.substring(0, 200),
+          source: 'simulate_chat_task',
+        },
+      }).catch((e: any) => console.warn(`[DEBUG] simulate-chat-task: user_message_received log failed: ${e.message}`));
+
       res.json({
         ok: true,
         taskId,
