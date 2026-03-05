@@ -903,6 +903,62 @@ class SupervisorService {
       ts: Date.now(),
     });
 
+    let earlyParsedGoal: ParsedGoal | null = null;
+    try {
+      console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal`);
+      earlyParsedGoal = await parseGoalToConstraints(rawMsg.trim());
+
+      const earlyConstraints = earlyParsedGoal.constraints;
+      const earlyRc = buildRequestedCount(earlyParsedGoal.requested_count_user);
+      const earlyUserCount = earlyRc.requested_count_user === 'explicit' ? earlyParsedGoal.requested_count_user : null;
+
+      const cePayload = buildConstraintsExtractedPayload(rawMsg.trim(), earlyUserCount ?? null, earlyConstraints);
+      const ceTitle = `Constraints extracted: ${earlyConstraints.length} constraints`;
+      const ceSummary = `mission_type=lead_finder | ${earlyConstraints.filter(c => c.hard).length} hard, ${earlyConstraints.filter(c => !c.hard).length} soft | requested_count_user=${earlyUserCount ?? 'any'}`;
+      await createArtefact({
+        runId: jobId,
+        type: 'constraints_extracted',
+        title: ceTitle,
+        summary: ceSummary,
+        payload: cePayload as unknown as Record<string, unknown>,
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch((e: any) => console.warn(`[EARLY_PARSE] constraints_extracted artefact failed (non-fatal): ${e.message}`));
+      this.postArtefactToUI({
+        runId: jobId,
+        clientRequestId,
+        type: 'constraints_extracted',
+        payload: { ...cePayload as unknown as Record<string, unknown>, title: ceTitle, summary: ceSummary },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch((e: any) => console.warn(`[EARLY_PARSE] postArtefactToUI constraints_extracted failed (non-fatal): ${e.message}`));
+
+      const ccPayload = buildCapabilityCheck(earlyConstraints);
+      const ccTitle = `Capability check: ${ccPayload.verifiable_count} verifiable, ${ccPayload.unverifiable_count} unverifiable`;
+      const ccSummary = `${ccPayload.verifiable_count}/${ccPayload.total_constraints} verifiable | blocking_hard: [${ccPayload.blocking_hard_constraints.join(', ')}]`;
+      await createArtefact({
+        runId: jobId,
+        type: 'constraint_capability_check',
+        title: ccTitle,
+        summary: ccSummary,
+        payload: ccPayload as unknown as Record<string, unknown>,
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch((e: any) => console.warn(`[EARLY_PARSE] constraint_capability_check artefact failed (non-fatal): ${e.message}`));
+      this.postArtefactToUI({
+        runId: jobId,
+        clientRequestId,
+        type: 'constraint_capability_check',
+        payload: { ...ccPayload as unknown as Record<string, unknown>, title: ccTitle, summary: ccSummary },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch((e: any) => console.warn(`[EARLY_PARSE] postArtefactToUI constraint_capability_check failed (non-fatal): ${e.message}`));
+
+      console.log(`[EARLY_PARSE] Emitted constraints_extracted (${earlyConstraints.length}) + capability_check before gates`);
+    } catch (parseErr: any) {
+      console.warn(`[EARLY_PARSE] parseGoalToConstraints failed (non-fatal, will retry in executeTowerLoopChat): ${parseErr.message}`);
+    }
+
     const isFactoryDemo = rawMsg.trim().toLowerCase() === 'run the injection moulding demo';
 
     if (isFactoryDemo) {
@@ -1387,7 +1443,7 @@ class SupervisorService {
     let runFailed = false;
     let failureReason = '';
     try {
-      towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId);
+      towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId, earlyParsedGoal);
     } catch (execErr: any) {
       runFailed = true;
       failureReason = execErr.message || String(execErr);
@@ -1922,6 +1978,7 @@ class SupervisorService {
     userContext: UserContext,
     chatRunId: string,
     clientRequestId: string,
+    preComputedParsedGoal?: ParsedGoal | null,
   ): Promise<{ response: string; leadIds: string[]; deliverySummary: DeliverySummaryPayload | null; towerVerdict: string | null; leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string }> }> {
     const conversationId = task.conversation_id;
     const requestData = task.request_data;
@@ -1934,7 +1991,10 @@ class SupervisorService {
     const originalUserGoal = rawMsg.trim();
 
     console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=parse_goal_to_constraints`);
-    const parsedGoal = await parseGoalToConstraints(originalUserGoal);
+    const parsedGoal = preComputedParsedGoal ?? await parseGoalToConstraints(originalUserGoal);
+    if (preComputedParsedGoal) {
+      console.log(`[TOWER_LOOP_CHAT] Reusing pre-computed parsedGoal (skipped duplicate LLM call)`);
+    }
 
     let businessType: string = canonicaliseBusinessType(searchQuery?.business_type as string || parsedGoal.business_type || '');
     let rawLocation = parsedGoal.location;
@@ -2145,56 +2205,60 @@ class SupervisorService {
     }
     console.log(`[TOWER_LOOP_CHAT] Typed constraints for Tower: ${JSON.stringify(typedConstraints)}`);
 
-    const cvlConstraintsPayload = buildConstraintsExtractedPayload(originalUserGoal, userRequestedCountFinal, structuredConstraints);
-    try {
-      const ceArtefact = await createArtefact({
-        runId: chatRunId,
-        type: 'constraints_extracted',
-        title: `Constraints extracted: ${structuredConstraints.length} constraints`,
-        summary: `mission_type=lead_finder | ${structuredConstraints.filter(c => c.hard).length} hard, ${structuredConstraints.filter(c => !c.hard).length} soft | requested_count_user=${userRequestedCountFinal ?? 'any'}`,
-        payload: cvlConstraintsPayload as unknown as Record<string, unknown>,
-        userId: task.user_id,
-        conversationId,
-      });
-      console.log(`[CVL] constraints_extracted artefact id=${ceArtefact.id} constraints=${structuredConstraints.length}`);
-      const ceTitle = `Constraints extracted: ${structuredConstraints.length} constraints`;
-      const ceSummary = `mission_type=lead_finder | ${structuredConstraints.filter(c => c.hard).length} hard, ${structuredConstraints.filter(c => !c.hard).length} soft | requested_count_user=${userRequestedCountFinal ?? 'any'}`;
-      await this.postArtefactToUI({
-        runId: chatRunId,
-        clientRequestId,
-        type: 'constraints_extracted',
-        payload: { ...cvlConstraintsPayload as unknown as Record<string, unknown>, title: ceTitle, summary: ceSummary },
-        userId: task.user_id,
-        conversationId,
-      }).catch((e: any) => console.warn(`[CVL] postArtefactToUI constraints_extracted failed (non-fatal): ${e.message}`));
-    } catch (ceErr: any) {
-      console.warn(`[CVL] Failed to emit constraints_extracted (non-fatal): ${ceErr.message}`);
-    }
+    if (!preComputedParsedGoal) {
+      const cvlConstraintsPayload = buildConstraintsExtractedPayload(originalUserGoal, userRequestedCountFinal, structuredConstraints);
+      try {
+        const ceArtefact = await createArtefact({
+          runId: chatRunId,
+          type: 'constraints_extracted',
+          title: `Constraints extracted: ${structuredConstraints.length} constraints`,
+          summary: `mission_type=lead_finder | ${structuredConstraints.filter(c => c.hard).length} hard, ${structuredConstraints.filter(c => !c.hard).length} soft | requested_count_user=${userRequestedCountFinal ?? 'any'}`,
+          payload: cvlConstraintsPayload as unknown as Record<string, unknown>,
+          userId: task.user_id,
+          conversationId,
+        });
+        console.log(`[CVL] constraints_extracted artefact id=${ceArtefact.id} constraints=${structuredConstraints.length}`);
+        const ceTitle = `Constraints extracted: ${structuredConstraints.length} constraints`;
+        const ceSummary = `mission_type=lead_finder | ${structuredConstraints.filter(c => c.hard).length} hard, ${structuredConstraints.filter(c => !c.hard).length} soft | requested_count_user=${userRequestedCountFinal ?? 'any'}`;
+        await this.postArtefactToUI({
+          runId: chatRunId,
+          clientRequestId,
+          type: 'constraints_extracted',
+          payload: { ...cvlConstraintsPayload as unknown as Record<string, unknown>, title: ceTitle, summary: ceSummary },
+          userId: task.user_id,
+          conversationId,
+        }).catch((e: any) => console.warn(`[CVL] postArtefactToUI constraints_extracted failed (non-fatal): ${e.message}`));
+      } catch (ceErr: any) {
+        console.warn(`[CVL] Failed to emit constraints_extracted (non-fatal): ${ceErr.message}`);
+      }
 
-    const cvlCapabilityPayload = buildCapabilityCheck(structuredConstraints);
-    try {
-      const ccArtefact = await createArtefact({
-        runId: chatRunId,
-        type: 'constraint_capability_check',
-        title: `Capability check: ${cvlCapabilityPayload.verifiable_count} verifiable, ${cvlCapabilityPayload.unverifiable_count} unverifiable`,
-        summary: `${cvlCapabilityPayload.verifiable_count}/${cvlCapabilityPayload.total_constraints} verifiable | blocking_hard: [${cvlCapabilityPayload.blocking_hard_constraints.join(', ')}]`,
-        payload: cvlCapabilityPayload as unknown as Record<string, unknown>,
-        userId: task.user_id,
-        conversationId,
-      });
-      console.log(`[CVL] constraint_capability_check artefact id=${ccArtefact.id} verifiable=${cvlCapabilityPayload.verifiable_count} blocking_hard=${cvlCapabilityPayload.blocking_hard_constraints.length}`);
-      const ccTitle = `Capability check: ${cvlCapabilityPayload.verifiable_count} verifiable, ${cvlCapabilityPayload.unverifiable_count} unverifiable`;
-      const ccSummary = `${cvlCapabilityPayload.verifiable_count}/${cvlCapabilityPayload.total_constraints} verifiable | blocking_hard: [${cvlCapabilityPayload.blocking_hard_constraints.join(', ')}]`;
-      await this.postArtefactToUI({
-        runId: chatRunId,
-        clientRequestId,
-        type: 'constraint_capability_check',
-        payload: { ...cvlCapabilityPayload as unknown as Record<string, unknown>, title: ccTitle, summary: ccSummary },
-        userId: task.user_id,
-        conversationId,
-      }).catch((e: any) => console.warn(`[CVL] postArtefactToUI constraint_capability_check failed (non-fatal): ${e.message}`));
-    } catch (ccErr: any) {
-      console.warn(`[CVL] Failed to emit constraint_capability_check (non-fatal): ${ccErr.message}`);
+      const cvlCapabilityPayload = buildCapabilityCheck(structuredConstraints);
+      try {
+        const ccArtefact = await createArtefact({
+          runId: chatRunId,
+          type: 'constraint_capability_check',
+          title: `Capability check: ${cvlCapabilityPayload.verifiable_count} verifiable, ${cvlCapabilityPayload.unverifiable_count} unverifiable`,
+          summary: `${cvlCapabilityPayload.verifiable_count}/${cvlCapabilityPayload.total_constraints} verifiable | blocking_hard: [${cvlCapabilityPayload.blocking_hard_constraints.join(', ')}]`,
+          payload: cvlCapabilityPayload as unknown as Record<string, unknown>,
+          userId: task.user_id,
+          conversationId,
+        });
+        console.log(`[CVL] constraint_capability_check artefact id=${ccArtefact.id} verifiable=${cvlCapabilityPayload.verifiable_count} blocking_hard=${cvlCapabilityPayload.blocking_hard_constraints.length}`);
+        const ccTitle = `Capability check: ${cvlCapabilityPayload.verifiable_count} verifiable, ${cvlCapabilityPayload.unverifiable_count} unverifiable`;
+        const ccSummary = `${cvlCapabilityPayload.verifiable_count}/${cvlCapabilityPayload.total_constraints} verifiable | blocking_hard: [${cvlCapabilityPayload.blocking_hard_constraints.join(', ')}]`;
+        await this.postArtefactToUI({
+          runId: chatRunId,
+          clientRequestId,
+          type: 'constraint_capability_check',
+          payload: { ...cvlCapabilityPayload as unknown as Record<string, unknown>, title: ccTitle, summary: ccSummary },
+          userId: task.user_id,
+          conversationId,
+        }).catch((e: any) => console.warn(`[CVL] postArtefactToUI constraint_capability_check failed (non-fatal): ${e.message}`));
+      } catch (ccErr: any) {
+        console.warn(`[CVL] Failed to emit constraint_capability_check (non-fatal): ${ccErr.message}`);
+      }
+    } else {
+      console.log(`[CVL] Skipping duplicate constraints_extracted + capability_check artefacts (already emitted in early_parse_goal stage)`);
     }
 
     let policyResult: PolicyApplicationResult | null = null;
