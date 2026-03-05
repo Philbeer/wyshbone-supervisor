@@ -1,0 +1,73 @@
+SUPERVISOR REPO TASK: take ownership of clarification for chat-initiated missions.
+
+Goal
+When the UI/server delegates a chat message to Supervisor (via supervisor_tasks), Supervisor must:
+1) Run the normal LLM decipher steps (intent/constraints + capability)
+2) If clarification is needed, return a clarification response and write clarify artefacts
+3) If not needed, proceed with the normal run
+
+Rules
+- Production-grade, minimal change.
+- Do NOT add new DB enums/types.
+- Use existing artefact types already in AFR:
+  - intent_extracted_shadow (or whatever you already emit)
+  - constraints_extracted
+  - constraint_capability_check
+  - clarify_gate (existing)
+  - (optional) clarify_resolution (existing, if you already have it)
+- Do NOT rely on the UI/server clarifySession Map. Supervisor must be able to handle clarify on its own.
+- Keep the existing non-chat Supervisor task flows working.
+
+What you already have (assume from UI report)
+UI will include in request_data:
+- original_user_message
+- user_message (same or clarified)
+- supervisor_preflight: { requested_mode: "CLARIFY_FOR_RUN", reason, entityType, location }
+And it creates a supervisor_tasks row with task_type like find_prospects.
+
+Implementation
+1) Find the main entry point where Supervisor processes pending supervisor_tasks rows (the handler for task_type 'find_prospects' / the main executor).
+2) Add a preflight step at the very start of processing a chat-initiated task:
+   - Determine latestUserText = request_data.user_message OR request_data.original_user_message
+   - Run your existing pipeline that produces:
+     - intent extraction artefact
+     - constraints_extracted artefact
+     - constraint_capability_check artefact
+   - Decide "needs clarification?" using deterministic rules from the capability result:
+     - If there is any HARD constraint that is not verifiable OR is missing required fields (location missing, business_type missing, requested_count missing only if required by policy), then needs clarification.
+     - Also treat "opened in the last X months" as needing clarification unless you have a verifiable data source for opening date. (If you do not, clarify.)
+   - If needs clarification:
+     - Write a clarify_gate artefact to the same run_id (use the run_id on the supervisor_task row).
+     - Return a structured result to the UI by marking the supervisor_task as completed with a response payload like:
+       {
+         mode: "clarify",
+         question: <string>,
+         options: <string[] | null>,
+         reason: <short string>,
+         run_id: <run_id>
+       }
+     - Do NOT run the normal lead-finding steps when mode=clarify.
+   - If no clarification needed:
+     - Continue the existing execution as-is.
+
+3) Clarify question generation (keep it simple)
+- If missing location: ask for the location.
+- If time_filter like "opened in the last X months": ask what proxy is acceptable, e.g.
+  "We can't reliably verify opening date. Do you mean (A) newly opened businesses, or (B) newly listed/first reviewed recently (a proxy), or (C) ignore the opening-date constraint?"
+- If subjective constraints are hard: ask to convert to proxy (ratings, reviews, etc).
+
+4) Store/return mechanism
+Whatever mechanism Supervisor already uses to update supervisor_tasks status and store results:
+- Add support for mode:"clarify" results so UI can show the question in chat.
+- Ensure the Supervisor updates the supervisor_tasks row to status='completed' (or equivalent) even for clarify, with response_data containing the clarify payload.
+
+Deliverables
+- Implement the preflight clarify decision + clarify response.
+- Ensure the artefacts are emitted BEFORE returning clarify.
+- Ensure normal runs still work.
+- Keep changes minimal and localized.
+
+Manual check
+- With SUPERVISOR_OWNS_CLARIFY=true in UI/server:
+  Input: "find gyms in London that opened in the last 6 months"
+  Expect: Supervisor emits intent/constraints/capability + clarify_gate, and returns mode:"clarify" with a sensible question.
