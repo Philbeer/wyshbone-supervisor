@@ -1722,30 +1722,36 @@ class SupervisorService {
     }
   }
 
-  private async backfillUserMessageRunId(userId: string, runId: string, conversationId?: string, taskCreatedAt?: number): Promise<void> {
+  private async backfillUserMessageRunId(userId: string, runId: string, conversationId?: string, _taskCreatedAt?: number): Promise<void> {
     if (!supabase) return;
     if (!conversationId) return;
 
-    const windowMs = 120_000;
-    const cutoff = (taskCreatedAt || Date.now()) - windowMs;
-
-    let query = supabase
+    const { data: rows, error: selectErr } = await supabase
       .from('agent_activities')
-      .update({ run_id: runId })
-      .eq('user_id', userId)
+      .select('id')
       .eq('conversation_id', conversationId)
       .eq('action_taken', 'user_message_received')
       .is('run_id', null)
-      .gte('created_at', cutoff);
+      .order('created_at', { ascending: false })
+      .limit(1);
 
-    const { data, error } = await query.select('id');
-    if (error) {
-      console.error(`[BACKFILL] Failed to backfill user_message_received run_id: ${error.message}`);
+    if (selectErr) {
+      console.error(`[BACKFILL] Select failed: ${selectErr.message}`);
+      return;
+    }
+    if (!rows || rows.length === 0) return;
+
+    const targetId = rows[0].id;
+
+    const { error: updateErr } = await supabase
+      .from('agent_activities')
+      .update({ run_id: runId })
+      .eq('id', targetId);
+
+    if (updateErr) {
+      console.error(`[BACKFILL] Update failed for row ${targetId}: ${updateErr.message}`);
     } else {
-      const count = data?.length ?? 0;
-      if (count > 0) {
-        console.log(`[BACKFILL] Patched ${count} user_message_received row(s) with run_id=${runId} conv=${conversationId} window=${windowMs}ms`);
-      }
+      console.log(`[BACKFILL] Patched user_message_received row=${targetId} with run_id=${runId} conv=${conversationId}`);
     }
   }
 
