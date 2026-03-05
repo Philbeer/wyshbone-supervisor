@@ -8,6 +8,13 @@ export const MISSION_TYPE_ENUM = [
   'unknown',
 ] as const;
 
+export const ENTITY_KIND_ENUM = [
+  'venue',
+  'company',
+  'person',
+  'unknown',
+] as const;
+
 export const GEO_MODE_ENUM = [
   'city',
   'region',
@@ -23,9 +30,9 @@ export const DEFAULT_COUNT_POLICY_ENUM = [
 ] as const;
 
 export const CONSTRAINT_TYPE_ENUM = [
-  'location',
-  'count',
   'attribute',
+  'rating',
+  'reviews',
   'time',
   'name_filter',
   'category',
@@ -37,6 +44,7 @@ export const HARDNESS_ENUM = ['hard', 'soft'] as const;
 
 export const EVIDENCE_MODE_ENUM = [
   'google_places',
+  'places_fields',
   'website_text',
   'web_search',
   'news',
@@ -67,7 +75,7 @@ export type CanonicalConstraint = z.infer<typeof CanonicalConstraintSchema>;
 
 export const CanonicalIntentSchema = z.object({
   mission_type: z.enum(MISSION_TYPE_ENUM),
-  entity_kind: z.string().nullable(),
+  entity_kind: z.enum(ENTITY_KIND_ENUM),
   entity_category: z.string().nullable(),
   location_text: z.string().nullable(),
   geo_mode: z.enum(GEO_MODE_ENUM),

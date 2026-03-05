@@ -10,8 +10,8 @@ import { getIntentExtractorMode } from './intent-shadow';
 describe('CanonicalIntent v2 — schema validation', () => {
   const validIntent: CanonicalIntent = {
     mission_type: 'find_businesses',
-    entity_kind: 'pubs',
-    entity_category: 'hospitality',
+    entity_kind: 'venue',
+    entity_category: 'pubs',
     location_text: 'Arundel',
     geo_mode: 'city',
     radius_km: null,
@@ -37,8 +37,8 @@ describe('CanonicalIntent v2 — schema validation', () => {
     assert.deepStrictEqual(result.errors, []);
     assert.ok(result.intent);
     assert.strictEqual(result.intent!.mission_type, 'find_businesses');
-    assert.strictEqual(result.intent!.entity_kind, 'pubs');
-    assert.strictEqual(result.intent!.entity_category, 'hospitality');
+    assert.strictEqual(result.intent!.entity_kind, 'venue');
+    assert.strictEqual(result.intent!.entity_category, 'pubs');
     assert.strictEqual(result.intent!.location_text, 'Arundel');
     assert.strictEqual(result.intent!.geo_mode, 'city');
     assert.strictEqual(result.intent!.requested_count, 10);
@@ -57,6 +57,13 @@ describe('CanonicalIntent v2 — schema validation', () => {
     const result = validateCanonicalIntent(bad);
     assert.strictEqual(result.ok, false);
     assert.ok(result.errors.some(e => e.includes('mission_type')));
+  });
+
+  it('rejects invalid entity_kind enum', () => {
+    const bad = { ...validIntent, entity_kind: 'pubs' };
+    const result = validateCanonicalIntent(bad);
+    assert.strictEqual(result.ok, false);
+    assert.ok(result.errors.some(e => e.includes('entity_kind')));
   });
 
   it('rejects invalid geo_mode enum', () => {
@@ -88,6 +95,24 @@ describe('CanonicalIntent v2 — schema validation', () => {
     assert.ok(result.errors.some(e => e.includes('type')));
   });
 
+  it('rejects constraint type "location" (removed from schema)', () => {
+    const bad = {
+      ...validIntent,
+      constraints: [{ type: 'location', raw: 'in Leeds', hardness: 'soft', evidence_mode: 'google_places', clarify_if_needed: false, clarify_question: null }],
+    };
+    const result = validateCanonicalIntent(bad);
+    assert.strictEqual(result.ok, false);
+  });
+
+  it('rejects constraint type "count" (removed from schema)', () => {
+    const bad = {
+      ...validIntent,
+      constraints: [{ type: 'count', raw: 'find 5', hardness: 'hard', evidence_mode: 'not_applicable', clarify_if_needed: false, clarify_question: null }],
+    };
+    const result = validateCanonicalIntent(bad);
+    assert.strictEqual(result.ok, false);
+  });
+
   it('rejects constraint with invalid hardness enum', () => {
     const bad = {
       ...validIntent,
@@ -112,10 +137,18 @@ describe('CanonicalIntent v2 — schema validation', () => {
     assert.ok(result.errors.length > 0);
   });
 
-  it('accepts null entity_kind and entity_category', () => {
-    const intent = { ...validIntent, entity_kind: null, entity_category: null };
+  it('accepts null entity_category', () => {
+    const intent = { ...validIntent, entity_category: null };
     const result = validateCanonicalIntent(intent);
     assert.strictEqual(result.ok, true);
+  });
+
+  it('accepts all valid entity_kind values', () => {
+    for (const kind of ['venue', 'company', 'person', 'unknown'] as const) {
+      const intent = { ...validIntent, entity_kind: kind };
+      const result = validateCanonicalIntent(intent);
+      assert.strictEqual(result.ok, true, `entity_kind=${kind} should be valid`);
+    }
   });
 
   it('accepts radius_km when geo_mode is radius', () => {
@@ -127,6 +160,18 @@ describe('CanonicalIntent v2 — schema validation', () => {
 
   it('accepts empty preferred_evidence_order', () => {
     const intent = { ...validIntent, preferred_evidence_order: [] as any[] };
+    const result = validateCanonicalIntent(intent);
+    assert.strictEqual(result.ok, true);
+  });
+
+  it('accepts places_fields evidence_mode', () => {
+    const intent = {
+      ...validIntent,
+      constraints: [
+        { type: 'rating' as const, raw: 'rated under 4.2 stars', hardness: 'hard' as const, evidence_mode: 'places_fields' as const, clarify_if_needed: false, clarify_question: null },
+      ],
+      preferred_evidence_order: ['places_fields' as const],
+    };
     const result = validateCanonicalIntent(intent);
     assert.strictEqual(result.ok, true);
   });
@@ -155,7 +200,7 @@ describe('CanonicalIntent v2 — old shape rejection', () => {
   it('rejects old shape even with some v2 fields mixed in', () => {
     const mixed = {
       mission_type: 'find_businesses',
-      entity_kind: 'pubs',
+      entity_kind: 'venue',
       action: 'find_businesses',
       business_type: 'pubs',
       location_text: 'Arundel',
@@ -175,7 +220,7 @@ describe('CanonicalIntent v2 — old shape rejection', () => {
   it('rejects object with only delivery_requirements from old shape', () => {
     const obj = {
       mission_type: 'find_businesses',
-      entity_kind: 'pubs',
+      entity_kind: 'venue',
       entity_category: null,
       location_text: 'Arundel',
       geo_mode: 'city',
@@ -195,7 +240,7 @@ describe('CanonicalIntent v2 — old shape rejection', () => {
   it('rejects object with only confidence from old shape', () => {
     const obj = {
       mission_type: 'find_businesses',
-      entity_kind: 'pubs',
+      entity_kind: 'venue',
       entity_category: null,
       location_text: 'Arundel',
       geo_mode: 'city',
@@ -215,7 +260,7 @@ describe('CanonicalIntent v2 — old shape rejection', () => {
   it('rejects object with only raw_input from old shape', () => {
     const obj = {
       mission_type: 'find_businesses',
-      entity_kind: 'pubs',
+      entity_kind: 'venue',
       entity_category: null,
       location_text: 'Arundel',
       geo_mode: 'city',
@@ -235,7 +280,7 @@ describe('CanonicalIntent v2 — old shape rejection', () => {
   it('rejects object with old "location" field (not location_text)', () => {
     const obj = {
       mission_type: 'find_businesses',
-      entity_kind: 'pubs',
+      entity_kind: 'venue',
       entity_category: null,
       location: 'Arundel',
       location_text: 'Arundel',
@@ -255,7 +300,7 @@ describe('CanonicalIntent v2 — old shape rejection', () => {
   it('rejects object with old "count" field (not requested_count)', () => {
     const obj = {
       mission_type: 'find_businesses',
-      entity_kind: 'pubs',
+      entity_kind: 'venue',
       entity_category: null,
       location_text: 'Arundel',
       geo_mode: 'city',
@@ -277,8 +322,8 @@ describe('CanonicalIntent v2 — JSON parsing', () => {
   it('parses valid v2 JSON string', () => {
     const json = JSON.stringify({
       mission_type: 'find_businesses',
-      entity_kind: 'restaurants',
-      entity_category: 'hospitality',
+      entity_kind: 'venue',
+      entity_category: 'restaurants',
       location_text: 'London',
       geo_mode: 'city',
       radius_km: null,
@@ -341,8 +386,8 @@ describe('CanonicalIntent v2 — constraint classification expectations', () => 
   it('"serve food" should be attribute + website_text, not relationship', () => {
     const intent: CanonicalIntent = {
       mission_type: 'find_businesses',
-      entity_kind: 'pubs',
-      entity_category: 'hospitality',
+      entity_kind: 'venue',
+      entity_category: 'pubs',
       location_text: 'Arundel',
       geo_mode: 'city',
       radius_km: null,
@@ -373,8 +418,8 @@ describe('CanonicalIntent v2 — constraint classification expectations', () => 
     for (const mode of validModes) {
       const intent: CanonicalIntent = {
         mission_type: 'find_businesses',
-        entity_kind: 'cafes',
-        entity_category: 'hospitality',
+        entity_kind: 'venue',
+        entity_category: 'cafes',
         location_text: 'Brighton',
         geo_mode: 'city',
         radius_km: null,
@@ -402,8 +447,8 @@ describe('CanonicalIntent v2 — constraint classification expectations', () => 
   it('unknown phrases should produce unknown_constraint with clarify_if_needed=true', () => {
     const intent: CanonicalIntent = {
       mission_type: 'find_businesses',
-      entity_kind: 'shops',
-      entity_category: 'retail',
+      entity_kind: 'venue',
+      entity_category: 'shops',
       location_text: 'Leeds',
       geo_mode: 'city',
       radius_km: null,
@@ -433,8 +478,8 @@ describe('CanonicalIntent v2 — constraint classification expectations', () => 
   it('constraint with clarify_if_needed=false must accept clarify_question=null', () => {
     const intent: CanonicalIntent = {
       mission_type: 'find_businesses',
-      entity_kind: 'pubs',
-      entity_category: 'hospitality',
+      entity_kind: 'venue',
+      entity_category: 'pubs',
       location_text: 'Bristol',
       geo_mode: 'city',
       radius_km: null,
@@ -456,6 +501,243 @@ describe('CanonicalIntent v2 — constraint classification expectations', () => 
     const result = validateCanonicalIntent(intent);
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.intent!.constraints[0].clarify_question, null);
+  });
+});
+
+describe('CanonicalIntent v2 — rating + reviews constraint mapping', () => {
+  it('"rated under 4.2 stars" maps to type=rating, evidence_mode=places_fields', () => {
+    const intent: CanonicalIntent = {
+      mission_type: 'find_businesses',
+      entity_kind: 'company',
+      entity_category: 'electrical contractors',
+      location_text: 'Leeds',
+      geo_mode: 'city',
+      radius_km: null,
+      requested_count: null,
+      default_count_policy: 'page_1',
+      constraints: [
+        {
+          type: 'rating',
+          raw: 'rated under 4.2 stars on Google',
+          hardness: 'hard',
+          evidence_mode: 'places_fields',
+          clarify_if_needed: false,
+          clarify_question: null,
+        },
+      ],
+      plan_template_hint: 'search_and_verify',
+      preferred_evidence_order: ['places_fields'],
+    };
+    const result = validateCanonicalIntent(intent);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.intent!.constraints[0].type, 'rating');
+    assert.strictEqual(result.intent!.constraints[0].evidence_mode, 'places_fields');
+  });
+
+  it('"fewer than 50 reviews" maps to type=reviews, evidence_mode=places_fields', () => {
+    const intent: CanonicalIntent = {
+      mission_type: 'find_businesses',
+      entity_kind: 'company',
+      entity_category: 'electrical contractors',
+      location_text: 'Leeds',
+      geo_mode: 'city',
+      radius_km: null,
+      requested_count: null,
+      default_count_policy: 'page_1',
+      constraints: [
+        {
+          type: 'reviews',
+          raw: 'fewer than 50 reviews',
+          hardness: 'hard',
+          evidence_mode: 'places_fields',
+          clarify_if_needed: false,
+          clarify_question: null,
+        },
+      ],
+      plan_template_hint: 'search_and_verify',
+      preferred_evidence_order: ['places_fields'],
+    };
+    const result = validateCanonicalIntent(intent);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.intent!.constraints[0].type, 'reviews');
+    assert.strictEqual(result.intent!.constraints[0].evidence_mode, 'places_fields');
+  });
+
+  it('combined rating + reviews + entity_kind=company validates correctly', () => {
+    const intent: CanonicalIntent = {
+      mission_type: 'find_businesses',
+      entity_kind: 'company',
+      entity_category: 'electrical contractors',
+      location_text: 'Leeds',
+      geo_mode: 'city',
+      radius_km: null,
+      requested_count: null,
+      default_count_policy: 'page_1',
+      constraints: [
+        {
+          type: 'rating',
+          raw: 'rated under 4.2 stars on Google',
+          hardness: 'hard',
+          evidence_mode: 'places_fields',
+          clarify_if_needed: false,
+          clarify_question: null,
+        },
+        {
+          type: 'reviews',
+          raw: 'fewer than 50 reviews',
+          hardness: 'hard',
+          evidence_mode: 'places_fields',
+          clarify_if_needed: false,
+          clarify_question: null,
+        },
+      ],
+      plan_template_hint: 'search_and_verify',
+      preferred_evidence_order: ['places_fields'],
+    };
+    const result = validateCanonicalIntent(intent);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.intent!.entity_kind, 'company');
+    assert.strictEqual(result.intent!.entity_category, 'electrical contractors');
+    assert.strictEqual(result.intent!.constraints.length, 2);
+    assert.strictEqual(result.intent!.constraints[0].type, 'rating');
+    assert.strictEqual(result.intent!.constraints[1].type, 'reviews');
+  });
+
+  it('location must NOT appear as a constraint — only in location_text', () => {
+    const withLocationConstraint = {
+      mission_type: 'find_businesses',
+      entity_kind: 'venue',
+      entity_category: 'pubs',
+      location_text: 'Leeds',
+      geo_mode: 'city',
+      radius_km: null,
+      requested_count: null,
+      default_count_policy: 'page_1',
+      constraints: [
+        { type: 'location', raw: 'in Leeds', hardness: 'soft', evidence_mode: 'google_places', clarify_if_needed: false, clarify_question: null },
+      ],
+      plan_template_hint: 'simple_search',
+      preferred_evidence_order: [],
+    };
+    const result = validateCanonicalIntent(withLocationConstraint);
+    assert.strictEqual(result.ok, false);
+  });
+
+  it('"at least 4 stars" is type=rating with hardness=hard', () => {
+    const intent: CanonicalIntent = {
+      mission_type: 'find_businesses',
+      entity_kind: 'venue',
+      entity_category: 'restaurants',
+      location_text: 'Manchester',
+      geo_mode: 'city',
+      radius_km: null,
+      requested_count: null,
+      default_count_policy: 'page_1',
+      constraints: [
+        {
+          type: 'rating',
+          raw: 'at least 4 stars',
+          hardness: 'hard',
+          evidence_mode: 'places_fields',
+          clarify_if_needed: false,
+          clarify_question: null,
+        },
+      ],
+      plan_template_hint: 'search_and_verify',
+      preferred_evidence_order: ['places_fields'],
+    };
+    const result = validateCanonicalIntent(intent);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.intent!.constraints[0].type, 'rating');
+  });
+
+  it('"more than 100 reviews" is type=reviews with hardness=hard', () => {
+    const intent: CanonicalIntent = {
+      mission_type: 'find_businesses',
+      entity_kind: 'venue',
+      entity_category: 'hotels',
+      location_text: 'Bath',
+      geo_mode: 'city',
+      radius_km: null,
+      requested_count: null,
+      default_count_policy: 'page_1',
+      constraints: [
+        {
+          type: 'reviews',
+          raw: 'more than 100 reviews',
+          hardness: 'hard',
+          evidence_mode: 'places_fields',
+          clarify_if_needed: false,
+          clarify_question: null,
+        },
+      ],
+      plan_template_hint: 'search_and_verify',
+      preferred_evidence_order: ['places_fields'],
+    };
+    const result = validateCanonicalIntent(intent);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.intent!.constraints[0].type, 'reviews');
+  });
+});
+
+describe('CanonicalIntent v2 — entity_kind enum rules', () => {
+  it('contractors → entity_kind=company', () => {
+    const intent: CanonicalIntent = {
+      mission_type: 'find_businesses',
+      entity_kind: 'company',
+      entity_category: 'electrical contractors',
+      location_text: 'Leeds',
+      geo_mode: 'city',
+      radius_km: null,
+      requested_count: null,
+      default_count_policy: 'page_1',
+      constraints: [],
+      plan_template_hint: 'simple_search',
+      preferred_evidence_order: [],
+    };
+    const result = validateCanonicalIntent(intent);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.intent!.entity_kind, 'company');
+    assert.strictEqual(result.intent!.entity_category, 'electrical contractors');
+  });
+
+  it('pubs → entity_kind=venue, entity_category=pubs', () => {
+    const intent: CanonicalIntent = {
+      mission_type: 'find_businesses',
+      entity_kind: 'venue',
+      entity_category: 'pubs',
+      location_text: 'Bristol',
+      geo_mode: 'city',
+      radius_km: null,
+      requested_count: null,
+      default_count_policy: 'page_1',
+      constraints: [],
+      plan_template_hint: 'simple_search',
+      preferred_evidence_order: [],
+    };
+    const result = validateCanonicalIntent(intent);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.intent!.entity_kind, 'venue');
+    assert.strictEqual(result.intent!.entity_category, 'pubs');
+  });
+
+  it('free-form string for entity_kind is rejected', () => {
+    const bad = {
+      mission_type: 'find_businesses',
+      entity_kind: 'electrical contractors',
+      entity_category: 'electrical contractors',
+      location_text: 'Leeds',
+      geo_mode: 'city',
+      radius_km: null,
+      requested_count: null,
+      default_count_policy: 'page_1',
+      constraints: [],
+      plan_template_hint: 'simple_search',
+      preferred_evidence_order: [],
+    };
+    const result = validateCanonicalIntent(bad);
+    assert.strictEqual(result.ok, false);
+    assert.ok(result.errors.some(e => e.includes('entity_kind')));
   });
 });
 

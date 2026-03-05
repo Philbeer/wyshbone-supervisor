@@ -3,6 +3,7 @@ import {
   type IntentValidationResult,
   parseAndValidateIntentJSON,
   MISSION_TYPE_ENUM,
+  ENTITY_KIND_ENUM,
   CONSTRAINT_TYPE_ENUM,
   HARDNESS_ENUM,
   EVIDENCE_MODE_ENUM,
@@ -16,9 +17,14 @@ const INTENT_EXTRACTOR_SYSTEM_PROMPT = `You are a strict intent classifier for a
 SCHEMA (all fields required):
 {
   "mission_type": one of ${JSON.stringify(MISSION_TYPE_ENUM)},
-  "entity_kind": string or null (core entity type, e.g. "pubs", "dentists", "cafes"),
-  "entity_category": string or null (broad vertical, e.g. "hospitality", "healthcare", "retail", "professional_services"),
-  "location_text": string or null (geographic location verbatim from user, e.g. "Arundel", "central London", "near Brighton"),
+  "entity_kind": one of ${JSON.stringify(ENTITY_KIND_ENUM)} (
+    "venue" = pubs, cafes, restaurants, gyms, hotels, shops, bars — any physical place customers visit,
+    "company" = contractors, agencies, firms, suppliers, manufacturers, trades — any business/service provider,
+    "person" = specific named individuals,
+    "unknown" = cannot determine
+  ),
+  "entity_category": string or null (the user's own category phrase verbatim or lightly normalised, e.g. "electrical contractors", "pubs", "dental practices", "Italian restaurants" — NOT a broad bucket like "hospitality" or "professional_services"),
+  "location_text": string or null (geographic location verbatim from user, e.g. "Leeds", "central London", "near Brighton"),
   "geo_mode": one of ${JSON.stringify(GEO_MODE_ENUM)} (
     "city" = single city/town,
     "region" = county/state/area,
@@ -53,11 +59,22 @@ SCHEMA (all fields required):
   "preferred_evidence_order": array of evidence_mode values, ordered by preference for this query (e.g. ["website_text", "google_places"] if user wants website verification first)
 }
 
+LOCATION RULE (CRITICAL):
+- Location goes ONLY in location_text and geo_mode. NEVER emit a constraint with type "location". The "location" constraint type does not exist in the schema.
+- "in Leeds" → location_text: "Leeds", geo_mode: "city". No constraint.
+- "near Brighton" → location_text: "Brighton", geo_mode: "radius". No constraint.
+
+ENTITY_KIND RULES:
+- Pubs, cafes, restaurants, bars, hotels, gyms, shops, salons → "venue"
+- Contractors, electricians, plumbers, solicitors, accountants, agencies, suppliers, manufacturers → "company"
+- Named individuals → "person"
+- Cannot determine → "unknown"
+
 CONSTRAINT CLASSIFICATION RULES:
 - "serve food", "beer garden", "outdoor seating", "air conditioning", "parking", "wifi", "wheelchair accessible", "dog friendly" → type: "attribute", evidence_mode: "website_text"
 - "on their website", "from their website", "website says" → sets evidence_mode to "website_text" for the associated constraint
-- "in <place>", "near <place>" → type: "location", evidence_mode: "google_places"
-- "find N", "top N" → type: "count", evidence_mode: "not_applicable"
+- "rated under/over/above/below N stars", "N+ stars", "at least N stars on Google", "Google rating above N" → type: "rating", evidence_mode: "places_fields", raw: the verbatim rating phrase
+- "fewer than N reviews", "more than N reviews", "at least N reviews", "N+ reviews on Google" → type: "reviews", evidence_mode: "places_fields", raw: the verbatim review count phrase
 - "opened in last N months", "opened recently", "new" → type: "time", evidence_mode: "web_search" or "news" or "registry"
 - "with the word X in the name", "called X" → type: "name_filter", evidence_mode: "google_places"
 - "works with", "supplies", "owned by", "run by" → type: "relationship", evidence_mode: "web_search", clarify_if_needed: true
@@ -67,24 +84,28 @@ CONSTRAINT CLASSIFICATION RULES:
 HARDNESS RULES:
 - "must", "only", "exactly", "strict" → hard
 - "preferably", "if possible", "ideally", "nice to have" → soft
+- Rating and review count constraints stated as requirements (no hedging) → hard
 - Attributes stated as requirements (no hedging) → hard
-- Location → soft unless "only in" / "must be in"
 
 PLAN_TEMPLATE_HINT RULES:
 - No constraints that need verification → "simple_search"
 - Has attribute/time constraints requiring website or web checks → "search_and_verify"
 - Has attribute constraints + user asked for email/phone/website → "search_verify_enrich"
+- Has rating/reviews constraints (places_fields) → "search_and_verify"
 - mission_type is "deep_research" → "deep_research"
 - Cannot determine → "unknown"
 
 PREFERRED_EVIDENCE_ORDER RULES:
 - If user mentions "on their website" → put "website_text" first
 - If user mentions "reviews say" → put "review_text" first
+- If rating/reviews constraints → include "places_fields"
 - Default for attribute constraints: ["website_text", "google_places"]
 - Default for time constraints: ["news", "web_search", "registry"]
+- Default for rating/reviews: ["places_fields"]
 - Include only modes relevant to the constraints in this query
 
 DO NOT include these old-schema fields: action, business_type, country, delivery_requirements, confidence, raw_input, value.
+DO NOT emit constraint type "location" or type "count". Location goes in location_text. Counts go in requested_count.
 
 Return ONLY valid JSON. No markdown fences, no commentary, no explanation.`;
 
