@@ -871,6 +871,12 @@ class SupervisorService {
       metadata: { taskId: task.id, task_type: task.task_type },
     }).catch(() => {});
 
+    try {
+      await runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id);
+    } catch (e: any) {
+      console.warn(`[INTENT_EXTRACTOR_SHADOW] top-level error (non-fatal): ${e.message}`);
+    }
+
     const isFactoryDemo = rawMsg.trim().toLowerCase() === 'run the injection moulding demo';
 
     if (isFactoryDemo) {
@@ -1258,12 +1264,6 @@ class SupervisorService {
         await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'clarification_needed', endedAt: new Date(), metadata: { verdict: 'clarify_before_run', clarify_state: clarifyState } }).catch(() => {});
         return;
       }
-    }
-
-    try {
-      await runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id);
-    } catch (e: any) {
-      console.warn(`[INTENT_EXTRACTOR_SHADOW] top-level error (non-fatal): ${e.message}`);
     }
 
     console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=constraint_gate`);
