@@ -27,6 +27,7 @@ import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-
 import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField, type ClarifyTriggerCategory } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
+import { runIntentExtractorShadow } from './supervisor/intent-shadow';
 import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './supervisor/query-shape-key';
@@ -1258,6 +1259,10 @@ class SupervisorService {
         return;
       }
     }
+
+    runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id).catch(
+      (e: any) => console.warn(`[INTENT_EXTRACTOR_SHADOW] fire-and-forget error: ${e.message}`)
+    );
 
     console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=constraint_gate`);
     // OUTER CONSTRAINT GATE — runs BEFORE executeTowerLoopChat
