@@ -72,6 +72,8 @@ export interface RelationshipPredicateResult {
   relationship_target: string | null;
 }
 
+const PRODUCT_ATTRIBUTE_AFTER_SERVE = /^(?:food|drinks?|meals?|breakfast|lunch|dinner|brunch|coffee|tea|beer|wine|cocktails?|snacks?|pizza|burgers?|ice\s*cream|desserts?|tapas|sushi|curry|fish|chips|sandwiches|cakes?|pastries?|soup|salad|steak|seafood|alcohol|spirits?|lager|ale|cider|gin|whisky|whiskey|rum|vodka|tequila|champagne|prosecco)/i;
+
 export function detectRelationshipPredicate(userMessage: string): RelationshipPredicateResult {
   const msgLower = userMessage.toLowerCase().trim();
 
@@ -80,6 +82,11 @@ export function detectRelationshipPredicate(userMessage: string): RelationshipPr
     if (idx === -1) continue;
 
     const afterPredicate = msgLower.slice(idx + predicate.length).trim();
+
+    if ((predicate === 'serve' || predicate === 'serves' || predicate === 'serving') && PRODUCT_ATTRIBUTE_AFTER_SERVE.test(afterPredicate)) {
+      continue;
+    }
+
     const target = afterPredicate
       .replace(/^(the|a|an)\s+/i, '')
       .split(/[,.;!?\n]/)[0]

@@ -355,9 +355,7 @@ export function buildRunReceiptFromArtefacts(
     },
   };
 
-  if (attributeOutcomes.length > 0) {
-    result.outcomes = { attributes: attributeOutcomes };
-  }
+  result.outcomes = { attributes: attributeOutcomes };
 
   return result;
 }
@@ -402,10 +400,11 @@ function buildNarrativeLines(ctx: {
 
   if (ctx.attributeOutcomes && ctx.attributeOutcomes.length > 0) {
     for (const ao of ctx.attributeOutcomes) {
+      const total = ao.matched_count + ao.unknown_count;
       if (ao.matched_count > 0) {
-        lines.push(`I verified ${ao.matched_count} of the ${ctx.deliveredCount} ${ctx.businessType} mention "${ao.attribute_raw}" on their website.`);
+        lines.push(`${ao.matched_count} of ${total} mention/indicate '${ao.attribute_raw}' online.`);
       } else {
-        lines.push(`I could not verify "${ao.attribute_raw}" from any of the websites checked.`);
+        lines.push(`None of the ${total} checked mention '${ao.attribute_raw}' online.`);
       }
     }
   }

@@ -335,10 +335,29 @@ function regexFallback(rawGoal: string): ParsedGoal {
     nameFilter = nameContainsMatch[1];
   }
 
-  const attrMatch = msg.match(/\bwith\s+(?:a\s+)?(?!the\s+word|the\s+name)(beer\s+garden|outdoor\s+seating|live\s+music|parking|rooftop|pool\s+table|function\s+room|wheelchair|garden|terrace|patio|wifi|karaoke)\b/i);
+  const KNOWN_ATTR_PATTERN = /\bwith\s+(?:a\s+)?(?!the\s+word|the\s+name)(beer\s+garden|outdoor\s+seating|live\s+music|parking|rooftop|pool\s+table|function\s+room|wheelchair|garden|terrace|patio|wifi|karaoke|air\s+conditioning|air\s+con)\b/i;
+  const GENERIC_ATTR_PATTERNS = [
+    /\b(?:that|which)\s+(?:serve|serves|offer|offers|have|has|provide|provides|feature|features)\s+(.+?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i,
+    /\bwith\s+(?:a\s+)?(?!the\s+word|the\s+name)(.+?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i,
+  ];
+  const ATTR_SUBJECTIVE_FILTER = /^(?:best|top|nicest|coolest|greatest|finest|most\s+\w+|favourite|favorite|ideal|perfect|amazing|awesome|nice|good|great|lovely|decent|popular|trendy|fancy|better|chill|cool|vibes?|vibey)$/i;
   let attributeFilter: string | null = null;
-  if (attrMatch) {
-    attributeFilter = attrMatch[1].trim();
+  const knownAttrMatch = msg.match(KNOWN_ATTR_PATTERN);
+  if (knownAttrMatch) {
+    attributeFilter = knownAttrMatch[1].trim();
+  } else {
+    for (const gp of GENERIC_ATTR_PATTERNS) {
+      const gm = msg.match(gp);
+      if (gm && gm[1]) {
+        let candidate = gm[1].trim();
+        candidate = candidate.replace(/\b(?:please|thanks|thank you|for me)\b/gi, '').trim();
+        candidate = candidate.replace(/\s+(?:that|which|who)\s+.*$/i, '').trim();
+        if (candidate.length >= 2 && candidate.length <= 60 && !ATTR_SUBJECTIVE_FILTER.test(candidate)) {
+          attributeFilter = candidate;
+          break;
+        }
+      }
+    }
   }
 
   const toolMatch = msg.match(/\b(?:with|using)\s+(google\s+places?\s+search|google\s+places?|google\s+maps?)\b/i);

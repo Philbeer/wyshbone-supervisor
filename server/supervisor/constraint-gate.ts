@@ -20,14 +20,18 @@ import {
 export type LiveMusicVerification = 'website_verify' | 'best_effort' | null;
 export type TimePredicateResolution = 'news_mention' | 'recent_reviews' | 'best_effort' | null;
 
+export type AttributeClassification = 'TOOL_CHECKABLE' | 'SUBJECTIVE_UNDEFINED' | 'MISSING_NUMERIC_THRESHOLD' | 'BLOCKING';
+
 export interface AttributeConstraint {
   type: 'attribute';
   attribute: string;
+  classification: AttributeClassification;
   verifiability: 'verifiable' | 'proxy' | 'unverifiable';
   requires_clarification: boolean;
   chosen_verification: LiveMusicVerification;
   hardness: Hardness;
   must_be_certain?: boolean;
+  keyword_variants?: string[];
 }
 
 export interface SubjectivePredicateConstraint {
@@ -337,6 +341,120 @@ const BEST_EFFORT_PATTERNS = /\b(?:best[- ]?effort|unverified\s+(?:is\s+)?(?:ok|
 const LIVE_MUSIC_VERIFY_PATTERNS = /(?:\bverify\s+(?:[\w\s]*?)(?:via|through|using)\s+(?:website|listings?|web)\b|\bverify\s+via\s+(?:website|listings?|web)\b|\bcheck\s+(?:website|listings?)\b|\bwebsite\s+verif|\boption\s*(?:1|one)\b|\b[Aa]\b\s*\)|\b[Aa]\b\s*(?:for\s+live)|\bon\s+(?:their|the)\s+website\b|\bsay\s+(?:they\s+)?(?:have|offer|do)\b.*\bon\s+(?:their|the)\s+website\b|\bfrom\s+(?:their|the)\s+website\b|\baccording\s+to\s+(?:their|the)\s+website\b|\bwebsite\s+(?:says?|mentions?|lists?|shows?)\b)/i;
 const LIVE_MUSIC_BEST_EFFORT_PATTERNS = /(?:\bbest[- ]?effort\b|\bunverified\s+(?:is\s+)?(?:ok|fine|acceptable|good)\b|\bdon'?t\s+(?:need\s+to\s+)?verify\b|\bskip\s+verif|\boption\s*(?:2|two)\b|\b[Bb]\b\s*\)|\b[Bb]\b\s*(?:for\s+live))/i;
 
+const GENERIC_ATTRIBUTE_PATTERNS = [
+  /\b(?:that|which)\s+(?:serve|serves|offer|offers|have|has|provide|provides|feature|features|include|includes)\s+(.+?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i,
+  /\b(?:with|offering|serving|featuring|providing|including)\s+(.+?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i,
+  /\b(?:that|which)\s+(?:are|is)\s+(.+?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i,
+];
+
+const COMMON_ATTRIBUTE_SYNONYMS: Record<string, string[]> = {
+  'air conditioning': ['air con', 'a/c', 'ac', 'climate control', 'air conditioned', 'air-conditioned', 'air-conditioning'],
+  'serve food': ['food served', 'food available', 'serves food', 'food menu', 'kitchen', 'dining', 'meals', 'lunch', 'dinner'],
+  'food': ['food served', 'food available', 'serves food', 'food menu', 'kitchen', 'dining', 'meals', 'lunch', 'dinner', 'gastropub', 'restaurant'],
+  'parking': ['car park', 'car parking', 'free parking', 'on-site parking', 'parking available', 'parking lot'],
+  'wifi': ['wi-fi', 'free wifi', 'free wi-fi', 'wireless internet', 'internet access'],
+  'free wifi': ['wi-fi', 'free wi-fi', 'wireless internet', 'internet access', 'complimentary wifi'],
+  'wheelchair accessible': ['wheelchair access', 'disabled access', 'step-free', 'accessibility', 'accessible entrance'],
+  'dog friendly': ['dogs welcome', 'dog-friendly', 'well-behaved dogs', 'four-legged friends', 'pets welcome'],
+  'family friendly': ['family-friendly', 'child friendly', 'children welcome', 'kids welcome', 'family pub', 'family restaurant'],
+  'beer garden': ['outdoor seating area', 'garden terrace', 'patio', 'beer patio', 'outside seating'],
+  'outdoor seating': ['outdoor area', 'outside seating', 'terrace', 'patio', 'al fresco', 'garden seating'],
+  'live music': ['live band', 'live bands', 'open mic', 'gigs', 'gig', 'music night', 'music nights', 'live entertainment', 'live acoustic'],
+  'craft beer': ['craft ales', 'craft brewery', 'microbrewery', 'artisan beer', 'indie beer'],
+  'real ale': ['cask ale', 'cask beer', 'real ales', 'hand-pulled', 'traditional ale'],
+  'rooftop': ['rooftop bar', 'rooftop terrace', 'sky bar', 'rooftop seating'],
+  'vegan': ['vegan options', 'vegan menu', 'plant-based', 'vegan food', 'vegan friendly'],
+  'vegetarian': ['vegetarian options', 'vegetarian menu', 'veggie options', 'veggie menu'],
+  'gluten free': ['gluten-free', 'coeliac friendly', 'celiac friendly', 'gluten free options'],
+  'late night': ['late-night', 'open late', 'late opening', 'late bar', 'late licence', 'late license'],
+  'pool table': ['pool tables', 'billiards', 'snooker'],
+  'function room': ['function rooms', 'private room', 'private dining', 'event space', 'hire'],
+  'karaoke': ['karaoke night', 'karaoke nights', 'sing-along'],
+};
+
+const PURE_SUBJECTIVE_PATTERN = /^(?:best|top|nicest|coolest|greatest|finest|most\s+\w+|favourite|favorite|ideal|perfect|amazing|awesome|incredible|fantastic|ultimate|chillest|trendiest|hippest|recommended|quality|nice|good|great|lovely|decent|popular|trendy|fancy|better|chill|cool|vibes?|vibey|vibe-?y)$/i;
+
+export function classifyAttribute(raw: string): AttributeClassification {
+  const trimmed = raw.trim().toLowerCase();
+  if (PURE_SUBJECTIVE_PATTERN.test(trimmed)) return 'SUBJECTIVE_UNDEFINED';
+  if (/^(?:cheap|expensive|budget|premium|high[- ]?end)$/i.test(trimmed) && !/[£$€\d]/.test(trimmed)) return 'MISSING_NUMERIC_THRESHOLD';
+  return 'TOOL_CHECKABLE';
+}
+
+export function generateKeywordVariants(attrRaw: string): string[] {
+  const base = attrRaw.toLowerCase().trim().replace(/[''""]/g, '');
+  const variants = new Set<string>();
+  variants.add(base);
+
+  const stripped = base.replace(/[^a-z0-9\s&/-]/g, '').trim();
+  if (stripped && stripped !== base) variants.add(stripped);
+
+  const hyphenToSpace = base.replace(/-/g, ' ');
+  if (hyphenToSpace !== base) variants.add(hyphenToSpace);
+
+  const spaceToHyphen = base.replace(/\s+/g, '-');
+  if (spaceToHyphen !== base) variants.add(spaceToHyphen);
+
+  const withAnd = base.replace(/\s*&\s*/g, ' and ');
+  if (withAnd !== base) variants.add(withAnd);
+
+  const withAmpersand = base.replace(/\s+and\s+/gi, ' & ');
+  if (withAmpersand !== base) variants.add(withAmpersand);
+
+  const noSpaces = base.replace(/\s+/g, '');
+  if (noSpaces !== base && noSpaces.length > 3) variants.add(noSpaces);
+
+  const words = base.split(/\s+/);
+  if (words.length > 0) {
+    const lastWord = words[words.length - 1];
+    const prefix = words.slice(0, -1).join(' ');
+    const prefixStr = prefix ? prefix + ' ' : '';
+    if (lastWord.endsWith('s') && lastWord.length > 2) {
+      const singular = lastWord.slice(0, -1);
+      variants.add(prefixStr + singular);
+      if (lastWord.endsWith('ies')) {
+        variants.add(prefixStr + lastWord.slice(0, -3) + 'y');
+      }
+    } else if (lastWord.length > 1) {
+      variants.add(prefixStr + lastWord + 's');
+      if (lastWord.endsWith('y')) {
+        variants.add(prefixStr + lastWord.slice(0, -1) + 'ies');
+      }
+    }
+  }
+
+  const synonyms = COMMON_ATTRIBUTE_SYNONYMS[base] || COMMON_ATTRIBUTE_SYNONYMS[base.replace(/_/g, ' ')] || [];
+  for (const syn of synonyms) variants.add(syn);
+
+  return Array.from(variants);
+}
+
+function extractGenericAttributes(msg: string, alreadyFound: Set<string>): { attribute: string; raw: string }[] {
+  const results: { attribute: string; raw: string }[] = [];
+
+  for (const pattern of GENERIC_ATTRIBUTE_PATTERNS) {
+    const match = msg.match(pattern);
+    if (!match || !match[1]) continue;
+
+    let raw = match[1].trim();
+    raw = raw.replace(/\b(?:please|thanks|thank you|for me)\b/gi, '').trim();
+    raw = raw.replace(/\s+(?:that|which|who)\s+.*$/i, '').trim();
+    raw = raw.replace(/,\s+(?:and\s+)?(?:also|too)\b.*$/i, '').trim();
+
+    if (!raw || raw.length < 2 || raw.length > 60) continue;
+
+    const normalized = raw.toLowerCase().replace(/\s+/g, '_');
+    if (alreadyFound.has(normalized)) continue;
+
+    if (SUBJECTIVE_TERMS_PATTERN.test(raw) && !MEASURABLE_CRITERIA_PATTERN.test(raw)) continue;
+
+    alreadyFound.add(normalized);
+    results.push({ attribute: normalized, raw });
+  }
+
+  return results;
+}
+
 export function extractAttributes(msg: string): AttributeConstraint[] {
   const found = new Set<string>();
   const result: AttributeConstraint[] = [];
@@ -345,15 +463,34 @@ export function extractAttributes(msg: string): AttributeConstraint[] {
     if (entry.pattern.test(msg) && !found.has(entry.attribute)) {
       found.add(entry.attribute);
       const isBlocking = BLOCKING_ATTRIBUTES.has(entry.attribute);
+      const classification: AttributeClassification = isBlocking ? 'TOOL_CHECKABLE' : 'TOOL_CHECKABLE';
       result.push({
         type: 'attribute',
         attribute: entry.attribute,
+        classification,
         verifiability: isBlocking ? 'proxy' : 'verifiable',
         requires_clarification: isBlocking,
         chosen_verification: null,
         hardness: inferHardness(msg),
+        keyword_variants: generateKeywordVariants(entry.attribute.replace(/_/g, ' ')),
       });
     }
+  }
+
+  const genericAttrs = extractGenericAttributes(msg, found);
+  for (const ga of genericAttrs) {
+    const classification = classifyAttribute(ga.raw);
+    if (classification === 'SUBJECTIVE_UNDEFINED' || classification === 'MISSING_NUMERIC_THRESHOLD') continue;
+    result.push({
+      type: 'attribute',
+      attribute: ga.attribute,
+      classification,
+      verifiability: 'verifiable',
+      requires_clarification: false,
+      chosen_verification: null,
+      hardness: inferHardness(msg),
+      keyword_variants: generateKeywordVariants(ga.raw),
+    });
   }
 
   return result;

@@ -19,6 +19,8 @@ import {
   detectSubjectiveTerms,
   hasMeasurableCriteria,
   detectRelationshipStrategyChoice,
+  classifyAttribute,
+  generateKeywordVariants,
   type ConstraintContract,
   type AttributeConstraint,
   type SubjectivePredicateConstraint,
@@ -687,6 +689,7 @@ describe('isCertainVerifiable', () => {
     const attr: AttributeConstraint = {
       type: 'attribute',
       attribute: 'live_music',
+      classification: 'TOOL_CHECKABLE',
       verifiability: 'proxy',
       requires_clarification: true,
       chosen_verification: null,
@@ -699,6 +702,7 @@ describe('isCertainVerifiable', () => {
     const attr: AttributeConstraint = {
       type: 'attribute',
       attribute: 'beer_garden',
+      classification: 'TOOL_CHECKABLE',
       verifiability: 'verifiable',
       requires_clarification: false,
       chosen_verification: null,
@@ -820,6 +824,7 @@ describe('applyCertaintyGate', () => {
       constraints: [{
         type: 'attribute',
         attribute: 'beer_garden',
+        classification: 'TOOL_CHECKABLE',
         verifiability: 'verifiable',
         requires_clarification: false,
         chosen_verification: null,
@@ -1565,5 +1570,80 @@ describe('Constraint Gate — Batch 4: relationship predicate priority ordering'
     const rp = resolved.constraints.find(c => c.type === 'relationship_predicate') as any;
     assert.strictEqual(rp.can_execute, true);
     assert.strictEqual(rp.chosen_relationship_strategy, 'official_only');
+  });
+});
+
+describe('Generic attribute classification', () => {
+  it('classifyAttribute: "air conditioning" → TOOL_CHECKABLE', () => {
+    assert.strictEqual(classifyAttribute('air conditioning'), 'TOOL_CHECKABLE');
+  });
+
+  it('classifyAttribute: "serve food" → TOOL_CHECKABLE', () => {
+    assert.strictEqual(classifyAttribute('serve food'), 'TOOL_CHECKABLE');
+  });
+
+  it('classifyAttribute: "parking" → TOOL_CHECKABLE', () => {
+    assert.strictEqual(classifyAttribute('parking'), 'TOOL_CHECKABLE');
+  });
+
+  it('classifyAttribute: "best" → SUBJECTIVE_UNDEFINED', () => {
+    assert.strictEqual(classifyAttribute('best'), 'SUBJECTIVE_UNDEFINED');
+  });
+
+  it('classifyAttribute: "nice" → SUBJECTIVE_UNDEFINED', () => {
+    assert.strictEqual(classifyAttribute('nice'), 'SUBJECTIVE_UNDEFINED');
+  });
+
+  it('classifyAttribute: "cheap" → MISSING_NUMERIC_THRESHOLD', () => {
+    assert.strictEqual(classifyAttribute('cheap'), 'MISSING_NUMERIC_THRESHOLD');
+  });
+
+  it('classifyAttribute: "expensive" → MISSING_NUMERIC_THRESHOLD', () => {
+    assert.strictEqual(classifyAttribute('expensive'), 'MISSING_NUMERIC_THRESHOLD');
+  });
+
+  it('generateKeywordVariants: "air conditioning" includes abbreviations', () => {
+    const variants = generateKeywordVariants('air conditioning');
+    assert.ok(variants.includes('air conditioning'));
+    assert.ok(variants.includes('air-conditioning'));
+    assert.ok(variants.some(v => v === 'a/c' || v === 'ac' || v === 'air con' || v === 'climate control'));
+  });
+
+  it('generateKeywordVariants: "serve food" includes food-related synonyms', () => {
+    const variants = generateKeywordVariants('serve food');
+    assert.ok(variants.includes('serve food'));
+    assert.ok(variants.some(v => v === 'food served' || v === 'kitchen' || v === 'dining' || v === 'meals'));
+  });
+});
+
+describe('Generic clarify gate — acceptance tests', () => {
+  it('"office space in Arundel with air conditioning" runs without clarification', () => {
+    const result = preExecutionConstraintGate('office space in Arundel with air conditioning');
+    assert.strictEqual(result.can_execute, true, `Expected can_execute=true, got why_blocked="${result.why_blocked}"`);
+    assert.strictEqual(result.clarify_questions.length, 0);
+  });
+
+  it('"pubs in Arundel that serve food" runs without clarification', () => {
+    const result = preExecutionConstraintGate('pubs in Arundel that serve food');
+    assert.strictEqual(result.can_execute, true, `Expected can_execute=true, got why_blocked="${result.why_blocked}"`);
+    assert.strictEqual(result.clarify_questions.length, 0);
+  });
+
+  it('"best pubs in Arundel" asks a clarifier', () => {
+    const result = preExecutionConstraintGate('best pubs in Arundel');
+    assert.strictEqual(result.can_execute, false, 'Expected can_execute=false for subjective "best"');
+    assert.ok(result.clarify_questions.length > 0, 'Should have at least one clarify question');
+  });
+
+  it('extracted attributes have classification field set to TOOL_CHECKABLE', () => {
+    const attrs = extractAttributes('pubs with beer garden in Bristol');
+    assert.ok(attrs.length >= 1);
+    assert.strictEqual(attrs[0].classification, 'TOOL_CHECKABLE');
+  });
+
+  it('extracted attributes have keyword_variants populated', () => {
+    const attrs = extractAttributes('pubs with beer garden in Bristol');
+    assert.ok(attrs.length >= 1);
+    assert.ok(attrs[0].keyword_variants && attrs[0].keyword_variants.length > 0);
   });
 });

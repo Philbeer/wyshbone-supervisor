@@ -27,7 +27,7 @@ import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-
 import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField, type ClarifyTriggerCategory } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
-import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, type ConstraintContract } from './supervisor/constraint-gate';
+import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './supervisor/query-shape-key';
 import { readLearningStore, mergePolicyKnobs, buildPolicyAppliedPayload, emitPolicyAppliedArtefact, handleLearningUpdate, BASELINE_DEFAULTS, type FinalPolicy, type PolicyAppliedArtefact, type LearningUpdatePayload } from './supervisor/learning-store';
@@ -3180,60 +3180,14 @@ class SupervisorService {
       }
       console.log(`[ATTR_VERIFY] Cached WEB_VISIT data: ${cachedWebVisitPages.size}/${finalLeads.length} leads have existing page text`);
 
-      const ATTRIBUTE_SYNONYM_MAP: Record<string, string[]> = {
-        'live music': ['live band', 'live bands', 'open mic', 'gigs', 'gig', 'music night', 'music nights', 'music listings', 'live entertainment', 'live acoustic'],
-        'beer garden': ['outdoor seating area', 'garden terrace'],
-        'dog friendly': ['dogs welcome', 'well-behaved dogs', 'well behaved dogs', 'four-legged friends welcome'],
-      };
-
       const NEGATIVE_KEYWORD_MAP: Record<string, string[]> = {
         'live music': ['no live music', 'no music', 'does not have live music'],
         'beer garden': ['no beer garden', 'no garden'],
         'dog friendly': ['no dogs', 'dogs not allowed', 'no pets'],
       };
 
-      function generateMatchVariants(attrRaw: string): string[] {
-        const base = attrRaw.toLowerCase().trim().replace(/[''""]/g, '');
-        const variants = new Set<string>();
-        variants.add(base);
-        const stripped = base.replace(/[^a-z0-9\s&-]/g, '').trim();
-        if (stripped && stripped !== base) variants.add(stripped);
-        const hyphenToSpace = base.replace(/-/g, ' ');
-        if (hyphenToSpace !== base) variants.add(hyphenToSpace);
-        const spaceToHyphen = base.replace(/\s+/g, '-');
-        if (spaceToHyphen !== base) variants.add(spaceToHyphen);
-        const withAnd = base.replace(/\s*&\s*/g, ' and ');
-        if (withAnd !== base) variants.add(withAnd);
-        const withAmpersand = base.replace(/\s+and\s+/gi, ' & ');
-        if (withAmpersand !== base) variants.add(withAmpersand);
-        const words = base.split(/\s+/);
-        if (words.length > 0) {
-          const lastWord = words[words.length - 1];
-          const prefix = words.slice(0, -1).join(' ');
-          const prefixStr = prefix ? prefix + ' ' : '';
-          if (lastWord.endsWith('s')) {
-            const singular = lastWord.slice(0, -1);
-            if (singular.length > 1) variants.add(prefixStr + singular);
-            if (lastWord.endsWith('ies')) {
-              variants.add(prefixStr + lastWord.slice(0, -3) + 'y');
-            }
-          } else {
-            variants.add(prefixStr + lastWord + 's');
-            if (lastWord.endsWith('y')) {
-              variants.add(prefixStr + lastWord.slice(0, -1) + 'ies');
-            }
-          }
-        }
-        return Array.from(variants);
-      }
-
       function getMatchVariantsWithSynonyms(attrValue: string): string[] {
-        const genericVariants = generateMatchVariants(attrValue);
-        const key = attrValue.toLowerCase().trim();
-        const synonyms = ATTRIBUTE_SYNONYM_MAP[key] || ATTRIBUTE_SYNONYM_MAP[key.replace(/_/g, ' ')] || [];
-        const all = new Set(genericVariants);
-        for (const syn of synonyms) all.add(syn);
-        return Array.from(all);
+        return generateKeywordVariants(attrValue.replace(/_/g, ' '));
       }
 
       function getNegativeKeywords(attrValue: string): string[] {
