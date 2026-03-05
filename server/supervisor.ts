@@ -822,6 +822,10 @@ class SupervisorService {
     }
 
     try {
+    this.backfillUserMessageRunId(task.user_id, jobId, task.conversation_id, task.created_at).catch((e: any) =>
+      console.error(`[BACKFILL] user_message_received backfill failed (non-fatal): ${e.message}`)
+    );
+
     this.bridgeRunToUI(uiRunId, jobId, clientRequestId, task.conversation_id, task.user_id).catch((e: any) =>
       console.error(`[RUN_BRIDGE] bridgeRunToUI failed: ${e.message}`)
     );
@@ -1715,6 +1719,33 @@ class SupervisorService {
         }).catch(() => {});
       }
       return { ok: false };
+    }
+  }
+
+  private async backfillUserMessageRunId(userId: string, runId: string, conversationId?: string, taskCreatedAt?: number): Promise<void> {
+    if (!supabase) return;
+    if (!conversationId) return;
+
+    const windowMs = 120_000;
+    const cutoff = (taskCreatedAt || Date.now()) - windowMs;
+
+    let query = supabase
+      .from('agent_activities')
+      .update({ run_id: runId })
+      .eq('user_id', userId)
+      .eq('conversation_id', conversationId)
+      .eq('action_taken', 'user_message_received')
+      .is('run_id', null)
+      .gte('created_at', cutoff);
+
+    const { data, error } = await query.select('id');
+    if (error) {
+      console.error(`[BACKFILL] Failed to backfill user_message_received run_id: ${error.message}`);
+    } else {
+      const count = data?.length ?? 0;
+      if (count > 0) {
+        console.log(`[BACKFILL] Patched ${count} user_message_received row(s) with run_id=${runId} conv=${conversationId} window=${windowMs}ms`);
+      }
     }
   }
 
