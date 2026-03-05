@@ -16,6 +16,7 @@ const SAMPLE_INPUTS = [
   'find the vibes in Camden',
   'how accurate are your results?',
   'find cheap restaurants in York',
+  'find 5 pubs in arundel that say they serve food on their website',
 ];
 
 const SEP = '─'.repeat(72);
@@ -34,23 +35,26 @@ async function main() {
 
     if (v.ok && v.intent) {
       const it = v.intent;
-      console.log(`  action        : ${it.action}`);
-      console.log(`  business_type : ${it.business_type ?? '(none)'}`);
-      console.log(`  location      : ${it.location ?? '(none)'}`);
-      console.log(`  country       : ${it.country ?? '(none)'}`);
-      console.log(`  count         : ${it.count ?? '(none)'}`);
-      console.log(`  confidence    : ${it.confidence}`);
-      console.log(`  delivery      : email=${it.delivery_requirements.email} phone=${it.delivery_requirements.phone} website=${it.delivery_requirements.website}`);
+      console.log(`  mission_type         : ${it.mission_type}`);
+      console.log(`  entity_kind          : ${it.entity_kind ?? '(none)'}`);
+      console.log(`  entity_category      : ${it.entity_category ?? '(none)'}`);
+      console.log(`  location_text        : ${it.location_text ?? '(none)'}`);
+      console.log(`  geo_mode             : ${it.geo_mode}`);
+      console.log(`  radius_km            : ${it.radius_km ?? '(none)'}`);
+      console.log(`  requested_count      : ${it.requested_count ?? '(none)'}`);
+      console.log(`  default_count_policy : ${it.default_count_policy}`);
+      console.log(`  plan_template_hint   : ${it.plan_template_hint}`);
+      console.log(`  evidence_order       : [${it.preferred_evidence_order.join(', ')}]`);
 
       if (it.constraints.length === 0) {
-        console.log(`  constraints   : (none)`);
+        console.log(`  constraints          : (none)`);
       } else {
         for (const c of it.constraints) {
-          console.log(`  constraint    : type=${c.type}  evidence=${c.evidence_mode}  hardness=${c.hardness}  clarify=${c.clarify_if_needed}  raw="${c.raw}"`);
+          console.log(`  constraint           : type=${c.type}  evidence=${c.evidence_mode}  hardness=${c.hardness}  clarify=${c.clarify_if_needed}  raw="${c.raw}"  q=${c.clarify_question ?? '(none)'}`);
         }
       }
     } else {
-      console.log(`  errors        : ${v.errors.join('; ')}`);
+      console.log(`  errors               : ${v.errors.join('; ')}`);
     }
 
     console.log(`  model=${result.model}  duration=${result.duration_ms}ms`);

@@ -62,7 +62,7 @@ export async function runIntentExtractorShadow(
       type: 'intent_extracted_shadow',
       title: 'Shadow Intent Extraction',
       summary: validationOk
-        ? `Extracted intent: ${extraction?.validation.intent?.action ?? 'unknown'}`
+        ? `Extracted intent: ${extraction?.validation.intent?.mission_type ?? 'unknown'}`
         : extractionError
           ? `Extraction error: ${extractionError.substring(0, 100)}`
           : `Validation failed: ${validationErrors.length} error(s)`,

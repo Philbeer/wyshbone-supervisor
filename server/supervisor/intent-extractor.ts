@@ -2,21 +2,37 @@ import {
   type CanonicalIntent,
   type IntentValidationResult,
   parseAndValidateIntentJSON,
-  INTENT_ACTION_ENUM,
+  MISSION_TYPE_ENUM,
   CONSTRAINT_TYPE_ENUM,
   HARDNESS_ENUM,
   EVIDENCE_MODE_ENUM,
+  GEO_MODE_ENUM,
+  DEFAULT_COUNT_POLICY_ENUM,
+  PLAN_TEMPLATE_HINT_ENUM,
 } from './canonical-intent';
 
 const INTENT_EXTRACTOR_SYSTEM_PROMPT = `You are a strict intent classifier for a B2B lead generation system. Given a user message, extract the canonical intent as JSON.
 
 SCHEMA (all fields required):
 {
-  "action": one of ${JSON.stringify(INTENT_ACTION_ENUM)},
-  "business_type": string or null (core business type only, e.g. "pubs", "dentists"),
-  "location": string or null (geographic location only),
-  "country": string or null (inferred from location: "UK", "US", etc.),
-  "count": number or null (explicit count from user, null if not specified),
+  "mission_type": one of ${JSON.stringify(MISSION_TYPE_ENUM)},
+  "entity_kind": string or null (core entity type, e.g. "pubs", "dentists", "cafes"),
+  "entity_category": string or null (broad vertical, e.g. "hospitality", "healthcare", "retail", "professional_services"),
+  "location_text": string or null (geographic location verbatim from user, e.g. "Arundel", "central London", "near Brighton"),
+  "geo_mode": one of ${JSON.stringify(GEO_MODE_ENUM)} (
+    "city" = single city/town,
+    "region" = county/state/area,
+    "radius" = user said "near"/"within X miles",
+    "national" = whole country,
+    "unspecified" = no location given
+  ),
+  "radius_km": number or null (only when geo_mode is "radius" — convert miles to km if needed, otherwise null),
+  "requested_count": number or null (explicit count from user, null if not specified),
+  "default_count_policy": one of ${JSON.stringify(DEFAULT_COUNT_POLICY_ENUM)} (
+    "explicit" = user gave a number,
+    "page_1" = no count, just first page of results,
+    "best_effort" = user said "all", "as many as possible", etc.
+  ),
   "constraints": [
     {
       "type": one of ${JSON.stringify(CONSTRAINT_TYPE_ENUM)},
@@ -24,16 +40,22 @@ SCHEMA (all fields required):
       "hardness": one of ${JSON.stringify(HARDNESS_ENUM)},
       "evidence_mode": one of ${JSON.stringify(EVIDENCE_MODE_ENUM)},
       "clarify_if_needed": boolean (true if this constraint is ambiguous or unverifiable),
-      "value": string or number or null (the extracted value)
+      "clarify_question": string or null (if clarify_if_needed is true, a concise question to ask the user; otherwise null)
     }
   ],
-  "delivery_requirements": { "email": boolean, "phone": boolean, "website": boolean },
-  "confidence": number 0-1 (how confident you are in this extraction),
-  "raw_input": string (verbatim user message)
+  "plan_template_hint": one of ${JSON.stringify(PLAN_TEMPLATE_HINT_ENUM)} (
+    "simple_search" = just find businesses, no verification needed,
+    "search_and_verify" = find + verify attributes via website/web,
+    "search_verify_enrich" = find + verify + extract contacts,
+    "deep_research" = deep research task,
+    "unknown" = cannot determine
+  ),
+  "preferred_evidence_order": array of evidence_mode values, ordered by preference for this query (e.g. ["website_text", "google_places"] if user wants website verification first)
 }
 
 CONSTRAINT CLASSIFICATION RULES:
 - "serve food", "beer garden", "outdoor seating", "air conditioning", "parking", "wifi", "wheelchair accessible", "dog friendly" → type: "attribute", evidence_mode: "website_text"
+- "on their website", "from their website", "website says" → sets evidence_mode to "website_text" for the associated constraint
 - "in <place>", "near <place>" → type: "location", evidence_mode: "google_places"
 - "find N", "top N" → type: "count", evidence_mode: "not_applicable"
 - "opened in last N months", "opened recently", "new" → type: "time", evidence_mode: "web_search" or "news" or "registry"
@@ -47,6 +69,22 @@ HARDNESS RULES:
 - "preferably", "if possible", "ideally", "nice to have" → soft
 - Attributes stated as requirements (no hedging) → hard
 - Location → soft unless "only in" / "must be in"
+
+PLAN_TEMPLATE_HINT RULES:
+- No constraints that need verification → "simple_search"
+- Has attribute/time constraints requiring website or web checks → "search_and_verify"
+- Has attribute constraints + user asked for email/phone/website → "search_verify_enrich"
+- mission_type is "deep_research" → "deep_research"
+- Cannot determine → "unknown"
+
+PREFERRED_EVIDENCE_ORDER RULES:
+- If user mentions "on their website" → put "website_text" first
+- If user mentions "reviews say" → put "review_text" first
+- Default for attribute constraints: ["website_text", "google_places"]
+- Default for time constraints: ["news", "web_search", "registry"]
+- Include only modes relevant to the constraints in this query
+
+DO NOT include these old-schema fields: action, business_type, country, delivery_requirements, confidence, raw_input, value.
 
 Return ONLY valid JSON. No markdown fences, no commentary, no explanation.`;
 
