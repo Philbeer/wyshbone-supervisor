@@ -27,7 +27,7 @@ import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-
 import { evaluateClarifyGate, type ClarifyGateResult, type ClarifyMissingField, type ClarifyTriggerCategory } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
-import { runIntentExtractorShadow } from './supervisor/intent-shadow';
+import { runIntentExtractorShadow, getIntentExtractorMode } from './supervisor/intent-shadow';
 import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './supervisor/query-shape-key';
@@ -871,11 +871,43 @@ class SupervisorService {
       metadata: { taskId: task.id, task_type: task.task_type },
     }).catch(() => {});
 
+    const extractorMode = getIntentExtractorMode();
+    const probeTs = Date.now();
+    await createArtefact({
+      runId: jobId,
+      type: 'intent_extractor_probe',
+      title: 'Intent extractor probe: BEFORE',
+      summary: `mode=${extractorMode} about_to_call_extractor=true`,
+      payload: { run_id: jobId, task_id: task.id, conversation_id: task.conversation_id, mode: extractorMode, about_to_call_extractor: true, ts: probeTs },
+      userId: task.user_id,
+      conversationId: task.conversation_id,
+    }).catch((e: any) => console.warn(`[INTENT_EXTRACTOR_PROBE] before-artefact emit failed: ${e.message}`));
+
+    let extractorResult: { ran: boolean; extraction: any; error: string | null } = { ran: false, extraction: null, error: null };
+    let extractorProbeError: string | null = null;
     try {
-      await runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id);
+      extractorResult = await runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id);
     } catch (e: any) {
+      extractorProbeError = e.message;
       console.warn(`[INTENT_EXTRACTOR_SHADOW] top-level error (non-fatal): ${e.message}`);
     }
+
+    await createArtefact({
+      runId: jobId,
+      type: 'intent_extractor_probe',
+      title: 'Intent extractor probe: AFTER',
+      summary: `ran=${extractorResult.ran} validation_ok=${extractorResult.extraction?.validation?.ok ?? false} error=${extractorProbeError ?? extractorResult.error ?? 'none'}`,
+      payload: {
+        run_id: jobId,
+        extractor_ran: extractorResult.ran,
+        artefact_written_run_id: jobId,
+        validation_ok: extractorResult.extraction?.validation?.ok ?? false,
+        error: extractorProbeError ?? extractorResult.error ?? null,
+        duration_ms: extractorResult.extraction?.duration_ms ?? 0,
+      },
+      userId: task.user_id,
+      conversationId: task.conversation_id,
+    }).catch((e: any) => console.warn(`[INTENT_EXTRACTOR_PROBE] after-artefact emit failed: ${e.message}`));
 
     const isFactoryDemo = rawMsg.trim().toLowerCase() === 'run the injection moulding demo';
 
