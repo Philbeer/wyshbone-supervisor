@@ -969,6 +969,47 @@ class SupervisorService {
       console.warn(`[EARLY_PARSE] parseGoalToConstraints failed (non-fatal, will retry in executeTowerLoopChat): ${parseErr.message}`);
     }
 
+    const previewBT = extractBusinessType(rawMsg) ?? null;
+    const previewLoc = extractLocation(rawMsg) ?? null;
+    const previewCount = extractCount(rawMsg) ?? null;
+    const previewTime = extractTimeFilter(rawMsg) ?? null;
+
+    const intentPreviewPayload = {
+      raw_message: rawMsg.substring(0, 500),
+      parsed_fields: {
+        business_type: previewBT,
+        location: previewLoc,
+        count: previewCount,
+        time_filter: previewTime,
+      },
+      route: 'pre_gate',
+      extraction_method: 'regex_or_simple_parse',
+    };
+
+    this.postArtefactToUI({
+      runId: jobId,
+      clientRequestId,
+      type: 'diagnostic',
+      payload: { ...intentPreviewPayload, title: 'Intent preview' },
+      userId: task.user_id,
+      conversationId: task.conversation_id,
+    }).catch((uiErr: any) => console.warn(`[INTENT_PREVIEW] postArtefactToUI failed — runId=${jobId} conversationId=${task.conversation_id} error=${uiErr.message}`));
+
+    try {
+      await createArtefact({
+        runId: jobId,
+        type: 'diagnostic',
+        title: 'Intent preview',
+        summary: `Parsed fields from user message (pre-clarify).`,
+        payload: intentPreviewPayload as Record<string, unknown>,
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      });
+      console.log(`[INTENT_PREVIEW] Emitted diagnostic 'Intent preview' — runId=${jobId} bt=${previewBT} loc=${previewLoc} count=${previewCount} time=${previewTime}`);
+    } catch (previewErr: any) {
+      console.error(`[INTENT_PREVIEW] DB write FAILED — runId=${jobId} conversationId=${task.conversation_id} error=${previewErr.message}`);
+    }
+
     const isFactoryDemo = rawMsg.trim().toLowerCase() === 'run the injection moulding demo';
 
     if (isFactoryDemo) {
@@ -1302,46 +1343,6 @@ class SupervisorService {
         userId: task.user_id,
         conversationId: task.conversation_id,
       }).catch((e: any) => console.warn(`[CLARIFY_GATE] Failed to emit artefact: ${e.message}`));
-
-      if (clarifyGate.route === 'clarify_before_run') {
-        const previewBT = extractBusinessType(rawMsg) ?? null;
-        const previewLoc = extractLocation(rawMsg) ?? null;
-        const previewCount = extractCount(rawMsg) ?? null;
-        const previewTime = extractTimeFilter(rawMsg) ?? null;
-        const hasLlmArtefacts = earlyParsedGoal !== null;
-
-        const intentPreviewPayload = {
-          businessType: previewBT,
-          location: previewLoc,
-          count: previewCount,
-          timeFilter: previewTime,
-          route: clarifyGate.route,
-          trigger_category: clarifyGate.triggerCategory ?? null,
-          has_llm_artefacts: hasLlmArtefacts,
-          extraction_method: 'regex',
-          user_message: rawMsg.substring(0, 500),
-        };
-
-        this.postArtefactToUI({
-          runId: jobId,
-          clientRequestId,
-          type: 'diagnostic',
-          payload: { ...intentPreviewPayload, title: 'Intent preview' },
-          userId: task.user_id,
-          conversationId: task.conversation_id,
-        }).catch(() => {});
-
-        await createArtefact({
-          runId: jobId,
-          type: 'diagnostic',
-          title: 'Intent preview',
-          summary: `bt=${previewBT ?? '?'} | loc=${previewLoc ?? '?'} | count=${previewCount ?? 'any'} | time=${previewTime ?? 'none'} | llm_artefacts=${hasLlmArtefacts}`,
-          payload: intentPreviewPayload as Record<string, unknown>,
-          userId: task.user_id,
-          conversationId: task.conversation_id,
-        }).catch((previewErr: any) => console.error(`[INTENT_PREVIEW] DB write failed: ${previewErr.message}`));
-        console.log(`[INTENT_PREVIEW] Emitted diagnostic 'Intent preview' for clarify_before_run — runId=${jobId} bt=${previewBT} loc=${previewLoc} count=${previewCount} time=${previewTime}`);
-      }
 
       if (clarifyGate.route === 'direct_response') {
         closeClarifySession(task.conversation_id);

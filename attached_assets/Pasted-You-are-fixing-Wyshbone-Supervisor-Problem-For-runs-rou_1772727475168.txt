@@ -1,0 +1,59 @@
+You are fixing Wyshbone Supervisor.
+
+Problem:
+For runs routed to CLARIFY_FOR_RUN / clarify_before_run (example run_id 56d30b0f-4526-4453-9f2f-fb6272d63d0c), AFR Run Detail shows ONLY 1 artefact: clarify_gate.
+We need AFR to also show an “Intent preview” artefact BEFORE returning early, even when no Supervisor execution happens.
+
+Constraint:
+NO new artefact types. Do NOT add intent_preview enum. Use an existing type that is already guaranteed to persist and display in AFR — use type = "diagnostic".
+Title MUST be "Intent preview".
+
+Absolute requirement:
+This artefact must be written using the EXACT SAME run_id that clarify_gate uses for that same run (the run_id visible in AFR).
+If clarify_gate is written with run_id = jobId (or similar), the new diagnostic must use that identical value.
+
+Implementation requirements:
+1) Find the exact code path that creates/persists clarify_gate for clarify_before_run.
+2) Immediately in that same branch (right next to it, just before returning), create a SECOND artefact:
+   - type: "diagnostic"
+   - title: "Intent preview"
+   - summary: short sentence like "Parsed fields from user message (pre-clarify)."
+   - payload_json must include:
+        {
+          "raw_message": <original user message>,
+          "parsed_fields": {
+             "business_type": <string|null>,
+             "location": <string|null>,
+             "count": <number|null>,
+             "time_filter": <string|null>
+          },
+          "route": "clarify_before_run",
+          "extraction_method": "regex_or_simple_parse"
+        }
+   Use the cheap regex extractors you already have (or implement minimal ones) — no LLM required.
+
+3) Do NOT swallow errors silently. If artefact creation fails, emit a console.error that includes:
+   - run_id used
+   - conversation_id
+   - error message
+
+4) Ensure this is persisted to the SAME artefacts table/store that AFR reads from.
+AFR Run Detail endpoint is: GET /api/afr/runs/:runId/artefacts which queries artefacts WHERE run_id = $1.
+So the new artefact must land in that same table with that run_id.
+
+Verification (must be performed and reported with evidence):
+After implementing, trigger the clarify scenario:
+"find gyms in London that opened in the last 6 months"
+Open AFR Run Detail for the new run_id and confirm it shows AT LEAST TWO artefacts:
+- clarify_gate
+- diagnostic (Intent preview)
+
+Also run a DB query (or use existing storage helper) to list artefacts for that run_id and paste the rows (type/title/created_at).
+If it still shows only clarify_gate, identify exactly where the run_id diverges or why the write is not happening.
+
+Deliverable:
+Commit the change and report:
+- file(s) changed
+- exact branch where the diagnostic is created
+- the exact run_id value used
+- proof via artefact list for a new clarify run
