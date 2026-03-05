@@ -1260,9 +1260,11 @@ class SupervisorService {
       }
     }
 
-    runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id).catch(
-      (e: any) => console.warn(`[INTENT_EXTRACTOR_SHADOW] fire-and-forget error: ${e.message}`)
-    );
+    try {
+      await runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id);
+    } catch (e: any) {
+      console.warn(`[INTENT_EXTRACTOR_SHADOW] top-level error (non-fatal): ${e.message}`);
+    }
 
     console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=constraint_gate`);
     // OUTER CONSTRAINT GATE — runs BEFORE executeTowerLoopChat

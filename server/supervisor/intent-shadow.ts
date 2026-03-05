@@ -30,20 +30,30 @@ export async function runIntentExtractorShadow(
 
   if (mode === 'active' || mode === 'strict') {
     console.log(`[INTENT_EXTRACTOR] mode=${mode} — not yet wired, skipping`);
+    await emitDiagnosticArtefact(runId, userId, conversationId, mode, false, false, null);
     return { ran: false, extraction: null, error: null };
   }
 
-  let extraction: IntentExtractionResult;
+  console.log(`[INTENT_EXTRACTOR_SHADOW] mode=shadow — running extractor for runId=${runId}`);
+
+  let extraction: IntentExtractionResult | null = null;
+  let extractionError: string | null = null;
+
   try {
     extraction = await extractCanonicalIntent(userMessage, conversationContext);
   } catch (err: any) {
+    extractionError = err.message;
     console.error(`[INTENT_EXTRACTOR_SHADOW] extraction failed: ${err.message}`);
-    return { ran: true, extraction: null, error: err.message };
   }
 
+  const validationOk = extraction?.validation.ok ?? false;
+  const validationErrors = extraction?.validation.errors ?? (extractionError ? [`LLM call failed: ${extractionError}`] : ['extraction did not run']);
+  const model = extraction?.model ?? 'none';
+  const durationMs = extraction?.duration_ms ?? 0;
+
   console.log(
-    `[INTENT_EXTRACTOR_SHADOW] model=${extraction.model} valid=${extraction.validation.ok} duration=${extraction.duration_ms}ms` +
-    (extraction.validation.errors.length > 0 ? ` errors=[${extraction.validation.errors.join('; ')}]` : '')
+    `[INTENT_EXTRACTOR_SHADOW] model=${model} valid=${validationOk} duration=${durationMs}ms` +
+    (validationErrors.length > 0 ? ` errors=[${validationErrors.join('; ')}]` : '')
   );
 
   try {
@@ -51,23 +61,57 @@ export async function runIntentExtractorShadow(
       runId,
       type: 'intent_extracted_shadow',
       title: 'Shadow Intent Extraction',
-      summary: extraction.validation.ok
-        ? `Extracted intent: ${extraction.validation.intent?.action ?? 'unknown'}`
-        : `Validation failed: ${extraction.validation.errors.length} error(s)`,
+      summary: validationOk
+        ? `Extracted intent: ${extraction?.validation.intent?.action ?? 'unknown'}`
+        : extractionError
+          ? `Extraction error: ${extractionError.substring(0, 100)}`
+          : `Validation failed: ${validationErrors.length} error(s)`,
       payload: {
         input_message: userMessage,
-        extracted_intent: extraction.validation.ok ? extraction.validation.intent : null,
-        validation_ok: extraction.validation.ok,
-        validation_errors: extraction.validation.errors,
-        model: extraction.model,
-        duration_ms: extraction.duration_ms,
+        extracted_intent: validationOk ? extraction!.validation.intent : null,
+        validation_ok: validationOk,
+        validation_errors: validationErrors,
+        model,
+        duration_ms: durationMs,
+      },
+      userId,
+      conversationId,
+    });
+    console.log(`[INTENT_EXTRACTOR_SHADOW] intent_extracted_shadow artefact emitted for runId=${runId}`);
+  } catch (err: any) {
+    console.error(`[INTENT_EXTRACTOR_SHADOW] artefact emit FAILED: ${err.message}`);
+  }
+
+  await emitDiagnosticArtefact(runId, userId, conversationId, mode, true, validationOk, extractionError);
+
+  return { ran: true, extraction, error: extractionError };
+}
+
+async function emitDiagnosticArtefact(
+  runId: string,
+  userId: string,
+  conversationId: string | undefined,
+  mode: IntentExtractorMode,
+  executed: boolean,
+  validationPassed: boolean,
+  error: string | null,
+): Promise<void> {
+  try {
+    await createArtefact({
+      runId,
+      type: 'diagnostic',
+      title: 'Intent Extractor Diagnostic',
+      summary: `mode=${mode} executed=${executed} valid=${validationPassed}`,
+      payload: {
+        intent_extractor_mode: mode,
+        extractor_executed: executed,
+        validation_passed: validationPassed,
+        error: error ?? null,
       },
       userId,
       conversationId,
     });
   } catch (err: any) {
-    console.warn(`[INTENT_EXTRACTOR_SHADOW] artefact emit failed: ${err.message}`);
+    console.warn(`[INTENT_EXTRACTOR_SHADOW] diagnostic artefact emit failed: ${err.message}`);
   }
-
-  return { ran: true, extraction, error: null };
 }
