@@ -1,0 +1,66 @@
+SUPERVISOR REPO TASK: upgrade the Intent Extraction Contract and prepare it to become the active parser.
+
+Goal
+Improve intent understanding quality and stop losing user meaning.
+
+Important findings
+- The current shadow extractor is only observational and is discarded
+- No conversation context is passed
+- No few-shot examples exist
+- Nullable fields can silently become null
+- The old parser still re-parses the message separately
+
+Task
+Make a production-grade improvement in 3 parts:
+
+1. Improve the canonical intent extractor prompt in server/supervisor/intent-extractor.ts
+- Replace the current system prompt with a stronger “Intent Extraction Contract” prompt
+- The prompt must prioritise:
+  - entity_category
+  - location_text
+  - requested_count
+  - constraints
+- The LLM must only translate user language into fixed schema
+- It must never choose tools or decide truth sources
+- Add a few strong examples, especially:
+  - “find gyms in London that opened in the last 6 months”
+  - “find 10 pubs in Arundel”
+  - “dentists near Brighton with 4.5 star rating”
+  - “new breweries in Texas”
+- Keep output as strict JSON only
+
+2. Pass conversation context into the extractor
+- Find the current shadow extractor call in supervisor.ts
+- Pass real conversation context into the 5th argument instead of leaving it empty
+- Use recent user/assistant turns only, enough to preserve clarify follow-up meaning
+- This is especially important for clarification replies like:
+  “Venues with first Google review within the specified window”
+
+3. Prepare the canonical extractor to become active
+- Do NOT fully rip out the old parser yet
+- But add a clear bridge point so the canonical extraction can feed downstream parsing
+- Identify where earlyParsedGoal / previewBT / previewLoc / previewTime are currently derived from the old parser
+- Add a clean TODO-free adapter/helper so the canonical extractor result can be mapped into those downstream fields
+- Keep the change safe and minimal
+
+Important rules
+- Do not let the LLM choose tools
+- Do not let the LLM decide truth sources beyond schema hints
+- Keep deterministic planning/tool selection in code
+- Preserve backward compatibility for now
+
+Success result
+For:
+“find gyms in London that opened in the last 6 months”
+
+The canonical extractor should reliably produce:
+- entity_category: gym
+- location_text: London
+- constraint: opened in the last 6 months
+- requested_count: null or best_effort
+
+Deliverables
+- Updated prompt
+- Conversation context wired in
+- Clear adapter/helper preparing canonical intent for future active use
+- Minimal, production-grade change

@@ -28,6 +28,7 @@ import { evaluateClarifyGate, extractBusinessType, extractLocation, extractCount
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
+import { buildConversationContextString, canonicalIntentToPreviewFields } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
@@ -895,10 +896,28 @@ class SupervisorService {
       metadata: { taskId: task.id, task_type: task.task_type },
     }).catch(() => {});
 
+    let conversationContextStr: string | undefined;
+    if (task.conversation_id && supabase) {
+      try {
+        const { data: recentMsgs } = await supabase
+          .from('messages')
+          .select('role, content')
+          .eq('conversation_id', task.conversation_id)
+          .order('created_at', { ascending: false })
+          .limit(6);
+        if (recentMsgs && recentMsgs.length > 0) {
+          const reversed = recentMsgs.reverse() as Array<{ role: string; content: string }>;
+          conversationContextStr = buildConversationContextString(reversed, 6);
+        }
+      } catch (ctxErr: any) {
+        console.warn(`[INTENT_EXTRACTOR_SHADOW] conversation context fetch failed (non-fatal): ${ctxErr.message}`);
+      }
+    }
+
     let shadowResult: { ran: boolean; extraction: any; error: string | null } = { ran: false, extraction: null, error: null };
     let shadowProbeError: string | null = null;
     try {
-      shadowResult = await runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id);
+      shadowResult = await runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id, conversationContextStr);
     } catch (e: any) {
       shadowProbeError = e.message;
       console.warn(`[INTENT_EXTRACTOR_SHADOW] top-level error (non-fatal): ${e.message}`);
@@ -975,6 +994,11 @@ class SupervisorService {
     const previewCount = extractCount(rawMsg) ?? null;
     const previewTime = extractTimeFilter(rawMsg) ?? null;
 
+    let shadowPreviewFields: { business_type: string | null; location: string | null; count: number | null; time_filter: string | null } | null = null;
+    if (shadowResult.ran && shadowResult.extraction?.validation?.ok && shadowResult.extraction.validation.intent) {
+      shadowPreviewFields = canonicalIntentToPreviewFields(shadowResult.extraction.validation.intent);
+    }
+
     const intentPreviewPayload = {
       raw_message: rawMsg.substring(0, 500),
       parsed_fields: {
@@ -983,6 +1007,10 @@ class SupervisorService {
         count: previewCount,
         time_filter: previewTime,
       },
+      ...(shadowPreviewFields ? {
+        shadow_parsed_fields: shadowPreviewFields,
+        shadow_extraction_used: true,
+      } : {}),
       route: 'pre_gate',
       extraction_method: 'regex_or_simple_parse',
     };
