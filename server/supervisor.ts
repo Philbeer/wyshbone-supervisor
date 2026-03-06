@@ -3278,6 +3278,10 @@ class SupervisorService {
         const enrichableLeads = indexedLeads.filter(l => l.website).slice(0, enrichmentBatchSize);
         const ENRICH_CONCURRENCY = 3;
 
+        const willRunSemanticVerification = structuredConstraints.some(
+          c => c.type === 'HAS_ATTRIBUTE' && c.hard
+        ) && !usedStub;
+
         const enrichOneLead = async (lead: typeof enrichableLeads[0], eli: number) => {
           const leadIdx = lead._idx;
           console.log(`[ENRICHMENT] Enriching lead ${eli + 1}/${enrichableLeads.length}: "${lead.name}" (${lead.website})`);
@@ -3382,18 +3386,23 @@ class SupervisorService {
                 });
 
                 if (enrichStepArtefact) {
-                  try {
-                    const enrichObs = await judgeArtefact({ artefact: enrichStepArtefact, runId: chatRunId, goal, userId: task.user_id, conversationId });
-                    await createArtefact({
-                      runId: chatRunId, type: 'tower_judgement',
-                      title: `Tower Judgement: ${enrichObs.judgement.verdict} (${tool})`,
-                      summary: `Observation: ${enrichObs.judgement.verdict} | ${enrichObs.judgement.action} | ${tool} for "${lead.name}"`,
-                      payload: { verdict: enrichObs.judgement.verdict, action: enrichObs.judgement.action, reasons: enrichObs.judgement.reasons, metrics: enrichObs.judgement.metrics, step_index: globalStepIdx, step_label: `${tool} – ${lead.name}`, judged_artefact_id: enrichStepArtefact.id, stubbed: enrichObs.stubbed, observation_only: true },
-                      userId: task.user_id, conversationId,
-                    });
-                    console.log(`[ENRICHMENT] [observation] ${tool} for "${lead.name}" verdict=${enrichObs.judgement.verdict}`);
-                  } catch (enrichObsErr: any) {
-                    console.warn(`[ENRICHMENT] Tower observation failed for ${tool} "${lead.name}" (continuing): ${enrichObsErr.message}`);
+                  const suppressStepStatusJudgement = tool === 'WEB_VISIT' && willRunSemanticVerification;
+                  if (suppressStepStatusJudgement) {
+                    console.log(`[ENRICHMENT] Suppressing step-status Tower judgement for WEB_VISIT "${lead.name}" — semantic attribute verification will follow`);
+                  } else {
+                    try {
+                      const enrichObs = await judgeArtefact({ artefact: enrichStepArtefact, runId: chatRunId, goal, userId: task.user_id, conversationId });
+                      await createArtefact({
+                        runId: chatRunId, type: 'tower_judgement',
+                        title: `Tower Judgement: ${enrichObs.judgement.verdict} (${tool})`,
+                        summary: `Observation: ${enrichObs.judgement.verdict} | ${enrichObs.judgement.action} | ${tool} for "${lead.name}"`,
+                        payload: { verdict: enrichObs.judgement.verdict, action: enrichObs.judgement.action, reasons: enrichObs.judgement.reasons, metrics: enrichObs.judgement.metrics, step_index: globalStepIdx, step_label: `${tool} – ${lead.name}`, judged_artefact_id: enrichStepArtefact.id, stubbed: enrichObs.stubbed, observation_only: true },
+                        userId: task.user_id, conversationId,
+                      });
+                      console.log(`[ENRICHMENT] [observation] ${tool} for "${lead.name}" verdict=${enrichObs.judgement.verdict}`);
+                    } catch (enrichObsErr: any) {
+                      console.warn(`[ENRICHMENT] Tower observation failed for ${tool} "${lead.name}" (continuing): ${enrichObsErr.message}`);
+                    }
                   }
                 }
               } catch (enrichArtErr: any) {
