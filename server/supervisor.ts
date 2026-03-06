@@ -833,6 +833,21 @@ class SupervisorService {
       }
     }
 
+    let taskExecutionStartedEmitted = false;
+    let taskExecutionCompleteEmitted = false;
+    const emitTaskExecutionCompleted = async (verdict: string, extraMeta?: Record<string, unknown>) => {
+      if (taskExecutionCompleteEmitted || !taskExecutionStartedEmitted) return;
+      taskExecutionCompleteEmitted = true;
+      logAFREvent({
+        userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
+        clientRequestId,
+        actionTaken: 'task_execution_completed', status: 'success',
+        taskGenerated: `Execution completed: ${verdict}`,
+        runType: 'plan',
+        metadata: { taskId: task.id, task_type: task.task_type, verdict, ...extraMeta },
+      }).catch(() => {});
+    };
+
     try {
     this.backfillUserMessageRunId(task.user_id, jobId, task.conversation_id, task.created_at).catch((e: any) =>
       console.error(`[BACKFILL] user_message_received backfill failed (non-fatal): ${e.message}`)
@@ -887,6 +902,7 @@ class SupervisorService {
     let rawMsg = String(requestData.user_message || '');
 
     console.log(`[SUPERVISOR] Executing task ${task.id} — message="${rawMsg.substring(0, 80)}"`);
+    taskExecutionStartedEmitted = true;
     logAFREvent({
       userId: task.user_id, runId: jobId, conversationId: task.conversation_id,
       clientRequestId,
@@ -1166,6 +1182,7 @@ class SupervisorService {
           ts: Date.now(),
         });
 
+        await emitTaskExecutionCompleted('preflight_clarify', { reason: preflightResult.reason });
         return;
       }
     }
@@ -1177,6 +1194,7 @@ class SupervisorService {
 
       if (!guardDelivery(task.conversation_id, task.id, 'factory_demo_final_message')) {
         console.warn(`[SESSION_GUARD] Dropping factory demo delivery for stale task=${task.id}`);
+        await emitTaskExecutionCompleted('factory_demo_stale');
         return;
       }
 
@@ -1237,6 +1255,7 @@ class SupervisorService {
         metadata: { taskId: task.id, task_type: 'RUN_FACTORY_DEMO' },
       }).catch(() => {});
 
+      await emitTaskExecutionCompleted('factory_demo');
       return;
     }
 
@@ -1282,6 +1301,7 @@ class SupervisorService {
 
         await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'constraint_stop', endedAt: new Date(), metadata: { verdict: 'constraint_gate_stop', constraint_contract: resolvedContract } }).catch(() => {});
         console.log(`[CONSTRAINT_GATE] STOP — constraints cannot be satisfied`);
+        await emitTaskExecutionCompleted('constraint_gate_stop');
         return;
       }
 
@@ -1297,6 +1317,7 @@ class SupervisorService {
 
         await storage.updateAgentRun(jobId, { status: 'stopped', terminalState: 'stopped', endedAt: new Date(), metadata: { verdict: 'constraint_gate_clarify', stop_reason: 'clarification_needed', constraint_contract: resolvedContract } }).catch(() => {});
         console.log(`[CONSTRAINT_GATE] Still blocked — asking again — run paused`);
+        await emitTaskExecutionCompleted('constraint_gate_clarify');
         return;
       }
 
@@ -1350,6 +1371,7 @@ class SupervisorService {
 
         await storage.updateAgentRun(jobId, { status: 'stopped', terminalState: 'stopped', endedAt: new Date(), metadata: { verdict: 'meta_trust_during_session', stop_reason: 'clarification_needed', clarify_state: clarifyState, build: buildStamp } }).catch(() => {});
         console.log(`[CLARIFY_SESSION] META_TRUST answered — build=${buildStamp} conversation=${task.conversation_id} — session preserved, run paused`);
+        await emitTaskExecutionCompleted('meta_trust_during_session');
         return;
       }
 
@@ -1404,6 +1426,7 @@ class SupervisorService {
 
           await storage.updateAgentRun(jobId, { status: 'stopped', terminalState: 'stopped', endedAt: new Date(), metadata: { verdict: 'execute_blocked_incomplete', stop_reason: 'clarification_needed', clarify_state: clarifyState } }).catch(() => {});
           console.log(`[CLARIFY_SESSION] EXECUTE_NOW blocked — missing fields: [${existingSession.missingFields.join(',')}] — run paused`);
+          await emitTaskExecutionCompleted('execute_blocked_incomplete');
           return;
         }
       }
@@ -1460,6 +1483,7 @@ class SupervisorService {
 
           await storage.updateAgentRun(jobId, { status: 'stopped', terminalState: 'stopped', endedAt: new Date(), metadata: { verdict: 'clarify_turn_limit', stop_reason: 'clarification_needed', clarify_state: clarifyState } }).catch(() => {});
           console.log(`[CLARIFY_SESSION] Turn limit reached for conversation=${task.conversation_id} — offering choices — run paused`);
+          await emitTaskExecutionCompleted('clarify_turn_limit');
           return;
 
         } else {
@@ -1484,6 +1508,7 @@ class SupervisorService {
           if (msgResult.error) console.error(`[CLARIFY_SESSION] message insert failed: ${msgResult.error.message}`);
 
           await storage.updateAgentRun(jobId, { status: 'stopped', terminalState: 'stopped', endedAt: new Date(), metadata: { verdict: 'clarify_session_continue', stop_reason: 'clarification_needed', clarify_state: clarifyState } }).catch(() => {});
+          await emitTaskExecutionCompleted('clarify_session_continue');
           return;
         }
       }
@@ -1521,6 +1546,7 @@ class SupervisorService {
         if (msgResult.error) console.error(`[CLARIFY_GATE] message insert failed: ${msgResult.error.message}`);
 
         await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'direct_response', endedAt: new Date(), metadata: { verdict: 'direct_response', clarify_gate: clarifyGate } }).catch(() => {});
+        await emitTaskExecutionCompleted('direct_response');
         return;
       }
 
@@ -1567,6 +1593,7 @@ class SupervisorService {
           ts: Date.now(),
         });
 
+        await emitTaskExecutionCompleted('clarify_before_run');
         return;
       }
     }
@@ -1660,6 +1687,7 @@ class SupervisorService {
           },
         }).catch(() => {});
         console.log(`[CONSTRAINT_GATE_OUTER] BLOCKED — status=${outerStatus} terminalState=${outerTermState}`);
+        await emitTaskExecutionCompleted('outer_constraint_gate', { stop: outerGateResult.stop_recommended });
         return;
       }
     }
@@ -1707,6 +1735,7 @@ class SupervisorService {
         () => console.log(`[SESSION_GUARD] Marked stale task=${task.id} as failed`),
         (err: any) => console.warn(`[SESSION_GUARD] Failed to mark stale task as failed: ${err.message}`)
       );
+      await emitTaskExecutionCompleted('session_guard_stale_run');
       return;
     }
 
@@ -1775,6 +1804,8 @@ class SupervisorService {
 
     console.log(`[FINAL_MESSAGE] final_message_created run_id=${jobId} conversation_id=${task.conversation_id} message_id=${messageResult.data.id} task_status=${taskStatus} status=${runFailed ? 'FAIL' : 'OK'}`);
 
+    await emitTaskExecutionCompleted('run_completed', { runFailed, leadCount: leadIds.length });
+
     } catch (topLevelErr: any) {
       const stage = 'processChatTask_top_level';
       const errMsg = topLevelErr instanceof Error ? topLevelErr.message : String(topLevelErr);
@@ -1838,6 +1869,7 @@ class SupervisorService {
         error: `run_error: ${errMsg.substring(0, 200)}`,
       }).eq('id', task.id).catch(() => {});
 
+      await emitTaskExecutionCompleted('run_error', { error: errMsg.substring(0, 200) });
       throw topLevelErr;
     }
   }
