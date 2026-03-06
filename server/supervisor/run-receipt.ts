@@ -239,10 +239,14 @@ export function buildRunReceiptFromArtefacts(
       const sourceUrl = p?.evidence?.source_url || '';
       if (sourceUrl) {
         entry.matched_place_ids.add(placeId);
+        const extractedQuotes: string[] = Array.isArray(p?.extracted_quotes) ? p.extracted_quotes : [];
+        const bestSnippet = extractedQuotes.length > 0
+          ? String(extractedQuotes[0]).substring(0, 300)
+          : (p?.evidence?.quote ? String(p.evidence.quote).substring(0, 300) : undefined);
         entry.evidence_refs.push({
           place_id: placeId,
           url: sourceUrl,
-          ...(p?.evidence?.quote ? { snippet: String(p.evidence.quote).substring(0, 300) } : {}),
+          ...(bestSnippet ? { snippet: bestSnippet } : {}),
           ...(p?.matched_variant ? { matched_variant: p.matched_variant } : {}),
         });
       } else {

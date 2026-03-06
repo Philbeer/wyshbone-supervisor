@@ -3612,6 +3612,8 @@ class SupervisorService {
       url_visited: string | null;
       web_visit_success: boolean;
       snippets: string[];
+      extracted_quotes: string[];
+      extraction_method: string;
       attribute_found: boolean;
       evidence_strength: 'strong' | 'weak' | 'none';
       verdict: 'yes' | 'no' | 'unknown';
@@ -3691,6 +3693,67 @@ class SupervisorService {
         return `${title} ${body}`;
       };
 
+      const extractEvidenceSnippets = (
+        textClean: string,
+        keywords: string[],
+        maxSnippets: number = 3,
+      ): { snippets: string[]; method: 'keyword_sentence_match' | 'no_match' } => {
+        if (!textClean || textClean.trim().length === 0) {
+          return { snippets: [], method: 'no_match' };
+        }
+
+        const sentences = textClean
+          .replace(/([.!?])\s+/g, '$1\n')
+          .split('\n')
+          .map(s => s.trim())
+          .filter(s => s.length >= 10 && s.length <= 500);
+
+        if (sentences.length === 0) {
+          const chunks: string[] = [];
+          for (let i = 0; i < textClean.length; i += 200) {
+            const chunk = textClean.slice(i, i + 200).trim();
+            if (chunk.length >= 10) chunks.push(chunk);
+          }
+          const scored = chunks.map(chunk => {
+            const lower = chunk.toLowerCase();
+            let score = 0;
+            for (const kw of keywords) {
+              if (lower.includes(kw.toLowerCase())) score += 2;
+            }
+            return { chunk, score };
+          });
+          scored.sort((a, b) => b.score - a.score);
+          const top = scored.filter(s => s.score > 0).slice(0, maxSnippets);
+          return {
+            snippets: top.map(s => s.chunk.substring(0, 300)),
+            method: top.length > 0 ? 'keyword_sentence_match' : 'no_match',
+          };
+        }
+
+        const scored = sentences.map(sentence => {
+          const lower = sentence.toLowerCase();
+          let score = 0;
+          for (const kw of keywords) {
+            const kwLower = kw.toLowerCase();
+            if (lower.includes(kwLower)) {
+              score += 3;
+              const idx = lower.indexOf(kwLower);
+              if (idx < lower.length / 2) score += 1;
+            }
+          }
+          const wordCount = sentence.split(/\s+/).length;
+          if (wordCount >= 5 && wordCount <= 40) score += 1;
+          return { sentence, score };
+        });
+
+        scored.sort((a, b) => b.score - a.score);
+        const top = scored.filter(s => s.score > 0).slice(0, maxSnippets);
+        return {
+          snippets: top.map(s => s.sentence.substring(0, 300)),
+          method: top.length > 0 ? 'keyword_sentence_match' : 'no_match',
+        };
+      };
+
       interface PageScanResult {
         verdict: 'yes' | 'no' | 'unknown';
         confidence: 'high' | 'medium' | 'low';
@@ -3700,6 +3763,10 @@ class SupervisorService {
         matchedVariant: string | null;
         matchSource: 'title' | 'body' | 'search_snippet' | null;
         snippets: string[];
+        extractedQuotes: string[];
+        pageUrl: string | null;
+        pageTitle: string | null;
+        extractionMethod: 'keyword_sentence_match' | 'keyword_window' | 'no_match' | 'none';
         evidenceStrength: 'strong' | 'weak' | 'none';
         rationale: string;
         unknownReason: UnknownReason | undefined;
@@ -3723,6 +3790,10 @@ class SupervisorService {
           matchedVariant: null,
           matchSource: null,
           snippets: [],
+          extractedQuotes: [],
+          pageUrl: null,
+          pageTitle: null,
+          extractionMethod: 'none',
           evidenceStrength: 'none',
           rationale: `No evidence found for "${attrValue}" at ${leadName}.`,
           unknownReason: 'no_match_in_visited_pages',
@@ -3732,6 +3803,7 @@ class SupervisorService {
         for (const page of pages) {
           const scanText = buildScanText(page);
           const scanTextLower = scanText.toLowerCase();
+          const bodyText = (page.text_clean || page.cleaned_text || '') as string;
           const pageUrl = page.url || primaryUrl;
 
           const negPageMatch = textMatchesKeywords(scanTextLower, negativeKeywords);
@@ -3739,11 +3811,16 @@ class SupervisorService {
             const negIdx = scanTextLower.indexOf(negPageMatch.matchedKeyword!);
             const negStart = Math.max(0, negIdx - 60);
             const negEnd = Math.min(scanText.length, negIdx + (negPageMatch.matchedKeyword?.length || 0) + 60);
+            const negEvidence = extractEvidenceSnippets(bodyText, [negPageMatch.matchedKeyword!], 2);
             result.verdict = 'no';
             result.confidence = 'high';
             result.quote = `...${scanText.slice(negStart, negEnd)}...`.slice(0, 200);
             result.rationale = `Official site page explicitly states "${negPageMatch.matchedKeyword}" for ${leadName}.`;
             result.sourceUrl = pageUrl;
+            result.pageUrl = pageUrl;
+            result.pageTitle = page.title || null;
+            result.extractedQuotes = negEvidence.snippets.length > 0 ? negEvidence.snippets : [result.quote];
+            result.extractionMethod = negEvidence.method;
             result.evidenceStrength = 'strong';
             return result;
           }
@@ -3758,8 +3835,15 @@ class SupervisorService {
             const contextStart = Math.max(0, idx - 80);
             const contextEnd = Math.min(scanText.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 80);
             const pageSnippet = `...${scanText.slice(contextStart, contextEnd)}...`.slice(0, 240);
+
+            const evidence = extractEvidenceSnippets(bodyText, keywords, 3);
+            result.extractedQuotes = evidence.snippets.length > 0 ? evidence.snippets : [pageSnippet];
+            result.extractionMethod = evidence.snippets.length > 0 ? evidence.method : 'keyword_window';
+            result.pageUrl = pageUrl;
+            result.pageTitle = page.title || null;
+
             result.snippets.push(pageSnippet);
-            result.quote = pageSnippet;
+            result.quote = result.extractedQuotes[0] || pageSnippet;
             result.sourceUrl = pageUrl;
             result.evidenceStrength = 'strong';
             result.attributeFound = true;
@@ -3768,20 +3852,28 @@ class SupervisorService {
             if (result.sourceType === 'official_site') {
               result.verdict = 'yes';
               result.confidence = 'high';
-              result.rationale = `Official site page clearly mentions "${posPageMatch.matchedKeyword}" for ${leadName} (found in ${result.matchSource}).`;
+              result.rationale = `Official site page clearly mentions "${posPageMatch.matchedKeyword}" for ${leadName} (found in ${result.matchSource}, ${result.extractedQuotes.length} evidence snippet(s) extracted).`;
             } else {
               result.verdict = 'yes';
               result.confidence = 'medium';
-              result.rationale = `Page content confirms "${posPageMatch.matchedKeyword}" for ${leadName} (source: ${result.sourceType}, found in ${result.matchSource}).`;
+              result.rationale = `Page content confirms "${posPageMatch.matchedKeyword}" for ${leadName} (source: ${result.sourceType}, found in ${result.matchSource}, ${result.extractedQuotes.length} evidence snippet(s) extracted).`;
             }
 
-            if (ATTR_TRACE) console.log(`[ATTR_TRACE] pageScan: matched=true variant="${posPageMatch.matchedKeyword}" matchSource=${result.matchSource} url=${pageUrl}`);
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] pageScan: matched=true variant="${posPageMatch.matchedKeyword}" matchSource=${result.matchSource} url=${pageUrl} extractedQuotes=${result.extractedQuotes.length}`);
             return result;
           } else {
-            if (ATTR_TRACE) console.log(`[ATTR_TRACE] pageScan: matched=false url=${pageUrl} title="${page.title}" textLen=${((page.text_clean || page.cleaned_text || '') as string).length}`);
+            const noMatchEvidence = extractEvidenceSnippets(bodyText, keywords, 3);
+            if (noMatchEvidence.snippets.length > 0) {
+              result.extractedQuotes = noMatchEvidence.snippets;
+              result.extractionMethod = noMatchEvidence.method;
+              result.pageUrl = pageUrl;
+              result.pageTitle = page.title || null;
+            }
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] pageScan: matched=false url=${pageUrl} title="${page.title}" textLen=${bodyText.length}`);
           }
         }
 
+        result.extractionMethod = result.extractionMethod === 'none' ? 'no_match' : result.extractionMethod;
         result.rationale = `Pages for ${leadName} were scanned but no match for "${attrValue}" (or variants) found in title or content.`;
         return result;
       };
@@ -3948,6 +4040,7 @@ class SupervisorService {
           const fallbackScan: PageScanResult = {
             verdict: 'unknown', confidence: 'low', sourceUrl: null, quote: null,
             sourceType: 'other', matchedVariant: null, matchSource: null, snippets: [],
+            extractedQuotes: [], pageUrl: null, pageTitle: null, extractionMethod: 'none',
             evidenceStrength: 'none', rationale: `Investigation error for "${attrValue}" at ${lead.name}.`,
             unknownReason: 'no_relevant_pages_found', attributeFound: false,
           };
@@ -3987,7 +4080,9 @@ class SupervisorService {
               scan = {
                 verdict: 'unknown', confidence: 'low', sourceUrl: leadWebsite, quote: null,
                 sourceType: classifySourceType(leadWebsite, lead.name),
-                matchedVariant: null, matchSource: null, snippets: [], evidenceStrength: 'none',
+                matchedVariant: null, matchSource: null, snippets: [],
+                extractedQuotes: [], pageUrl: null, pageTitle: null, extractionMethod: 'none',
+                evidenceStrength: 'none',
                 rationale: `Active WEB_VISIT for ${lead.name} (${leadWebsite}) failed or returned no pages. Cannot verify "${attrValue}".`,
                 unknownReason: 'active_visit_failed', attributeFound: false,
               };
@@ -4011,7 +4106,9 @@ class SupervisorService {
                 scan = {
                   verdict: 'unknown', confidence: 'low', sourceUrl: foundUrl, quote: null,
                   sourceType: classifySourceType(foundUrl, lead.name),
-                  matchedVariant: null, matchSource: null, snippets: [], evidenceStrength: 'none',
+                  matchedVariant: null, matchSource: null, snippets: [],
+                  extractedQuotes: [], pageUrl: null, pageTitle: null, extractionMethod: 'none',
+                  evidenceStrength: 'none',
                   rationale: `WEB_SEARCH found URL (${foundUrl}) for ${lead.name} but WEB_VISIT failed or returned no pages. Cannot verify "${attrValue}".`,
                   unknownReason: 'active_visit_failed', attributeFound: false,
                 };
@@ -4020,7 +4117,9 @@ class SupervisorService {
               scan = {
                 verdict: 'unknown', confidence: 'low', sourceUrl: null, quote: null,
                 sourceType: 'other',
-                matchedVariant: null, matchSource: null, snippets: [], evidenceStrength: 'none',
+                matchedVariant: null, matchSource: null, snippets: [],
+                extractedQuotes: [], pageUrl: null, pageTitle: null, extractionMethod: 'none',
+                evidenceStrength: 'none',
                 rationale: `WEB_SEARCH for "${lead.name} ${city} ${attrValue}" returned no usable URLs. Cannot verify "${attrValue}".`,
                 unknownReason: 'web_search_no_url_found', attributeFound: false,
               };
@@ -4034,7 +4133,9 @@ class SupervisorService {
             scan = {
               verdict: 'unknown', confidence: 'low', sourceUrl: null, quote: null,
               sourceType: 'other',
-              matchedVariant: null, matchSource: null, snippets: [], evidenceStrength: 'none',
+              matchedVariant: null, matchSource: null, snippets: [],
+              extractedQuotes: [], pageUrl: null, pageTitle: null, extractionMethod: 'none',
+              evidenceStrength: 'none',
               rationale: leadWebsite
                 ? `Active visit budget exhausted (${MAX_ACTIVE_VISITS}). Cannot verify "${attrValue}" for ${lead.name}.`
                 : `No website from Places and web search budget exhausted (${MAX_WEB_SEARCH_FALLBACKS}). Cannot verify "${attrValue}" for ${lead.name}.`,
@@ -4061,6 +4162,8 @@ class SupervisorService {
             url_visited: urlVisited,
             web_visit_success: webVisitSuccess,
             snippets: scan.snippets,
+            extracted_quotes: scan.extractedQuotes,
+            extraction_method: scan.extractionMethod,
             attribute_found: scan.attributeFound,
             evidence_strength: scan.evidenceStrength,
             verdict: scan.verdict,
@@ -4089,6 +4192,12 @@ class SupervisorService {
                 quote: scan.quote,
                 source_type: scan.sourceType,
               },
+              extracted_quotes: scan.extractedQuotes,
+              page_url: scan.pageUrl,
+              page_title: scan.pageTitle,
+              extraction_method: scan.extractionMethod,
+              original_goal: originalUserGoal,
+              constraint_raw: attrValue,
               rationale: scan.rationale,
               variants_searched: keywords,
               negative_checked: negativeKeywords,
@@ -4099,7 +4208,7 @@ class SupervisorService {
             conversationId,
           }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] Failed to create attribute_evidence artefact for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
 
-          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${scan.verdict} confidence=${scan.confidence} strength=${scan.evidenceStrength} source=${scan.sourceType}${scan.matchedVariant ? ` variant="${scan.matchedVariant}"` : ''} strategy=${investigationStrategy}${scan.verdict === 'unknown' ? ` reason=${scan.unknownReason}` : ''}${scan.matchSource ? ` match=${scan.matchSource}` : ''} url=${urlVisited || 'none'}`);
+          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${scan.verdict} confidence=${scan.confidence} strength=${scan.evidenceStrength} source=${scan.sourceType}${scan.matchedVariant ? ` variant="${scan.matchedVariant}"` : ''} strategy=${investigationStrategy}${scan.verdict === 'unknown' ? ` reason=${scan.unknownReason}` : ''}${scan.matchSource ? ` match=${scan.matchSource}` : ''} url=${urlVisited || 'none'} extractedQuotes=${scan.extractedQuotes.length} method=${scan.extractionMethod}`);
         }
       }
 
