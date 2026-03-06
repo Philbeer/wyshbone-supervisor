@@ -24,12 +24,12 @@ import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput, type AttributeEvidenceMap } from './supervisor/cvl';
 import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-plan-gate';
-import { evaluateClarifyGate, extractBusinessType, extractLocation, extractCount, extractTimeFilter, type ClarifyGateResult, type ClarifyMissingField, type ClarifyTriggerCategory } from './supervisor/clarify-gate';
+import { evaluateClarifyGate, evaluateClarifyGateFromIntent, extractBusinessType, extractLocation, extractCount, extractTimeFilter, type ClarifyGateResult, type ClarifyMissingField, type ClarifyTriggerCategory } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
 import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
-import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
+import { preExecutionConstraintGate, preExecutionConstraintGateFromIntent, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './supervisor/query-shape-key';
@@ -1081,7 +1081,7 @@ class SupervisorService {
 
     const hasActiveClarifySession = !!getClarifySession(task.conversation_id);
     if (earlyParsedGoal && !hasActiveClarifySession) {
-      const preflightResult = this.evaluatePreflightClarify(rawMsg, earlyParsedGoal, previewBT, previewLoc, previewTime);
+      const preflightResult = this.evaluatePreflightClarify(rawMsg, earlyParsedGoal, previewBT, previewLoc, previewTime, canonicalIntent);
       if (preflightResult) {
         console.log(`[PREFLIGHT_CLARIFY] Triggered — reason=${preflightResult.reason} questions=${preflightResult.questions.length} runId=${jobId}`);
 
@@ -1334,15 +1334,16 @@ class SupervisorService {
     let sessionFollowUpMsg: string | null = null;
 
     if (existingSession) {
-      const followUp = classifyFollowUp(rawMsg, existingSession);
-      console.log(`[CLARIFY_SESSION] conversation=${task.conversation_id} classification=${followUp.classification} field=${followUp.updatedField ?? 'none'} value="${(followUp.value ?? '').substring(0, 40)}"`);
+      const followUp = classifyFollowUp(rawMsg, existingSession, canonicalIntent ?? undefined);
+      const followUpSemanticSource = canonicalIntent ? 'canonical' : 'fallback_regex';
+      console.log(`[CLARIFY_SESSION] conversation=${task.conversation_id} classification=${followUp.classification} field=${followUp.updatedField ?? 'none'} value="${(followUp.value ?? '').substring(0, 40)}" semantic_source=${followUpSemanticSource}`);
 
       await createArtefact({
         runId: jobId,
         type: 'diagnostic',
         title: `Clarify session follow-up: ${followUp.classification}`,
         summary: `Follow-up to "${existingSession.originalUserRequest.substring(0, 60)}" — classified as ${followUp.classification}`,
-        payload: { classification: followUp.classification, updatedField: followUp.updatedField ?? null, value: followUp.value ?? null, originalRequest: existingSession.originalUserRequest, collectedFields: existingSession.collectedFields },
+        payload: { classification: followUp.classification, updatedField: followUp.updatedField ?? null, value: followUp.value ?? null, originalRequest: existingSession.originalUserRequest, collectedFields: existingSession.collectedFields, semantic_source: followUpSemanticSource },
         userId: task.user_id,
         conversationId: task.conversation_id,
       }).catch((e: any) => console.warn(`[CLARIFY_SESSION] Failed to emit artefact: ${e.message}`));
@@ -1516,15 +1517,18 @@ class SupervisorService {
 
     console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=clarify_gate`);
     if (!sessionCompletedToRun && (!existingSession || !getClarifySession(task.conversation_id))) {
-      const clarifyGate = evaluateClarifyGate(rawMsg);
-      console.log(`[CLARIFY_GATE] route=${clarifyGate.route} reason="${clarifyGate.reason}"${clarifyGate.triggerCategory ? ` triggerCategory=${clarifyGate.triggerCategory}` : ''}${clarifyGate.questions ? ` questions=${JSON.stringify(clarifyGate.questions)}` : ''}`);
+      const clarifyGate = canonicalIntent
+        ? evaluateClarifyGateFromIntent(canonicalIntent, rawMsg)
+        : evaluateClarifyGate(rawMsg);
+      if (!clarifyGate.semantic_source) clarifyGate.semantic_source = 'fallback_regex';
+      console.log(`[CLARIFY_GATE] route=${clarifyGate.route} reason="${clarifyGate.reason}" semantic_source=${clarifyGate.semantic_source}${clarifyGate.triggerCategory ? ` triggerCategory=${clarifyGate.triggerCategory}` : ''}${clarifyGate.questions ? ` questions=${JSON.stringify(clarifyGate.questions)}` : ''}`);
 
       await createArtefact({
         runId: jobId,
         type: 'diagnostic',
         title: `Clarify gate: ${clarifyGate.route}`,
         summary: clarifyGate.reason,
-        payload: { route: clarifyGate.route, reason: clarifyGate.reason, triggerCategory: clarifyGate.triggerCategory ?? null, questions: clarifyGate.questions ?? null, missingFields: clarifyGate.missingFields ?? null },
+        payload: { route: clarifyGate.route, reason: clarifyGate.reason, triggerCategory: clarifyGate.triggerCategory ?? null, questions: clarifyGate.questions ?? null, missingFields: clarifyGate.missingFields ?? null, semantic_source: clarifyGate.semantic_source },
         userId: task.user_id,
         conversationId: task.conversation_id,
       }).catch((e: any) => console.warn(`[CLARIFY_GATE] Failed to emit artefact: ${e.message}`));
@@ -1608,7 +1612,10 @@ class SupervisorService {
       const noProxySource = sessionOriginalRequest || outerGateMsg;
       const noProxyFromOriginal = detectNoProxySignal(noProxySource);
       const mustBeCertainFromOriginal = detectMustBeCertain(noProxySource);
-      let outerGateResult = preExecutionConstraintGate(outerGateMsg);
+      let outerGateResult = canonicalIntent
+        ? preExecutionConstraintGateFromIntent(canonicalIntent, outerGateMsg)
+        : preExecutionConstraintGate(outerGateMsg);
+      if (!outerGateResult.semantic_source) outerGateResult.semantic_source = 'fallback_regex';
 
       // If the original request had must-be-certain signal but the synthetic message doesn't, apply certainty gate
       if (mustBeCertainFromOriginal && !outerGateResult.stop_recommended && outerGateResult.constraints.length > 0) {
@@ -1697,7 +1704,7 @@ class SupervisorService {
     let runFailed = false;
     let failureReason = '';
     try {
-      towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId, earlyParsedGoal);
+      towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId, earlyParsedGoal, canonicalIntent);
     } catch (execErr: any) {
       runFailed = true;
       failureReason = execErr.message || String(execErr);
@@ -1952,13 +1959,15 @@ class SupervisorService {
     regexBT: string | null,
     regexLoc: string | null,
     regexTime: string | null,
-  ): { reason: string; questions: string[]; options: string[] | null } | null {
+    canonicalIntent?: import('./supervisor/canonical-intent').CanonicalIntent | null,
+  ): { reason: string; questions: string[]; options: string[] | null; semantic_source?: 'canonical' | 'fallback_regex' } | null {
     const questions: string[] = [];
     let options: string[] | null = null;
     const reasons: string[] = [];
+    let semanticSource: 'canonical' | 'fallback_regex' = canonicalIntent ? 'canonical' : 'fallback_regex';
 
-    const bt = parsedGoal.business_type?.trim() || regexBT;
-    const loc = parsedGoal.location?.trim() || regexLoc;
+    const bt = canonicalIntent?.entity_category?.trim() || parsedGoal.business_type?.trim() || regexBT;
+    const loc = canonicalIntent?.location_text?.trim() || parsedGoal.location?.trim() || regexLoc;
 
     if (!bt) {
       questions.push('What type of business are you looking for? (e.g. pubs, dentists, gyms)');
@@ -1970,27 +1979,51 @@ class SupervisorService {
       reasons.push('missing location');
     }
 
-    const timeDetected = detectTimePredicate(rawMsg);
-    if (timeDetected) {
-      const contract = buildTimePredicateContract(rawMsg);
-      if (contract && !contract.can_execute) {
-        const timeQ = buildTimePredicateClarifyQuestion(contract);
-        questions.push(timeQ);
-        reasons.push('time_predicate_unverifiable');
-        const supported = contract.proxy_options.filter(p => p.supported);
-        options = [
-          ...supported.map(p => `${p.label}: ${p.description}`),
-          'Best-effort (unverified): Search without verifying opening dates',
-        ];
+    let timeHandled = false;
+    if (canonicalIntent) {
+      const timeConstraint = canonicalIntent.constraints.find(c => c.type === 'time');
+      if (timeConstraint) {
+        const contract = buildTimePredicateContract(timeConstraint.raw);
+        if (contract && !contract.can_execute) {
+          const timeQ = buildTimePredicateClarifyQuestion(contract);
+          questions.push(timeQ);
+          reasons.push('time_predicate_unverifiable');
+          const supported = contract.proxy_options.filter(p => p.supported);
+          options = [
+            ...supported.map(p => `${p.label}: ${p.description}`),
+            'Best-effort (unverified): Search without verifying opening dates',
+          ];
+          timeHandled = true;
+        }
+      }
+    }
+
+    if (!timeHandled) {
+      const timeDetected = detectTimePredicate(rawMsg);
+      if (timeDetected) {
+        semanticSource = 'fallback_regex';
+        const contract = buildTimePredicateContract(rawMsg);
+        if (contract && !contract.can_execute) {
+          const timeQ = buildTimePredicateClarifyQuestion(contract);
+          questions.push(timeQ);
+          reasons.push('time_predicate_unverifiable');
+          const supported = contract.proxy_options.filter(p => p.supported);
+          options = [
+            ...supported.map(p => `${p.label}: ${p.description}`),
+            'Best-effort (unverified): Search without verifying opening dates',
+          ];
+        }
       }
     }
 
     if (questions.length === 0) return null;
 
+    console.log(`[PREFLIGHT_CLARIFY] semantic_source=${semanticSource} reasons=${reasons.join(', ')}`);
     return {
       reason: reasons.join('; '),
       questions,
       options,
+      semantic_source: semanticSource,
     };
   }
 
@@ -2284,6 +2317,7 @@ class SupervisorService {
     chatRunId: string,
     clientRequestId: string,
     preComputedParsedGoal?: ParsedGoal | null,
+    canonicalIntent?: import('./supervisor/canonical-intent').CanonicalIntent | null,
   ): Promise<{ response: string; leadIds: string[]; deliverySummary: DeliverySummaryPayload | null; towerVerdict: string | null; leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string }> }> {
     const conversationId = task.conversation_id;
     const requestData = task.request_data;
@@ -2489,9 +2523,17 @@ class SupervisorService {
       console.log(`[PRE_PLAN_GATE] query_suspected_merged=true — proceeding with warning`);
     }
 
-    const relationshipPredicate = detectRelationshipPredicate(originalUserGoal);
-    if (relationshipPredicate.requires_relationship_evidence) {
-      console.log(`[RELATIONSHIP_PREDICATE] detected="${relationshipPredicate.detected_predicate}" target="${relationshipPredicate.relationship_target}" — all results will be candidates until relationship evidence is found`);
+    let relationshipPredicate: RelationshipPredicateResult;
+    const canonicalRelConstraint = canonicalIntent?.constraints.find(c => c.type === 'relationship');
+    if (canonicalRelConstraint) {
+      const relRole = detectRelationshipPredicate(canonicalRelConstraint.raw);
+      relationshipPredicate = relRole.requires_relationship_evidence ? relRole : detectRelationshipPredicate(originalUserGoal);
+      console.log(`[RELATIONSHIP_PREDICATE] semantic_source=canonical detected="${relationshipPredicate.detected_predicate}" target="${relationshipPredicate.relationship_target}"`);
+    } else {
+      relationshipPredicate = detectRelationshipPredicate(originalUserGoal);
+      if (relationshipPredicate.requires_relationship_evidence) {
+        console.log(`[RELATIONSHIP_PREDICATE] semantic_source=fallback_regex detected="${relationshipPredicate.detected_predicate}" target="${relationshipPredicate.relationship_target}" — all results will be candidates until relationship evidence is found`);
+      }
     }
 
     const typedConstraints = structuredConstraints.map(c => ({
@@ -2854,9 +2896,12 @@ class SupervisorService {
     // PRE-EXECUTION CONSTRAINT GATE — blocks before ANY tool or Google search
     const constraintGateAlreadyResolved = !!(requestData as any)._constraint_gate_resolved;
     const constraintGateResult = constraintGateAlreadyResolved
-      ? { constraints: [], can_execute: true, why_blocked: null, clarify_questions: [], stop_recommended: false } as ConstraintContract
-      : preExecutionConstraintGate(originalUserGoal);
-    console.log(`[CONSTRAINT_GATE] can_execute=${constraintGateResult.can_execute} stop=${constraintGateResult.stop_recommended} constraints=${constraintGateResult.constraints.length} already_resolved=${constraintGateAlreadyResolved}`);
+      ? { constraints: [], can_execute: true, why_blocked: null, clarify_questions: [], stop_recommended: false, semantic_source: 'canonical' as const } as ConstraintContract
+      : canonicalIntent
+        ? preExecutionConstraintGateFromIntent(canonicalIntent, originalUserGoal)
+        : preExecutionConstraintGate(originalUserGoal);
+    if (!constraintGateResult.semantic_source) constraintGateResult.semantic_source = 'fallback_regex';
+    console.log(`[CONSTRAINT_GATE] can_execute=${constraintGateResult.can_execute} stop=${constraintGateResult.stop_recommended} constraints=${constraintGateResult.constraints.length} already_resolved=${constraintGateAlreadyResolved} semantic_source=${constraintGateResult.semantic_source}`);
 
     if (!constraintGateResult.can_execute) {
       await createArtefact({

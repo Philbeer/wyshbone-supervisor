@@ -17,6 +17,8 @@ import {
   detectRelationshipRole,
 } from './relationship-predicate';
 
+import type { CanonicalIntent, CanonicalConstraint } from './canonical-intent';
+
 export type LiveMusicVerification = 'website_verify' | 'best_effort' | null;
 export type TimePredicateResolution = 'news_mention' | 'recent_reviews' | 'best_effort' | null;
 
@@ -78,12 +80,15 @@ export interface RelationshipPredicateConstraint {
 
 export type Constraint = TimePredicateContract | AttributeConstraint | SubjectivePredicateConstraint | NumericAmbiguityConstraint | RelationshipPredicateConstraint;
 
+export type SemanticSource = 'canonical' | 'fallback_regex';
+
 export interface ConstraintContract {
   constraints: Constraint[];
   can_execute: boolean;
   why_blocked: string | null;
   clarify_questions: string[];
   stop_recommended: boolean;
+  semantic_source?: SemanticSource;
 }
 
 export interface PendingConstraintState {
@@ -974,6 +979,129 @@ export function getPendingContract(conversationId: string): PendingConstraintSta
 
 export function clearPendingContract(conversationId: string): void {
   pendingContracts.delete(conversationId);
+}
+
+export function preExecutionConstraintGateFromIntent(intent: CanonicalIntent, rawMsg: string): ConstraintContract {
+  const constraints: Constraint[] = [];
+  let coveredTypes = new Set<string>();
+
+  for (const cc of intent.constraints) {
+    switch (cc.type) {
+      case 'attribute': {
+        const attrKey = cc.raw.toLowerCase().trim().replace(/\s+/g, '_');
+        const classification = classifyAttribute(cc.raw);
+        if (classification === 'SUBJECTIVE_UNDEFINED' || classification === 'MISSING_NUMERIC_THRESHOLD') break;
+        const isBlocking = BLOCKING_ATTRIBUTES.has(attrKey);
+        constraints.push({
+          type: 'attribute',
+          attribute: attrKey,
+          classification: 'TOOL_CHECKABLE',
+          verifiability: isBlocking ? 'proxy' : 'verifiable',
+          requires_clarification: isBlocking,
+          chosen_verification: null,
+          hardness: cc.hardness as Hardness,
+          keyword_variants: generateKeywordVariants(cc.raw),
+        });
+        coveredTypes.add('attribute');
+        break;
+      }
+      case 'time': {
+        const timePred = buildTimePredicateContract(cc.raw);
+        if (timePred) {
+          if (cc.hardness === 'hard') {
+            timePred.hardness = 'hard';
+          }
+          constraints.push(timePred);
+        }
+        coveredTypes.add('time');
+        break;
+      }
+      case 'relationship': {
+        const relRole = detectRelationshipRole(cc.raw);
+        constraints.push({
+          type: 'relationship_predicate',
+          predicate: cc.raw,
+          relationship_target: relRole?.relationship_target ?? cc.raw,
+          relationship_direction: relRole?.relationship_direction ?? 'unknown',
+          verifiability: 'unverifiable',
+          hardness: cc.hardness as Hardness,
+          can_execute: false,
+          why_blocked: `Relationship constraint "${cc.raw}" requires strategy selection before search can proceed.`,
+          clarify_question: `Your request involves a relationship filter ("${cc.raw}"). Do you want me to:\n\nA) Research each result individually (slower, more thorough)\nB) Use keyword-based filtering (faster, less precise)\nC) Skip this filter and return all results`,
+        });
+        coveredTypes.add('relationship');
+        break;
+      }
+      case 'unknown_constraint': {
+        if (cc.clarify_if_needed) {
+          const terms = cc.raw.trim();
+          constraints.push({
+            type: 'subjective_predicate',
+            label: terms,
+            terms: [terms],
+            verifiability: 'unverifiable',
+            hardness: 'soft',
+            can_execute: false,
+            why_blocked: `Subjective term "${terms}" is too vague to verify from listings data.`,
+            clarification_options: SUBJECTIVE_CLARIFICATION_OPTIONS,
+            required_inputs_missing: [],
+          });
+          coveredTypes.add('subjective');
+        }
+        break;
+      }
+      case 'rating':
+      case 'reviews':
+      case 'name_filter':
+      case 'category':
+        break;
+    }
+  }
+
+  if (constraints.length === 0 && coveredTypes.size === 0) {
+    return {
+      constraints: [],
+      can_execute: true,
+      why_blocked: null,
+      clarify_questions: [],
+      stop_recommended: false,
+      semantic_source: 'canonical',
+    };
+  }
+
+  const isNoProxy = detectNoProxySignal(rawMsg);
+  const isMustBeCertain = detectMustBeCertain(rawMsg);
+
+  if (isNoProxy || isMustBeCertain) {
+    for (const c of constraints) {
+      c.must_be_certain = true;
+      if (c.type === 'time_predicate') {
+        c.hardness = 'hard';
+        c.verifiability = 'unverifiable';
+        c.can_execute = false;
+        c.why_blocked = 'User requires certainty but opening dates cannot be verified from any available data source. This constraint cannot be satisfied.';
+        c.suggested_rephrase = null;
+      }
+    }
+  }
+
+  const initialLiveMusicChoice = detectLiveMusicChoice(rawMsg);
+  if (initialLiveMusicChoice) {
+    for (const c of constraints) {
+      if (c.type === 'attribute' && c.attribute === 'live_music' && c.requires_clarification) {
+        c.chosen_verification = initialLiveMusicChoice;
+        c.requires_clarification = false;
+        c.can_execute = true;
+        c.why_blocked = '';
+      }
+    }
+  }
+
+  const gate = buildGateState(constraints, isNoProxy || isMustBeCertain);
+  const result = isMustBeCertain ? applyCertaintyGate(gate) : gate;
+  result.semantic_source = 'canonical';
+  console.log(`[CONSTRAINT_GATE] semantic_source=canonical constraints=${result.constraints.length} can_execute=${result.can_execute}`);
+  return result;
 }
 
 const buildStamp = process.env.GIT_SHA?.substring(0, 7) || '5c9c5a8';

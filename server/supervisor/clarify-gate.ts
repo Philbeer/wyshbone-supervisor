@@ -1,4 +1,6 @@
 import { RELATIONSHIP_PREDICATES } from './relationship-predicate';
+import type { CanonicalIntent } from './canonical-intent';
+import type { SemanticSource } from './constraint-gate';
 
 export type ClarifyRoute = 'direct_response' | 'clarify_before_run' | 'agent_run';
 
@@ -18,6 +20,7 @@ export interface ClarifyGateResult {
     count: number | null;
     timeFilter: string | null;
   };
+  semantic_source?: SemanticSource;
 }
 
 const DIRECT_RESPONSE_PATTERNS = [
@@ -374,5 +377,90 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   return {
     route: 'agent_run',
     reason: 'Intent is clear and runnable — proceeding with agent execution.',
+  };
+}
+
+export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: string): ClarifyGateResult {
+  const msg = rawMsg.trim();
+
+  if (!msg || msg.length === 0) {
+    return {
+      route: 'clarify_before_run',
+      reason: 'Clarification needed: input is empty.',
+      triggerCategory: 'empty',
+      questions: ['It looks like your message was empty. What would you like me to search for?'],
+      missingFields: [],
+      parsedFields: { businessType: null, location: null, count: null, timeFilter: null },
+      semantic_source: 'canonical',
+    };
+  }
+
+  if (isNonsenseInput(msg)) {
+    return {
+      route: 'clarify_before_run',
+      reason: 'Clarification needed: input appears to be nonsense or unintelligible.',
+      triggerCategory: 'malformed',
+      questions: ['I couldn\'t understand that message. Could you rephrase what you\'re looking for? For example: "Find 10 pubs in Brighton"'],
+      missingFields: [],
+      parsedFields: { businessType: null, location: null, count: null, timeFilter: null },
+      semantic_source: 'canonical',
+    };
+  }
+
+  const malformed = isMalformedInput(msg);
+  const mixed = hasMixedIntent(msg);
+  if (malformed || mixed) {
+    const questions: string[] = [];
+    if (malformed) {
+      questions.push('It looks like your message may contain multiple requests joined together. Could you separate them so I handle each one correctly?');
+    }
+    if (mixed && !malformed) {
+      questions.push('Your message seems to contain more than one request. Could you tell me which one to tackle first?');
+    }
+    const timeConstraint = intent.constraints.find(c => c.type === 'time');
+    return {
+      route: 'clarify_before_run',
+      reason: `Clarification needed: ${malformed ? 'input appears malformed or contains multiple concatenated requests' : 'message contains multiple searches'}.`,
+      triggerCategory: 'multiple_requests',
+      questions: questions.slice(0, 3),
+      missingFields: [],
+      parsedFields: {
+        businessType: intent.entity_category,
+        location: intent.location_text,
+        count: intent.requested_count,
+        timeFilter: timeConstraint?.raw ?? null,
+      },
+      semantic_source: 'canonical',
+    };
+  }
+
+  if (intent.mission_type === 'explain' || intent.mission_type === 'meta_question') {
+    console.log(`[CLARIFY_GATE] semantic_source=canonical route=direct_response mission_type=${intent.mission_type}`);
+    return {
+      route: 'direct_response',
+      reason: `Canonical intent mission_type=${intent.mission_type} — no agent execution needed.`,
+      semantic_source: 'canonical',
+    };
+  }
+
+  if (intent.mission_type === 'unknown') {
+    console.log(`[CLARIFY_GATE] semantic_source=canonical mission_type=unknown — falling back to regex`);
+    const fallback = evaluateClarifyGate(rawMsg);
+    fallback.semantic_source = 'fallback_regex';
+    return fallback;
+  }
+
+  const timeConstraint = intent.constraints.find(c => c.type === 'time');
+  console.log(`[CLARIFY_GATE] semantic_source=canonical route=agent_run mission_type=${intent.mission_type}`);
+  return {
+    route: 'agent_run',
+    reason: `Canonical intent mission_type=${intent.mission_type} — proceeding with agent execution.`,
+    parsedFields: {
+      businessType: intent.entity_category,
+      location: intent.location_text,
+      count: intent.requested_count,
+      timeFilter: timeConstraint?.raw ?? null,
+    },
+    semantic_source: 'canonical',
   };
 }

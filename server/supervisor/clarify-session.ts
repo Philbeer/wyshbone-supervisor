@@ -1,3 +1,5 @@
+import type { CanonicalIntent } from './canonical-intent';
+
 export type MissingField = 'location' | 'entity_type' | 'relationship_clarification' | 'semantic_constraint';
 
 export interface ClarifySession {
@@ -307,7 +309,7 @@ function looksLikeRefinement(msg: string): boolean {
   return false;
 }
 
-export function classifyFollowUp(msg: string, session: ClarifySession): FollowUpResult {
+export function classifyFollowUp(msg: string, session: ClarifySession, followUpIntent?: CanonicalIntent): FollowUpResult {
   const trimmed = msg.trim();
   const stripped = trimmed.replace(/[?!.,]+$/, '').trim();
 
@@ -317,6 +319,28 @@ export function classifyFollowUp(msg: string, session: ClarifySession): FollowUp
 
   if (isMetaTrust(trimmed)) {
     return { classification: 'META_TRUST' };
+  }
+
+  if (followUpIntent) {
+    if (followUpIntent.mission_type === 'meta_question' || followUpIntent.mission_type === 'explain') {
+      console.log(`[CLARIFY_SESSION] semantic_source=canonical follow_up mission_type=${followUpIntent.mission_type} → META_TRUST`);
+      return { classification: 'META_TRUST' };
+    }
+
+    if (followUpIntent.mission_type === 'find_businesses' || followUpIntent.mission_type === 'deep_research') {
+      const intentEntity = followUpIntent.entity_category;
+      const intentLocation = followUpIntent.location_text;
+      const sessionEntity = session.collectedFields.businessType;
+      const sessionLocation = session.collectedFields.location;
+
+      const entityChanged = !!(intentEntity && sessionEntity && entitiesAreDifferent(sessionEntity, intentEntity));
+      const locationChanged = !!(intentLocation && sessionLocation && intentLocation.toLowerCase() !== sessionLocation.toLowerCase());
+
+      if (entityChanged && (intentLocation || locationChanged)) {
+        console.log(`[CLARIFY_SESSION] semantic_source=canonical scope_change detected: entity="${intentEntity}" vs session="${sessionEntity}" location="${intentLocation}" → NEW_REQUEST`);
+        return { classification: 'NEW_REQUEST' };
+      }
+    }
   }
 
   if (isContradictoryNewTask(trimmed, session)) {
