@@ -1,0 +1,91 @@
+SUPERVISOR REPO TASK: add the missing evidence-investigation loop for attribute queries before finishing the run.
+
+Goal
+Right now the system can:
+- understand the user intent correctly
+- search Google Places correctly
+- return candidate businesses
+
+But for attribute queries like:
+"Find cafes in Manchester that serve vegan food"
+
+the run stops too early and returns:
+- cafes found
+- attribute not checked
+
+We need the real agent loop:
+
+1. LLM parses intent
+2. Search tool finds candidates
+3. Supervisor gathers evidence for the attribute from websites/pages/snippets
+4. Tower judges whether the evidence supports the attribute
+5. Supervisor decides continue / stop / deliver
+
+This task is to implement step 3 properly.
+
+Required behaviour
+For attribute-style queries, after SEARCH_PLACES returns candidate businesses, Supervisor must not stop at discovery.
+It must enter an evidence-investigation loop.
+
+For each candidate business (or a sensible batch):
+- fetch website / public pages
+- extract relevant snippets/text
+- create raw evidence artefacts
+- pass those artefacts onward for judgement
+- continue until:
+  - enough strong matches are found
+  - evidence is exhausted
+  - or continuing is no longer worth it
+
+Important architecture rules
+- Supervisor should gather evidence, not semantically decide the final match
+- Tower should judge whether the evidence satisfies the attribute
+- Do not rely on brittle precomputed yes/no flags as the only path
+- Keep deterministic tool orchestration in Supervisor
+
+What to change
+1. Find the current path where an attribute query can finish with "attribute not checked" after candidate discovery.
+2. Add an evidence-investigation stage after SEARCH_PLACES for attribute constraints such as:
+   - vegan food
+   - live music
+   - beer garden
+   - dog friendly
+   - outdoor seating
+3. For each candidate, use existing tools where available:
+   - WEB_VISIT
+   - page fetch
+   - snippet extraction
+   - any existing website/content artefact path
+4. Create/store artefacts that contain raw evidence, for example:
+   - quote/snippet
+   - source_url
+   - business identity
+   - attribute being checked
+5. Do not mark the run complete until this evidence loop has either:
+   - produced enough judged matches
+   - or honestly determined there is not enough evidence
+6. Keep the implementation minimal and production-safe:
+   - sensible batching
+   - sensible limits
+   - stop conditions
+   - no massive rewrite
+
+Success result
+For:
+"Find cafes in Manchester that serve vegan food"
+
+the run should:
+- search cafes in Manchester
+- visit websites/pages for candidates
+- extract evidence snippets about vegan food / plant-based / vegan options
+- create evidence artefacts
+- allow Tower to judge those artefacts
+- return either:
+  - verified/likely matching cafes
+  - or an honest statement that evidence was not found after checking
+
+Important
+This task is about unlocking the evidence-gathering loop.
+Do not redesign Tower in this task.
+Do not redesign the intent parser in this task.
+Just make Supervisor actually investigate the attribute before ending the run.

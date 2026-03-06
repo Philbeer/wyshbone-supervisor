@@ -3657,14 +3657,216 @@ class SupervisorService {
         | 'no_match_in_visited_pages'
         | 'official_site_blocked'
         | 'only_weak_third_party_mentions'
-        | 'no_website_from_places';
+        | 'no_website_from_places'
+        | 'web_search_no_url_found'
+        | 'active_visit_failed'
+        | 'active_visit_budget_exhausted'
+        | 'web_search_budget_exhausted';
+
+      type InvestigationStrategy = 'cached_pages' | 'active_web_visit' | 'web_search_then_visit' | 'no_investigation_possible';
 
       const ATTR_TRACE = process.env.ATTR_VERIFY_TRACE === '1';
+      const MAX_ACTIVE_VISITS = parseInt(process.env.ATTR_MAX_ACTIVE_VISITS || '8', 10);
+      const MAX_WEB_SEARCH_FALLBACKS = parseInt(process.env.ATTR_MAX_SEARCH_FALLBACKS || '5', 10);
+      let activeVisitCount = 0;
+      let webSearchFallbackCount = 0;
+      const investigationBreakdown = { cached_pages: 0, active_web_visit: 0, web_search_then_visit: 0, no_investigation_possible: 0 };
 
       const buildScanText = (page: any): string => {
         const title = (page.title || '');
         const body = (page.text_clean || page.cleaned_text || '');
         return `${title} ${body}`;
+      };
+
+      interface PageScanResult {
+        verdict: 'yes' | 'no' | 'unknown';
+        confidence: 'high' | 'medium' | 'low';
+        sourceUrl: string | null;
+        quote: string | null;
+        sourceType: 'official_site' | 'directory' | 'other';
+        matchedVariant: string | null;
+        matchSource: 'title' | 'body' | 'search_snippet' | null;
+        snippets: string[];
+        evidenceStrength: 'strong' | 'weak' | 'none';
+        rationale: string;
+        unknownReason: UnknownReason | undefined;
+        attributeFound: boolean;
+      }
+
+      const scanPagesForAttribute = (
+        pages: any[],
+        primaryUrl: string,
+        keywords: string[],
+        negativeKeywords: string[],
+        leadName: string,
+        attrValue: string,
+      ): PageScanResult => {
+        const result: PageScanResult = {
+          verdict: 'unknown',
+          confidence: 'low',
+          sourceUrl: primaryUrl,
+          quote: null,
+          sourceType: classifySourceType(primaryUrl, leadName),
+          matchedVariant: null,
+          matchSource: null,
+          snippets: [],
+          evidenceStrength: 'none',
+          rationale: `No evidence found for "${attrValue}" at ${leadName}.`,
+          unknownReason: 'no_match_in_visited_pages',
+          attributeFound: false,
+        };
+
+        for (const page of pages) {
+          const scanText = buildScanText(page);
+          const scanTextLower = scanText.toLowerCase();
+          const pageUrl = page.url || primaryUrl;
+
+          const negPageMatch = textMatchesKeywords(scanTextLower, negativeKeywords);
+          if (negPageMatch.matched && result.sourceType === 'official_site') {
+            const negIdx = scanTextLower.indexOf(negPageMatch.matchedKeyword!);
+            const negStart = Math.max(0, negIdx - 60);
+            const negEnd = Math.min(scanText.length, negIdx + (negPageMatch.matchedKeyword?.length || 0) + 60);
+            result.verdict = 'no';
+            result.confidence = 'high';
+            result.quote = `...${scanText.slice(negStart, negEnd)}...`.slice(0, 200);
+            result.rationale = `Official site page explicitly states "${negPageMatch.matchedKeyword}" for ${leadName}.`;
+            result.sourceUrl = pageUrl;
+            result.evidenceStrength = 'strong';
+            return result;
+          }
+
+          const posPageMatch = textMatchesKeywords(scanTextLower, keywords);
+          if (posPageMatch.matched) {
+            result.matchedVariant = posPageMatch.matchedKeyword;
+            const titleLower = (page.title || '').toLowerCase();
+            const inTitle = titleLower.includes(posPageMatch.matchedKeyword!);
+            result.matchSource = inTitle ? 'title' : 'body';
+            const idx = scanTextLower.indexOf(posPageMatch.matchedKeyword!);
+            const contextStart = Math.max(0, idx - 80);
+            const contextEnd = Math.min(scanText.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 80);
+            const pageSnippet = `...${scanText.slice(contextStart, contextEnd)}...`.slice(0, 240);
+            result.snippets.push(pageSnippet);
+            result.quote = pageSnippet;
+            result.sourceUrl = pageUrl;
+            result.evidenceStrength = 'strong';
+            result.attributeFound = true;
+            result.unknownReason = undefined;
+
+            if (result.sourceType === 'official_site') {
+              result.verdict = 'yes';
+              result.confidence = 'high';
+              result.rationale = `Official site page clearly mentions "${posPageMatch.matchedKeyword}" for ${leadName} (found in ${result.matchSource}).`;
+            } else {
+              result.verdict = 'yes';
+              result.confidence = 'medium';
+              result.rationale = `Page content confirms "${posPageMatch.matchedKeyword}" for ${leadName} (source: ${result.sourceType}, found in ${result.matchSource}).`;
+            }
+
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] pageScan: matched=true variant="${posPageMatch.matchedKeyword}" matchSource=${result.matchSource} url=${pageUrl}`);
+            return result;
+          } else {
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] pageScan: matched=false url=${pageUrl} title="${page.title}" textLen=${((page.text_clean || page.cleaned_text || '') as string).length}`);
+          }
+        }
+
+        result.rationale = `Pages for ${leadName} were scanned but no match for "${attrValue}" (or variants) found in title or content.`;
+        return result;
+      };
+
+      const activeWebVisit = async (url: string, leadName: string, leadPlaceId: string): Promise<{ pages: any[]; success: boolean }> => {
+        try {
+          runToolCallCount++;
+          const visitResult = await executeAction({
+            toolName: 'WEB_VISIT',
+            toolArgs: { url, max_pages: 3, same_domain_only: true },
+            userId: task.user_id,
+            tracker: toolTracker,
+            runId: chatRunId,
+            conversationId,
+            clientRequestId,
+          });
+
+          if (visitResult.success && visitResult.data) {
+            const pages = (visitResult.data?.envelope as any)?.outputs?.pages || [];
+
+            await createArtefact({
+              runId: chatRunId,
+              type: 'step_result',
+              title: `Step result: WEB_VISIT (attr investigation) – "${leadName}"`,
+              summary: `${visitResult.success ? 'success' : 'fail'} – ${visitResult.summary}`,
+              payload: {
+                run_id: chatRunId,
+                step_id: `web_visit_attr_${leadPlaceId}`,
+                step_title: `WEB_VISIT (attr investigation) – ${leadName}`,
+                step_type: 'WEB_VISIT',
+                step_status: 'success',
+                phase: 'attribute_investigation',
+                inputs_summary: { url, max_pages: 3 },
+                outputs_summary: { success: true, pages_count: pages.length, summary: visitResult.summary },
+              },
+              userId: task.user_id,
+              conversationId,
+            }).catch((e: any) => console.warn(`[ATTR_INVESTIGATE] step_result artefact failed for WEB_VISIT "${leadName}" (non-fatal): ${e.message}`));
+
+            return { pages, success: true };
+          }
+          return { pages: [], success: false };
+        } catch (err: any) {
+          console.warn(`[ATTR_INVESTIGATE] WEB_VISIT failed for "${leadName}" url=${url}: ${err.message}`);
+          return { pages: [], success: false };
+        }
+      };
+
+      const webSearchForAttribute = async (leadName: string, location: string, attrValue: string): Promise<string | null> => {
+        try {
+          runToolCallCount++;
+          const searchResult = await executeAction({
+            toolName: 'WEB_SEARCH',
+            toolArgs: { query: `${leadName} ${location} ${attrValue}`, max_results: 3 },
+            userId: task.user_id,
+            tracker: toolTracker,
+            runId: chatRunId,
+            conversationId,
+            clientRequestId,
+          });
+
+          if (searchResult.success && searchResult.data) {
+            const results = (searchResult.data?.envelope as any)?.outputs?.results || [];
+
+            await createArtefact({
+              runId: chatRunId,
+              type: 'step_result',
+              title: `Step result: WEB_SEARCH (attr investigation) – "${leadName}" + "${attrValue}"`,
+              summary: `${searchResult.success ? 'success' : 'fail'} – ${searchResult.summary}`,
+              payload: {
+                run_id: chatRunId,
+                step_id: `web_search_attr_${leadName.replace(/\s+/g, '_').substring(0, 20)}`,
+                step_title: `WEB_SEARCH (attr investigation) – ${leadName}`,
+                step_type: 'WEB_SEARCH',
+                step_status: 'success',
+                phase: 'attribute_investigation',
+                inputs_summary: { query: `${leadName} ${location} ${attrValue}`, max_results: 3 },
+                outputs_summary: { success: true, results_count: results.length, summary: searchResult.summary },
+              },
+              userId: task.user_id,
+              conversationId,
+            }).catch((e: any) => console.warn(`[ATTR_INVESTIGATE] step_result artefact failed for WEB_SEARCH "${leadName}" (non-fatal): ${e.message}`));
+
+            const SKIP_DOMAINS = ['google.com', 'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'youtube.com', 'tiktok.com', 'pinterest.com', 'linkedin.com'];
+            for (const r of results) {
+              const url = r.url || r.link;
+              if (!url) continue;
+              const domain = url.toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
+              if (SKIP_DOMAINS.some(d => domain.includes(d))) continue;
+              console.log(`[ATTR_INVESTIGATE] WEB_SEARCH found URL for "${leadName}": ${url}`);
+              return url;
+            }
+          }
+          return null;
+        } catch (err: any) {
+          console.warn(`[ATTR_INVESTIGATE] WEB_SEARCH failed for "${leadName}": ${err.message}`);
+          return null;
+        }
       };
 
       const cachedWebVisitPages = new Map<string, { pages: any[]; sourceUrl: string }>();
@@ -3728,20 +3930,15 @@ class SupervisorService {
           let webSearchSuccess = false;
           let urlVisited: string | null = null;
           let webVisitSuccess = false;
-          const snippets: string[] = [];
-          let attributeFound = false;
-          let evidenceStrength: 'strong' | 'weak' | 'none' = 'none';
+          let investigationStrategy: InvestigationStrategy = 'no_investigation_possible';
 
-          let evidenceVerdict: 'yes' | 'no' | 'unknown' = 'unknown';
-          let evidenceConfidence: 'high' | 'medium' | 'low' = 'low';
-          let evidenceSourceUrl: string | null = null;
-          let evidenceQuote: string | null = null;
-          let evidenceSourceType: 'official_site' | 'directory' | 'other' = 'other';
-          let evidenceRationale = `No evidence found for "${attrValue}" at ${lead.name}.`;
-          let unknownReason: UnknownReason = 'no_relevant_pages_found';
-          let negativeFound = false;
-          let matchSource: 'title' | 'body' | 'search_snippet' | null = null;
-          let matchedVariant: string | null = null;
+          const fallbackScan: PageScanResult = {
+            verdict: 'unknown', confidence: 'low', sourceUrl: null, quote: null,
+            sourceType: 'other', matchedVariant: null, matchSource: null, snippets: [],
+            evidenceStrength: 'none', rationale: `Investigation error for "${attrValue}" at ${lead.name}.`,
+            unknownReason: 'no_relevant_pages_found', attributeFound: false,
+          };
+          let scan: PageScanResult = fallbackScan;
 
           const leadWebsite = lead.website as string | null;
 
@@ -3752,81 +3949,92 @@ class SupervisorService {
           const cached = cachedWebVisitPages.get(lead.placeId);
           const hasPages = cached && cached.pages.length > 0;
 
+          try {
           if (hasPages) {
+            investigationStrategy = 'cached_pages';
             webVisitSuccess = true;
             urlVisited = cached.sourceUrl;
-            evidenceSourceUrl = cached.sourceUrl;
-            evidenceSourceType = classifySourceType(cached.sourceUrl, lead.name);
 
             if (ATTR_TRACE) console.log(`[ATTR_TRACE] Using cached WEB_VISIT pages=${cached.pages.length} for "${lead.name}" url=${cached.sourceUrl}`);
 
-            for (const page of cached.pages) {
-              const scanText = buildScanText(page);
-              const scanTextLower = scanText.toLowerCase();
-              const pageUrl = page.url || cached.sourceUrl;
+            scan = scanPagesForAttribute(cached.pages, cached!.sourceUrl, keywords, negativeKeywords, lead.name, attrValue);
+            investigationBreakdown.cached_pages++;
+          } else if (leadWebsite && activeVisitCount < MAX_ACTIVE_VISITS && !checkRunDeadline()) {
+            investigationStrategy = 'active_web_visit';
+            console.log(`[ATTR_INVESTIGATE] Active WEB_VISIT for "${lead.name}" — website=${leadWebsite} (visit ${activeVisitCount + 1}/${MAX_ACTIVE_VISITS})`);
+            activeVisitCount++;
 
-              const negPageMatch = textMatchesKeywords(scanTextLower, negativeKeywords);
-              if (negPageMatch.matched && evidenceSourceType === 'official_site') {
-                evidenceVerdict = 'no';
-                evidenceConfidence = 'high';
-                const negIdx = scanTextLower.indexOf(negPageMatch.matchedKeyword!);
-                const negStart = Math.max(0, negIdx - 60);
-                const negEnd = Math.min(scanText.length, negIdx + (negPageMatch.matchedKeyword?.length || 0) + 60);
-                evidenceQuote = `...${scanText.slice(negStart, negEnd)}...`.slice(0, 200);
-                evidenceRationale = `Official site page explicitly states "${negPageMatch.matchedKeyword}" for ${lead.name}.`;
-                evidenceSourceUrl = pageUrl;
-                attributeFound = false;
-                evidenceStrength = 'strong';
-                negativeFound = true;
-                break;
-              }
+            const visitResult = await activeWebVisit(leadWebsite, lead.name, lead.placeId);
+            if (visitResult.success && visitResult.pages.length > 0) {
+              webVisitSuccess = true;
+              urlVisited = leadWebsite;
+              cachedWebVisitPages.set(lead.placeId, { pages: visitResult.pages, sourceUrl: leadWebsite });
+              scan = scanPagesForAttribute(visitResult.pages, leadWebsite, keywords, negativeKeywords, lead.name, attrValue);
+            } else {
+              scan = {
+                verdict: 'unknown', confidence: 'low', sourceUrl: leadWebsite, quote: null,
+                sourceType: classifySourceType(leadWebsite, lead.name),
+                matchedVariant: null, matchSource: null, snippets: [], evidenceStrength: 'none',
+                rationale: `Active WEB_VISIT for ${lead.name} (${leadWebsite}) failed or returned no pages. Cannot verify "${attrValue}".`,
+                unknownReason: 'active_visit_failed', attributeFound: false,
+              };
+            }
+            investigationBreakdown.active_web_visit++;
+          } else if (!leadWebsite && webSearchFallbackCount < MAX_WEB_SEARCH_FALLBACKS && !checkRunDeadline()) {
+            investigationStrategy = 'web_search_then_visit';
+            console.log(`[ATTR_INVESTIGATE] WEB_SEARCH fallback for "${lead.name}" — no website (search ${webSearchFallbackCount + 1}/${MAX_WEB_SEARCH_FALLBACKS})`);
+            webSearchFallbackCount++;
 
-              const posPageMatch = textMatchesKeywords(scanTextLower, keywords);
-              if (posPageMatch.matched) {
-                evidenceStrength = 'strong';
-                matchedVariant = posPageMatch.matchedKeyword;
-                const titleLower = (page.title || '').toLowerCase();
-                const inTitle = titleLower.includes(posPageMatch.matchedKeyword!);
-                matchSource = inTitle ? 'title' : 'body';
-                const idx = scanTextLower.indexOf(posPageMatch.matchedKeyword!);
-                const contextStart = Math.max(0, idx - 80);
-                const contextEnd = Math.min(scanText.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 80);
-                const pageSnippet = `...${scanText.slice(contextStart, contextEnd)}...`.slice(0, 240);
-                snippets.push(pageSnippet);
-                evidenceQuote = pageSnippet;
-                evidenceSourceUrl = pageUrl;
-
-                if (evidenceSourceType === 'official_site') {
-                  evidenceVerdict = 'yes';
-                  evidenceConfidence = 'high';
-                  evidenceRationale = `Official site page clearly mentions "${posPageMatch.matchedKeyword}" for ${lead.name} (found in ${matchSource}).`;
-                } else {
-                  evidenceVerdict = 'yes';
-                  evidenceConfidence = 'medium';
-                  evidenceRationale = `Page content confirms "${posPageMatch.matchedKeyword}" for ${lead.name} (source: ${evidenceSourceType}, found in ${matchSource}).`;
-                }
-                attributeFound = true;
-                unknownReason = undefined as any;
-
-                if (ATTR_TRACE) console.log(`[ATTR_TRACE] cachedPageScan: matched=true variant="${posPageMatch.matchedKeyword}" matchSource=${matchSource} url=${pageUrl}`);
-                break;
+            const foundUrl = await webSearchForAttribute(lead.name, city, attrValue);
+            if (foundUrl) {
+              webSearchSuccess = true;
+              const visitResult = await activeWebVisit(foundUrl, lead.name, lead.placeId);
+              if (visitResult.success && visitResult.pages.length > 0) {
+                webVisitSuccess = true;
+                urlVisited = foundUrl;
+                cachedWebVisitPages.set(lead.placeId, { pages: visitResult.pages, sourceUrl: foundUrl });
+                scan = scanPagesForAttribute(visitResult.pages, foundUrl, keywords, negativeKeywords, lead.name, attrValue);
               } else {
-                if (ATTR_TRACE) console.log(`[ATTR_TRACE] cachedPageScan: matched=false url=${pageUrl} title="${page.title}" textLen=${((page.text_clean || page.cleaned_text || '') as string).length}`);
+                scan = {
+                  verdict: 'unknown', confidence: 'low', sourceUrl: foundUrl, quote: null,
+                  sourceType: classifySourceType(foundUrl, lead.name),
+                  matchedVariant: null, matchSource: null, snippets: [], evidenceStrength: 'none',
+                  rationale: `WEB_SEARCH found URL (${foundUrl}) for ${lead.name} but WEB_VISIT failed or returned no pages. Cannot verify "${attrValue}".`,
+                  unknownReason: 'active_visit_failed', attributeFound: false,
+                };
               }
+            } else {
+              scan = {
+                verdict: 'unknown', confidence: 'low', sourceUrl: null, quote: null,
+                sourceType: 'other',
+                matchedVariant: null, matchSource: null, snippets: [], evidenceStrength: 'none',
+                rationale: `WEB_SEARCH for "${lead.name} ${city} ${attrValue}" returned no usable URLs. Cannot verify "${attrValue}".`,
+                unknownReason: 'web_search_no_url_found', attributeFound: false,
+              };
             }
-
-            if (!attributeFound && !negativeFound) {
-              unknownReason = 'no_match_in_visited_pages';
-              evidenceRationale = `Existing WEB_VISIT pages for ${lead.name} were scanned but no match for "${attrValue}" (or variants) found in title or content.`;
-            }
-          } else if (leadWebsite) {
-            unknownReason = 'no_relevant_pages_found';
-            evidenceRationale = `Lead "${lead.name}" has a website (${leadWebsite}) but no WEB_VISIT page text was available from enrichment. Cannot verify "${attrValue}".`;
-            if (ATTR_TRACE) console.log(`[ATTR_TRACE] No cached WEB_VISIT data for "${lead.name}" despite website=${leadWebsite} — verdict=unknown`);
+            investigationBreakdown.web_search_then_visit++;
           } else {
-            unknownReason = 'no_website_from_places';
-            evidenceRationale = `No website returned from Places Details for ${lead.name}. Cannot verify "${attrValue}" without a website.`;
-            if (ATTR_TRACE) console.log(`[ATTR_TRACE] No website for "${lead.name}" — verdict=unknown reason=no_website_from_places`);
+            investigationStrategy = 'no_investigation_possible';
+            const reason: UnknownReason = leadWebsite
+              ? (activeVisitCount >= MAX_ACTIVE_VISITS ? 'active_visit_budget_exhausted' : 'no_relevant_pages_found')
+              : (webSearchFallbackCount >= MAX_WEB_SEARCH_FALLBACKS ? 'web_search_budget_exhausted' : 'no_website_from_places');
+            scan = {
+              verdict: 'unknown', confidence: 'low', sourceUrl: null, quote: null,
+              sourceType: 'other',
+              matchedVariant: null, matchSource: null, snippets: [], evidenceStrength: 'none',
+              rationale: leadWebsite
+                ? `Active visit budget exhausted (${MAX_ACTIVE_VISITS}). Cannot verify "${attrValue}" for ${lead.name}.`
+                : `No website from Places and web search budget exhausted (${MAX_WEB_SEARCH_FALLBACKS}). Cannot verify "${attrValue}" for ${lead.name}.`,
+              unknownReason: reason, attributeFound: false,
+            };
+            investigationBreakdown.no_investigation_possible++;
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] No investigation possible for "${lead.name}" — strategy=${investigationStrategy} website=${leadWebsite || 'none'}`);
+          }
+          } catch (investigationErr: any) {
+            console.warn(`[ATTR_INVESTIGATE] Investigation error for "${lead.name}" + "${attrValue}" (non-fatal, using fallback): ${investigationErr.message}`);
+            scan = fallbackScan;
+            scan.rationale = `Investigation failed for "${attrValue}" at ${lead.name}: ${investigationErr.message}`;
+            investigationStrategy = 'no_investigation_possible';
           }
 
           attrVerificationResults.push({
@@ -3834,24 +4042,24 @@ class SupervisorService {
             lead_place_id: lead.placeId,
             attribute: attrValue,
             attribute_raw: attrValue,
-            matched_variant: matchedVariant,
+            matched_variant: scan.matchedVariant,
             search_query: searchQuery,
             web_search_success: webSearchSuccess,
             url_visited: urlVisited,
             web_visit_success: webVisitSuccess,
-            snippets,
-            attribute_found: attributeFound,
-            evidence_strength: evidenceStrength,
-            verdict: evidenceVerdict,
-            confidence: evidenceConfidence,
-            rationale: evidenceRationale,
+            snippets: scan.snippets,
+            attribute_found: scan.attributeFound,
+            evidence_strength: scan.evidenceStrength,
+            verdict: scan.verdict,
+            confidence: scan.confidence,
+            rationale: scan.rationale,
           });
 
           await createArtefact({
             runId: chatRunId,
             type: 'attribute_evidence',
-            title: `Attribute evidence: ${lead.name} — ${attrValue} → ${evidenceVerdict}`,
-            summary: evidenceRationale,
+            title: `Attribute evidence: ${lead.name} — ${attrValue} → ${scan.verdict}`,
+            summary: scan.rationale,
             payload: {
               run_id: chatRunId,
               lead_place_id: lead.placeId,
@@ -3859,25 +4067,26 @@ class SupervisorService {
               attribute_key: attrKey,
               attribute_label: attrValue,
               attribute_raw: attrValue,
-              verdict: evidenceVerdict,
-              confidence: evidenceConfidence,
-              ...(matchedVariant ? { matched_variant: matchedVariant } : {}),
-              ...(evidenceVerdict === 'unknown' ? { unknown_reason: unknownReason } : {}),
+              verdict: scan.verdict,
+              confidence: scan.confidence,
+              ...(scan.matchedVariant ? { matched_variant: scan.matchedVariant } : {}),
+              ...(scan.verdict === 'unknown' ? { unknown_reason: scan.unknownReason } : {}),
               evidence: {
-                source_url: evidenceSourceUrl,
-                quote: evidenceQuote,
-                source_type: evidenceSourceType,
+                source_url: scan.sourceUrl,
+                quote: scan.quote,
+                source_type: scan.sourceType,
               },
-              rationale: evidenceRationale,
+              rationale: scan.rationale,
               variants_searched: keywords,
               negative_checked: negativeKeywords,
-              ...(matchSource ? { match_source: matchSource } : {}),
+              investigation_strategy: investigationStrategy,
+              ...(scan.matchSource ? { match_source: scan.matchSource } : {}),
             },
             userId: task.user_id,
             conversationId,
           }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] Failed to create attribute_evidence artefact for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
 
-          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${evidenceVerdict} confidence=${evidenceConfidence} strength=${evidenceStrength} source=${evidenceSourceType}${matchedVariant ? ` variant="${matchedVariant}"` : ''} strategy=${leadWebsite ? 'cached-pages' : 'no-website'}${evidenceVerdict === 'unknown' ? ` reason=${unknownReason}` : ''}${matchSource ? ` match=${matchSource}` : ''} url=${urlVisited || 'none'}`);
+          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${scan.verdict} confidence=${scan.confidence} strength=${scan.evidenceStrength} source=${scan.sourceType}${scan.matchedVariant ? ` variant="${scan.matchedVariant}"` : ''} strategy=${investigationStrategy}${scan.verdict === 'unknown' ? ` reason=${scan.unknownReason}` : ''}${scan.matchSource ? ` match=${scan.matchSource}` : ''} url=${urlVisited || 'none'}`);
         }
       }
 
@@ -3899,12 +4108,15 @@ class SupervisorService {
           checks_with_evidence: totalVerified,
           strong_evidence: strongEvidence,
           leads_with_attribute: leadsWithAttr,
+          investigation_breakdown: investigationBreakdown,
+          active_visits_used: activeVisitCount,
+          web_search_fallbacks_used: webSearchFallbackCount,
           results: attrVerificationResults,
         },
         userId: task.user_id,
         conversationId,
       });
-      console.log(`[ATTR_VERIFY] artefact id=${attrVerifArtefact.id} — ${leadsWithAttr}/${finalLeads.length} leads verified, ${strongEvidence} strong evidence`);
+      console.log(`[ATTR_VERIFY] artefact id=${attrVerifArtefact.id} — ${leadsWithAttr}/${finalLeads.length} leads verified, ${strongEvidence} strong evidence, investigation: cached=${investigationBreakdown.cached_pages} active_visit=${investigationBreakdown.active_web_visit} search_then_visit=${investigationBreakdown.web_search_then_visit} no_investigation=${investigationBreakdown.no_investigation_possible}`);
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
@@ -3916,6 +4128,7 @@ class SupervisorService {
           leads_with_attribute: leadsWithAttr,
           total_leads: finalLeads.length,
           strong_evidence: strongEvidence,
+          investigation_breakdown: investigationBreakdown,
         },
       });
       console.log(`[ATTR_VERIFY] Completed: ${leadsWithAttr}/${finalLeads.length} leads with "${attrLabel}" (Tower deferred to final_delivery)`);
