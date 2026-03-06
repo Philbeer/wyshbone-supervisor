@@ -28,7 +28,7 @@ import { evaluateClarifyGate, extractBusinessType, extractLocation, extractCount
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
-import { buildConversationContextString, canonicalIntentToPreviewFields } from './supervisor/intent-bridge';
+import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
@@ -934,23 +934,47 @@ class SupervisorService {
     });
 
     let earlyParsedGoal: ParsedGoal | null = null;
-    try {
-      console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal`);
-      earlyParsedGoal = await parseGoalToConstraints(rawMsg.trim());
+    let intentSource: 'canonical' | 'legacy' = 'legacy';
+    const canonicalValid = shadowResult.ran && shadowResult.extraction?.validation?.ok && shadowResult.extraction.validation.intent;
+    const canonicalIntent = canonicalValid ? shadowResult.extraction!.validation.intent! : null;
 
+    if (canonicalIntent) {
+      try {
+        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=canonical_active`);
+        earlyParsedGoal = canonicalIntentToParsedGoal(canonicalIntent, rawMsg.trim());
+        intentSource = 'canonical';
+        console.log(`[INTENT_SOURCE] canonical_active — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location} count=${earlyParsedGoal.requested_count_user} constraints=${earlyParsedGoal.constraints.length}`);
+      } catch (bridgeErr: any) {
+        console.warn(`[INTENT_SOURCE] canonical bridge failed, falling back to legacy: ${bridgeErr.message}`);
+        earlyParsedGoal = null;
+      }
+    }
+
+    if (!earlyParsedGoal) {
+      try {
+        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=legacy_fallback`);
+        earlyParsedGoal = await parseGoalToConstraints(rawMsg.trim());
+        intentSource = 'legacy';
+        console.log(`[INTENT_SOURCE] legacy_fallback — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location} count=${earlyParsedGoal.requested_count_user} constraints=${earlyParsedGoal.constraints.length}`);
+      } catch (parseErr: any) {
+        console.warn(`[EARLY_PARSE] parseGoalToConstraints failed (non-fatal, will retry in executeTowerLoopChat): ${parseErr.message}`);
+      }
+    }
+
+    if (earlyParsedGoal) {
       const earlyConstraints = earlyParsedGoal.constraints;
       const earlyRc = buildRequestedCount(earlyParsedGoal.requested_count_user);
       const earlyUserCount = earlyRc.requested_count_user === 'explicit' ? earlyParsedGoal.requested_count_user : null;
 
       const cePayload = buildConstraintsExtractedPayload(rawMsg.trim(), earlyUserCount ?? null, earlyConstraints);
       const ceTitle = `Constraints extracted: ${earlyConstraints.length} constraints`;
-      const ceSummary = `mission_type=lead_finder | ${earlyConstraints.filter(c => c.hard).length} hard, ${earlyConstraints.filter(c => !c.hard).length} soft | requested_count_user=${earlyUserCount ?? 'any'}`;
+      const ceSummary = `mission_type=lead_finder | ${earlyConstraints.filter(c => c.hard).length} hard, ${earlyConstraints.filter(c => !c.hard).length} soft | requested_count_user=${earlyUserCount ?? 'any'} | source=${intentSource}`;
       await createArtefact({
         runId: jobId,
         type: 'constraints_extracted',
         title: ceTitle,
         summary: ceSummary,
-        payload: cePayload as unknown as Record<string, unknown>,
+        payload: { ...cePayload as unknown as Record<string, unknown>, intent_source: intentSource },
         userId: task.user_id,
         conversationId: task.conversation_id,
       }).catch((e: any) => console.warn(`[EARLY_PARSE] constraints_extracted artefact failed (non-fatal): ${e.message}`));
@@ -958,7 +982,7 @@ class SupervisorService {
         runId: jobId,
         clientRequestId,
         type: 'constraints_extracted',
-        payload: { ...cePayload as unknown as Record<string, unknown>, title: ceTitle, summary: ceSummary },
+        payload: { ...cePayload as unknown as Record<string, unknown>, title: ceTitle, summary: ceSummary, intent_source: intentSource },
         userId: task.user_id,
         conversationId: task.conversation_id,
       }).catch((e: any) => console.warn(`[EARLY_PARSE] postArtefactToUI constraints_extracted failed (non-fatal): ${e.message}`));
@@ -984,20 +1008,19 @@ class SupervisorService {
         conversationId: task.conversation_id,
       }).catch((e: any) => console.warn(`[EARLY_PARSE] postArtefactToUI constraint_capability_check failed (non-fatal): ${e.message}`));
 
-      console.log(`[EARLY_PARSE] Emitted constraints_extracted (${earlyConstraints.length}) + capability_check before gates`);
-    } catch (parseErr: any) {
-      console.warn(`[EARLY_PARSE] parseGoalToConstraints failed (non-fatal, will retry in executeTowerLoopChat): ${parseErr.message}`);
+      console.log(`[EARLY_PARSE] Emitted constraints_extracted (${earlyConstraints.length}) + capability_check before gates — source=${intentSource}`);
     }
 
-    const previewBT = extractBusinessType(rawMsg) ?? null;
-    const previewLoc = extractLocation(rawMsg) ?? null;
-    const previewCount = extractCount(rawMsg) ?? null;
-    const previewTime = extractTimeFilter(rawMsg) ?? null;
+    const regexBT = extractBusinessType(rawMsg) ?? null;
+    const regexLoc = extractLocation(rawMsg) ?? null;
+    const regexCount = extractCount(rawMsg) ?? null;
+    const regexTime = extractTimeFilter(rawMsg) ?? null;
 
-    let shadowPreviewFields: { business_type: string | null; location: string | null; count: number | null; time_filter: string | null } | null = null;
-    if (shadowResult.ran && shadowResult.extraction?.validation?.ok && shadowResult.extraction.validation.intent) {
-      shadowPreviewFields = canonicalIntentToPreviewFields(shadowResult.extraction.validation.intent);
-    }
+    const canonicalPreview = canonicalIntent ? canonicalIntentToPreviewFields(canonicalIntent) : null;
+    const previewBT = canonicalPreview?.business_type ?? regexBT;
+    const previewLoc = canonicalPreview?.location ?? regexLoc;
+    const previewCount = canonicalPreview?.count ?? regexCount;
+    const previewTime = canonicalPreview?.time_filter ?? regexTime;
 
     const intentPreviewPayload = {
       raw_message: rawMsg.substring(0, 500),
@@ -1007,12 +1030,13 @@ class SupervisorService {
         count: previewCount,
         time_filter: previewTime,
       },
-      ...(shadowPreviewFields ? {
-        shadow_parsed_fields: shadowPreviewFields,
-        shadow_extraction_used: true,
+      intent_source: intentSource,
+      ...(canonicalPreview ? {
+        canonical_fields: canonicalPreview,
+        regex_fields: { business_type: regexBT, location: regexLoc, count: regexCount, time_filter: regexTime },
       } : {}),
       route: 'pre_gate',
-      extraction_method: 'regex_or_simple_parse',
+      extraction_method: intentSource === 'canonical' ? 'canonical_intent_extractor' : 'regex_or_simple_parse',
     };
 
     this.postArtefactToUI({

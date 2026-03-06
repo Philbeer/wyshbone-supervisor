@@ -1,0 +1,77 @@
+SUPERVISOR REPO TASK: make the canonical intent extractor the ACTIVE parser for preflight and downstream parsing.
+
+Goal
+The upgraded canonical intent extractor is now good enough to be used for real.
+It currently runs as shadow-only, writes artefacts, and is then discarded while the old parser re-parses the message.
+Change that.
+
+Target behaviour
+- Canonical intent extraction becomes the primary source of meaning for the run
+- The downstream preflight / clarify / planner inputs must come from canonical intent when it validates successfully
+- The old parser remains only as a safe fallback if canonical extraction is invalid or unavailable
+
+Important architecture rules
+- The LLM only translates language into the fixed canonical intent schema
+- The LLM must NOT choose tools
+- The LLM must NOT decide truth sources beyond schema hints
+- Deterministic code still owns planner logic, tool selection, verification, and execution
+
+What to change
+1) Find where the current downstream fields are derived from the legacy parser
+This includes things like:
+- earlyParsedGoal
+- previewBT
+- previewLoc
+- previewTime
+- any other preflight fields used by clarify / capability / planner
+
+2) Replace those legacy-derived fields with canonical-derived fields when canonical extraction is valid
+- Use the bridge/adapter helpers already created
+- Canonical extraction should become the main source for:
+  - business type / entity category
+  - location
+  - requested count
+  - time filter / constraints hints
+- Keep the old parser only as fallback if canonical extraction is invalid
+
+3) Keep the current shadow artefacts and probes for now
+- Do NOT remove the shadow artefact yet
+- Do NOT remove diagnostics yet
+- We still want visibility while making the canonical extractor active
+
+4) Keep all current clarify and execution behaviour working
+- Clarify should still happen if canonical constraints require it
+- Normal runs should still execute
+- Follow-up clarify answers should still work
+
+5) Add an explicit branch in code:
+- if canonical extraction valid:
+    use canonical-derived downstream fields
+  else:
+    use legacy parser fallback
+
+6) Add lightweight logging / probe output showing which source was used
+Example:
+- canonical_active_source
+- legacy_fallback_source
+
+Important
+- Do not do a massive refactor
+- Do not rip out the old parser completely yet
+- Make the smallest production-grade change that causes the system to actually USE canonical intent first
+
+Success result
+For:
+"find gyms in London that opened in the last 6 months"
+
+the run should:
+- use canonical entity_category = gyms
+- use canonical location_text = London
+- use canonical time constraint = opened in the last 6 months
+- trigger clarification based on canonical extraction
+- only fall back to the old parser if canonical extraction is invalid
+
+Deliverable
+Make the code change directly.
+Keep it minimal, safe, and production-grade.
+No TODOs.

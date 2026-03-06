@@ -58,13 +58,7 @@ export async function runIntentExtractorShadow(
     return { ran: false, extraction: null, error: null };
   }
 
-  if (mode === 'active' || mode === 'strict') {
-    console.log(`[INTENT_EXTRACTOR] mode=${mode} — not yet wired, skipping`);
-    await emitDiagnosticArtefact(runId, userId, conversationId, mode, false, false, null);
-    return { ran: false, extraction: null, error: null };
-  }
-
-  console.log(`[INTENT_EXTRACTOR_SHADOW] mode=shadow — running extractor for runId=${runId}`);
+  console.log(`[INTENT_EXTRACTOR_SHADOW] mode=${mode} — running extractor for runId=${runId}`);
 
   let extraction: IntentExtractionResult | null = null;
   let extractionError: string | null = null;
