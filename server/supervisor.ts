@@ -31,6 +31,7 @@ import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './s
 import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, preExecutionConstraintGateFromIntent, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
+import { requestSemanticVerification, towerStatusToVerdict, type TowerSemanticRequest, type TowerSemanticStatus, type TowerSemanticResponse, type SemanticVerifyResult } from './supervisor/tower-semantic-verify';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './supervisor/query-shape-key';
 import { readLearningStore, mergePolicyKnobs, buildPolicyAppliedPayload, emitPolicyAppliedArtefact, handleLearningUpdate, BASELINE_DEFAULTS, type FinalPolicy, type PolicyAppliedArtefact, type LearningUpdatePayload } from './supervisor/learning-store';
@@ -3619,6 +3620,10 @@ class SupervisorService {
       verdict: 'yes' | 'no' | 'unknown';
       confidence: 'high' | 'medium' | 'low';
       rationale: string;
+      tower_semantic_status: TowerSemanticStatus | null;
+      tower_semantic_confidence: number | null;
+      tower_semantic_reasoning: string | null;
+      verification_source: 'tower_semantic' | 'keyword_only' | 'no_evidence';
     }> = [];
 
     if (hasHardAttribute && finalLeads.length > 0 && !usedStub) {
@@ -4151,6 +4156,107 @@ class SupervisorService {
             investigationStrategy = 'no_investigation_possible';
           }
 
+          let towerSemanticStatus: TowerSemanticStatus | null = null;
+          let towerSemanticConfidence: number | null = null;
+          let towerSemanticReasoning: string | null = null;
+          let verificationSource: 'tower_semantic' | 'keyword_only' | 'no_evidence' = 'no_evidence';
+
+          const hasEvidenceText = webVisitSuccess && (scan.extractedQuotes.length > 0 || scan.snippets.length > 0);
+
+          if (hasEvidenceText && !checkRunDeadline()) {
+            const cachedPageData = cachedWebVisitPages.get(lead.placeId);
+            const fullEvidenceText = cachedPageData
+              ? cachedPageData.pages.map(p => (p.text_clean || p.cleaned_text || '')).join('\n\n').substring(0, 8000)
+              : scan.extractedQuotes.join('\n').substring(0, 4000);
+
+            const semanticRequest: TowerSemanticRequest = {
+              run_id: chatRunId,
+              original_user_goal: originalUserGoal,
+              lead_name: lead.name,
+              lead_place_id: lead.placeId,
+              constraint_to_check: attrValue,
+              source_url: urlVisited || scan.sourceUrl || '',
+              evidence_text: fullEvidenceText,
+              extracted_quotes: scan.extractedQuotes,
+              page_title: scan.pageTitle,
+            };
+
+            const semanticResult: SemanticVerifyResult = await requestSemanticVerification({
+              request: semanticRequest,
+              userId: task.user_id,
+              conversationId,
+              clientRequestId,
+            });
+
+            towerSemanticStatus = semanticResult.towerResponse.status;
+            towerSemanticConfidence = semanticResult.towerResponse.confidence;
+            towerSemanticReasoning = semanticResult.towerResponse.reasoning;
+
+            const towerVerdict = towerStatusToVerdict(semanticResult.towerResponse.status);
+            scan.verdict = towerVerdict.verdict;
+            scan.confidence = towerVerdict.confidence;
+            scan.evidenceStrength = towerVerdict.evidenceStrength;
+            scan.attributeFound = towerVerdict.verdict === 'yes';
+
+            if (semanticResult.towerResponse.matched_snippets && semanticResult.towerResponse.matched_snippets.length > 0) {
+              scan.extractedQuotes = semanticResult.towerResponse.matched_snippets;
+              scan.quote = semanticResult.towerResponse.matched_snippets[0];
+            }
+
+            scan.rationale = `Tower semantic: ${semanticResult.towerResponse.status} (confidence=${semanticResult.towerResponse.confidence}) — ${semanticResult.towerResponse.reasoning}`;
+            verificationSource = 'tower_semantic';
+
+            if (towerVerdict.verdict === 'unknown') {
+              scan.unknownReason = semanticResult.towerResponse.status === 'no_evidence'
+                ? 'no_match_in_visited_pages'
+                : 'only_weak_third_party_mentions';
+            } else {
+              scan.unknownReason = undefined;
+            }
+
+            await createArtefact({
+              runId: chatRunId,
+              type: 'tower_semantic_judgement',
+              title: `Tower semantic: ${lead.name} — "${attrValue}" → ${semanticResult.towerResponse.status}`,
+              summary: semanticResult.towerResponse.reasoning,
+              payload: {
+                run_id: chatRunId,
+                lead_name: lead.name,
+                lead_place_id: lead.placeId,
+                constraint_to_check: attrValue,
+                source_url: urlVisited || scan.sourceUrl,
+                tower_status: semanticResult.towerResponse.status,
+                tower_confidence: semanticResult.towerResponse.confidence,
+                tower_reasoning: semanticResult.towerResponse.reasoning,
+                tower_matched_snippets: semanticResult.towerResponse.matched_snippets || [],
+                stubbed: semanticResult.stubbed,
+                tower_available: semanticResult.towerAvailable,
+                original_user_goal: originalUserGoal,
+                extracted_quotes_sent: scan.extractedQuotes.length,
+                evidence_text_length: fullEvidenceText.length,
+              },
+              userId: task.user_id,
+              conversationId,
+            }).catch((tsErr: any) => console.warn(`[TOWER_SEMANTIC] Failed to create tower_semantic_judgement artefact for "${lead.name}" + "${attrValue}" (non-fatal): ${tsErr.message}`));
+
+            if (ATTR_TRACE) console.log(`[ATTR_TRACE] Tower semantic result for "${lead.name}" + "${attrValue}": status=${towerSemanticStatus} confidence=${towerSemanticConfidence} stubbed=${semanticResult.stubbed}`);
+          } else if (!hasEvidenceText) {
+            verificationSource = 'no_evidence';
+            scan.verdict = 'unknown';
+            scan.confidence = 'low';
+            scan.evidenceStrength = 'none';
+            scan.attributeFound = false;
+          } else {
+            verificationSource = 'keyword_only';
+            scan.verdict = 'unknown';
+            scan.confidence = 'low';
+            scan.evidenceStrength = 'none';
+            scan.attributeFound = false;
+            scan.unknownReason = 'no_match_in_visited_pages';
+            scan.rationale = `Evidence text available for "${attrValue}" at ${lead.name} but Tower semantic verification was skipped (run deadline). Lead remains unverified.`;
+            console.warn(`[ATTR_VERIFY] Skipped Tower semantic for "${lead.name}" + "${attrValue}" — run deadline exceeded, lead remains unverified`);
+          }
+
           attrVerificationResults.push({
             lead_name: lead.name,
             lead_place_id: lead.placeId,
@@ -4169,12 +4275,16 @@ class SupervisorService {
             verdict: scan.verdict,
             confidence: scan.confidence,
             rationale: scan.rationale,
+            tower_semantic_status: towerSemanticStatus,
+            tower_semantic_confidence: towerSemanticConfidence,
+            tower_semantic_reasoning: towerSemanticReasoning,
+            verification_source: verificationSource,
           });
 
           await createArtefact({
             runId: chatRunId,
             type: 'attribute_evidence',
-            title: `Attribute evidence: ${lead.name} — ${attrValue} → ${scan.verdict}`,
+            title: `Attribute evidence: ${lead.name} — ${attrValue} → ${scan.verdict} (${verificationSource})`,
             summary: scan.rationale,
             payload: {
               run_id: chatRunId,
@@ -4202,13 +4312,21 @@ class SupervisorService {
               variants_searched: keywords,
               negative_checked: negativeKeywords,
               investigation_strategy: investigationStrategy,
+              verification_source: verificationSource,
+              ...(towerSemanticStatus ? {
+                tower_semantic: {
+                  status: towerSemanticStatus,
+                  confidence: towerSemanticConfidence,
+                  reasoning: towerSemanticReasoning,
+                },
+              } : {}),
               ...(scan.matchSource ? { match_source: scan.matchSource } : {}),
             },
             userId: task.user_id,
             conversationId,
           }).catch((aeErr: any) => console.warn(`[ATTR_EVIDENCE] Failed to create attribute_evidence artefact for "${lead.name}" + "${attrValue}" (non-fatal): ${aeErr.message}`));
 
-          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${scan.verdict} confidence=${scan.confidence} strength=${scan.evidenceStrength} source=${scan.sourceType}${scan.matchedVariant ? ` variant="${scan.matchedVariant}"` : ''} strategy=${investigationStrategy}${scan.verdict === 'unknown' ? ` reason=${scan.unknownReason}` : ''}${scan.matchSource ? ` match=${scan.matchSource}` : ''} url=${urlVisited || 'none'} extractedQuotes=${scan.extractedQuotes.length} method=${scan.extractionMethod}`);
+          console.log(`[ATTR_VERIFY] "${lead.name}" + "${attrValue}": verdict=${scan.verdict} confidence=${scan.confidence} strength=${scan.evidenceStrength} source=${scan.sourceType} verifiedBy=${verificationSource}${towerSemanticStatus ? ` tower=${towerSemanticStatus}(${towerSemanticConfidence})` : ''}${scan.matchedVariant ? ` variant="${scan.matchedVariant}"` : ''} strategy=${investigationStrategy}${scan.verdict === 'unknown' ? ` reason=${scan.unknownReason}` : ''}${scan.matchSource ? ` match=${scan.matchSource}` : ''} url=${urlVisited || 'none'} extractedQuotes=${scan.extractedQuotes.length} method=${scan.extractionMethod}`);
         }
       }
 
@@ -4216,12 +4334,16 @@ class SupervisorService {
       const totalChecked = attrVerificationResults.length;
       const strongEvidence = attrVerificationResults.filter(r => r.evidence_strength === 'strong').length;
       const leadsWithAttr = new Set(attrVerificationResults.filter(r => r.attribute_found).map(r => r.lead_place_id)).size;
+      const towerVerifiedCount = attrVerificationResults.filter(r => r.tower_semantic_status === 'verified').length;
+      const towerWeakCount = attrVerificationResults.filter(r => r.tower_semantic_status === 'weak_match').length;
+      const towerNoEvidenceCount = attrVerificationResults.filter(r => r.tower_semantic_status === 'no_evidence' || r.tower_semantic_status === 'insufficient_evidence').length;
+      const towerCalledCount = attrVerificationResults.filter(r => r.verification_source === 'tower_semantic').length;
 
       const attrVerifArtefact = await createArtefact({
         runId: chatRunId,
         type: 'attribute_verification',
         title: `Attribute verification: ${totalVerified}/${totalChecked} checks found evidence for "${attrLabel}"`,
-        summary: `${leadsWithAttr} of ${finalLeads.length} leads show evidence of "${attrLabel}" (${strongEvidence} strong, ${totalVerified - strongEvidence} weak)`,
+        summary: `${leadsWithAttr} of ${finalLeads.length} leads show evidence of "${attrLabel}" (Tower: ${towerVerifiedCount} verified, ${towerWeakCount} weak, ${towerNoEvidenceCount} no evidence)`,
         payload: {
           run_id: chatRunId,
           attributes_checked: attrValues,
@@ -4234,17 +4356,24 @@ class SupervisorService {
           active_visits_used: activeVisitCount,
           web_search_fallbacks_used: webSearchFallbackCount,
           evidence_ready_for_tower: totalChecked > 0,
+          tower_semantic_summary: {
+            tower_called: towerCalledCount,
+            tower_verified: towerVerifiedCount,
+            tower_weak_match: towerWeakCount,
+            tower_no_evidence: towerNoEvidenceCount,
+            keyword_only_fallback: attrVerificationResults.filter(r => r.verification_source === 'keyword_only').length,
+          },
           results: attrVerificationResults,
         },
         userId: task.user_id,
         conversationId,
       });
-      console.log(`[ATTR_VERIFY] artefact id=${attrVerifArtefact.id} — ${leadsWithAttr}/${finalLeads.length} leads verified, ${strongEvidence} strong evidence, investigation: cached=${investigationBreakdown.cached_pages} active_visit=${investigationBreakdown.active_web_visit} search_then_visit=${investigationBreakdown.web_search_then_visit} no_investigation=${investigationBreakdown.no_investigation_possible}`);
+      console.log(`[ATTR_VERIFY] artefact id=${attrVerifArtefact.id} — ${leadsWithAttr}/${finalLeads.length} leads verified (Tower: ${towerVerifiedCount} verified, ${towerWeakCount} weak, ${towerNoEvidenceCount} no_evidence), investigation: cached=${investigationBreakdown.cached_pages} active_visit=${investigationBreakdown.active_web_visit} search_then_visit=${investigationBreakdown.web_search_then_visit} no_investigation=${investigationBreakdown.no_investigation_possible}`);
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
         actionTaken: 'attribute_verification_completed', status: 'success',
-        taskGenerated: `Attribute verification: ${leadsWithAttr}/${finalLeads.length} leads verified for "${attrLabel}" (Tower deferred to final_delivery)`,
+        taskGenerated: `Attribute verification: ${leadsWithAttr}/${finalLeads.length} leads verified for "${attrLabel}" (Tower semantic: ${towerVerifiedCount} verified, ${towerWeakCount} weak)`,
         runType: 'plan',
         metadata: {
           attributes: attrValues,
@@ -4252,6 +4381,7 @@ class SupervisorService {
           total_leads: finalLeads.length,
           strong_evidence: strongEvidence,
           investigation_breakdown: investigationBreakdown,
+          tower_semantic_summary: { tower_verified: towerVerifiedCount, tower_weak: towerWeakCount, tower_no_evidence: towerNoEvidenceCount },
         },
       });
       console.log(`[ATTR_VERIFY] Completed: ${leadsWithAttr}/${finalLeads.length} leads with "${attrLabel}" (Tower deferred to final_delivery)`);
