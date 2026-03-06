@@ -1,0 +1,70 @@
+SUPERVISOR REPO TASK: reduce semantic overreach and make Supervisor an orchestrator, not a semantic judge.
+
+Goal
+Move Supervisor toward the correct architecture:
+
+- LLM intent extractor understands the user request
+- Supervisor chooses tools, runs steps, manages retries/stops
+- Tower judges whether gathered evidence actually satisfies the goal
+
+Supervisor should stop re-parsing natural language and stop pre-deciding semantic truth wherever possible.
+
+What to change
+1. Trust canonical intent first
+- Wherever canonical intent is available and valid, use it as the source of:
+  - entity category
+  - location
+  - constraints
+  - hardness
+  - clarify_if_needed
+- Do not re-scan raw user text downstream unless canonical intent is missing/invalid
+
+2. Reduce or bypass brittle semantic logic
+For the following areas, prefer canonical intent output over regex/phrase logic:
+- subjective term detection
+- attribute phrase classification
+- time predicate detection
+- relationship predicate detection
+- "serve/serves" disambiguation
+- hardness assignment
+- follow-up scope contradiction parsing
+
+3. Keep only deterministic orchestration logic in Supervisor
+Keep these in Supervisor:
+- tool routing
+- batching/concurrency
+- retries
+- stopping
+- geometry/location math
+- location sanitising
+- name matching
+- gibberish/empty input checks
+- honesty guardrails
+- simple command detection like "go ahead"
+
+4. Stop pre-deciding semantic truth where possible
+Supervisor should gather evidence and store raw artefacts, not over-commit to semantic verdicts.
+Do not redesign everything in one go, but reduce use of precomputed semantic yes/no flags as the primary truth source.
+
+5. Add visibility
+Add clear logging/probe fields showing:
+- intent_source: canonical | fallback
+- semantic_source: canonical | fallback_regex
+- evidence_ready_for_tower: true | false
+
+Important
+- Minimal production-safe changes only
+- Keep fallback safety if canonical extraction fails
+- Do not break current working runs
+- Do not redesign Tower in this task
+
+Success result
+For:
+"Find cafes in Manchester that serve vegan food"
+
+Supervisor should:
+- trust canonical intent
+- search candidates
+- gather website/page evidence
+- avoid reclassifying "serve" as a relationship predicate
+- pass evidence onward instead of making brittle semantic decisions itself

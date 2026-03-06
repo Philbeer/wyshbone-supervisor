@@ -1027,12 +1027,12 @@ class SupervisorService {
       console.log(`[EARLY_PARSE] Emitted constraints_extracted (${earlyConstraints.length}) + capability_check before gates — source=${intentSource}`);
     }
 
-    const regexBT = extractBusinessType(rawMsg) ?? null;
-    const regexLoc = extractLocation(rawMsg) ?? null;
-    const regexCount = extractCount(rawMsg) ?? null;
-    const regexTime = extractTimeFilter(rawMsg) ?? null;
-
     const canonicalPreview = canonicalIntent ? canonicalIntentToPreviewFields(canonicalIntent) : null;
+    const regexBT = intentSource === 'canonical' ? null : (extractBusinessType(rawMsg) ?? null);
+    const regexLoc = intentSource === 'canonical' ? null : (extractLocation(rawMsg) ?? null);
+    const regexCount = intentSource === 'canonical' ? null : (extractCount(rawMsg) ?? null);
+    const regexTime = intentSource === 'canonical' ? null : (extractTimeFilter(rawMsg) ?? null);
+
     const previewBT = canonicalPreview?.business_type ?? regexBT;
     const previewLoc = canonicalPreview?.location ?? regexLoc;
     const previewCount = canonicalPreview?.count ?? regexCount;
@@ -1049,7 +1049,7 @@ class SupervisorService {
       intent_source: intentSource,
       ...(canonicalPreview ? {
         canonical_fields: canonicalPreview,
-        regex_fields: { business_type: regexBT, location: regexLoc, count: regexCount, time_filter: regexTime },
+        regex_fields: intentSource === 'canonical' ? { skipped: true, reason: 'canonical_intent_active' } : { business_type: regexBT, location: regexLoc, count: regexCount, time_filter: regexTime },
       } : {}),
       route: 'pre_gate',
       extraction_method: intentSource === 'canonical' ? 'canonical_intent_extractor' : 'regex_or_simple_parse',
@@ -1998,7 +1998,7 @@ class SupervisorService {
       }
     }
 
-    if (!timeHandled) {
+    if (!timeHandled && !canonicalIntent) {
       const timeDetected = detectTimePredicate(rawMsg);
       if (timeDetected) {
         semanticSource = 'fallback_regex';
@@ -2375,10 +2375,19 @@ class SupervisorService {
     const rc: RequestedCountCanonical = buildRequestedCount(parsedGoal.requested_count_user);
     const userSpecifiedCount = rc.requested_count_user === 'explicit';
     const displayCount = rc.requested_count_value;
-    const exactnessMode: ExactnessMode = detectExactnessMode(originalUserGoal);
-    const doNotStopDetected = detectDoNotStop(originalUserGoal);
-    if (doNotStopDetected) {
-      console.log(`[SUPERVISOR] "do not stop" detected in goal — ignoring, enforcing budgets instead`);
+    let exactnessMode: ExactnessMode;
+    let doNotStopDetected: boolean;
+    if (canonicalIntent) {
+      const hasHardCount = canonicalIntent.constraints.some(c => c.type === 'attribute' && c.hardness === 'hard') || canonicalIntent.default_count_policy === 'explicit';
+      exactnessMode = hasHardCount ? 'hard' : 'soft';
+      doNotStopDetected = false;
+      console.log(`[SUPERVISOR] exactness_mode=${exactnessMode} do_not_stop=false semantic_source=canonical`);
+    } else {
+      exactnessMode = detectExactnessMode(originalUserGoal);
+      doNotStopDetected = detectDoNotStop(originalUserGoal);
+      if (doNotStopDetected) {
+        console.log(`[SUPERVISOR] "do not stop" detected in goal — ignoring, enforcing budgets instead (semantic_source=fallback_regex)`);
+      }
     }
     let candidateCountFromGoogle = 0;
     let queryBroadeningApplied = false;
@@ -2525,10 +2534,13 @@ class SupervisorService {
 
     let relationshipPredicate: RelationshipPredicateResult;
     const canonicalRelConstraint = canonicalIntent?.constraints.find(c => c.type === 'relationship');
-    if (canonicalRelConstraint) {
+    if (canonicalIntent && canonicalRelConstraint) {
       const relRole = detectRelationshipPredicate(canonicalRelConstraint.raw);
-      relationshipPredicate = relRole.requires_relationship_evidence ? relRole : detectRelationshipPredicate(originalUserGoal);
-      console.log(`[RELATIONSHIP_PREDICATE] semantic_source=canonical detected="${relationshipPredicate.detected_predicate}" target="${relationshipPredicate.relationship_target}"`);
+      relationshipPredicate = relRole;
+      console.log(`[RELATIONSHIP_PREDICATE] semantic_source=canonical detected="${relationshipPredicate.detected_predicate}" target="${relationshipPredicate.relationship_target}" requires_evidence=${relationshipPredicate.requires_relationship_evidence}`);
+    } else if (canonicalIntent && !canonicalRelConstraint) {
+      relationshipPredicate = { requires_relationship_evidence: false, detected_predicate: null, relationship_target: null };
+      console.log(`[RELATIONSHIP_PREDICATE] semantic_source=canonical — no relationship constraint in canonical intent, skipping regex detection`);
     } else {
       relationshipPredicate = detectRelationshipPredicate(originalUserGoal);
       if (relationshipPredicate.requires_relationship_evidence) {
@@ -3246,6 +3258,7 @@ class SupervisorService {
           summary: `Enrichment plan (Places-only): ${leads.length} leads discovered, ${leadsWithWebsites.length} with websites from Places Details: ${enrichOrderedTools.filter(t => t !== 'SEARCH_PLACES' && t !== 'WEB_SEARCH').join(' → ')}`,
           payload: {
             plan_version: 1,
+            intent_source: canonicalIntent ? 'canonical' : 'legacy',
             tool_plan_path: enrichToolPlan.selected_path,
             rules_applied: enrichToolPlan.rules_applied,
             enrichment_steps: enrichSteps.map((s, idx) => ({ step_index: idx + 1, tool: s.tool, phase: s.phase, condition: s.condition, depends_on: s.depends_on, reason: s.reason })),
@@ -4111,6 +4124,7 @@ class SupervisorService {
           investigation_breakdown: investigationBreakdown,
           active_visits_used: activeVisitCount,
           web_search_fallbacks_used: webSearchFallbackCount,
+          evidence_ready_for_tower: totalChecked > 0,
           results: attrVerificationResults,
         },
         userId: task.user_id,
@@ -5008,6 +5022,8 @@ class SupervisorService {
       } : {}),
       used_stub: usedStub,
       run_deadline_exceeded: runDeadlineExceeded,
+      intent_source: canonicalIntent ? 'canonical' : 'legacy',
+      evidence_ready_for_tower: attributeVerificationAttempted,
     };
 
     console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=final_delivery`);

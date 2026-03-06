@@ -1069,8 +1069,10 @@ export function preExecutionConstraintGateFromIntent(intent: CanonicalIntent, ra
     };
   }
 
-  const isNoProxy = detectNoProxySignal(rawMsg);
-  const isMustBeCertain = detectMustBeCertain(rawMsg);
+  const allHard = intent.constraints.every(c => c.hardness === 'hard');
+  const hasMustBeCertainInCanonical = allHard && intent.constraints.some(c => c.type === 'time' && c.hardness === 'hard');
+  const isNoProxy = hasMustBeCertainInCanonical || detectNoProxySignal(rawMsg);
+  const isMustBeCertain = hasMustBeCertainInCanonical || detectMustBeCertain(rawMsg);
 
   if (isNoProxy || isMustBeCertain) {
     for (const c of constraints) {
@@ -1085,14 +1087,27 @@ export function preExecutionConstraintGateFromIntent(intent: CanonicalIntent, ra
     }
   }
 
-  const initialLiveMusicChoice = detectLiveMusicChoice(rawMsg);
-  if (initialLiveMusicChoice) {
+  const canonicalHasVerifyChoice = intent.constraints.some(c => c.type === 'attribute' && c.evidence_mode === 'website_text' && !c.clarify_if_needed);
+  if (canonicalHasVerifyChoice) {
     for (const c of constraints) {
       if (c.type === 'attribute' && c.attribute === 'live_music' && c.requires_clarification) {
-        c.chosen_verification = initialLiveMusicChoice;
+        c.chosen_verification = 'website_verify';
         c.requires_clarification = false;
         c.can_execute = true;
         c.why_blocked = '';
+        console.log(`[CONSTRAINT_GATE] canonical evidence_mode=website_text auto-resolved live_music clarification`);
+      }
+    }
+  } else {
+    const initialLiveMusicChoice = detectLiveMusicChoice(rawMsg);
+    if (initialLiveMusicChoice) {
+      for (const c of constraints) {
+        if (c.type === 'attribute' && c.attribute === 'live_music' && c.requires_clarification) {
+          c.chosen_verification = initialLiveMusicChoice;
+          c.requires_clarification = false;
+          c.can_execute = true;
+          c.why_blocked = '';
+        }
       }
     }
   }
