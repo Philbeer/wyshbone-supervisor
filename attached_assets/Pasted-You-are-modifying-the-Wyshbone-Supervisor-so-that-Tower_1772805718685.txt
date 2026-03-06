@@ -1,0 +1,109 @@
+You are modifying the Wyshbone Supervisor so that Tower performs semantic evidence judgement after WEB_VISIT, instead of only step-status checks.
+
+Goal
+
+For attribute-based user requests like:
+- serves vegan food
+- has live music
+- dog friendly
+- family run
+- recently opened
+
+Supervisor must send the original goal, the specific constraint, the lead, the source URL, and the crawled page text to Tower for semantic verification.
+
+Important architecture rule
+
+- Supervisor gathers evidence
+- Tower judges evidence
+
+Supervisor must NOT perform semantic verification itself.
+Supervisor must NOT mark a lead verified just because WEB_VISIT succeeded.
+
+What is wrong now
+
+The current system still performs Tower step-status checks like:
+- pass (WEB_VISIT)
+- pass (CONTACT_EXTRACT)
+- pass (LEAD_ENRICH)
+
+Those only prove tool execution, not truth of the user constraint.
+
+We now already have a Tower prompt capable of semantic judgement, but Supervisor is not wiring the correct inputs into that path.
+
+Required change
+
+After every successful WEB_VISIT for a lead, if the user request contains an attribute/qualifier/claim that requires evidence checking, Supervisor must call Tower semantic verification with:
+
+- original_user_goal
+- constraint_to_check
+- lead_name
+- source_url
+- evidence_text = WEB_VISIT.text_clean
+
+Tower should then return a semantic result like:
+- verified
+- weak_match
+- no_evidence
+- insufficient_evidence
+
+Supervisor must store this as a separate semantic Tower judgement artefact, not as a normal step-status pass/fail artefact.
+
+Implementation requirements
+
+1. Find the code path where Supervisor currently:
+- handles WEB_VISIT completion
+- emits Tower step-status judgement
+- builds lead status / result rows
+
+2. Add a new semantic Tower call after WEB_VISIT completion when:
+- there is a user constraint that needs semantic verification
+- WEB_VISIT returned usable page text
+
+3. The semantic Tower call must send:
+- original user goal
+- the exact attribute/constraint being checked
+- lead name
+- source URL
+- WEB_VISIT.text_clean
+
+4. Preserve existing step-status Tower checks if needed for runtime monitoring, but do NOT let them act as final truth of the user request.
+
+5. Add a distinct artefact or judgement type for semantic verification, for example:
+- attribute_verification
+or equivalent
+
+6. Update Supervisor result assembly logic so final lead status is based on semantic Tower verification if present:
+- verified -> lead shown as verified
+- weak_match -> lead shown as weak / partially verified
+- no_evidence -> lead remains unverified
+- insufficient_evidence -> lead remains unverified or retried later
+
+7. Do not let CONTACT_EXTRACT or LEAD_ENRICH count as proof of the user’s semantic attribute unless Tower explicitly judged supporting evidence.
+
+8. If no semantic Tower verification exists for a lead, the lead must remain unverified.
+
+What I want back from you
+
+1. A short explanation of exactly which files you changed
+2. A summary of the new call flow
+3. Any new types/interfaces/functions added
+4. Any assumptions you had to make
+5. Full code for every file changed, not diffs
+6. A short test plan using this exact input:
+
+Find cafes in Manchester that serve vegan food
+
+Expected behaviour after fix
+
+- SEARCH_PLACES finds cafes
+- WEB_VISIT crawls sites
+- Supervisor sends page text to Tower semantic verification
+- Tower returns verified / weak_match / no_evidence
+- Results no longer rely on plain step success
+- UI can truthfully show which leads are actually supported by website evidence
+
+Important
+
+Do not give me partial edits.
+Do not tell me to manually patch lines.
+Return the full rewritten files only.
