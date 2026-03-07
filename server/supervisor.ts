@@ -1039,6 +1039,11 @@ class SupervisorService {
     let intentSource: 'mission' | 'canonical' | 'legacy' = 'legacy';
     let legacyFallbackReason: string | null = null;
 
+    const canonicalValid = shadowResult.ran && shadowResult.extraction?.validation?.ok && shadowResult.extraction.validation.intent;
+    const canonicalIntent = canonicalValid ? shadowResult.extraction!.validation.intent! : null;
+
+    try {
+
     if (missionMode === 'active' && missionResult?.ok && missionResult.mission) {
       try {
         console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=mission_active`);
@@ -1057,9 +1062,6 @@ class SupervisorService {
     }
 
     if (!earlyParsedGoal) {
-      const canonicalValid = shadowResult.ran && shadowResult.extraction?.validation?.ok && shadowResult.extraction.validation.intent;
-      const canonicalIntent = canonicalValid ? shadowResult.extraction!.validation.intent! : null;
-
       if (canonicalIntent) {
         try {
           console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=canonical_fallback`);
@@ -1091,6 +1093,56 @@ class SupervisorService {
       } catch (parseErr: any) {
         console.warn(`[EARLY_PARSE] parseGoalToConstraints failed (non-fatal, will retry in executeTowerLoopChat): ${parseErr.message}`);
       }
+    }
+
+    } catch (intentResolutionErr: any) {
+      const errMsg = intentResolutionErr.message?.substring(0, 200) ?? 'unknown';
+      console.error(`[INTENT_RESOLUTION] Unexpected error during intent resolution (non-fatal, using legacy fallback): ${errMsg}`);
+      legacyFallbackReason = `intent_resolution_exception: ${errMsg}`;
+
+      if (!earlyParsedGoal) {
+        try {
+          earlyParsedGoal = await parseGoalToConstraints(rawMsg.trim());
+          intentSource = 'legacy';
+          console.log(`[INTENT_SOURCE] legacy_emergency_fallback — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location}`);
+        } catch (emergencyErr: any) {
+          console.error(`[INTENT_RESOLUTION] Emergency legacy fallback also failed: ${emergencyErr.message}`);
+        }
+      }
+
+      createArtefact({
+        runId: jobId,
+        type: 'intent_resolution_error',
+        title: 'Intent resolution failed unexpectedly',
+        summary: `error=${errMsg} intent_source_at_failure=${intentSource} fallback_reason=${legacyFallbackReason}`,
+        payload: {
+          error: errMsg,
+          intent_source_at_failure: intentSource,
+          mission_mode: missionMode,
+          mission_ok: missionResult?.ok ?? false,
+          canonical_available: !!canonicalIntent,
+          legacy_fallback_attempted: !!earlyParsedGoal,
+          fallback_reason: legacyFallbackReason,
+        },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch(() => {});
+
+      this.postArtefactToUI({
+        runId: jobId,
+        clientRequestId,
+        type: 'diagnostic',
+        payload: {
+          title: 'Intent resolution error',
+          diagnostic_type: 'intent_resolution_error',
+          error: errMsg,
+          intent_source_at_failure: intentSource,
+          mission_mode: missionMode,
+          fallback_reason: legacyFallbackReason,
+        },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch(() => {});
     }
 
     if (earlyParsedGoal) {
