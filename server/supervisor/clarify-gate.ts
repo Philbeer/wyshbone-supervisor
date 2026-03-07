@@ -50,7 +50,7 @@ const META_TRUST_PATTERNS = [
   /\b(?:is (?:it|wyshbone) (?:honest|truthful|reliable|accurate|trustworthy))\b/i,
 ];
 
-const LEAD_FINDING_VERBS = /\b(?:find|search|list|show|get|look\s+for|locate|discover|identify|give me|pull|fetch|source)\b/i;
+const LEAD_FINDING_VERBS = /\b(?:find|search|list|show|get|look\s+for|locate|discover|identify|give me|pull|fetch|source|monitor|check|checking|watch|alert|notify|track)\b/i;
 
 const VAGUE_ENTITY_TYPES = [
   'organisations', 'organizations', 'companies', 'businesses',

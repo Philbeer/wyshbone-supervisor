@@ -139,9 +139,15 @@ OUTPUT SCHEMA (return ONLY this JSON object, no markdown fences, no commentary):
 {
   "entity_category": string,
   "location_text": string or null,
+  "requested_count": number or null,
   "constraints": [ ... ],
   "mission_mode": one of ${JSON.stringify(MISSION_MODES)}
 }
+
+REQUESTED_COUNT RULES:
+- If the user explicitly asked for a specific number of results (e.g. "find 10 pubs", "give me 5 restaurants"), set requested_count to that number.
+- If no count is mentioned or implied, set requested_count to null.
+- NEVER invent a count — only extract what the user explicitly stated.
 
 Each constraint object:
 {
@@ -261,6 +267,7 @@ Semantic input: The user wants pubs in Arundel whose business name contains "swa
 {
   "entity_category": "pubs",
   "location_text": "Arundel",
+  "requested_count": null,
   "constraints": [
     { "type": "text_compare", "field": "name", "operator": "contains", "value": "swan", "hardness": "hard" }
   ],
@@ -271,6 +278,7 @@ Semantic input: The user wants pubs in Arundel whose website text contains "live
 {
   "entity_category": "pubs",
   "location_text": "Arundel",
+  "requested_count": null,
   "constraints": [
     { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "live music", "hardness": "hard" }
   ],
@@ -281,6 +289,7 @@ Semantic input: The user wants cafes in Manchester whose website text contains "
 {
   "entity_category": "cafes",
   "location_text": "Manchester",
+  "requested_count": null,
   "constraints": [
     { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "vegan food", "hardness": "hard" }
   ],
@@ -291,6 +300,7 @@ Semantic input: The user wants breweries in Texas that opened within the last 6 
 {
   "entity_category": "breweries",
   "location_text": "Texas",
+  "requested_count": null,
   "constraints": [
     { "type": "time_constraint", "field": "opening_date", "operator": "within_last", "value": "6 months", "hardness": "hard" }
   ],
@@ -301,6 +311,7 @@ Semantic input: The user wants hospitals in the UK that offer the service "sleep
 {
   "entity_category": "hospitals",
   "location_text": "UK",
+  "requested_count": null,
   "constraints": [
     { "type": "status_check", "field": "service_offered", "operator": "has", "value": "sleep apnea implant", "hardness": "hard" },
     { "type": "location_constraint", "field": "location", "operator": "near", "value": "user_area", "hardness": "soft" }
@@ -312,6 +323,7 @@ Semantic input: The user wants 10 Italian restaurants in Brighton that have outd
 {
   "entity_category": "Italian restaurants",
   "location_text": "Brighton",
+  "requested_count": 10,
   "constraints": [
     { "type": "attribute_check", "field": "amenity", "operator": "has", "value": "outdoor seating", "hardness": "hard" },
     { "type": "numeric_range", "field": "rating", "operator": "gte", "value": 4.5, "hardness": "hard" }
@@ -323,6 +335,7 @@ Semantic input: The user wants pubs in Sussex whose business name contains "The 
 {
   "entity_category": "pubs",
   "location_text": "Sussex",
+  "requested_count": null,
   "constraints": [
     { "type": "text_compare", "field": "name", "operator": "contains", "value": "The Swan", "hardness": "hard" },
     { "type": "attribute_check", "field": "amenity", "operator": "has", "value": "beer garden", "hardness": "hard" }
@@ -334,20 +347,33 @@ Semantic input: The user wants dentists near Bristol that have a relationship wi
 {
   "entity_category": "dentists",
   "location_text": "Bristol",
+  "requested_count": null,
   "constraints": [
     { "type": "relationship_check", "field": "client", "operator": "serves", "value": "NHS", "hardness": "hard" }
   ],
   "mission_mode": "research_now"
 }
 
+Semantic input: The user wants 5 vets in London that extract email addresses. This is a one-time search.
+{
+  "entity_category": "vets",
+  "location_text": "London",
+  "requested_count": 5,
+  "constraints": [
+    { "type": "contact_extraction", "field": "email", "operator": "extract", "value": null, "hardness": "hard" }
+  ],
+  "mission_mode": "research_now"
+}
+
 Return ONLY valid JSON. No markdown fences, no commentary, no explanation.`;
 
-export type MissionExtractorMode = 'off' | 'shadow';
+export type MissionExtractorMode = 'off' | 'shadow' | 'active';
 
 export function getMissionExtractorMode(): MissionExtractorMode {
-  const raw = (process.env.MISSION_EXTRACTOR_MODE || 'shadow').toLowerCase().trim();
+  const raw = (process.env.MISSION_EXTRACTOR_MODE || 'active').toLowerCase().trim();
   if (raw === 'off') return 'off';
-  return 'shadow';
+  if (raw === 'shadow') return 'shadow';
+  return 'active';
 }
 
 const MAX_CONTEXT_CHARS = 3000;

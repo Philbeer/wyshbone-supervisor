@@ -29,7 +29,7 @@ import { getClarifySession, didSessionExpire, createClarifySession, closeClarify
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
 import { extractStructuredMission, getMissionExtractorMode } from './supervisor/mission-extractor';
-import { logMissionShadow, buildMissionDiagnosticPayload } from './supervisor/mission-bridge';
+import { logMissionShadow, buildMissionDiagnosticPayload, missionToParsedGoal } from './supervisor/mission-bridge';
 import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, preExecutionConstraintGateFromIntent, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
@@ -952,9 +952,12 @@ class SupervisorService {
       ts: Date.now(),
     });
 
-    if (getMissionExtractorMode() !== 'off') {
+    let missionResult: Awaited<ReturnType<typeof extractStructuredMission>> | null = null;
+    const missionMode = getMissionExtractorMode();
+
+    if (missionMode !== 'off') {
       try {
-        const missionResult = await extractStructuredMission(rawMsg, conversationContextStr);
+        missionResult = await extractStructuredMission(rawMsg, conversationContextStr);
         const canonicalForComparison = shadowResult.extraction?.validation?.intent ?? null;
 
         logMissionShadow(
@@ -971,14 +974,14 @@ class SupervisorService {
         );
 
         const missionTitle = missionResult.ok
-          ? `Mission extraction: ${missionResult.mission!.entity_category} in ${missionResult.mission!.location_text ?? 'unknown'} (${missionResult.mission!.constraints.length} constraints)`
+          ? `Mission extraction (${missionMode}): ${missionResult.mission!.entity_category} in ${missionResult.mission!.location_text ?? 'unknown'} (${missionResult.mission!.constraints.length} constraints)`
           : `Mission extraction failed at ${missionResult.trace.failure_stage}`;
 
         createArtefact({
           runId: jobId,
           type: 'mission_extraction',
           title: missionTitle,
-          summary: `pipeline_ok=${missionDiag.pipeline_ok} failure_stage=${missionDiag.failure_stage} model=${missionDiag.model} total_ms=${missionDiag.timing.total_ms}`,
+          summary: `pipeline_ok=${missionDiag.pipeline_ok} failure_stage=${missionDiag.failure_stage} model=${missionDiag.model} mode=${missionMode} total_ms=${missionDiag.timing.total_ms}`,
           payload: missionDiag as unknown as Record<string, unknown>,
           userId: task.user_id,
           conversationId: task.conversation_id,
@@ -993,7 +996,8 @@ class SupervisorService {
           conversationId: task.conversation_id,
         }).catch((e: any) => console.warn(`[MISSION_EXTRACTOR] postArtefactToUI failed (non-fatal): ${e.message}`));
       } catch (missionErr: any) {
-        console.warn(`[MISSION_EXTRACTOR] Shadow extraction failed (non-fatal): ${missionErr.message}`);
+        console.warn(`[MISSION_EXTRACTOR] Extraction failed (non-fatal): ${missionErr.message}`);
+        missionResult = null;
 
         const exceptionDiag = {
           pipeline_ok: false,
@@ -1014,7 +1018,7 @@ class SupervisorService {
           runId: jobId,
           type: 'mission_extraction',
           title: 'Mission extraction failed (exception)',
-          summary: `pipeline_ok=false failure_stage=extractor_exception`,
+          summary: `pipeline_ok=false failure_stage=extractor_exception mode=${missionMode}`,
           payload: exceptionDiag,
           userId: task.user_id,
           conversationId: task.conversation_id,
@@ -1032,31 +1036,55 @@ class SupervisorService {
     }
 
     let earlyParsedGoal: ParsedGoal | null = null;
-    let intentSource: 'canonical' | 'legacy' = 'legacy';
+    let intentSource: 'mission' | 'canonical' | 'legacy' = 'legacy';
     let legacyFallbackReason: string | null = null;
-    const canonicalValid = shadowResult.ran && shadowResult.extraction?.validation?.ok && shadowResult.extraction.validation.intent;
-    const canonicalIntent = canonicalValid ? shadowResult.extraction!.validation.intent! : null;
 
-    if (canonicalIntent) {
+    if (missionMode === 'active' && missionResult?.ok && missionResult.mission) {
       try {
-        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=canonical_active`);
-        earlyParsedGoal = canonicalIntentToParsedGoal(canonicalIntent, rawMsg.trim());
-        intentSource = 'canonical';
-        console.log(`[INTENT_SOURCE] canonical_active — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location} count=${earlyParsedGoal.requested_count_user} constraints=${earlyParsedGoal.constraints.length}`);
+        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=mission_active`);
+        earlyParsedGoal = missionToParsedGoal(missionResult.mission, rawMsg.trim());
+        intentSource = 'mission';
+        console.log(`[INTENT_SOURCE] mission_active — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location} count=${earlyParsedGoal.requested_count_user} constraints=${earlyParsedGoal.constraints.length}`);
       } catch (bridgeErr: any) {
-        legacyFallbackReason = `canonical_bridge_error: ${bridgeErr.message?.substring(0, 100)}`;
-        console.warn(`[INTENT_SOURCE] canonical bridge failed, falling back to legacy: ${bridgeErr.message}`);
+        legacyFallbackReason = `mission_bridge_error: ${bridgeErr.message?.substring(0, 100)}`;
+        console.warn(`[INTENT_SOURCE] mission bridge failed, falling through to canonical: ${bridgeErr.message}`);
         earlyParsedGoal = null;
       }
-    } else if (!shadowResult.ran) {
-      legacyFallbackReason = 'intent_extractor_did_not_run';
-    } else if (!shadowResult.extraction?.validation?.ok) {
-      legacyFallbackReason = `intent_validation_failed: ${shadowResult.extraction?.validation?.errors?.slice(0, 2).join('; ') ?? 'unknown'}`;
+    } else if (missionMode === 'active') {
+      legacyFallbackReason = missionResult
+        ? `mission_validation_failed: ${missionResult.trace.failure_stage}`
+        : 'mission_extractor_exception';
+    }
+
+    if (!earlyParsedGoal) {
+      const canonicalValid = shadowResult.ran && shadowResult.extraction?.validation?.ok && shadowResult.extraction.validation.intent;
+      const canonicalIntent = canonicalValid ? shadowResult.extraction!.validation.intent! : null;
+
+      if (canonicalIntent) {
+        try {
+          console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=canonical_fallback`);
+          earlyParsedGoal = canonicalIntentToParsedGoal(canonicalIntent, rawMsg.trim());
+          intentSource = 'canonical';
+          console.log(`[INTENT_SOURCE] canonical_fallback — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location} count=${earlyParsedGoal.requested_count_user} constraints=${earlyParsedGoal.constraints.length} fallback_reason=${legacyFallbackReason ?? 'mission_not_active'}`);
+        } catch (bridgeErr: any) {
+          legacyFallbackReason = legacyFallbackReason
+            ? `${legacyFallbackReason} + canonical_bridge_error: ${bridgeErr.message?.substring(0, 100)}`
+            : `canonical_bridge_error: ${bridgeErr.message?.substring(0, 100)}`;
+          console.warn(`[INTENT_SOURCE] canonical bridge failed, falling back to legacy: ${bridgeErr.message}`);
+          earlyParsedGoal = null;
+        }
+      } else if (!legacyFallbackReason) {
+        if (!shadowResult.ran) {
+          legacyFallbackReason = 'intent_extractor_did_not_run';
+        } else if (!shadowResult.extraction?.validation?.ok) {
+          legacyFallbackReason = `intent_validation_failed: ${shadowResult.extraction?.validation?.errors?.slice(0, 2).join('; ') ?? 'unknown'}`;
+        }
+      }
     }
 
     if (!earlyParsedGoal) {
       try {
-        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=legacy_fallback reason=${legacyFallbackReason ?? 'canonical_not_available'}`);
+        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=legacy_fallback reason=${legacyFallbackReason ?? 'all_higher_sources_unavailable'}`);
         earlyParsedGoal = await parseGoalToConstraints(rawMsg.trim());
         intentSource = 'legacy';
         console.log(`[INTENT_SOURCE] legacy_fallback — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location} count=${earlyParsedGoal.requested_count_user} constraints=${earlyParsedGoal.constraints.length} fallback_reason=${legacyFallbackReason ?? 'none'}`);
@@ -1154,7 +1182,7 @@ class SupervisorService {
         regex_fields: { skipped: true, reason: 'canonical_intent_active' },
       } : {}),
       route: 'pre_gate',
-      extraction_method: intentSource === 'canonical' ? 'canonical_intent_extractor' : (earlyParsedGoal ? 'llm_parsed_goal' : 'regex_fallback_deprecated'),
+      extraction_method: intentSource === 'mission' ? 'structured_mission_extractor' : intentSource === 'canonical' ? 'canonical_intent_extractor' : (earlyParsedGoal ? 'llm_parsed_goal' : 'regex_fallback_deprecated'),
       ...(legacyFallbackReason ? { legacy_fallback_reason: legacyFallbackReason } : {}),
     };
 

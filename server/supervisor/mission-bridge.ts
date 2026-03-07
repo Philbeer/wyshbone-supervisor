@@ -207,14 +207,89 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
       };
     }
 
-    case 'time_constraint':
-    case 'status_check':
-    case 'relationship_check':
-    case 'ranking':
+    case 'time_constraint': {
+      const val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
+      return {
+        id: `c_time_m${index}`,
+        type: 'HAS_ATTRIBUTE',
+        field: 'time_constraint',
+        operator: 'has',
+        value: `${c.field} ${c.operator} ${val}`,
+        hard: c.hardness === 'hard',
+        rationale: `Time constraint: ${c.field} ${c.operator} ${val}`,
+      };
+    }
+
+    case 'status_check': {
+      const val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
+      const shortName = val.replace(/\s+/g, '_').toLowerCase().substring(0, 20);
+      return {
+        id: `c_status_${shortName}_m${index}`,
+        type: 'HAS_ATTRIBUTE',
+        field: 'status',
+        operator: 'has',
+        value: val,
+        hard: c.hardness === 'hard',
+        rationale: `Status check: ${c.field} ${c.operator} "${val}"`,
+      };
+    }
+
+    case 'relationship_check': {
+      const val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
+      const shortName = val.replace(/\s+/g, '_').toLowerCase().substring(0, 20);
+      return {
+        id: `c_rel_${shortName}_m${index}`,
+        type: 'HAS_ATTRIBUTE',
+        field: 'relationship',
+        operator: 'has',
+        value: `${c.operator} ${val}`,
+        hard: c.hardness === 'hard',
+        rationale: `Relationship: ${c.field} ${c.operator} "${val}"`,
+      };
+    }
+
+    case 'ranking': {
+      const val = typeof c.value === 'number' ? c.value : null;
+      return {
+        id: `c_ranking_m${index}`,
+        type: 'COUNT_MIN',
+        field: c.field || 'ranking',
+        operator: '>=',
+        value: val ?? 0,
+        hard: c.hardness === 'hard',
+        rationale: `Ranking: ${c.operator} ${val ?? 'unspecified'} by ${c.field}`,
+      };
+    }
+
     case 'contact_extraction':
-    case 'entity_discovery':
-    case 'location_constraint':
       return null;
+
+    case 'entity_discovery':
+      return null;
+
+    case 'location_constraint': {
+      const val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
+      if (c.operator === 'near' || c.operator === 'within') {
+        return {
+          id: `c_loc_near_m${index}`,
+          type: 'LOCATION_NEAR',
+          field: 'location',
+          operator: 'within_km',
+          value: { center: val, km: 10 },
+          hard: c.hardness === 'hard',
+          rationale: `${c.operator === 'within' ? 'Within' : 'Near'} ${val}`,
+        };
+      }
+      return {
+        id: `c_loc_m${index}`,
+        type: 'LOCATION_EQUALS',
+        field: 'location',
+        operator: '=',
+        value: val,
+        hard: c.hardness === 'hard',
+        rationale: `Location constraint: ${val}`,
+      };
+    }
 
     default:
       return null;
@@ -228,8 +303,24 @@ export function missionToParsedGoal(
   const businessType = mission.entity_category;
   const location = mission.location_text ?? '';
   const country = location ? inferCountryFromLocation(location) : 'UK';
+  const requestedCountUser = mission.requested_count ?? null;
+  const searchBudgetCount = requestedCountUser
+    ? Math.min(Math.max(30, requestedCountUser * 3), 50)
+    : 30;
 
   const constraints: StructuredConstraint[] = [];
+
+  if (requestedCountUser !== null && requestedCountUser > 0) {
+    constraints.push({
+      id: 'c_count',
+      type: 'COUNT_MIN',
+      field: 'count',
+      operator: '>=',
+      value: requestedCountUser,
+      hard: true,
+      rationale: `User requested ${requestedCountUser} results`,
+    });
+  }
 
   if (location) {
     constraints.push({
@@ -246,9 +337,26 @@ export function missionToParsedGoal(
   let nameFilter: string | null = null;
   let prefixFilter: string | null = null;
   let attributeFilter: string | null = null;
+  let includeEmail = false;
+  let includePhone = false;
+  let includeWebsite = false;
 
   for (let i = 0; i < mission.constraints.length; i++) {
     const mc = mission.constraints[i];
+
+    if (mc.type === 'contact_extraction') {
+      const field = mc.field?.toLowerCase() ?? '';
+      if (field === 'email') includeEmail = true;
+      else if (field === 'phone') includePhone = true;
+      else if (field === 'website') includeWebsite = true;
+      else {
+        includeEmail = true;
+        includePhone = true;
+        includeWebsite = true;
+      }
+      continue;
+    }
+
     const mapped = mapMissionConstraintToStructured(mc, i);
     if (mapped) {
       constraints.push(mapped);
@@ -270,13 +378,13 @@ export function missionToParsedGoal(
   const successCriteria: SuccessCriteria = {
     required_constraints: requiredConstraintIds,
     optional_constraints: optionalConstraintIds,
-    target_count: null,
+    target_count: requestedCountUser,
   };
 
   return {
     original_goal: originalGoal,
-    requested_count_user: null,
-    search_budget_count: 30,
+    requested_count_user: requestedCountUser,
+    search_budget_count: searchBudgetCount,
     business_type: businessType,
     location,
     country,
@@ -284,9 +392,9 @@ export function missionToParsedGoal(
     name_filter: nameFilter,
     attribute_filter: attributeFilter,
     tool_preference: null,
-    include_email: false,
-    include_phone: false,
-    include_website: false,
+    include_email: includeEmail,
+    include_phone: includePhone,
+    include_website: includeWebsite,
     constraints,
     success_criteria: successCriteria,
   };

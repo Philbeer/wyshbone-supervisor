@@ -82,6 +82,7 @@ export type MissionConstraint = z.infer<typeof MissionConstraintSchema>;
 export const StructuredMissionSchema = z.object({
   entity_category: z.string().min(1),
   location_text: z.string().nullable(),
+  requested_count: z.number().nullable(),
   constraints: z.array(MissionConstraintSchema),
   mission_mode: z.enum(MISSION_MODES),
 });
