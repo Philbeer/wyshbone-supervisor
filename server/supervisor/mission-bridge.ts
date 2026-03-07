@@ -1,0 +1,243 @@
+import type { StructuredMission, MissionConstraint, MissionExtractionTrace } from './mission-schema';
+import type { ParsedGoal, StructuredConstraint, SuccessCriteria } from './goal-to-constraints';
+import { inferCountryFromLocation } from './goal-to-constraints';
+import type { CanonicalIntent, CanonicalConstraint } from './canonical-intent';
+
+export interface MissionShadowComparison {
+  mission: StructuredMission;
+  legacy_entity_category: string | null;
+  legacy_location: string | null;
+  legacy_constraints_count: number;
+  mission_entity_category: string;
+  mission_location: string | null;
+  mission_constraints_count: number;
+  differences: string[];
+}
+
+export function compareMissionWithLegacy(
+  mission: StructuredMission,
+  legacyIntent: CanonicalIntent | null,
+  legacyParsedGoal: ParsedGoal | null,
+): MissionShadowComparison {
+  const legacyEntity = legacyIntent?.entity_category ?? legacyParsedGoal?.business_type ?? null;
+  const legacyLocation = legacyIntent?.location_text ?? legacyParsedGoal?.location ?? null;
+  const legacyConstraintsCount = legacyIntent?.constraints?.length ?? legacyParsedGoal?.constraints?.length ?? 0;
+
+  const differences: string[] = [];
+
+  if (legacyEntity && mission.entity_category.toLowerCase() !== legacyEntity.toLowerCase()) {
+    differences.push(`entity_category: mission="${mission.entity_category}" vs legacy="${legacyEntity}"`);
+  }
+
+  const missionLoc = mission.location_text?.toLowerCase() ?? '';
+  const legacyLoc = legacyLocation?.toLowerCase() ?? '';
+  if (missionLoc !== legacyLoc) {
+    differences.push(`location: mission="${mission.location_text}" vs legacy="${legacyLocation}"`);
+  }
+
+  if (mission.constraints.length !== legacyConstraintsCount) {
+    differences.push(`constraints_count: mission=${mission.constraints.length} vs legacy=${legacyConstraintsCount}`);
+  }
+
+  return {
+    mission,
+    legacy_entity_category: legacyEntity,
+    legacy_location: legacyLocation,
+    legacy_constraints_count: legacyConstraintsCount,
+    mission_entity_category: mission.entity_category,
+    mission_location: mission.location_text,
+    mission_constraints_count: mission.constraints.length,
+    differences,
+  };
+}
+
+function mapMissionConstraintToStructured(c: MissionConstraint, index: number): StructuredConstraint | null {
+  switch (c.type) {
+    case 'text_compare': {
+      if (c.operator === 'starts_with') {
+        return {
+          id: `c_name_prefix_m${index}`,
+          type: 'NAME_STARTS_WITH',
+          field: 'name',
+          operator: 'starts_with',
+          value: typeof c.value === 'string' ? c.value : '',
+          hard: c.hardness === 'hard',
+          rationale: `Name starts with "${c.value}"`,
+        };
+      }
+      if (c.field === 'name') {
+        return {
+          id: `c_name_contains_m${index}`,
+          type: 'NAME_CONTAINS',
+          field: 'name',
+          operator: 'contains_word',
+          value: typeof c.value === 'string' ? c.value : '',
+          hard: c.hardness === 'hard',
+          rationale: `Name contains "${c.value}"`,
+        };
+      }
+      return null;
+    }
+
+    case 'attribute_check': {
+      const val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
+      const shortName = val.replace(/\s+/g, '_').toLowerCase().substring(0, 20);
+      return {
+        id: `c_attr_${shortName}_m${index}`,
+        type: 'HAS_ATTRIBUTE',
+        field: 'attribute',
+        operator: 'has',
+        value: val,
+        hard: c.hardness === 'hard',
+        rationale: `Has attribute "${val}"`,
+      };
+    }
+
+    case 'numeric_range': {
+      if (c.field === 'rating' || c.field === 'review_count') {
+        const op = c.operator === 'gte' ? '>=' : c.operator === 'lte' ? '<=' : c.operator === 'gt' ? '>' : c.operator === 'lt' ? '<' : '>=';
+        return {
+          id: `c_${c.field}_m${index}`,
+          type: 'COUNT_MIN',
+          field: c.field,
+          operator: op,
+          value: typeof c.value === 'number' ? c.value : 0,
+          hard: c.hardness === 'hard',
+          rationale: `${c.field} ${op} ${c.value}`,
+        };
+      }
+      return null;
+    }
+
+    case 'website_evidence': {
+      const val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
+      const shortName = val.replace(/\s+/g, '_').toLowerCase().substring(0, 20);
+      return {
+        id: `c_attr_${shortName}_m${index}`,
+        type: 'HAS_ATTRIBUTE',
+        field: 'attribute',
+        operator: 'has',
+        value: val,
+        hard: c.hardness === 'hard',
+        rationale: `Website evidence for "${val}"`,
+      };
+    }
+
+    case 'time_constraint':
+    case 'status_check':
+    case 'relationship_check':
+    case 'ranking':
+    case 'contact_extraction':
+    case 'entity_discovery':
+    case 'location_constraint':
+      return null;
+
+    default:
+      return null;
+  }
+}
+
+export function missionToParsedGoal(
+  mission: StructuredMission,
+  originalGoal: string,
+): ParsedGoal {
+  const businessType = mission.entity_category;
+  const location = mission.location_text ?? '';
+  const country = location ? inferCountryFromLocation(location) : 'UK';
+
+  const constraints: StructuredConstraint[] = [];
+
+  if (location) {
+    constraints.push({
+      id: 'c_location',
+      type: 'LOCATION_EQUALS',
+      field: 'location',
+      operator: '=',
+      value: location,
+      hard: false,
+      rationale: `Location: ${location}`,
+    });
+  }
+
+  let nameFilter: string | null = null;
+  let prefixFilter: string | null = null;
+  let attributeFilter: string | null = null;
+
+  for (let i = 0; i < mission.constraints.length; i++) {
+    const mc = mission.constraints[i];
+    const mapped = mapMissionConstraintToStructured(mc, i);
+    if (mapped) {
+      constraints.push(mapped);
+      if (mapped.type === 'NAME_CONTAINS' && !nameFilter) {
+        nameFilter = typeof mapped.value === 'string' ? mapped.value : null;
+      }
+      if (mapped.type === 'NAME_STARTS_WITH' && !prefixFilter) {
+        prefixFilter = typeof mapped.value === 'string' ? mapped.value : null;
+      }
+      if (mapped.type === 'HAS_ATTRIBUTE' && !attributeFilter) {
+        attributeFilter = typeof mapped.value === 'string' ? mapped.value : null;
+      }
+    }
+  }
+
+  const requiredConstraintIds = constraints.filter(c => c.hard).map(c => c.id);
+  const optionalConstraintIds = constraints.filter(c => !c.hard).map(c => c.id);
+
+  const successCriteria: SuccessCriteria = {
+    required_constraints: requiredConstraintIds,
+    optional_constraints: optionalConstraintIds,
+    target_count: null,
+  };
+
+  return {
+    original_goal: originalGoal,
+    requested_count_user: null,
+    search_budget_count: 30,
+    business_type: businessType,
+    location,
+    country,
+    prefix_filter: prefixFilter,
+    name_filter: nameFilter,
+    attribute_filter: attributeFilter,
+    tool_preference: null,
+    include_email: false,
+    include_phone: false,
+    include_website: false,
+    constraints,
+    success_criteria: successCriteria,
+  };
+}
+
+export function logMissionShadow(
+  trace: MissionExtractionTrace,
+  legacyIntent: CanonicalIntent | null,
+  legacyParsedGoal: ParsedGoal | null,
+): void {
+  const mission = trace.pass2_structured_mission;
+
+  console.log(`[MISSION_SHADOW] ======= Mission Extraction Trace =======`);
+  console.log(`[MISSION_SHADOW] Raw input: "${trace.raw_user_input}"`);
+  console.log(`[MISSION_SHADOW] Pass 1 interpretation: "${trace.pass1_semantic_interpretation}"`);
+
+  if (mission) {
+    console.log(`[MISSION_SHADOW] Pass 2 mission: entity="${mission.entity_category}" location="${mission.location_text}" mode="${mission.mission_mode}" constraints=${mission.constraints.length}`);
+    for (const c of mission.constraints) {
+      console.log(`[MISSION_SHADOW]   constraint: type=${c.type} field=${c.field} op=${c.operator} value="${c.value}" hardness=${c.hardness}`);
+    }
+
+    const comparison = compareMissionWithLegacy(mission, legacyIntent, legacyParsedGoal);
+    if (comparison.differences.length > 0) {
+      console.log(`[MISSION_SHADOW] Differences from legacy:`);
+      for (const diff of comparison.differences) {
+        console.log(`[MISSION_SHADOW]   ${diff}`);
+      }
+    } else {
+      console.log(`[MISSION_SHADOW] No differences from legacy detected`);
+    }
+  } else {
+    console.log(`[MISSION_SHADOW] Pass 2 failed: ${trace.validation_result.errors.join('; ')}`);
+  }
+
+  console.log(`[MISSION_SHADOW] Model: ${trace.model} | Pass1: ${trace.pass1_duration_ms}ms | Pass2: ${trace.pass2_duration_ms}ms | Total: ${trace.total_duration_ms}ms`);
+  console.log(`[MISSION_SHADOW] ====================================`);
+}

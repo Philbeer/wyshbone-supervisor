@@ -28,6 +28,8 @@ import { evaluateClarifyGate, evaluateClarifyGateFromIntent, extractBusinessType
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
+import { extractStructuredMission, getMissionExtractorMode } from './supervisor/mission-extractor';
+import { logMissionShadow } from './supervisor/mission-bridge';
 import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, preExecutionConstraintGateFromIntent, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
@@ -949,6 +951,19 @@ class SupervisorService {
       intent_extractor_mode: getIntentExtractorMode(),
       ts: Date.now(),
     });
+
+    if (getMissionExtractorMode() !== 'off') {
+      try {
+        const missionResult = await extractStructuredMission(rawMsg, conversationContextStr);
+        logMissionShadow(
+          missionResult.trace,
+          shadowResult.extraction?.validation?.intent ?? null,
+          null,
+        );
+      } catch (missionErr: any) {
+        console.warn(`[MISSION_EXTRACTOR] Shadow extraction failed (non-fatal): ${missionErr.message}`);
+      }
+    }
 
     let earlyParsedGoal: ParsedGoal | null = null;
     let intentSource: 'canonical' | 'legacy' = 'legacy';
