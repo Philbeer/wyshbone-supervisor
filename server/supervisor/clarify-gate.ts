@@ -328,6 +328,25 @@ export { extractBusinessType, extractLocation, extractCount, extractTimeFilter }
 export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   const msg = userMessage.trim();
 
+  if (hasMonitoringIntent(msg)) {
+    const bt = extractBusinessType(msg);
+    const loc = extractLocation(msg);
+    const count = extractCount(msg);
+    const timeFilter = extractTimeFilter(msg);
+    console.log(`[CLARIFY_GATE] route=agent_run — monitoring verb detected (regex early exit) bt=${bt} loc=${loc}`);
+    return {
+      route: 'agent_run',
+      reason: `Monitoring verb detected — proceeding with agent execution.`,
+      parsedFields: {
+        businessType: bt,
+        location: loc,
+        count,
+        timeFilter,
+      },
+      semantic_source: 'fallback_regex',
+    };
+  }
+
   if (!msg || msg.length === 0) {
     return {
       route: 'clarify_before_run',
@@ -394,6 +413,38 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
 export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: string): ClarifyGateResult {
   const msg = rawMsg.trim();
 
+  if (intent.mission_type === 'monitor') {
+    const timeConstraint = intent.constraints.find(c => c.type === 'time');
+    console.log(`[CLARIFY_GATE] semantic_source=canonical route=agent_run mission_type=monitor (early exit)`);
+    return {
+      route: 'agent_run',
+      reason: `Canonical intent mission_type=monitor — proceeding with agent execution.`,
+      parsedFields: {
+        businessType: intent.entity_category,
+        location: intent.location_text,
+        count: intent.requested_count,
+        timeFilter: timeConstraint?.raw ?? null,
+      },
+      semantic_source: 'canonical',
+    };
+  }
+
+  if (hasMonitoringIntent(msg)) {
+    const timeConstraint = intent.constraints.find(c => c.type === 'time');
+    console.log(`[CLARIFY_GATE] semantic_source=canonical route=agent_run — monitoring verb override (early exit, mission_type was ${intent.mission_type})`);
+    return {
+      route: 'agent_run',
+      reason: `Monitoring verb detected in message — overriding mission_type=${intent.mission_type} — proceeding with agent execution.`,
+      parsedFields: {
+        businessType: intent.entity_category,
+        location: intent.location_text,
+        count: intent.requested_count,
+        timeFilter: timeConstraint?.raw ?? null,
+      },
+      semantic_source: 'canonical',
+    };
+  }
+
   if (!msg || msg.length === 0) {
     return {
       route: 'clarify_before_run',
@@ -446,21 +497,6 @@ export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: s
   }
 
   if (intent.mission_type === 'explain' || intent.mission_type === 'meta_question') {
-    if (hasSearchIntent(msg) || hasMonitoringIntent(msg)) {
-      console.log(`[CLARIFY_GATE] semantic_source=canonical mission_type=${intent.mission_type} overridden by search/monitor verb — routing to agent_run`);
-      const timeConstraint = intent.constraints.find(c => c.type === 'time');
-      return {
-        route: 'agent_run',
-        reason: `Canonical intent mission_type=${intent.mission_type} overridden: message contains search/monitor verb — proceeding with agent execution.`,
-        parsedFields: {
-          businessType: intent.entity_category,
-          location: intent.location_text,
-          count: intent.requested_count,
-          timeFilter: timeConstraint?.raw ?? null,
-        },
-        semantic_source: 'canonical',
-      };
-    }
     console.log(`[CLARIFY_GATE] semantic_source=canonical route=direct_response mission_type=${intent.mission_type}`);
     return {
       route: 'direct_response',
