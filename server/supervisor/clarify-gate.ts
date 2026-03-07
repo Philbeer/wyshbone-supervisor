@@ -323,7 +323,7 @@ function extractLocation(msg: string): string | null {
   return null;
 }
 
-export { extractBusinessType, extractLocation, extractCount, extractTimeFilter };
+export { extractBusinessType, extractLocation, extractCount, extractTimeFilter, hasMonitoringIntent };
 
 export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   const msg = userMessage.trim();
