@@ -77,10 +77,17 @@ function hasLeadFindingVerb(msg: string): boolean {
   return LEAD_FINDING_VERBS.test(msg);
 }
 
+const MONITORING_VERBS = /\b(?:keep\s+checking|monitor|watch\s+for|alert\s+me|notify\s+me|track|let\s+me\s+know|keep\s+an?\s+eye|ongoing|recurring|check\s+every)\b/i;
+
+function hasMonitoringIntent(msg: string): boolean {
+  return MONITORING_VERBS.test(msg);
+}
+
 const NOUN_PHRASE_SEARCH = /\b(?:list of|number of)\s+\w/i;
 
 function hasSearchIntent(msg: string): boolean {
   if (hasLeadFindingVerb(msg)) return true;
+  if (hasMonitoringIntent(msg)) return true;
   if (NOUN_PHRASE_SEARCH.test(msg) && LOCATION_INDICATOR.test(msg)) return true;
   if (LOCATION_INDICATOR.test(msg) && /\b\w+(?:s|ers|ies|ors)\b/i.test(msg)) return true;
   return false;
@@ -439,6 +446,21 @@ export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: s
   }
 
   if (intent.mission_type === 'explain' || intent.mission_type === 'meta_question') {
+    if (hasSearchIntent(msg) || hasMonitoringIntent(msg)) {
+      console.log(`[CLARIFY_GATE] semantic_source=canonical mission_type=${intent.mission_type} overridden by search/monitor verb — routing to agent_run`);
+      const timeConstraint = intent.constraints.find(c => c.type === 'time');
+      return {
+        route: 'agent_run',
+        reason: `Canonical intent mission_type=${intent.mission_type} overridden: message contains search/monitor verb — proceeding with agent execution.`,
+        parsedFields: {
+          businessType: intent.entity_category,
+          location: intent.location_text,
+          count: intent.requested_count,
+          timeFilter: timeConstraint?.raw ?? null,
+        },
+        semantic_source: 'canonical',
+      };
+    }
     console.log(`[CLARIFY_GATE] semantic_source=canonical route=direct_response mission_type=${intent.mission_type}`);
     return {
       route: 'direct_response',

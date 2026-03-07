@@ -24,6 +24,15 @@ RULES:
 - If the user provides a count, capture it exactly. If no count, set requested_count to null.
 - Capture ALL constraints. If the user mentions time, rating, attributes, name filters, or relationships, each one MUST appear as a separate constraint entry.
 
+mission_type:
+  "find_businesses" = one-time search for businesses, venues, or services. Default for most "find", "search", "list" requests.
+  "monitor" = ongoing monitoring, recurring checks, or alert-on-change. Use when the user says "keep checking", "monitor", "watch for", "alert me", "notify me", "track", "let me know when", "check every week", "keep an eye on", "ongoing", "recurring".
+  "deep_research" = in-depth research reports.
+  "explain" = questions about how something works, definitions, or explanations.
+  "meta_question" = questions about the system itself (accuracy, trust, capabilities).
+  "unknown" = cannot classify.
+  IMPORTANT: If the user wants to find businesses AND also wants ongoing monitoring or alerts, use "monitor" (not "find_businesses").
+
 SCHEMA (all fields required — return ONLY this JSON object):
 {
   "mission_type": one of ${JSON.stringify(MISSION_TYPE_ENUM)},
@@ -169,6 +178,40 @@ User: "new breweries in Texas"
   "default_count_policy": "page_1",
   "constraints": [
     { "type": "time", "raw": "new", "hardness": "hard", "evidence_mode": "web_search", "clarify_if_needed": true, "clarify_question": "What timeframe does 'new' mean — opened in the last year, last 6 months, or another window?" }
+  ],
+  "plan_template_hint": "search_and_verify",
+  "preferred_evidence_order": ["news", "web_search"]
+}
+
+User: "keep checking which hospitals in the UK offer the sleep apnea implant and alert me when it becomes available near me"
+{
+  "mission_type": "monitor",
+  "entity_kind": "company",
+  "entity_category": "hospitals",
+  "location_text": "UK",
+  "geo_mode": "national",
+  "radius_km": null,
+  "requested_count": null,
+  "default_count_policy": "page_1",
+  "constraints": [
+    { "type": "attribute", "raw": "offer the sleep apnea implant", "hardness": "hard", "evidence_mode": "website_text", "clarify_if_needed": false, "clarify_question": null }
+  ],
+  "plan_template_hint": "search_and_verify",
+  "preferred_evidence_order": ["website_text", "web_search"]
+}
+
+User: "monitor new vegan restaurants opening in Manchester"
+{
+  "mission_type": "monitor",
+  "entity_kind": "venue",
+  "entity_category": "vegan restaurants",
+  "location_text": "Manchester",
+  "geo_mode": "city",
+  "radius_km": null,
+  "requested_count": null,
+  "default_count_policy": "page_1",
+  "constraints": [
+    { "type": "time", "raw": "new opening", "hardness": "hard", "evidence_mode": "web_search", "clarify_if_needed": false, "clarify_question": null }
   ],
   "plan_template_hint": "search_and_verify",
   "preferred_evidence_order": ["news", "web_search"]

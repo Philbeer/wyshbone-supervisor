@@ -1929,11 +1929,82 @@ class SupervisorService {
       return;
     }
 
-    const response = sanitizeSupervisorMessage(towerResult.response);
+    const missionModeResolved = missionResult?.ok ? missionResult.mission?.mission_mode ?? 'research_now' : 'research_now';
+    const isMonitoringMission = missionModeResolved === 'monitor' || missionModeResolved === 'alert_on_change' || missionModeResolved === 'recurring_check';
+    let monitorCreated = false;
+
+    if (isMonitoringMission && !runFailed && earlyParsedGoal) {
+      try {
+        const monitorLabel = `${earlyParsedGoal.business_type ?? 'businesses'} in ${earlyParsedGoal.location || 'unspecified location'}`;
+        const monitorDescription = rawMsg.trim().substring(0, 500);
+        const scheduleType = missionModeResolved === 'recurring_check' ? 'weekly' : 'daily';
+
+        console.log(`[MONITOR_CREATE] mission_mode=${missionModeResolved} — creating scheduled monitor: "${monitorLabel}" schedule=${scheduleType}`);
+
+        const { data: monitorData, error: monitorError } = await supabase!
+          .from('scheduled_monitors')
+          .insert({
+            user_id: task.user_id,
+            label: monitorLabel,
+            description: monitorDescription,
+            monitor_type: 'lead_search',
+            schedule_type: scheduleType,
+            is_active: true,
+            config: {
+              original_goal: rawMsg.trim(),
+              business_type: earlyParsedGoal.business_type,
+              location: earlyParsedGoal.location,
+              country: earlyParsedGoal.country,
+              constraints: (earlyParsedGoal.constraints ?? []).map(c => ({ type: c.type, field: c.field, operator: c.operator, value: c.value })),
+              mission_mode: missionModeResolved,
+              source_run_id: jobId,
+            },
+          })
+          .select('id')
+          .single();
+
+        if (monitorError) {
+          console.warn(`[MONITOR_CREATE] Failed to create scheduled monitor (non-fatal): ${monitorError.message}`);
+        } else {
+          monitorCreated = true;
+          console.log(`[MONITOR_CREATE] Created scheduled monitor id=${monitorData?.id} for runId=${jobId}`);
+
+          await createArtefact({
+            runId: jobId,
+            type: 'monitor_created',
+            title: `Monitoring activated: ${monitorLabel}`,
+            summary: `schedule=${scheduleType} mission_mode=${missionModeResolved} monitor_id=${monitorData?.id}`,
+            payload: {
+              monitor_id: monitorData?.id,
+              label: monitorLabel,
+              description: monitorDescription,
+              schedule_type: scheduleType,
+              mission_mode: missionModeResolved,
+            },
+            userId: task.user_id,
+            conversationId: task.conversation_id,
+          }).catch((e: any) => console.warn(`[MONITOR_CREATE] Artefact creation failed (non-fatal): ${e.message}`));
+        }
+      } catch (monitorErr: any) {
+        console.warn(`[MONITOR_CREATE] Unexpected error creating monitor (non-fatal): ${monitorErr.message}`);
+      }
+    }
+
+    let response = sanitizeSupervisorMessage(towerResult.response);
+
+    if (monitorCreated) {
+      const monitorNote = missionModeResolved === 'alert_on_change'
+        ? `\n\nI've also set up ongoing monitoring for this. I'll alert you when there are changes or new results.`
+        : `\n\nI've also set up ongoing monitoring for this search. I'll check periodically and let you know about new results.`;
+      response = sanitizeSupervisorMessage(towerResult.response + monitorNote);
+    }
+
     const leadIds = towerResult.leadIds;
     const capabilities = runFailed
       ? ['lead_generation', 'run_failed']
-      : ['lead_generation', 'tower_validated'];
+      : monitorCreated
+        ? ['lead_generation', 'tower_validated', 'monitor_created']
+        : ['lead_generation', 'tower_validated'];
 
     const dsStatus = towerResult.deliverySummary?.status ?? (runFailed ? 'STOP' : 'PASS');
 

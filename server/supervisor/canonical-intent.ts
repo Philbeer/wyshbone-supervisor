@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const MISSION_TYPE_ENUM = [
   'find_businesses',
+  'monitor',
   'deep_research',
   'explain',
   'meta_question',
