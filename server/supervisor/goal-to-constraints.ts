@@ -281,6 +281,7 @@ function stripInstructionClauses(rawGoal: string): string {
 }
 
 function regexFallback(rawGoal: string): ParsedGoal {
+  console.warn(`[REGEX_FALLBACK] DEPRECATED: Using regex-based intent interpretation as emergency fallback. This path should only be reached when BOTH the canonical intent extractor AND the LLM goal parser fail. Input: "${rawGoal.substring(0, 100)}"`);
   const cleaned = stripInstructionClauses(rawGoal);
   const msg = cleaned.trim();
   const constraints: StructuredConstraint[] = [];

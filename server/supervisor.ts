@@ -1044,15 +1044,29 @@ class SupervisorService {
     }
 
     const canonicalPreview = canonicalIntent ? canonicalIntentToPreviewFields(canonicalIntent) : null;
-    const regexBT = intentSource === 'canonical' ? null : (extractBusinessType(rawMsg) ?? null);
-    const regexLoc = intentSource === 'canonical' ? null : (extractLocation(rawMsg) ?? null);
-    const regexCount = intentSource === 'canonical' ? null : (extractCount(rawMsg) ?? null);
-    const regexTime = intentSource === 'canonical' ? null : (extractTimeFilter(rawMsg) ?? null);
 
-    const previewBT = canonicalPreview?.business_type ?? regexBT;
-    const previewLoc = canonicalPreview?.location ?? regexLoc;
-    const previewCount = canonicalPreview?.count ?? regexCount;
-    const previewTime = canonicalPreview?.time_filter ?? regexTime;
+    let previewBT: string | null = null;
+    let previewLoc: string | null = null;
+    let previewCount: number | null = null;
+    let previewTime: string | null = null;
+
+    if (canonicalPreview) {
+      previewBT = canonicalPreview.business_type;
+      previewLoc = canonicalPreview.location;
+      previewCount = canonicalPreview.count;
+      previewTime = canonicalPreview.time_filter;
+    } else if (earlyParsedGoal) {
+      previewBT = earlyParsedGoal.business_type || null;
+      previewLoc = earlyParsedGoal.location || null;
+      previewCount = earlyParsedGoal.requested_count_user;
+      previewTime = null;
+    } else {
+      previewBT = extractBusinessType(rawMsg) ?? null;
+      previewLoc = extractLocation(rawMsg) ?? null;
+      previewCount = extractCount(rawMsg) ?? null;
+      previewTime = extractTimeFilter(rawMsg) ?? null;
+      console.warn(`[PREVIEW_FIELDS] Using deprecated regex extractors — no canonical intent or parsed goal available`);
+    }
 
     const intentPreviewPayload = {
       raw_message: rawMsg.substring(0, 500),
@@ -1065,10 +1079,10 @@ class SupervisorService {
       intent_source: intentSource,
       ...(canonicalPreview ? {
         canonical_fields: canonicalPreview,
-        regex_fields: intentSource === 'canonical' ? { skipped: true, reason: 'canonical_intent_active' } : { business_type: regexBT, location: regexLoc, count: regexCount, time_filter: regexTime },
+        regex_fields: { skipped: true, reason: 'canonical_intent_active' },
       } : {}),
       route: 'pre_gate',
-      extraction_method: intentSource === 'canonical' ? 'canonical_intent_extractor' : 'regex_or_simple_parse',
+      extraction_method: intentSource === 'canonical' ? 'canonical_intent_extractor' : (earlyParsedGoal ? 'llm_parsed_goal' : 'regex_fallback_deprecated'),
     };
 
     this.postArtefactToUI({
@@ -1972,9 +1986,9 @@ class SupervisorService {
   private evaluatePreflightClarify(
     rawMsg: string,
     parsedGoal: ParsedGoal,
-    regexBT: string | null,
-    regexLoc: string | null,
-    regexTime: string | null,
+    previewBT: string | null,
+    previewLoc: string | null,
+    previewTime: string | null,
     canonicalIntent?: import('./supervisor/canonical-intent').CanonicalIntent | null,
   ): { reason: string; questions: string[]; options: string[] | null; semantic_source?: 'canonical' | 'fallback_regex' } | null {
     const questions: string[] = [];
@@ -1982,8 +1996,8 @@ class SupervisorService {
     const reasons: string[] = [];
     let semanticSource: 'canonical' | 'fallback_regex' = canonicalIntent ? 'canonical' : 'fallback_regex';
 
-    const bt = canonicalIntent?.entity_category?.trim() || parsedGoal.business_type?.trim() || regexBT;
-    const loc = canonicalIntent?.location_text?.trim() || parsedGoal.location?.trim() || regexLoc;
+    const bt = canonicalIntent?.entity_category?.trim() || parsedGoal.business_type?.trim() || previewBT;
+    const loc = canonicalIntent?.location_text?.trim() || parsedGoal.location?.trim() || previewLoc;
 
     if (!bt) {
       questions.push('What type of business are you looking for? (e.g. pubs, dentists, gyms)');

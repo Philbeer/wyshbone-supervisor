@@ -51,7 +51,7 @@ function mapCanonicalConstraintType(c: CanonicalConstraint): StructuredConstrain
         hard: c.hardness === 'hard',
         rationale: c.raw,
       };
-    case 'rating':
+    case 'rating': {
       const ratingMatch = c.raw.match(/([\d.]+)/);
       return {
         id: 'c_rating',
@@ -62,25 +62,14 @@ function mapCanonicalConstraintType(c: CanonicalConstraint): StructuredConstrain
         hard: c.hardness === 'hard',
         rationale: c.raw,
       };
+    }
     case 'name_filter':
-      const nameWord = c.raw.replace(/^.*(?:word|name|called|starting with)\s+/i, '').trim();
-      if (/^start/i.test(c.raw)) {
-        return {
-          id: 'c_prefix',
-          type: 'NAME_STARTS_WITH',
-          field: 'name',
-          operator: 'starts_with',
-          value: nameWord,
-          hard: c.hardness === 'hard',
-          rationale: c.raw,
-        };
-      }
       return {
         id: 'c_name',
         type: 'NAME_CONTAINS',
         field: 'name',
         operator: 'contains',
-        value: nameWord,
+        value: c.raw,
         hard: c.hardness === 'hard',
         rationale: c.raw,
       };

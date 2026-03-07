@@ -259,6 +259,7 @@ const TEMPORAL_DISQUALIFIERS = /\b(?:months?|years?|days?|weeks?|hours?|minutes?
 const COUNT_NEAR_SEARCH = /\b(?:find|show|get|give me|list|pull|fetch|source|locate|discover|identify)\s+(\d+)\b/i;
 const COUNT_BEFORE_NOUN = /\b(\d+)\s+(?!months?\b|years?\b|days?\b|weeks?\b|hours?\b|minutes?\b)\w+/i;
 
+/** @deprecated Use canonical intent extractor instead. Only called as fallback when LLM extraction is unavailable. */
 function extractCount(msg: string): number | null {
   const searchMatch = msg.match(COUNT_NEAR_SEARCH);
   if (searchMatch) {
@@ -283,12 +284,14 @@ function extractCount(msg: string): number | null {
 const TIME_FILTER_PATTERN = /\b(?:(?:in|within|over)\s+(?:the\s+)?(?:last|past)\s+\d+\s+(?:months?|years?|weeks?|days?)|opened|closed|started|founded|established)\s+(?:in\s+(?:the\s+)?(?:last|past)\s+)?\d*\s*(?:months?|years?|weeks?|days?)?\b/i;
 const TIME_FILTER_SIMPLE = /\b(?:(?:last|past)\s+\d+\s+(?:months?|years?|weeks?|days?)|(?:opened|started|founded|established)\s+(?:in\s+(?:the\s+)?)?(?:last|past)?\s*\d+\s*(?:months?|years?|weeks?|days?))\b/i;
 
+/** @deprecated Use canonical intent extractor instead. Only called as fallback when LLM extraction is unavailable. */
 function extractTimeFilter(msg: string): string | null {
   const match = msg.match(TIME_FILTER_SIMPLE) || msg.match(TIME_FILTER_PATTERN);
   if (match) return match[0].trim();
   return null;
 }
 
+/** @deprecated Use canonical intent extractor instead. Only called as fallback when LLM extraction is unavailable. */
 function extractBusinessType(msg: string): string | null {
   const lower = msg.toLowerCase();
   const verbMatch = lower.match(/\b(?:find|search|list|show|get|look\s+for|locate|discover|identify|give me|pull|fetch|source)\s+(?:\d+\s+)?(.+?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i);
@@ -301,6 +304,7 @@ function extractBusinessType(msg: string): string | null {
   return null;
 }
 
+/** @deprecated Use canonical intent extractor instead. Only called as fallback when LLM extraction is unavailable. */
 function extractLocation(msg: string): string | null {
   const locMatch = msg.match(/\b(?:in|near|around|across|throughout|within)\s+([A-Z][\w\s,'-]+)/i);
   if (locMatch) {
