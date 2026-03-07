@@ -2,6 +2,7 @@ import {
   type StructuredMission,
   type MissionExtractionTrace,
   type MissionValidationResult,
+  type MissionFailureStage,
   parseAndValidateMissionJSON,
   MISSION_CONSTRAINT_TYPES,
   MISSION_MODES,
@@ -467,6 +468,7 @@ export async function extractStructuredMission(
       pass2_duration_ms: 0,
       total_duration_ms: 0,
       timestamp,
+      failure_stage: 'no_api_key',
     };
     return { trace, mission: null, ok: false };
   }
@@ -497,6 +499,7 @@ export async function extractStructuredMission(
       pass2_duration_ms: 0,
       total_duration_ms: duration,
       timestamp,
+      failure_stage: 'pass1_llm_call',
     };
     console.error(`[MISSION_EXTRACTOR] Pass 1 failed: ${err.message}`);
     return { trace, mission: null, ok: false };
@@ -523,6 +526,7 @@ export async function extractStructuredMission(
       pass2_duration_ms: pass2Duration,
       total_duration_ms: totalDuration,
       timestamp,
+      failure_stage: 'pass2_llm_call',
     };
     console.error(`[MISSION_EXTRACTOR] Pass 2 failed: ${err.message}`);
     return { trace, mission: null, ok: false };
@@ -552,6 +556,7 @@ export async function extractStructuredMission(
       pass2_duration_ms: pass2Duration,
       total_duration_ms: totalDuration,
       timestamp,
+      failure_stage: 'pass2_json_parse',
     };
     console.error(`[MISSION_EXTRACTOR] Pass 2 JSON parse failed`);
     return { trace, mission: null, ok: false };
@@ -559,6 +564,8 @@ export async function extractStructuredMission(
 
   const cleaned = cleanupMissionValues(parsedRaw);
   const validation = parseAndValidateMissionJSON(JSON.stringify(cleaned));
+
+  const failureStage: MissionFailureStage = validation.ok ? 'none' : 'pass2_schema_validation';
 
   const trace: MissionExtractionTrace = {
     raw_user_input: userMessage,
@@ -571,6 +578,7 @@ export async function extractStructuredMission(
     pass2_duration_ms: pass2Duration,
     total_duration_ms: totalDuration,
     timestamp,
+    failure_stage: failureStage,
   };
 
   if (validation.ok) {

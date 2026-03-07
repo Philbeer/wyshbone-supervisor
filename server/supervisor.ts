@@ -29,7 +29,7 @@ import { getClarifySession, didSessionExpire, createClarifySession, closeClarify
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
 import { extractStructuredMission, getMissionExtractorMode } from './supervisor/mission-extractor';
-import { logMissionShadow } from './supervisor/mission-bridge';
+import { logMissionShadow, buildMissionDiagnosticPayload } from './supervisor/mission-bridge';
 import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, preExecutionConstraintGateFromIntent, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
@@ -955,18 +955,85 @@ class SupervisorService {
     if (getMissionExtractorMode() !== 'off') {
       try {
         const missionResult = await extractStructuredMission(rawMsg, conversationContextStr);
+        const canonicalForComparison = shadowResult.extraction?.validation?.intent ?? null;
+
         logMissionShadow(
           missionResult.trace,
-          shadowResult.extraction?.validation?.intent ?? null,
+          canonicalForComparison,
           null,
         );
+
+        const missionDiag = buildMissionDiagnosticPayload(
+          missionResult.trace,
+          canonicalForComparison,
+          null,
+          null,
+        );
+
+        const missionTitle = missionResult.ok
+          ? `Mission extraction: ${missionResult.mission!.entity_category} in ${missionResult.mission!.location_text ?? 'unknown'} (${missionResult.mission!.constraints.length} constraints)`
+          : `Mission extraction failed at ${missionResult.trace.failure_stage}`;
+
+        createArtefact({
+          runId: jobId,
+          type: 'mission_extraction',
+          title: missionTitle,
+          summary: `pipeline_ok=${missionDiag.pipeline_ok} failure_stage=${missionDiag.failure_stage} model=${missionDiag.model} total_ms=${missionDiag.timing.total_ms}`,
+          payload: missionDiag as unknown as Record<string, unknown>,
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch((e: any) => console.warn(`[MISSION_EXTRACTOR] Artefact creation failed (non-fatal): ${e.message}`));
+
+        this.postArtefactToUI({
+          runId: jobId,
+          clientRequestId,
+          type: 'diagnostic',
+          payload: { ...missionDiag as unknown as Record<string, unknown>, title: 'Mission extraction trace', diagnostic_type: 'mission_extraction' },
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch((e: any) => console.warn(`[MISSION_EXTRACTOR] postArtefactToUI failed (non-fatal): ${e.message}`));
       } catch (missionErr: any) {
         console.warn(`[MISSION_EXTRACTOR] Shadow extraction failed (non-fatal): ${missionErr.message}`);
+
+        const exceptionDiag = {
+          pipeline_ok: false,
+          failure_stage: 'extractor_exception',
+          model: 'unknown',
+          timing: { pass1_ms: 0, pass2_ms: 0, total_ms: 0 },
+          layers: {
+            raw_user_input: rawMsg.substring(0, 500),
+            pass1_semantic_interpretation: '',
+            pass2_structured_mission: null,
+          },
+          validation: { ok: false, error_count: 1, errors: [missionErr.message?.substring(0, 200) ?? 'Unknown error'] },
+          legacy_comparison: null,
+          fallback_reason: `extractor_exception: ${missionErr.message?.substring(0, 100) ?? 'unknown'}`,
+        };
+
+        createArtefact({
+          runId: jobId,
+          type: 'mission_extraction',
+          title: 'Mission extraction failed (exception)',
+          summary: `pipeline_ok=false failure_stage=extractor_exception`,
+          payload: exceptionDiag,
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch(() => {});
+
+        this.postArtefactToUI({
+          runId: jobId,
+          clientRequestId,
+          type: 'diagnostic',
+          payload: { ...exceptionDiag, title: 'Mission extraction trace', diagnostic_type: 'mission_extraction' },
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch(() => {});
       }
     }
 
     let earlyParsedGoal: ParsedGoal | null = null;
     let intentSource: 'canonical' | 'legacy' = 'legacy';
+    let legacyFallbackReason: string | null = null;
     const canonicalValid = shadowResult.ran && shadowResult.extraction?.validation?.ok && shadowResult.extraction.validation.intent;
     const canonicalIntent = canonicalValid ? shadowResult.extraction!.validation.intent! : null;
 
@@ -977,17 +1044,22 @@ class SupervisorService {
         intentSource = 'canonical';
         console.log(`[INTENT_SOURCE] canonical_active — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location} count=${earlyParsedGoal.requested_count_user} constraints=${earlyParsedGoal.constraints.length}`);
       } catch (bridgeErr: any) {
+        legacyFallbackReason = `canonical_bridge_error: ${bridgeErr.message?.substring(0, 100)}`;
         console.warn(`[INTENT_SOURCE] canonical bridge failed, falling back to legacy: ${bridgeErr.message}`);
         earlyParsedGoal = null;
       }
+    } else if (!shadowResult.ran) {
+      legacyFallbackReason = 'intent_extractor_did_not_run';
+    } else if (!shadowResult.extraction?.validation?.ok) {
+      legacyFallbackReason = `intent_validation_failed: ${shadowResult.extraction?.validation?.errors?.slice(0, 2).join('; ') ?? 'unknown'}`;
     }
 
     if (!earlyParsedGoal) {
       try {
-        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=legacy_fallback`);
+        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=early_parse_goal source=legacy_fallback reason=${legacyFallbackReason ?? 'canonical_not_available'}`);
         earlyParsedGoal = await parseGoalToConstraints(rawMsg.trim());
         intentSource = 'legacy';
-        console.log(`[INTENT_SOURCE] legacy_fallback — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location} count=${earlyParsedGoal.requested_count_user} constraints=${earlyParsedGoal.constraints.length}`);
+        console.log(`[INTENT_SOURCE] legacy_fallback — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location} count=${earlyParsedGoal.requested_count_user} constraints=${earlyParsedGoal.constraints.length} fallback_reason=${legacyFallbackReason ?? 'none'}`);
       } catch (parseErr: any) {
         console.warn(`[EARLY_PARSE] parseGoalToConstraints failed (non-fatal, will retry in executeTowerLoopChat): ${parseErr.message}`);
       }
@@ -1006,7 +1078,7 @@ class SupervisorService {
         type: 'constraints_extracted',
         title: ceTitle,
         summary: ceSummary,
-        payload: { ...cePayload as unknown as Record<string, unknown>, intent_source: intentSource },
+        payload: { ...cePayload as unknown as Record<string, unknown>, intent_source: intentSource, ...(legacyFallbackReason ? { legacy_fallback_reason: legacyFallbackReason } : {}) },
         userId: task.user_id,
         conversationId: task.conversation_id,
       }).catch((e: any) => console.warn(`[EARLY_PARSE] constraints_extracted artefact failed (non-fatal): ${e.message}`));
@@ -1083,6 +1155,7 @@ class SupervisorService {
       } : {}),
       route: 'pre_gate',
       extraction_method: intentSource === 'canonical' ? 'canonical_intent_extractor' : (earlyParsedGoal ? 'llm_parsed_goal' : 'regex_fallback_deprecated'),
+      ...(legacyFallbackReason ? { legacy_fallback_reason: legacyFallbackReason } : {}),
     };
 
     this.postArtefactToUI({

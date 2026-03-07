@@ -94,6 +94,15 @@ export interface MissionValidationResult {
   errors: string[];
 }
 
+export type MissionFailureStage =
+  | 'none'
+  | 'no_api_key'
+  | 'pass1_llm_call'
+  | 'pass2_llm_call'
+  | 'pass2_json_parse'
+  | 'pass2_schema_validation'
+  | 'extractor_exception';
+
 export function validateStructuredMission(raw: unknown): MissionValidationResult {
   if (raw === null || raw === undefined) {
     return { ok: false, mission: null, errors: ['Input is null or undefined'] };
@@ -170,4 +179,5 @@ export interface MissionExtractionTrace {
   pass2_duration_ms: number;
   total_duration_ms: number;
   timestamp: string;
+  failure_stage: MissionFailureStage;
 }

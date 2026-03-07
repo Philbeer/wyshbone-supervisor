@@ -1,4 +1,4 @@
-import type { StructuredMission, MissionConstraint, MissionExtractionTrace } from './mission-schema';
+import type { StructuredMission, MissionConstraint, MissionExtractionTrace, MissionFailureStage } from './mission-schema';
 import type { ParsedGoal, StructuredConstraint, SuccessCriteria } from './goal-to-constraints';
 import { inferCountryFromLocation } from './goal-to-constraints';
 import type { CanonicalIntent, CanonicalConstraint } from './canonical-intent';
@@ -12,6 +12,90 @@ export interface MissionShadowComparison {
   mission_location: string | null;
   mission_constraints_count: number;
   differences: string[];
+}
+
+export interface MissionDiagnosticPayload {
+  pipeline_ok: boolean;
+  failure_stage: MissionFailureStage;
+  model: string;
+  timing: {
+    pass1_ms: number;
+    pass2_ms: number;
+    total_ms: number;
+  };
+  layers: {
+    raw_user_input: string;
+    pass1_semantic_interpretation: string;
+    pass2_structured_mission: {
+      entity_category: string;
+      location_text: string | null;
+      mission_mode: string;
+      constraints_count: number;
+      constraint_types: string[];
+    } | null;
+  };
+  validation: {
+    ok: boolean;
+    error_count: number;
+    errors: string[];
+  };
+  legacy_comparison: {
+    has_legacy: boolean;
+    differences: string[];
+  } | null;
+  fallback_reason: string | null;
+}
+
+export function buildMissionDiagnosticPayload(
+  trace: MissionExtractionTrace,
+  legacyIntent: CanonicalIntent | null,
+  legacyParsedGoal: ParsedGoal | null,
+  fallbackReason: string | null,
+): MissionDiagnosticPayload {
+  const mission = trace.pass2_structured_mission;
+
+  let legacyComparison: MissionDiagnosticPayload['legacy_comparison'] = null;
+  if (mission && (legacyIntent || legacyParsedGoal)) {
+    const comp = compareMissionWithLegacy(mission, legacyIntent, legacyParsedGoal);
+    legacyComparison = {
+      has_legacy: true,
+      differences: comp.differences,
+    };
+  } else if (legacyIntent || legacyParsedGoal) {
+    legacyComparison = {
+      has_legacy: true,
+      differences: ['mission extraction failed — cannot compare'],
+    };
+  }
+
+  return {
+    pipeline_ok: trace.validation_result.ok,
+    failure_stage: trace.failure_stage,
+    model: trace.model,
+    timing: {
+      pass1_ms: trace.pass1_duration_ms,
+      pass2_ms: trace.pass2_duration_ms,
+      total_ms: trace.total_duration_ms,
+    },
+    layers: {
+      raw_user_input: trace.raw_user_input.substring(0, 500),
+      pass1_semantic_interpretation: trace.pass1_semantic_interpretation.substring(0, 500),
+      pass2_structured_mission: mission ? {
+        entity_category: mission.entity_category,
+        location_text: mission.location_text,
+        mission_mode: mission.mission_mode,
+        constraints_count: mission.constraints.length,
+        constraint_types: mission.constraints.map(c => c.type),
+      } : null,
+    },
+    validation: {
+      ok: trace.validation_result.ok,
+      error_count: trace.validation_result.errors.length,
+      errors: trace.validation_result.errors.slice(0, 5),
+    },
+    legacy_comparison: legacyComparison,
+    fallback_reason: fallbackReason,
+  };
 }
 
 export function compareMissionWithLegacy(
@@ -216,8 +300,9 @@ export function logMissionShadow(
   const mission = trace.pass2_structured_mission;
 
   console.log(`[MISSION_SHADOW] ======= Mission Extraction Trace =======`);
-  console.log(`[MISSION_SHADOW] Raw input: "${trace.raw_user_input}"`);
-  console.log(`[MISSION_SHADOW] Pass 1 interpretation: "${trace.pass1_semantic_interpretation}"`);
+  console.log(`[MISSION_SHADOW] Raw input: "${trace.raw_user_input.substring(0, 200)}"`);
+  console.log(`[MISSION_SHADOW] Pass 1 interpretation: "${trace.pass1_semantic_interpretation.substring(0, 300)}"`);
+  console.log(`[MISSION_SHADOW] failure_stage=${trace.failure_stage}`);
 
   if (mission) {
     console.log(`[MISSION_SHADOW] Pass 2 mission: entity="${mission.entity_category}" location="${mission.location_text}" mode="${mission.mission_mode}" constraints=${mission.constraints.length}`);
