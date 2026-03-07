@@ -1,0 +1,298 @@
+Wyshbone Chat Interpretation Upgrade Plan
+Objective
+Convert natural language user requests into a structured mission using:
+
+A two-pass LLM semantic interpretation system
+
+A fixed constraint taxonomy
+
+Deterministic validation before planning
+
+This ensures the system understands meaning rather than copying surface phrasing.
+
+Final Target Architecture
+User Chat
+↓
+LLM Pass 1 — Meaning Extraction
+↓
+LLM Pass 2 — Constraint Mapping
+↓
+Schema Validation
+↓
+Mission Builder
+↓
+Planner (deterministic)
+↓
+Supervisor Tools
+↓
+Evidence
+↓
+Tower Judgement
+Phase 1 — Define the Canonical Constraint Taxonomy
+This is the language of the system.
+
+All user requests must map into these types.
+
+entity_discovery
+location_constraint
+text_compare
+attribute_check
+relationship_check
+numeric_range
+time_constraint
+status_check
+website_evidence
+contact_extraction
+ranking
+Example mapping:
+
+User input
+
+find pubs in arundel with swan in the name
+Becomes
+
+entity_discovery → pubs
+location_constraint → Arundel
+text_compare → name contains swan
+This taxonomy should be stored centrally and used by:
+
+the LLM prompts
+
+schema validation
+
+planner logic
+
+Phase 2 — Introduce Two-Pass LLM Interpretation
+Instead of one LLM call trying to do everything, split interpretation into two stages.
+
+Pass 1 — Semantic Meaning Extraction
+Goal:
+
+Understand what the user actually wants.
+
+Output is human readable semantic meaning.
+
+Example output:
+
+The user wants:
+
+• pubs
+• located in Arundel
+• whose name contains the word "swan"
+• no specific number requested
+• this is a one-time search
+Important rules for this pass:
+
+• interpret meaning, not phrasing
+• remove unnecessary words
+• identify intent components
+
+Pass 2 — Schema Conversion
+This pass converts the semantic meaning into the constraint taxonomy.
+
+Example output:
+
+entity_category: pub
+location_text: Arundel
+
+constraints:
+- type: text_compare
+  field: name
+  operator: contains
+  value: swan
+  hardness: hard
+
+mission_mode: research_now
+Important rules:
+
+• only use allowed constraint types
+• extract clean values
+• never preserve phrasing like “swan in the name”
+
+Phase 3 — Mission Mode Layer
+Separate what to check from how the system behaves over time.
+
+Mission modes:
+
+research_now
+monitor
+alert_on_change
+recurring_check
+Examples:
+
+User input
+
+find pubs in arundel
+→ research_now
+
+User input
+
+keep checking when new hospitals offer this treatment
+→ monitor
+
+This layer controls run scheduling, not interpretation.
+
+Phase 4 — Deterministic Schema Validation
+After the LLM generates the mission, enforce strict validation.
+
+Validate:
+
+allowed constraint types
+allowed fields
+allowed operators
+valid structure
+Example allowed fields for text_compare:
+
+name
+website
+description
+address
+Reject anything outside the schema.
+
+This prevents LLM drift.
+
+Phase 5 — Remove Regex Language Interpretation
+Regex should not parse human language.
+
+Remove regex patterns that attempt to interpret:
+
+with the word X in the name
+that have the word X
+named X
+Regex should only perform safe cleanup.
+
+Allowed regex tasks:
+
+trim whitespace
+remove quotes
+strip boilerplate phrases
+Example cleanup:
+
+"swan in the name" → swan
+But regex should never decide constraint type.
+
+Phase 6 — Deterministic Tool Planning
+Once constraints are structured, tool selection becomes deterministic.
+
+Examples:
+
+Text compare
+text_compare + name
+→ Google Places search
+→ filter results by name
+Website evidence
+website_evidence
+→ WEB_VISIT
+→ evidence extraction
+→ Tower semantic judgement
+Relationship check
+relationship_check
+→ web search
+→ verify connections
+This removes LLM tool selection randomness.
+
+Phase 7 — Multi-Constraint Mission Builder
+User queries often contain multiple checks.
+
+Example:
+
+find cafes in manchester that mention vegan food on their website
+Mission:
+
+entity_category: cafe
+location: Manchester
+
+constraints:
+- type: website_evidence
+  value: vegan food
+Planner executes constraints sequentially.
+
+Phase 8 — Observability
+Store three layers for debugging.
+
+raw_user_input
+semantic_interpretation (pass 1)
+structured_mission (pass 2)
+Example record:
+
+User input
+find pubs in arundel that have the word swan in the name
+
+Semantic interpretation
+pubs in Arundel whose name contains swan
+
+Structured mission
+text_compare name contains swan
+This allows rapid diagnosis of failures.
+
+Phase 9 — Shadow Deployment
+Run the new system in parallel with the current extractor.
+
+Log differences between:
+
+old extraction
+new extraction
+Track:
+
+• constraint accuracy
+• mission structure correctness
+• planner compatibility
+
+Switch when stable.
+
+Phase 10 — Planner Integration
+Update the planner so it expects taxonomy constraints rather than raw user phrasing.
+
+Planner inputs become:
+
+entity
+location
+constraint list
+mission mode
+Planner outputs:
+
+tool sequence
+verification steps
+expected artefacts
+Final System Behaviour
+Example input
+
+find pubs in arundel that have the word swan in the name
+System flow
+
+User input
+↓
+LLM meaning extraction
+↓
+LLM constraint mapping
+↓
+schema validation
+↓
+planner
+↓
+Google Places search
+↓
+name filter
+↓
+results
+↓
+Tower verification
+Why This Upgrade Matters
+This change will:
+
+• stop brittle phrase-matching logic
+• eliminate regex explosion
+• make planning deterministic
+• allow broader user language understanding
+• improve explainability and debugging
+
+Result
+Wyshbone becomes capable of reliably interpreting:
+
+• casual language
+• complex requests
+• multi-constraint searches
+• monitoring tasks
+
+
+without needing new regex patterns for every phrasing variation.
