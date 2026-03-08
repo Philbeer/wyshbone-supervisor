@@ -1,4 +1,4 @@
-import type { StructuredMission, MissionConstraint, MissionExtractionTrace, MissionFailureStage, ConstraintChecklist } from './mission-schema';
+import type { StructuredMission, MissionConstraint, MissionExtractionTrace, MissionFailureStage, ConstraintChecklist, ImplicitExpansionTrace } from './mission-schema';
 import type { ParsedGoal, StructuredConstraint, SuccessCriteria } from './goal-to-constraints';
 import { inferCountryFromLocation, isAttributeLikeConstraint } from './goal-to-constraints';
 import type { CanonicalIntent, CanonicalConstraint } from './canonical-intent';
@@ -65,6 +65,7 @@ export interface MissionDiagnosticPayload {
     raw_user_input: string;
     pass1_semantic_interpretation: string;
     pass1_constraint_checklist: ConstraintChecklist | null;
+    implicit_expansion: ImplicitExpansionTrace | null;
     pass2_structured_mission: {
       entity_category: string;
       location_text: string | null;
@@ -120,6 +121,7 @@ export function buildMissionDiagnosticPayload(
       raw_user_input: trace.raw_user_input.substring(0, 500),
       pass1_semantic_interpretation: trace.pass1_semantic_interpretation.substring(0, 500),
       pass1_constraint_checklist: trace.pass1_constraint_checklist,
+      implicit_expansion: trace.implicit_expansion,
       pass2_structured_mission: mission ? {
         entity_category: mission.entity_category,
         location_text: mission.location_text,
@@ -536,6 +538,12 @@ export function logMissionShadow(
     const cl = trace.pass1_constraint_checklist;
     const active = Object.entries(cl).filter(([, v]) => v).map(([k]) => k);
     console.log(`[MISSION_SHADOW] Pass 1 checklist (active): ${active.length > 0 ? active.join(', ') : 'none'}`);
+  }
+  if (trace.implicit_expansion && trace.implicit_expansion.inferred_constraints.length > 0) {
+    console.log(`[MISSION_SHADOW] Implicit expansion: ${trace.implicit_expansion.inferred_constraints.length} inferred constraint(s)`);
+    for (const note of trace.implicit_expansion.inference_notes) {
+      console.log(`[MISSION_SHADOW]   ${note}`);
+    }
   }
   console.log(`[MISSION_SHADOW] failure_stage=${trace.failure_stage}`);
 

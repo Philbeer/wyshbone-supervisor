@@ -4,6 +4,7 @@ import {
   type MissionValidationResult,
   type MissionFailureStage,
   type ConstraintChecklist,
+  type ImplicitExpansionTrace,
   parseAndValidateMissionJSON,
   MISSION_CONSTRAINT_TYPES,
   MISSION_MODES,
@@ -20,6 +21,7 @@ import {
   LOCATION_CONSTRAINT_OPERATORS,
   HARDNESS_VALUES,
 } from './mission-schema';
+import { expandImplicitConstraints, type ImplicitExpansionResult } from './implicit-constraint-expander';
 
 const PASS1_SYSTEM_PROMPT = `You are a semantic interpreter for a business search system. Your job is to read a messy user message and restate what the user is actually asking for in clean, unambiguous language.
 
@@ -601,6 +603,7 @@ export async function extractStructuredMission(
       raw_user_input: userMessage,
       pass1_semantic_interpretation: '',
       pass1_constraint_checklist: null,
+      implicit_expansion: null,
       pass2_structured_mission: null,
       pass2_raw_json: '',
       validation_result: { ok: false, mission: null, errors: ['No LLM API key available'] },
@@ -633,6 +636,7 @@ export async function extractStructuredMission(
       raw_user_input: userMessage,
       pass1_semantic_interpretation: '',
       pass1_constraint_checklist: null,
+      implicit_expansion: null,
       pass2_structured_mission: null,
       pass2_raw_json: '',
       validation_result: { ok: false, mission: null, errors: [`Pass 1 LLM call failed: ${err.message}`] },
@@ -656,7 +660,28 @@ export async function extractStructuredMission(
     console.warn(`[MISSION_EXTRACTOR] Pass 1 returned non-JSON — checklist unavailable, falling back to raw text`);
   }
 
-  const pass2Prompt = `Convert this semantic interpretation into the structured mission JSON schema:\n\n"${pass1Result}"`;
+  const expansion = expandImplicitConstraints(userMessage, pass1Checklist, pass1Result);
+  const expansionTrace: ImplicitExpansionTrace = {
+    explicit_constraints: expansion.explicit_constraints,
+    inferred_constraints: expansion.inferred_constraints,
+    inference_notes: expansion.inference_notes,
+    had_addendum: expansion.semantic_addendum !== null,
+  };
+
+  if (expansion.inferred_constraints.length > 0) {
+    console.log(`[MISSION_EXTRACTOR] Implicit expansion: ${expansion.inferred_constraints.length} inferred constraint(s)`);
+    for (const note of expansion.inference_notes) {
+      console.log(`[MISSION_EXTRACTOR]   ${note}`);
+    }
+  }
+
+  let pass2Input = pass1Result;
+  if (expansion.semantic_addendum) {
+    pass2Input = `${pass1Result} ${expansion.semantic_addendum}`;
+    console.log(`[MISSION_EXTRACTOR] Pass 2 input enriched with addendum: "${expansion.semantic_addendum}"`);
+  }
+
+  const pass2Prompt = `Convert this semantic interpretation into the structured mission JSON schema:\n\n"${pass2Input}"`;
 
   let pass2RawResponse = '';
   const pass2Start = Date.now();
@@ -669,6 +694,7 @@ export async function extractStructuredMission(
       raw_user_input: userMessage,
       pass1_semantic_interpretation: pass1Result,
       pass1_constraint_checklist: pass1Checklist,
+      implicit_expansion: expansionTrace,
       pass2_structured_mission: null,
       pass2_raw_json: '',
       validation_result: { ok: false, mission: null, errors: [`Pass 2 LLM call failed: ${err.message}`] },
@@ -700,6 +726,7 @@ export async function extractStructuredMission(
       raw_user_input: userMessage,
       pass1_semantic_interpretation: pass1Result,
       pass1_constraint_checklist: pass1Checklist,
+      implicit_expansion: expansionTrace,
       pass2_structured_mission: null,
       pass2_raw_json: pass2RawResponse,
       validation_result: validation,
@@ -723,6 +750,7 @@ export async function extractStructuredMission(
     raw_user_input: userMessage,
     pass1_semantic_interpretation: pass1Result,
     pass1_constraint_checklist: pass1Checklist,
+    implicit_expansion: expansionTrace,
     pass2_structured_mission: validation.mission,
     pass2_raw_json: pass2RawResponse,
     validation_result: validation,

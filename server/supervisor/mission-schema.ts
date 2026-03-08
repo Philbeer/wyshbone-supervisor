@@ -185,10 +185,25 @@ export interface ConstraintChecklist {
   has_monitoring_intent: boolean;
 }
 
+export interface ImplicitExpansionTrace {
+  explicit_constraints: string[];
+  inferred_constraints: Array<{
+    type: string;
+    field: string;
+    operator: string;
+    value: string | number | null;
+    hardness: string;
+    source: string;
+  }>;
+  inference_notes: string[];
+  had_addendum: boolean;
+}
+
 export interface MissionExtractionTrace {
   raw_user_input: string;
   pass1_semantic_interpretation: string;
   pass1_constraint_checklist: ConstraintChecklist | null;
+  implicit_expansion: ImplicitExpansionTrace | null;
   pass2_structured_mission: StructuredMission | null;
   pass2_raw_json: string;
   validation_result: MissionValidationResult;

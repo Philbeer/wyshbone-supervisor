@@ -285,6 +285,23 @@ export async function executeMissionDrivenPlan(
     });
   }
 
+  if (missionTrace.implicit_expansion && (missionTrace.implicit_expansion.inferred_constraints.length > 0 || missionTrace.implicit_expansion.inference_notes.length > 0)) {
+    await createArtefact({
+      runId,
+      type: 'implicit_constraint_expansion',
+      title: 'Implicit Constraint Expansion',
+      summary: `Expanded ${missionTrace.implicit_expansion.inferred_constraints.length} inferred constraint(s) from user phrasing`,
+      payload: {
+        explicit_constraints: missionTrace.implicit_expansion.explicit_constraints,
+        inferred_constraints: missionTrace.implicit_expansion.inferred_constraints as unknown as Record<string, unknown>[],
+        inference_notes: missionTrace.implicit_expansion.inference_notes,
+        had_addendum: missionTrace.implicit_expansion.had_addendum,
+      },
+      userId,
+      conversationId,
+    });
+  }
+
   await logAFREvent({
     userId, runId, conversationId, clientRequestId,
     actionTaken: 'plan_execution_started', status: 'pending',
