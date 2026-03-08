@@ -1,0 +1,61 @@
+Search the entire repository before answering. Do not limit to open files.
+
+We have identified a Stage 1 hardening gap: important meaning from the user request can still be silently dropped between pass 1 semantic extraction and pass 2 structured mission output.
+
+I want you to implement a deterministic post-extraction completeness check in Supervisor.
+
+Goal:
+After the structured mission is produced, compare it against:
+1. raw user input
+2. pass 1 semantic interpretation
+3. pass 2 structured mission
+
+Detect when important concepts from the user request were not preserved in the structured mission.
+
+This is not a planner change. It is a Stage 1 interpretation-audit layer.
+
+What to detect first:
+- dropped relationship meaning
+  examples:
+  “works with”
+  “supplies”
+  “partners with”
+  “used by”
+  “funded by”
+- dropped time meaning
+  examples:
+  “opened in last 6 months”
+  “new”
+  “recently”
+- dropped website evidence meaning
+  examples:
+  “mentions live music on website”
+  “says vegan on site”
+- dropped status meaning
+  examples:
+  “currently open”
+  “for sale”
+- dropped ranking/preference language
+  examples:
+  “best”
+  “top”
+  “highest rated”
+
+Requirements:
+1. Create a deterministic completeness-check module.
+2. It should inspect raw input + pass1 text + structured mission.
+3. It should emit a structured audit result such as:
+   - ok: true/false
+   - warnings: []
+   - dropped_concepts: []
+   - recommended_action: proceed | clarify | block
+4. If a hard meaning appears to have been dropped, do NOT silently proceed as if extraction is fine.
+5. Emit an artefact/log entry into AFR so we can inspect these failures.
+6. Keep this implementation production-grade and isolated. Do not hack it into prompts only.
+
+Important:
+- Do not redesign the planner yet.
+- Do not redesign Tower yet.
+- Focus only on Stage 1 hardening.
+- Reuse existing mission schema / extractor files where sensible.
+- Show me exactly which files you changed and the final audit flow.

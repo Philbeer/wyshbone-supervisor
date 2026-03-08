@@ -29,6 +29,7 @@ import { getClarifySession, didSessionExpire, createClarifySession, closeClarify
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
 import { extractStructuredMission, getMissionExtractorMode } from './supervisor/mission-extractor';
+import { checkMissionCompleteness, logCompletenessToAFR, type CompletenessCheckResult } from './supervisor/mission-completeness-check';
 import { logMissionShadow, buildMissionDiagnosticPayload, missionToParsedGoal } from './supervisor/mission-bridge';
 import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, preExecutionConstraintGateFromIntent, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
@@ -995,6 +996,86 @@ class SupervisorService {
           userId: task.user_id,
           conversationId: task.conversation_id,
         }).catch((e: any) => console.warn(`[MISSION_EXTRACTOR] postArtefactToUI failed (non-fatal): ${e.message}`));
+
+        if (missionResult.ok && missionResult.mission) {
+          try {
+            const completenessResult = checkMissionCompleteness(
+              rawMsg,
+              missionResult.trace.pass1_semantic_interpretation,
+              missionResult.mission,
+            );
+
+            logCompletenessToAFR(
+              completenessResult,
+              task.user_id,
+              jobId,
+              task.conversation_id,
+            ).catch((e: any) => console.warn(`[COMPLETENESS_CHECK] AFR log failed (non-fatal): ${e.message}`));
+
+            if (!completenessResult.ok) {
+              const droppedSummary = completenessResult.dropped_concepts
+                .map((d) => `${d.severity}:${d.category}:"${d.matched_phrase}"`)
+                .join(', ');
+              console.warn(
+                `[COMPLETENESS_CHECK] runId=${jobId} DROPPED CONCEPTS: ${droppedSummary} ` +
+                `action=${completenessResult.recommended_action}`
+              );
+
+              createArtefact({
+                runId: jobId,
+                type: 'mission_completeness_check',
+                title: `Completeness check: ${completenessResult.dropped_concepts.length} dropped concept(s) — ${completenessResult.recommended_action}`,
+                summary: `ok=false action=${completenessResult.recommended_action} dropped=${completenessResult.dropped_concepts.length} warnings=${completenessResult.warnings.length}`,
+                payload: completenessResult as unknown as Record<string, unknown>,
+                userId: task.user_id,
+                conversationId: task.conversation_id,
+              }).catch((e: any) => console.warn(`[COMPLETENESS_CHECK] Artefact creation failed (non-fatal): ${e.message}`));
+
+              this.postArtefactToUI({
+                runId: jobId,
+                clientRequestId,
+                type: 'diagnostic',
+                payload: {
+                  ...completenessResult as unknown as Record<string, unknown>,
+                  title: 'Mission completeness audit',
+                  diagnostic_type: 'mission_completeness_check',
+                },
+                userId: task.user_id,
+                conversationId: task.conversation_id,
+              }).catch(() => {});
+
+              if (completenessResult.recommended_action === 'block') {
+                console.error(
+                  `[COMPLETENESS_CHECK] runId=${jobId} BLOCKING — hard meaning dropped from mission. ` +
+                  `Invalidating mission result to force fallback.`
+                );
+                missionResult = {
+                  ...missionResult,
+                  ok: false,
+                  mission: null,
+                  trace: {
+                    ...missionResult.trace,
+                    failure_stage: 'pass2_schema_validation',
+                    validation_result: {
+                      ok: false,
+                      mission: null,
+                      errors: completenessResult.dropped_concepts
+                        .filter((d) => d.severity === 'hard')
+                        .map(
+                          (d) =>
+                            `Completeness block: ${d.category} meaning "${d.matched_phrase}" detected in ${d.source} but no ${d.expected_constraint_type} constraint in mission`,
+                        ),
+                    },
+                  },
+                };
+              }
+            } else {
+              console.log(`[COMPLETENESS_CHECK] runId=${jobId} PASSED — no dropped concepts`);
+            }
+          } catch (checkErr: any) {
+            console.warn(`[COMPLETENESS_CHECK] Check failed (non-fatal): ${checkErr.message}`);
+          }
+        }
       } catch (missionErr: any) {
         console.warn(`[MISSION_EXTRACTOR] Extraction failed (non-fatal): ${missionErr.message}`);
         missionResult = null;
