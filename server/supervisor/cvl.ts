@@ -1,4 +1,5 @@
 import type { StructuredConstraint } from './goal-to-constraints';
+import { isAttributeLikeConstraint } from './goal-to-constraints';
 import { verifyLocationGeo, type GeoVerificationResult } from './geo-regions';
 
 const PLACES_SUPPORTED_CATEGORIES = new Set([
@@ -229,6 +230,11 @@ export function buildCapabilityCheck(
         break;
 
       case 'HAS_ATTRIBUTE':
+      case 'RELATIONSHIP_CHECK':
+      case 'STATUS_CHECK':
+      case 'TIME_CONSTRAINT':
+      case 'WEBSITE_EVIDENCE':
+      case 'RANKING':
         verifiable = true;
         verification_method = 'website_visit';
         reason = 'Attribute verified via website visit (WEB_VISIT) — keyword scan on official site pages';
@@ -641,7 +647,12 @@ function verifyOneConstraint(
       break;
     }
 
-    case 'HAS_ATTRIBUTE': {
+    case 'HAS_ATTRIBUTE':
+    case 'RELATIONSHIP_CHECK':
+    case 'STATUS_CHECK':
+    case 'TIME_CONSTRAINT':
+    case 'WEBSITE_EVIDENCE':
+    case 'RANKING': {
       const attrValue = typeof constraint.value === 'string' ? constraint.value.toLowerCase() : '';
       const leadEvMap = attributeEvidence?.get(lead.placeId);
       const attrEv = leadEvMap?.get(attrValue);

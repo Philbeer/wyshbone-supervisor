@@ -14,7 +14,7 @@ import { redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-e
 import { buildToolPlan, persistToolPlanExplainer, getOrderedToolNames, type LeadContext, type ToolStepId, type ToolPlanExplainer } from './supervisor/tool-planning-policy';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
 import { buildShortfallDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, type PlanV2Constraints } from './supervisor/replan-policy';
-import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, buildRequestedCount, DEFAULT_LEADS_TARGET, sanitiseLocationString, detectExactnessMode, detectDoNotStop, type ParsedGoal, type StructuredConstraint, type RequestedCountCanonical, type ExactnessMode } from './supervisor/goal-to-constraints';
+import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, buildRequestedCount, DEFAULT_LEADS_TARGET, sanitiseLocationString, detectExactnessMode, detectDoNotStop, isAttributeLikeConstraint, type ParsedGoal, type StructuredConstraint, type RequestedCountCanonical, type ExactnessMode } from './supervisor/goal-to-constraints';
 import { emitSearchQueryCompiled, type SearchQueryCompiledPayload } from './supervisor/search-query-compiled';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
 import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type DeliverySummaryPayload } from './supervisor/delivery-summary';
@@ -30,7 +30,7 @@ import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelation
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
 import { extractStructuredMission, getMissionExtractorMode } from './supervisor/mission-extractor';
 import { checkMissionCompleteness, logCompletenessToAFR, type CompletenessCheckResult } from './supervisor/mission-completeness-check';
-import { logMissionShadow, buildMissionDiagnosticPayload, missionToParsedGoal } from './supervisor/mission-bridge';
+import { logMissionShadow, buildMissionDiagnosticPayload, missionToParsedGoal, buildHandoffDiagnostic, type HandoffDiagnostic } from './supervisor/mission-bridge';
 import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, preExecutionConstraintGateFromIntent, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
@@ -1131,6 +1131,40 @@ class SupervisorService {
         earlyParsedGoal = missionToParsedGoal(missionResult.mission, rawMsg.trim());
         intentSource = 'mission';
         console.log(`[INTENT_SOURCE] mission_active — bt=${earlyParsedGoal.business_type} loc=${earlyParsedGoal.location} count=${earlyParsedGoal.requested_count_user} constraints=${earlyParsedGoal.constraints.length}`);
+
+        const handoffDiag = buildHandoffDiagnostic(missionResult.mission, earlyParsedGoal.constraints);
+        if (handoffDiag.downgrade_count > 0) {
+          console.warn(
+            `[HANDOFF_DIAGNOSTIC] runId=${jobId} DOWNGRADES DETECTED: ${handoffDiag.downgrade_count} — ` +
+            handoffDiag.downgrades.map(d => `${d.reason}: ${d.detail}`).join('; ')
+          );
+        } else {
+          console.log(`[HANDOFF_DIAGNOSTIC] runId=${jobId} fidelity=${handoffDiag.mapping_fidelity} — no downgrades`);
+        }
+
+        createArtefact({
+          runId: jobId,
+          type: 'mission_handoff_diagnostic',
+          title: `Handoff: ${handoffDiag.mapping_fidelity} fidelity — ${handoffDiag.canonical_constraints.length} canonical → ${handoffDiag.mapped_constraints.length} mapped` +
+            (handoffDiag.downgrade_count > 0 ? ` (${handoffDiag.downgrade_count} downgrade(s))` : ''),
+          summary: `fidelity=${handoffDiag.mapping_fidelity} canonical=${handoffDiag.canonical_constraints.length} mapped=${handoffDiag.mapped_constraints.length} downgrades=${handoffDiag.downgrade_count}`,
+          payload: handoffDiag as unknown as Record<string, unknown>,
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch((e: any) => console.warn(`[HANDOFF_DIAGNOSTIC] Artefact creation failed (non-fatal): ${e.message}`));
+
+        this.postArtefactToUI({
+          runId: jobId,
+          clientRequestId,
+          type: 'diagnostic',
+          payload: {
+            ...handoffDiag as unknown as Record<string, unknown>,
+            title: 'Mission handoff diagnostic',
+            diagnostic_type: 'mission_handoff_diagnostic',
+          },
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch(() => {});
       } catch (bridgeErr: any) {
         legacyFallbackReason = `mission_bridge_error: ${bridgeErr.message?.substring(0, 100)}`;
         console.warn(`[INTENT_SOURCE] mission bridge failed, falling through to canonical: ${bridgeErr.message}`);
@@ -3660,7 +3694,7 @@ class SupervisorService {
         const ENRICH_CONCURRENCY = 3;
 
         const willRunSemanticVerification = structuredConstraints.some(
-          c => c.type === 'HAS_ATTRIBUTE' && c.hard
+          c => isAttributeLikeConstraint(c.type) && c.hard
         ) && !usedStub;
 
         const enrichOneLead = async (lead: typeof enrichableLeads[0], eli: number) => {
@@ -3989,7 +4023,7 @@ class SupervisorService {
     let attributeVerificationAttempted = false;
     let attributeVerificationStopped = false;
     const hardAttributeConstraints = structuredConstraints.filter(
-      c => c.type === 'HAS_ATTRIBUTE' && c.hard
+      c => isAttributeLikeConstraint(c.type) && c.hard
     );
     const hasHardAttribute = hardAttributeConstraints.length > 0;
     const attrVerificationResults: Array<{

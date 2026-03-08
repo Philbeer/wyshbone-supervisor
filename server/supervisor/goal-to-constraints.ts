@@ -24,9 +24,36 @@ export const CONSTRAINT_TYPES = [
   'NAME_CONTAINS',
   'MUST_USE_TOOL',
   'HAS_ATTRIBUTE',
+  'RELATIONSHIP_CHECK',
+  'STATUS_CHECK',
+  'TIME_CONSTRAINT',
+  'WEBSITE_EVIDENCE',
+  'RANKING',
 ] as const;
 
 export type ConstraintType = typeof CONSTRAINT_TYPES[number];
+
+export const ATTRIBUTE_LIKE_TYPES: readonly ConstraintType[] = [
+  'HAS_ATTRIBUTE',
+  'RELATIONSHIP_CHECK',
+  'STATUS_CHECK',
+  'TIME_CONSTRAINT',
+  'WEBSITE_EVIDENCE',
+  'RANKING',
+] as const;
+
+export function isAttributeLikeConstraint(type: string): boolean {
+  return (ATTRIBUTE_LIKE_TYPES as readonly string[]).includes(type);
+}
+
+export const CanonicalSourceSchema = z.object({
+  type: z.string(),
+  field: z.string(),
+  operator: z.string(),
+  value: z.union([z.string(), z.number(), z.boolean(), z.null()]),
+  hardness: z.string(),
+  value_secondary: z.union([z.string(), z.number(), z.null()]).optional(),
+}).optional();
 
 export const StructuredConstraintSchema = z.object({
   id: z.string(),
@@ -36,6 +63,7 @@ export const StructuredConstraintSchema = z.object({
   value: z.union([z.string(), z.number(), z.object({ center: z.string(), km: z.number() })]),
   hard: z.boolean(),
   rationale: z.string(),
+  canonical: CanonicalSourceSchema,
 });
 
 export type StructuredConstraint = z.infer<typeof StructuredConstraintSchema>;

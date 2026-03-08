@@ -1,0 +1,83 @@
+Search the entire repository before answering. Do not limit to open files.
+
+We need to finish the last Stage 1 gap.
+
+Problem:
+The mission extractor is now mostly understanding the user correctly, but the extracted meaning is still getting blurred or degraded in the handoff to downstream constraint / planner layers.
+
+Example:
+If Stage 1 extracts:
+- relationship_check
+- status_check
+- time_constraint
+- ranking
+
+those exact semantics must survive downstream unchanged.
+
+Right now, meaning is sometimes downgraded into looser generic forms like:
+- HAS_ATTRIBUTE
+- vague relationship labels
+- generic status wording
+
+Goal:
+Make the structured mission the single authoritative source of truth after extraction.
+
+What I want implemented
+
+1. Lock the post-extraction handoff contract
+After pass 2 structured mission is validated, downstream systems must receive and preserve the exact extracted constraint semantics.
+Do not silently remap rich constraint types into weaker generic types unless there is an explicit, traceable compatibility layer.
+
+2. Preserve exact Stage 1 constraint meaning
+For each extracted constraint, preserve at minimum:
+- type
+- field
+- operator
+- value
+- hardness
+
+And where relevant also preserve richer fields such as:
+- relationship target
+- relationship direction if known
+- time window / comparison meaning
+- status target
+- ranking intent / ranking mode
+- evidence target text
+
+3. Add a canonical-to-legacy mapping layer if needed
+If older downstream code still requires legacy constraint shapes, create an explicit adapter layer.
+Requirements for that adapter:
+- preserve original canonical constraint alongside any legacy mapped version
+- never discard the original canonical constraint
+- make the mapping traceable in logs / artefacts
+- make it obvious when a rich canonical constraint was mapped into a weaker legacy form
+
+4. Improve observability
+In artefacts / diagnostics / AFR, show clearly:
+- canonical extracted constraints
+- mapped downstream constraints
+- whether any semantic downgrade occurred
+- why any mapping occurred
+
+5. Add downgrade detection
+If a canonical constraint is being weakened or blurred in downstream mapping, emit a warning/diagnostic.
+Examples:
+- relationship_check mapped to generic HAS_ATTRIBUTE
+- status_check losing the status target
+- time_constraint losing the actual time meaning
+- ranking losing the ranking intent
+
+6. Keep this as a Stage 1 handoff fix
+Do not redesign the planner yet.
+Do not redesign Tower yet.
+Do not add strategy selection yet.
+This task is only:
+extract meaning cleanly -> preserve that meaning cleanly downstream
+
+What I want back
+
+1. Exact files changed
+2. Short explanation of the new handoff contract
+3. Where canonical constraints now live
+4. Where legacy mapping happens if still needed
+5. How downgrade detection is surfaced in artefacts / diagnostics

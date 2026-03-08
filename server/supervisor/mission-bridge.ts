@@ -1,7 +1,45 @@
 import type { StructuredMission, MissionConstraint, MissionExtractionTrace, MissionFailureStage } from './mission-schema';
 import type { ParsedGoal, StructuredConstraint, SuccessCriteria } from './goal-to-constraints';
-import { inferCountryFromLocation } from './goal-to-constraints';
+import { inferCountryFromLocation, isAttributeLikeConstraint } from './goal-to-constraints';
 import type { CanonicalIntent, CanonicalConstraint } from './canonical-intent';
+
+export type DowngradeReason =
+  | 'relationship_to_has_attribute'
+  | 'status_to_has_attribute'
+  | 'time_to_has_attribute'
+  | 'website_evidence_to_has_attribute'
+  | 'ranking_to_count_min';
+
+export interface ConstraintDowngrade {
+  constraint_index: number;
+  canonical_type: string;
+  mapped_type: string;
+  reason: DowngradeReason;
+  detail: string;
+}
+
+export interface HandoffDiagnostic {
+  canonical_constraints: Array<{
+    index: number;
+    type: string;
+    field: string;
+    operator: string;
+    value: unknown;
+    hardness: string;
+  }>;
+  mapped_constraints: Array<{
+    id: string;
+    type: string;
+    field: string;
+    operator: string;
+    value: unknown;
+    hard: boolean;
+    has_canonical: boolean;
+  }>;
+  downgrades: ConstraintDowngrade[];
+  downgrade_count: number;
+  mapping_fidelity: 'exact' | 'degraded' | 'unknown';
+}
 
 export interface MissionShadowComparison {
   mission: StructuredMission;
@@ -135,7 +173,20 @@ export function compareMissionWithLegacy(
   };
 }
 
+function buildCanonical(c: MissionConstraint) {
+  return {
+    type: c.type,
+    field: c.field,
+    operator: c.operator,
+    value: c.value,
+    hardness: c.hardness,
+    ...(c.value_secondary !== undefined && c.value_secondary !== null ? { value_secondary: c.value_secondary } : {}),
+  };
+}
+
 function mapMissionConstraintToStructured(c: MissionConstraint, index: number): StructuredConstraint | null {
+  const canonical = buildCanonical(c);
+
   switch (c.type) {
     case 'text_compare': {
       if (c.operator === 'starts_with') {
@@ -147,6 +198,7 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
           value: typeof c.value === 'string' ? c.value : '',
           hard: c.hardness === 'hard',
           rationale: `Name starts with "${c.value}"`,
+          canonical,
         };
       }
       if (c.field === 'name') {
@@ -158,6 +210,7 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
           value: typeof c.value === 'string' ? c.value : '',
           hard: c.hardness === 'hard',
           rationale: `Name contains "${c.value}"`,
+          canonical,
         };
       }
       return null;
@@ -174,6 +227,7 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
         value: val,
         hard: c.hardness === 'hard',
         rationale: `Has attribute "${val}"`,
+        canonical,
       };
     }
 
@@ -188,6 +242,7 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
           value: typeof c.value === 'number' ? c.value : 0,
           hard: c.hardness === 'hard',
           rationale: `${c.field} ${op} ${c.value}`,
+          canonical,
         };
       }
       return null;
@@ -197,13 +252,14 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
       const val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
       const shortName = val.replace(/\s+/g, '_').toLowerCase().substring(0, 20);
       return {
-        id: `c_attr_${shortName}_m${index}`,
-        type: 'HAS_ATTRIBUTE',
-        field: 'attribute',
-        operator: 'has',
+        id: `c_webev_${shortName}_m${index}`,
+        type: 'WEBSITE_EVIDENCE',
+        field: 'website_text',
+        operator: c.operator,
         value: val,
         hard: c.hardness === 'hard',
-        rationale: `Website evidence for "${val}"`,
+        rationale: `Website must contain evidence of "${val}"`,
+        canonical,
       };
     }
 
@@ -211,12 +267,13 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
       const val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
       return {
         id: `c_time_m${index}`,
-        type: 'HAS_ATTRIBUTE',
-        field: 'time_constraint',
-        operator: 'has',
-        value: `${c.field} ${c.operator} ${val}`,
+        type: 'TIME_CONSTRAINT',
+        field: c.field,
+        operator: c.operator,
+        value: val,
         hard: c.hardness === 'hard',
         rationale: `Time constraint: ${c.field} ${c.operator} ${val}`,
+        canonical,
       };
     }
 
@@ -225,12 +282,13 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
       const shortName = val.replace(/\s+/g, '_').toLowerCase().substring(0, 20);
       return {
         id: `c_status_${shortName}_m${index}`,
-        type: 'HAS_ATTRIBUTE',
-        field: 'status',
-        operator: 'has',
+        type: 'STATUS_CHECK',
+        field: c.field,
+        operator: c.operator,
         value: val,
         hard: c.hardness === 'hard',
-        rationale: `Status check: ${c.field} ${c.operator} "${val}"`,
+        rationale: `Status: ${c.field} ${c.operator} "${val}"`,
+        canonical,
       };
     }
 
@@ -239,12 +297,13 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
       const shortName = val.replace(/\s+/g, '_').toLowerCase().substring(0, 20);
       return {
         id: `c_rel_${shortName}_m${index}`,
-        type: 'HAS_ATTRIBUTE',
-        field: 'relationship',
-        operator: 'has',
-        value: `${c.operator} ${val}`,
+        type: 'RELATIONSHIP_CHECK',
+        field: c.field,
+        operator: c.operator,
+        value: val,
         hard: c.hardness === 'hard',
         rationale: `Relationship: ${c.field} ${c.operator} "${val}"`,
+        canonical,
       };
     }
 
@@ -252,12 +311,13 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
       const val = typeof c.value === 'number' ? c.value : null;
       return {
         id: `c_ranking_m${index}`,
-        type: 'COUNT_MIN',
-        field: c.field || 'ranking',
-        operator: '>=',
+        type: 'RANKING',
+        field: c.field || 'rating',
+        operator: c.operator,
         value: val ?? 0,
         hard: c.hardness === 'hard',
-        rationale: `Ranking: ${c.operator} ${val ?? 'unspecified'} by ${c.field}`,
+        rationale: `Ranking: ${c.operator} ${val ?? 'unspecified'} by ${c.field || 'rating'}`,
+        canonical,
       };
     }
 
@@ -278,6 +338,7 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
           value: { center: val, km: 10 },
           hard: c.hardness === 'hard',
           rationale: `${c.operator === 'within' ? 'Within' : 'Near'} ${val}`,
+          canonical,
         };
       }
       return {
@@ -288,12 +349,71 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
         value: val,
         hard: c.hardness === 'hard',
         rationale: `Location constraint: ${val}`,
+        canonical,
       };
     }
 
     default:
       return null;
   }
+}
+
+export function buildHandoffDiagnostic(
+  mission: StructuredMission,
+  mappedConstraints: StructuredConstraint[],
+): HandoffDiagnostic {
+  const canonicalConstraints = mission.constraints.map((c, i) => ({
+    index: i,
+    type: c.type,
+    field: c.field,
+    operator: c.operator,
+    value: c.value,
+    hardness: c.hardness,
+  }));
+
+  const mapped = mappedConstraints
+    .filter(c => c.canonical)
+    .map(c => ({
+      id: c.id,
+      type: c.type,
+      field: c.field,
+      operator: c.operator,
+      value: c.value,
+      hard: c.hard,
+      has_canonical: !!c.canonical,
+    }));
+
+  const downgrades: ConstraintDowngrade[] = [];
+
+  for (const c of mappedConstraints) {
+    if (!c.canonical) continue;
+    const ct = c.canonical.type;
+    const mt = c.type;
+
+    if (ct === 'relationship_check' && mt === 'HAS_ATTRIBUTE') {
+      downgrades.push({ constraint_index: mappedConstraints.indexOf(c), canonical_type: ct, mapped_type: mt, reason: 'relationship_to_has_attribute', detail: `Relationship "${c.canonical.operator} ${c.canonical.value}" downgraded to generic attribute` });
+    }
+    if (ct === 'status_check' && mt === 'HAS_ATTRIBUTE') {
+      downgrades.push({ constraint_index: mappedConstraints.indexOf(c), canonical_type: ct, mapped_type: mt, reason: 'status_to_has_attribute', detail: `Status "${c.canonical.field} ${c.canonical.operator} ${c.canonical.value}" downgraded to generic attribute` });
+    }
+    if (ct === 'time_constraint' && mt === 'HAS_ATTRIBUTE') {
+      downgrades.push({ constraint_index: mappedConstraints.indexOf(c), canonical_type: ct, mapped_type: mt, reason: 'time_to_has_attribute', detail: `Time constraint "${c.canonical.field} ${c.canonical.operator} ${c.canonical.value}" downgraded to generic attribute` });
+    }
+    if (ct === 'website_evidence' && mt === 'HAS_ATTRIBUTE') {
+      downgrades.push({ constraint_index: mappedConstraints.indexOf(c), canonical_type: ct, mapped_type: mt, reason: 'website_evidence_to_has_attribute', detail: `Website evidence "${c.canonical.value}" downgraded to generic attribute` });
+    }
+    if (ct === 'ranking' && mt === 'COUNT_MIN') {
+      downgrades.push({ constraint_index: mappedConstraints.indexOf(c), canonical_type: ct, mapped_type: mt, reason: 'ranking_to_count_min', detail: `Ranking "${c.canonical.operator} by ${c.canonical.field}" downgraded to numeric minimum` });
+    }
+  }
+
+  return {
+    canonical_constraints: canonicalConstraints,
+    mapped_constraints: mapped,
+    downgrades,
+    downgrade_count: downgrades.length,
+    mapping_fidelity: downgrades.length === 0 ? 'exact' : 'degraded',
+  };
 }
 
 export function missionToParsedGoal(
@@ -366,7 +486,7 @@ export function missionToParsedGoal(
       if (mapped.type === 'NAME_STARTS_WITH' && !prefixFilter) {
         prefixFilter = typeof mapped.value === 'string' ? mapped.value : null;
       }
-      if (mapped.type === 'HAS_ATTRIBUTE' && !attributeFilter) {
+      if (isAttributeLikeConstraint(mapped.type) && !attributeFilter) {
         attributeFilter = typeof mapped.value === 'string' ? mapped.value : null;
       }
     }

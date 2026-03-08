@@ -1,5 +1,5 @@
 import { canonicaliseBusinessType } from './learning-layer';
-import { inferCountryFromLocation } from './goal-to-constraints';
+import { inferCountryFromLocation, isAttributeLikeConstraint } from './goal-to-constraints';
 
 export interface QueryShapeInput {
   intentClass: 'find_venues' | 'find_leads';
@@ -50,7 +50,7 @@ export function deriveQueryShapeFromGoal(parsed: {
   }
   if (parsed.constraints) {
     for (const c of parsed.constraints) {
-      if (c.type === 'HAS_ATTRIBUTE' && c.hard) {
+      if (isAttributeLikeConstraint(c.type) && c.hard) {
         const attrVal = `attr:${String((c as any).value || c.field).toLowerCase().trim()}`;
         if (!majorConstraintTypes.includes(attrVal)) {
           majorConstraintTypes.push(attrVal);

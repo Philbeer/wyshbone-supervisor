@@ -1,6 +1,6 @@
 import type { CanonicalIntent, CanonicalConstraint } from './canonical-intent';
 import type { ParsedGoal, StructuredConstraint, SuccessCriteria } from './goal-to-constraints';
-import { inferCountryFromLocation } from './goal-to-constraints';
+import { inferCountryFromLocation, isAttributeLikeConstraint } from './goal-to-constraints';
 
 export interface IntentPreviewFields {
   business_type: string | null;
@@ -143,7 +143,7 @@ export function canonicalIntentToParsedGoal(
     const mapped = mapCanonicalConstraintType(c);
     if (mapped) {
       constraints.push(mapped);
-      if (mapped.type === 'HAS_ATTRIBUTE' && !attributeFilter) {
+      if (isAttributeLikeConstraint(mapped.type) && !attributeFilter) {
         attributeFilter = c.raw;
       }
       if (mapped.type === 'NAME_CONTAINS' && !nameFilter) {
