@@ -1,0 +1,133 @@
+You are auditing the Wyshbone codebase to determine the current implementation status of the 3-stage architecture plan.
+
+Your task is NOT to propose changes.
+Your task is to produce a **forensic audit of what actually exists in the code today**.
+
+Focus on these three stages:
+
+STAGE 1 — Chat Interpretation Upgrade
+Goal: convert messy user language into clean structured missions.
+
+Expected components:
+
+1. Fixed constraint taxonomy
+   (types such as entity/category discovery, location constraint, text comparison, category/class check, attribute/property check, relationship check, time/date, numeric/range, website evidence, contact extraction, status check, ranking)
+
+2. Two-pass LLM extraction
+   Pass 1: extract meaning
+   Pass 2: map meaning to schema
+
+3. Deterministic schema validation layer
+   (reject or normalize invalid structures)
+
+4. Regex used only for cleanup / normalization
+   not interpretation
+
+5. Structured mission object produced from chat containing fields such as:
+
+entity
+location
+constraints[]
+mission_mode
+
+Example expected structure:
+
+{
+entity: "pub",
+location: "Arundel",
+constraints: [
+{ type: "text_compare", field: "name", operator: "contains", value: "swan" }
+],
+mission_mode: "research_now"
+}
+
+STAGE 2 — Planner Upgrade
+Goal: deterministic execution plans from structured missions.
+
+Expected components:
+
+planner reads structured mission object
+
+constraint → strategy mapping
+
+deterministic tool selection
+
+plan artefact explaining:
+
+• why this plan
+• which constraints are being checked
+• expected outputs
+
+STAGE 3 — Strategy Layer
+Goal: agent-level behaviour.
+
+Expected components:
+
+goal vs strategy distinction
+
+explicit strategies stored
+
+success / failure conditions
+
+ability to:
+
+continue
+switch strategy
+stop
+
+Tower able to judge strategy rationality.
+
+---
+
+AUDIT TASKS
+
+Search the repository and determine:
+
+1. Which Stage 1 components already exist.
+2. Which Stage 1 components are partially implemented.
+3. Which Stage 1 components do not exist.
+
+Then do the same for:
+
+Stage 2
+Stage 3
+
+Also identify any **partial implementations or accidental pieces** that already exist but were not part of the original plan.
+
+---
+
+OUTPUT FORMAT
+
+Produce a clear report with sections:
+
+1. Stage 1 — Implemented
+
+2. Stage 1 — Partial
+
+3. Stage 1 — Missing
+
+4. Stage 2 — Implemented
+
+5. Stage 2 — Partial
+
+6. Stage 2 — Missing
+
+7. Stage 3 — Implemented
+
+8. Stage 3 — Partial
+
+9. Stage 3 — Missing
+
+For every item found include:
+
+• file paths
+• functions or modules responsible
+• short explanation of behaviour
+
+Finally include a **short summary estimating completion levels**:
+
+Stage 1: % complete
+Stage 2: % complete
+Stage 3: % complete
+
+Be precise and evidence-based. Do not guess.
