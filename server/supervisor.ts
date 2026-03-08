@@ -1460,7 +1460,32 @@ class SupervisorService {
     const pendingConstraint = getPendingContract(task.conversation_id);
     if (pendingConstraint && !getClarifySession(task.conversation_id)) {
       console.log(`[CONSTRAINT_GATE] Follow-up detected for conversation=${task.conversation_id} — resolving constraint contract`);
-      const resolvedContract = resolveFollowUp(pendingConstraint.contract, rawMsg);
+      let resolvedContract = resolveFollowUp(pendingConstraint.contract, rawMsg);
+
+      if (!resolvedContract.can_execute && !resolvedContract.stop_recommended) {
+        const hasUnresolvedRelationship = resolvedContract.constraints.some(
+          c => c.type === 'relationship_predicate' && !c.can_execute
+        );
+        const missionDroppedConstraints = missionResult?.ok && missionResult.mission &&
+          missionResult.mission.constraints.length === 0;
+        const followUpLooksLikeSkip = /\b(?:skip|all\s+results?|don'?t\s+(?:worry|bother|need)|without|ignore|remove|drop)\b/i.test(rawMsg);
+
+        if (hasUnresolvedRelationship && (missionDroppedConstraints || followUpLooksLikeSkip)) {
+          console.log(`[CONSTRAINT_GATE] Mission/follow-up indicates relationship constraint should be dropped — auto-resolving as skip_if_uncertain (mission_dropped=${!!missionDroppedConstraints} followup_skip=${followUpLooksLikeSkip})`);
+          resolvedContract = {
+            ...resolvedContract,
+            can_execute: true,
+            why_blocked: null,
+            clarify_questions: [],
+            constraints: resolvedContract.constraints.map(c => {
+              if (c.type === 'relationship_predicate' && !c.can_execute) {
+                return { ...c, can_execute: true, why_blocked: '', chosen_relationship_strategy: 'skip_if_uncertain' as const };
+              }
+              return c;
+            }),
+          };
+        }
+      }
 
       await createArtefact({
         runId: jobId,
@@ -1830,9 +1855,31 @@ class SupervisorService {
         console.log(`[CONSTRAINT_GATE_OUTER] no-proxy signal detected from original request "${noProxySource.substring(0, 60)}" — forcing STOP`);
       }
 
-      // If the follow-up contained proxy/best-effort, pre-resolve the gate
       if (sessionFollowUpMsg && !outerGateResult.can_execute && !outerGateResult.stop_recommended) {
-        const preResolved = resolveFollowUp(outerGateResult, sessionFollowUpMsg);
+        let preResolved = resolveFollowUp(outerGateResult, sessionFollowUpMsg);
+        if (!preResolved.can_execute) {
+          const hasUnresolvedRel = preResolved.constraints.some(
+            c => c.type === 'relationship_predicate' && !c.can_execute
+          );
+          const missionDropped = missionResult?.ok && missionResult.mission &&
+            missionResult.mission.constraints.length === 0;
+          const skipLike = /\b(?:skip|all\s+results?|don'?t\s+(?:worry|bother|need)|without|ignore|remove|drop)\b/i.test(sessionFollowUpMsg);
+          if (hasUnresolvedRel && (missionDropped || skipLike)) {
+            console.log(`[CONSTRAINT_GATE_OUTER] Mission/follow-up indicates relationship drop — auto-resolving as skip_if_uncertain`);
+            preResolved = {
+              ...preResolved,
+              can_execute: true,
+              why_blocked: null,
+              clarify_questions: [],
+              constraints: preResolved.constraints.map(c => {
+                if (c.type === 'relationship_predicate' && !c.can_execute) {
+                  return { ...c, can_execute: true, why_blocked: '', chosen_relationship_strategy: 'skip_if_uncertain' as const };
+                }
+                return c;
+              }),
+            };
+          }
+        }
         if (preResolved.can_execute) {
           outerGateResult = preResolved;
           (task.request_data as any)._constraint_gate_resolved = true;
