@@ -32,6 +32,7 @@ import { extractStructuredMission, getMissionExtractorMode } from './supervisor/
 import { checkMissionCompleteness, logCompletenessToAFR, type CompletenessCheckResult } from './supervisor/mission-completeness-check';
 import { logMissionShadow, buildMissionDiagnosticPayload, missionToParsedGoal, buildHandoffDiagnostic, type HandoffDiagnostic } from './supervisor/mission-bridge';
 import { buildMissionPlan, logMissionPlan, persistMissionPlan, type MissionPlan } from './supervisor/mission-planner';
+import { executeMissionDrivenPlan, type MissionExecutionContext, type MissionExecutionResult } from './supervisor/mission-executor';
 import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, preExecutionConstraintGateFromIntent, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
@@ -1120,6 +1121,8 @@ class SupervisorService {
     let earlyParsedGoal: ParsedGoal | null = null;
     let intentSource: 'mission' | 'canonical' | 'legacy' = 'legacy';
     let legacyFallbackReason: string | null = null;
+    let activeMissionPlan: MissionPlan | null = null;
+    let useMissionExecution = false;
 
     const canonicalValid = shadowResult.ran && shadowResult.extraction?.validation?.ok && shadowResult.extraction.validation.intent;
     const canonicalIntent = canonicalValid ? shadowResult.extraction!.validation.intent! : null;
@@ -1171,6 +1174,10 @@ class SupervisorService {
           const missionPlan = buildMissionPlan(missionResult.mission!);
           logMissionPlan(missionPlan, jobId);
 
+          activeMissionPlan = missionPlan;
+          useMissionExecution = true;
+          console.log(`[MISSION_EXEC_FLAG] runId=${jobId} useMissionExecution=true strategy=${missionPlan.strategy} tools=${missionPlan.tool_sequence.join(',')}`);
+
           persistMissionPlan(missionPlan, jobId, task.user_id, task.conversation_id).catch(
             (e: any) => console.warn(`[MISSION_PLANNER] Artefact persist failed (non-fatal): ${e.message}`)
           );
@@ -1188,7 +1195,9 @@ class SupervisorService {
             conversationId: task.conversation_id,
           }).catch(() => {});
         } catch (planErr: any) {
-          console.warn(`[MISSION_PLANNER] Plan generation failed (non-fatal): ${planErr.message}`);
+          console.warn(`[MISSION_PLANNER] Plan generation failed (non-fatal, falling back to legacy): ${planErr.message}`);
+          useMissionExecution = false;
+          activeMissionPlan = null;
         }
       } catch (bridgeErr: any) {
         legacyFallbackReason = `mission_bridge_error: ${bridgeErr.message?.substring(0, 100)}`;
@@ -2069,34 +2078,53 @@ class SupervisorService {
       }
     }
 
-    console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=executeTowerLoopChat`);
+    const executionSource = useMissionExecution && activeMissionPlan && missionResult?.ok && missionResult.mission
+      ? 'mission' as const
+      : 'legacy' as const;
+    console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=execution execution_source=${executionSource}`);
     let towerResult: { response: string; leadIds: string[]; deliverySummary: DeliverySummaryPayload | null; towerVerdict: string | null; leads: Array<{ name: string; address: string; phone: string | null; website: string | null; placeId: string }> };
     let runFailed = false;
     let failureReason = '';
     try {
-      towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId, earlyParsedGoal, canonicalIntent);
+      if (executionSource === 'mission') {
+        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=executeMissionDrivenPlan strategy=${activeMissionPlan!.strategy}`);
+        const missionCtx: MissionExecutionContext = {
+          mission: missionResult!.mission!,
+          plan: activeMissionPlan!,
+          runId: jobId,
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+          clientRequestId,
+          rawUserInput: rawMsg.trim(),
+          missionTrace: missionResult!.trace,
+        };
+        towerResult = await executeMissionDrivenPlan(missionCtx);
+      } else {
+        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=executeTowerLoopChat (legacy fallback)`);
+        towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId, earlyParsedGoal, canonicalIntent);
+      }
     } catch (execErr: any) {
       runFailed = true;
       failureReason = execErr.message || String(execErr);
-      console.error(`[TOWER_LOOP_CHAT] executeTowerLoopChat failed for runId=${jobId}: ${failureReason}`);
+      console.error(`[EXECUTION] ${executionSource} execution failed for runId=${jobId}: ${failureReason}`);
       await storage.updateAgentRun(jobId, {
         status: 'failed',
         terminalState: 'failed',
         error: failureReason,
         endedAt: new Date(),
       }).catch((updateErr: any) => {
-        console.warn(`[TOWER_LOOP_CHAT] Failed to mark agent_run as failed (run may not exist yet): ${updateErr.message}`);
+        console.warn(`[EXECUTION] Failed to mark agent_run as failed (run may not exist yet): ${updateErr.message}`);
       });
 
       createArtefact({
         runId: jobId,
         type: 'diagnostic',
-        title: 'Run failed: executeTowerLoopChat threw',
+        title: `Run failed: ${executionSource} execution threw`,
         summary: `Error: ${failureReason.substring(0, 200)}`,
-        payload: { reason: 'execution_error', error: failureReason, taskId: task.id },
+        payload: { reason: 'execution_error', error: failureReason, taskId: task.id, execution_source: executionSource },
         userId: task.user_id,
         conversationId: task.conversation_id,
-      }).catch((e: any) => console.warn(`[TOWER_LOOP_CHAT] Failed to emit diagnostic artefact: ${e.message}`));
+      }).catch((e: any) => console.warn(`[EXECUTION] Failed to emit diagnostic artefact: ${e.message}`));
 
       towerResult = {
         response: `The search encountered an issue and could not complete. You can view partial results if any are available.`,

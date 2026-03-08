@@ -1,0 +1,140 @@
+Search the entire repository before answering. Do not limit to open files.
+
+We now know the real Stage 2 gap.
+
+Current reality:
+- Raw input → Pass 1 semantic meaning → Pass 2 structured mission → schema validation is live
+- buildMissionPlan() exists
+- BUT the live supervisor flow still downgrades the validated StructuredMission into ParsedGoal
+- AND executeTowerLoopChat still runs from that legacy ParsedGoal path
+- So the deterministic MissionPlan is currently diagnostic-only, not execution-driving
+
+Goal:
+Finish Stage 2 properly by making the live supervisor execution consume the new validated mission/planner path instead of falling back to the old ParsedGoal execution path.
+
+This is the key objective:
+validated StructuredMission
+→ MissionPlan
+→ live execution
+
+instead of:
+validated StructuredMission
+→ ParsedGoal
+→ legacy executeTowerLoopChat
+
+Important:
+- Do not redesign Stage 1
+- Do not redesign Tower
+- Do not rewrite the whole app unnecessarily
+- Do not break working behaviour
+- Keep this production-grade and incremental
+- Prefer adapting/reusing existing execution code where sensible
+- Preserve observability and diagnostics
+
+==================================================
+TASK
+==================================================
+
+Implement the wiring so that the main chat-driven supervisor flow uses the MissionPlan / mission-planner path as the actual execution driver.
+
+That means:
+
+1. The validated StructuredMission must become the source of truth for live execution.
+2. buildMissionPlan() must no longer be diagnostic-only.
+3. The live run should execute from the MissionPlan (or from a direct execution structure derived from it), not from a downgraded ParsedGoal.
+4. If compatibility bridging is temporarily required, keep it explicit and traceable, but the execution logic must now be driven by the new mission/planner path.
+
+==================================================
+REQUIREMENTS
+==================================================
+
+1. Identify the minimum safe cut-over point
+Find the safest place in supervisor.ts where, after successful mission extraction + validation, the flow should branch into mission-plan-driven execution instead of the legacy ParsedGoal-driven executeTowerLoopChat path.
+
+2. Reuse existing execution machinery where sensible
+If plan-executor.ts or related code already exists and can be safely reused, use it.
+Do not duplicate a second execution engine if reuse is realistic.
+
+3. Preserve current working behaviour
+The migration should still support the current successful behaviours:
+- text_compare / direct filtering
+- website evidence
+- relationship / external evidence
+- ranking
+- normal lead discovery
+
+4. Keep observability strong
+For the live path, emit and preserve:
+- raw_user_input
+- pass1_semantic_meaning
+- pass2_structured_mission
+- validation_result
+- mission_handoff / mapping diagnostics if still relevant
+- MissionPlan
+- execution steps actually taken
+- Tower judgements
+- final delivery summary
+
+5. Do not silently downgrade rich mission meaning
+If any legacy bridge remains temporarily, it must not become the source of truth.
+The authoritative live execution path must now follow the validated mission/planner path.
+
+6. Be explicit about what remains legacy
+If some part of the old ParsedGoal path still needs to remain for fallback or non-migrated cases, isolate it clearly and document:
+- when it is used
+- why it is used
+- how the new mission path differs
+
+==================================================
+SUCCESS CRITERIA
+==================================================
+
+After this change, for a normal successful mission-extractor run:
+
+raw user input
+→ mission extractor
+→ validated StructuredMission
+→ MissionPlan
+→ live execution from that MissionPlan
+→ evidence
+→ Tower judgement
+→ results
+
+And NOT:
+
+raw user input
+→ StructuredMission
+→ ParsedGoal downgrade
+→ executeTowerLoopChat legacy path
+
+==================================================
+TEST CASES THAT MUST STILL WORK
+==================================================
+
+1. Find pubs in Arundel with Swan in the name
+Expected live path:
+StructuredMission → MissionPlan → SEARCH_PLACES → direct field filtering
+
+2. Find pubs in Arundel that mention live music on their website
+Expected live path:
+StructuredMission → MissionPlan → SEARCH_PLACES → WEB_VISIT → EVIDENCE_EXTRACT → TOWER_JUDGE
+
+3. Find organisations that work with the local authority in Blackpool
+Expected live path:
+StructuredMission → MissionPlan → SEARCH_PLACES → WEB_SEARCH / relationship evidence path → WEB_VISIT → EVIDENCE_EXTRACT → TOWER_JUDGE
+
+4. Find the best dentists in Brighton
+Expected live path:
+StructuredMission → MissionPlan → SEARCH_PLACES → ranking/scoring path
+
+==================================================
+WHAT I WANT BACK
+==================================================
+
+1. Exact files changed
+2. Where the live cut-over from StructuredMission to MissionPlan execution now happens
+3. Whether executeTowerLoopChat is still used, and if so in what limited role
+4. Whether ParsedGoal is still used, and if so only for fallback/legacy cases
+5. A concise explanation of the new live execution flow
+6. Confirmation that MissionPlan is now execution-driving, not diagnostic-only
+7. Example live execution path for the 4 test cases above
