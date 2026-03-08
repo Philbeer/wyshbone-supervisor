@@ -31,6 +31,7 @@ import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './s
 import { extractStructuredMission, getMissionExtractorMode } from './supervisor/mission-extractor';
 import { checkMissionCompleteness, logCompletenessToAFR, type CompletenessCheckResult } from './supervisor/mission-completeness-check';
 import { logMissionShadow, buildMissionDiagnosticPayload, missionToParsedGoal, buildHandoffDiagnostic, type HandoffDiagnostic } from './supervisor/mission-bridge';
+import { buildMissionPlan, logMissionPlan, persistMissionPlan, type MissionPlan } from './supervisor/mission-planner';
 import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, preExecutionConstraintGateFromIntent, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
@@ -1165,6 +1166,30 @@ class SupervisorService {
           userId: task.user_id,
           conversationId: task.conversation_id,
         }).catch(() => {});
+
+        try {
+          const missionPlan = buildMissionPlan(missionResult.mission!);
+          logMissionPlan(missionPlan, jobId);
+
+          persistMissionPlan(missionPlan, jobId, task.user_id, task.conversation_id).catch(
+            (e: any) => console.warn(`[MISSION_PLANNER] Artefact persist failed (non-fatal): ${e.message}`)
+          );
+
+          this.postArtefactToUI({
+            runId: jobId,
+            clientRequestId,
+            type: 'diagnostic',
+            payload: {
+              ...missionPlan as unknown as Record<string, unknown>,
+              title: 'Stage 2 mission plan',
+              diagnostic_type: 'mission_plan',
+            },
+            userId: task.user_id,
+            conversationId: task.conversation_id,
+          }).catch(() => {});
+        } catch (planErr: any) {
+          console.warn(`[MISSION_PLANNER] Plan generation failed (non-fatal): ${planErr.message}`);
+        }
       } catch (bridgeErr: any) {
         legacyFallbackReason = `mission_bridge_error: ${bridgeErr.message?.substring(0, 100)}`;
         console.warn(`[INTENT_SOURCE] mission bridge failed, falling through to canonical: ${bridgeErr.message}`);
