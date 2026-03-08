@@ -1,0 +1,120 @@
+Search the entire repository before answering. Do not limit to open files.
+
+We have found the next blocking bug in the live Stage 2 path.
+
+Bug:
+For relationship-constraint queries, the user answers the clarification question, the system rebuilds the run and even creates the correct mission plan, but the outer constraint gate blocks again instead of allowing execution to proceed.
+
+Observed behaviour:
+1. User asks:
+   "Find organisations that work with the local authority in Blackpool"
+2. Outer constraint gate blocks and asks the user to choose a strategy
+3. User answers:
+   "Research each result individually (slower, more thorough)"
+4. A new run starts
+5. The system rebuilds the mission and creates the correct Stage 2 plan
+6. But the outer constraint gate blocks again as if the clarification was never resolved
+7. UI remains in clarifying / processing state instead of proceeding into real execution
+
+This means the clarification answer is being accepted at chat/UI level, but is not being applied strongly enough to clear the relationship constraint for the next execution step.
+
+Goal:
+Make relationship clarification answers actually resolve the gate and allow the run to proceed.
+
+==================================================
+WHAT MUST HAPPEN
+==================================================
+
+When the user answers a relationship clarification such as:
+
+A) Research each result individually
+B) Use keyword-based filtering
+C) Skip this filter and return all results
+
+the system must:
+
+1. Persist the resolved relationship strategy for the active run/session/follow-up context
+2. Apply that resolved strategy when rebuilding the mission / execution context
+3. Make the outer constraint gate treat that relationship constraint as resolved
+4. Prevent the same clarification from being re-raised immediately for the same request
+5. Proceed into mission execution
+
+==================================================
+IMPORTANT
+==================================================
+
+This is NOT a planner redesign.
+This is NOT a UI-only fix.
+This is NOT a Stage 1 interpretation change.
+
+This is a supervisor clarification-resolution / constraint-gate handoff fix.
+
+==================================================
+REQUIREMENTS
+==================================================
+
+1. Find where the clarification answer is currently stored / parsed
+Identify:
+- where the follow-up answer enters the supervisor flow
+- how the system currently interprets “research each result individually”
+- whether the answer is stored in clarify session state, run state, follow-up context, or canonical intent metadata
+
+2. Make the resolved choice authoritative for the next run step
+After the user answers, the next execution attempt must carry a resolved relationship strategy such as:
+- research_each_result_individually
+- keyword_filtering
+- skip_relationship_filter
+
+3. Fix the outer constraint gate
+The outer constraint gate must check for an already-resolved relationship strategy before blocking.
+If a valid strategy is already resolved for the current request context, do NOT block again.
+
+4. Preserve observability
+Emit clear diagnostics / artefacts showing:
+- clarification question asked
+- clarification answer received
+- resolved relationship strategy
+- constraint gate decision after resolution
+- whether gate was bypassed because strategy was already resolved
+
+5. Keep the logic scoped to the relevant request context
+Do not let one clarification answer leak into unrelated future runs.
+It should apply to the current conversation/request context only.
+
+6. Production-grade fix
+- No hacky timeout
+- No UI-only workaround
+- No hardcoded string special case in rendering only
+- Fix the supervisor state / gate logic properly
+
+==================================================
+SUCCESS CRITERIA
+==================================================
+
+For this query:
+
+"Find organisations that work with the local authority in Blackpool"
+
+Flow should become:
+
+1. user asks query
+2. gate blocks and asks strategy question
+3. user answers "Research each result individually"
+4. next run resolves relationship strategy
+5. outer constraint gate sees strategy already resolved
+6. execution proceeds into mission-driven plan
+7. user is NOT asked the same clarification again immediately
+
+==================================================
+WHAT I WANT BACK
+==================================================
+
+1. Exact files changed
+2. Root cause
+3. Where the resolved relationship strategy is now stored
+4. How the outer constraint gate now checks for resolved strategy
+5. Why the same clarification will no longer immediately repeat
+6. Example trace of the corrected flow for:
+   - initial question
+   - clarification answer
+   - resumed execution

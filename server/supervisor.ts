@@ -1606,7 +1606,50 @@ class SupervisorService {
       }).catch((e: any) => console.warn(`[CLARIFY_SESSION] Failed to emit TTL expiry artefact: ${e.message}`));
     }
 
-    const pendingConstraint = getPendingContract(task.conversation_id);
+    let pendingConstraint = getPendingContract(task.conversation_id);
+
+    if (!pendingConstraint && !getClarifySession(task.conversation_id) && supabase) {
+      try {
+        const { data: clarifyingRuns } = await supabase.from('agent_runs')
+          .select('id, status, metadata')
+          .eq('conversation_id', task.conversation_id)
+          .eq('status', 'clarifying')
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        const existingRun = clarifyingRuns?.[0];
+        if (
+          existingRun &&
+          existingRun.metadata?.verdict === 'constraint_gate_clarify' &&
+          existingRun.metadata?.constraint_contract
+        ) {
+          let recoveredOriginal = existingRun.metadata.original_message || '';
+          if (!recoveredOriginal) {
+            const { data: userMsgs } = await supabase.from('messages')
+              .select('content')
+              .eq('conversation_id', task.conversation_id)
+              .eq('role', 'user')
+              .order('created_at', { ascending: true })
+              .limit(1);
+            recoveredOriginal = userMsgs?.[0]?.content || '';
+          }
+
+          if (recoveredOriginal) {
+            const recoveredRunId = existingRun.id;
+            console.log(`[CONSTRAINT_GATE] Recovered pending contract from DB — in-memory contract lost (server restart?) originalRunId=${recoveredRunId} currentJobId=${jobId}`);
+            if (recoveredRunId !== jobId) {
+              console.log(`[CONSTRAINT_GATE] Reusing original runId=${recoveredRunId} (was ${jobId})`);
+              jobId = recoveredRunId;
+            }
+            storePendingContract(task.conversation_id, recoveredOriginal, existingRun.metadata.constraint_contract, recoveredRunId);
+            pendingConstraint = getPendingContract(task.conversation_id);
+          }
+        }
+      } catch (e: any) {
+        console.warn(`[CONSTRAINT_GATE] Failed to recover pending contract from DB (non-fatal): ${e.message}`);
+      }
+    }
+
     if (pendingConstraint && !getClarifySession(task.conversation_id)) {
       console.log(`[CONSTRAINT_GATE] Follow-up detected for conversation=${task.conversation_id} — resolving constraint contract`);
       let resolvedContract = resolveFollowUp(pendingConstraint.contract, rawMsg);
@@ -1672,7 +1715,7 @@ class SupervisorService {
           supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(clarifyMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'constraint_gate_clarify', constraint_contract: resolvedContract, clarify_state: buildClarifyStateFromContract(resolvedContract) }, created_at: Date.now() }).select().single(),
         ]);
 
-        await storage.updateAgentRun(jobId, { status: 'stopped', terminalState: 'stopped', endedAt: new Date(), metadata: { verdict: 'constraint_gate_clarify', stop_reason: 'clarification_needed', constraint_contract: resolvedContract } }).catch(() => {});
+        await storage.updateAgentRun(jobId, { status: 'clarifying', terminalState: null, metadata: { verdict: 'constraint_gate_clarify', awaiting: 'user_input', constraint_contract: resolvedContract, original_message: pendingConstraint.originalMessage } }).catch(() => {});
         console.log(`[CONSTRAINT_GATE] Still blocked — asking again — run paused`);
         await emitTaskExecutionCompleted('constraint_gate_clarify');
         return;
@@ -2070,6 +2113,7 @@ class SupervisorService {
             verdict: outerGateResult.stop_recommended ? 'constraint_gate_stop' : 'constraint_gate_clarify',
             ...(outerIsClarify ? { awaiting: 'user_input' } : { stop_reason: 'constraint_stop' }),
             constraint_contract: outerGateResult,
+            original_message: sessionOriginalRequest || outerGateMsg,
           },
         }).catch(() => {});
         console.log(`[CONSTRAINT_GATE_OUTER] BLOCKED — status=${outerStatus} terminalState=${outerTermState}`);
