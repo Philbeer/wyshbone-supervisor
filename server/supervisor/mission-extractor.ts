@@ -3,6 +3,7 @@ import {
   type MissionExtractionTrace,
   type MissionValidationResult,
   type MissionFailureStage,
+  type ConstraintChecklist,
   parseAndValidateMissionJSON,
   MISSION_CONSTRAINT_TYPES,
   MISSION_MODES,
@@ -24,14 +25,39 @@ const PASS1_SYSTEM_PROMPT = `You are a semantic interpreter for a business searc
 
 YOUR SOLE TASK: strip away surface phrasing and restate the underlying meaning. You are a translator from casual language to precise semantic language.
 
+OUTPUT FORMAT: Return a JSON object with exactly two fields:
+1. "constraint_checklist" — classify which constraint categories appear in the user request (boolean for each).
+2. "semantic_interpretation" — a short paragraph of clean English restating the user's intent.
+
+CONSTRAINT CHECKLIST FIELDS (set true only if the user's request contains this type):
+- has_entity: an entity type is mentioned (e.g. pubs, cafes, hospitals)
+- has_location: a geographic location is specified
+- has_text_compare: a name or text match is requested (e.g. "with Swan in the name")
+- has_attribute_check: a venue feature or amenity is required (e.g. "with a beer garden", "dog friendly")
+- has_relationship_check: a business-to-business or business-to-entity relationship (e.g. "works with NHS", "partnered with", "supplies", "serves [an entity]", "affiliated with")
+- has_numeric_range: a numeric threshold or range (e.g. "at least 4.5 stars", "more than 50 reviews")
+- has_time_constraint: a time-based filter (e.g. "opened recently", "established before 2020")
+- has_status_check: a service or operational status (e.g. "accepting new patients", "offers X service")
+- has_website_evidence: proof from a website is required (e.g. "mention vegan food on their website")
+- has_contact_extraction: contact information extraction is requested (e.g. "extract email addresses")
+- has_ranking: ranking or ordering language is used (e.g. "best", "top", "highest rated")
+- has_requested_count: a specific number of results is requested (e.g. "find 10 pubs")
+- has_monitoring_intent: ongoing monitoring or alerting is requested (e.g. "keep checking", "alert me when", "notify me if")
+
 CORE RULES:
-1. Restate the user's intent in plain semantic English. NEVER preserve their exact wording or phrasing wrappers.
-2. Identify the entity type (e.g. pubs, cafes, breweries, hospitals).
-3. Identify the location if given.
-4. Identify ALL constraints the user cares about. Each constraint must be restated as a clean semantic fact.
-5. Identify the mission mode: is this a one-time search, ongoing monitoring, alert-on-change, or recurring check?
-6. Do NOT output JSON. Output a short paragraph of clean English.
-7. Do NOT invent constraints the user did not express. Only extract what is actually stated or clearly implied.
+1. First, classify which constraint categories appear in the user request by filling out the constraint_checklist.
+2. Then, write a clean semantic interpretation of the user's intent.
+3. Restate the user's intent in plain semantic English. NEVER preserve their exact wording or phrasing wrappers.
+4. Identify the entity type (e.g. pubs, cafes, breweries, hospitals).
+5. Identify the location if given.
+6. Identify ALL constraints the user cares about. Each constraint must be restated as a clean semantic fact.
+7. Identify the mission mode: is this a one-time search, ongoing monitoring, alert-on-change, or recurring check?
+8. Do NOT invent constraints the user did not express. Only extract what is actually stated or clearly implied.
+9. Interpret meaning, not phrasing. Do not copy user phrasing into the semantic interpretation.
+10. Do not drop constraints — every constraint in the checklist must appear in the semantic interpretation.
+11. Detect relationship language: "works with", "partnered with", "supplies", "serves [entity]", "affiliated with".
+12. Detect ranking language: "best", "top", "highest rated".
+13. Detect monitoring intent: "keep checking", "alert me when", "notify me if".
 
 SEMANTIC STRIPPING RULES — these are critical:
 
@@ -107,31 +133,84 @@ Mission mode:
 EXAMPLES:
 
 User: "find pubs in arundel that have the word swan in the name"
-Output: The user wants pubs in Arundel whose business name contains "swan". This is a one-time search.
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": true,
+    "has_attribute_check": false, "has_relationship_check": false, "has_numeric_range": false,
+    "has_time_constraint": false, "has_status_check": false, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
+    "has_monitoring_intent": false
+  },
+  "semantic_interpretation": "The user wants pubs in Arundel whose business name contains \\"swan\\". This is a one-time search."
+}
 
 User: "find pubs in arundel that mention live music on their website"
-Output: The user wants pubs in Arundel whose website text contains "live music". This is a one-time search.
-
-User: "find cafes in manchester that mention vegan food on their website"
-Output: The user wants cafes in Manchester whose website text contains "vegan food". This is a one-time search.
-
-User: "find breweries in texas opened in the last 6 months"
-Output: The user wants breweries in Texas that opened within the last 6 months. This is a one-time search.
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": false, "has_relationship_check": false, "has_numeric_range": false,
+    "has_time_constraint": false, "has_status_check": false, "has_website_evidence": true,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
+    "has_monitoring_intent": false
+  },
+  "semantic_interpretation": "The user wants pubs in Arundel whose website text contains \\"live music\\". This is a one-time search."
+}
 
 User: "keep checking which hospitals in the UK offer the sleep apnea implant and alert me if it starts near my area"
-Output: The user wants hospitals in the UK that offer the service "sleep apnea implant". They want ongoing monitoring with alerts when this service becomes available near their area. The mission mode is alert-on-change, with a location proximity filter for the user's area.
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": false, "has_relationship_check": false, "has_numeric_range": false,
+    "has_time_constraint": false, "has_status_check": true, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
+    "has_monitoring_intent": true
+  },
+  "semantic_interpretation": "The user wants hospitals in the UK that offer the service \\"sleep apnea implant\\". They want ongoing monitoring with alerts when this service becomes available near their area. The mission mode is alert-on-change, with a location proximity filter for the user's area."
+}
 
 User: "find 10 italian restaurants in Brighton with outdoor seating and at least 4.5 stars"
-Output: The user wants 10 Italian restaurants in Brighton that have outdoor seating and a rating of at least 4.5 stars. This is a one-time search.
-
-User: "find pubs in sussex called The Swan with a beer garden"
-Output: The user wants pubs in Sussex whose business name contains "The Swan" and that have a beer garden. This is a one-time search.
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": true, "has_relationship_check": false, "has_numeric_range": true,
+    "has_time_constraint": false, "has_status_check": false, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": true,
+    "has_monitoring_intent": false
+  },
+  "semantic_interpretation": "The user wants 10 Italian restaurants in Brighton that have outdoor seating and a rating of at least 4.5 stars. This is a one-time search."
+}
 
 User: "find dentists near Bristol that work with NHS and have good reviews"
-Output: The user wants dentists near Bristol that have a relationship with the NHS. This is a one-time search.
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": false, "has_relationship_check": true, "has_numeric_range": false,
+    "has_time_constraint": false, "has_status_check": false, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
+    "has_monitoring_intent": false
+  },
+  "semantic_interpretation": "The user wants dentists near Bristol that have a relationship with the NHS. This is a one-time search."
+}
 
 User: "watch for new co-working spaces in London and let me know when one opens"
-Output: The user wants co-working spaces in London. They want to be alerted when new ones open. The mission mode is alert-on-change with a time constraint for newly opened venues.`;
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": false, "has_relationship_check": false, "has_numeric_range": false,
+    "has_time_constraint": true, "has_status_check": false, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
+    "has_monitoring_intent": true
+  },
+  "semantic_interpretation": "The user wants co-working spaces in London. They want to be alerted when new ones open. The mission mode is alert-on-change with a time constraint for newly opened venues."
+}
+
+Return ONLY valid JSON matching this structure. No markdown fences, no commentary.`;
 
 const PASS2_SYSTEM_PROMPT = `You are a schema mapper for a business search system. You receive a clean semantic interpretation of a user request. Your job is to convert it into a fixed JSON schema using ONLY the allowed types, operators, and values.
 
@@ -448,6 +527,41 @@ async function callAnthropic(model: string, systemPrompt: string, userPrompt: st
   return textBlock?.text || '';
 }
 
+const EMPTY_CHECKLIST: ConstraintChecklist = {
+  has_entity: false,
+  has_location: false,
+  has_text_compare: false,
+  has_attribute_check: false,
+  has_relationship_check: false,
+  has_numeric_range: false,
+  has_time_constraint: false,
+  has_status_check: false,
+  has_website_evidence: false,
+  has_contact_extraction: false,
+  has_ranking: false,
+  has_requested_count: false,
+  has_monitoring_intent: false,
+};
+
+function parsePass1Response(raw: string): { semantic_interpretation: string; constraint_checklist: ConstraintChecklist | null } {
+  const cleaned = cleanJsonResponse(raw);
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (parsed && typeof parsed === 'object' && typeof parsed.semantic_interpretation === 'string') {
+      const checklist: ConstraintChecklist = { ...EMPTY_CHECKLIST };
+      if (parsed.constraint_checklist && typeof parsed.constraint_checklist === 'object') {
+        for (const key of Object.keys(EMPTY_CHECKLIST) as (keyof ConstraintChecklist)[]) {
+          if (typeof parsed.constraint_checklist[key] === 'boolean') {
+            checklist[key] = parsed.constraint_checklist[key];
+          }
+        }
+      }
+      return { semantic_interpretation: parsed.semantic_interpretation, constraint_checklist: checklist };
+    }
+  } catch {}
+  return { semantic_interpretation: raw.trim(), constraint_checklist: null };
+}
+
 function cleanJsonResponse(raw: string): string {
   let s = raw.trim();
   if (s.startsWith('```json')) s = s.slice(7);
@@ -486,6 +600,7 @@ export async function extractStructuredMission(
     const trace: MissionExtractionTrace = {
       raw_user_input: userMessage,
       pass1_semantic_interpretation: '',
+      pass1_constraint_checklist: null,
       pass2_structured_mission: null,
       pass2_raw_json: '',
       validation_result: { ok: false, mission: null, errors: ['No LLM API key available'] },
@@ -508,15 +623,16 @@ export async function extractStructuredMission(
     pass1Prompt = `Interpret the semantic meaning of this user message:\n\n"${userMessage}"`;
   }
 
-  let pass1Result = '';
+  let pass1RawResult = '';
   const pass1Start = Date.now();
   try {
-    pass1Result = await callLLM(model, PASS1_SYSTEM_PROMPT, pass1Prompt);
+    pass1RawResult = await callLLM(model, PASS1_SYSTEM_PROMPT, pass1Prompt);
   } catch (err: any) {
     const duration = Date.now() - pass1Start;
     const trace: MissionExtractionTrace = {
       raw_user_input: userMessage,
       pass1_semantic_interpretation: '',
+      pass1_constraint_checklist: null,
       pass2_structured_mission: null,
       pass2_raw_json: '',
       validation_result: { ok: false, mission: null, errors: [`Pass 1 LLM call failed: ${err.message}`] },
@@ -532,6 +648,14 @@ export async function extractStructuredMission(
   }
   const pass1Duration = Date.now() - pass1Start;
 
+  const { semantic_interpretation: pass1Result, constraint_checklist: pass1Checklist } = parsePass1Response(pass1RawResult);
+
+  if (pass1Checklist) {
+    console.log(`[MISSION_EXTRACTOR] Pass 1 checklist: ${JSON.stringify(pass1Checklist)}`);
+  } else {
+    console.warn(`[MISSION_EXTRACTOR] Pass 1 returned non-JSON — checklist unavailable, falling back to raw text`);
+  }
+
   const pass2Prompt = `Convert this semantic interpretation into the structured mission JSON schema:\n\n"${pass1Result}"`;
 
   let pass2RawResponse = '';
@@ -544,6 +668,7 @@ export async function extractStructuredMission(
     const trace: MissionExtractionTrace = {
       raw_user_input: userMessage,
       pass1_semantic_interpretation: pass1Result,
+      pass1_constraint_checklist: pass1Checklist,
       pass2_structured_mission: null,
       pass2_raw_json: '',
       validation_result: { ok: false, mission: null, errors: [`Pass 2 LLM call failed: ${err.message}`] },
@@ -574,6 +699,7 @@ export async function extractStructuredMission(
     const trace: MissionExtractionTrace = {
       raw_user_input: userMessage,
       pass1_semantic_interpretation: pass1Result,
+      pass1_constraint_checklist: pass1Checklist,
       pass2_structured_mission: null,
       pass2_raw_json: pass2RawResponse,
       validation_result: validation,
@@ -596,6 +722,7 @@ export async function extractStructuredMission(
   const trace: MissionExtractionTrace = {
     raw_user_input: userMessage,
     pass1_semantic_interpretation: pass1Result,
+    pass1_constraint_checklist: pass1Checklist,
     pass2_structured_mission: validation.mission,
     pass2_raw_json: pass2RawResponse,
     validation_result: validation,

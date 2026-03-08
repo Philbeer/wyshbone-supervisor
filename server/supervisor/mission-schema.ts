@@ -169,9 +169,26 @@ export function parseAndValidateMissionJSON(jsonString: string): MissionValidati
   return validateStructuredMission(parsed);
 }
 
+export interface ConstraintChecklist {
+  has_entity: boolean;
+  has_location: boolean;
+  has_text_compare: boolean;
+  has_attribute_check: boolean;
+  has_relationship_check: boolean;
+  has_numeric_range: boolean;
+  has_time_constraint: boolean;
+  has_status_check: boolean;
+  has_website_evidence: boolean;
+  has_contact_extraction: boolean;
+  has_ranking: boolean;
+  has_requested_count: boolean;
+  has_monitoring_intent: boolean;
+}
+
 export interface MissionExtractionTrace {
   raw_user_input: string;
   pass1_semantic_interpretation: string;
+  pass1_constraint_checklist: ConstraintChecklist | null;
   pass2_structured_mission: StructuredMission | null;
   pass2_raw_json: string;
   validation_result: MissionValidationResult;

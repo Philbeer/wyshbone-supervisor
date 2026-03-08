@@ -271,6 +271,20 @@ export async function executeMissionDrivenPlan(
     conversationId,
   });
 
+  if (missionTrace.pass1_constraint_checklist) {
+    await createArtefact({
+      runId,
+      type: 'pass1_constraint_checklist',
+      title: 'Pass 1 Constraint Checklist',
+      summary: `Constraint classification from Pass 1 semantic interpretation`,
+      payload: {
+        constraint_checklist: missionTrace.pass1_constraint_checklist as unknown as Record<string, unknown>,
+      },
+      userId,
+      conversationId,
+    });
+  }
+
   await logAFREvent({
     userId, runId, conversationId, clientRequestId,
     actionTaken: 'plan_execution_started', status: 'pending',
