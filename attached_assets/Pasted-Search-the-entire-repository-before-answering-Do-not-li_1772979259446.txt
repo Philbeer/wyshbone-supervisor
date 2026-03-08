@@ -1,0 +1,197 @@
+Search the entire repository before answering. Do not limit to open files.
+
+We have completed Stage 1 of the Wyshbone 3-stage architecture.
+Now implement the core deterministic Stage 2 planner rules.
+
+Goal:
+Make the planner choose the execution path from the canonical structured mission constraint types, not from vague lead context or generic fallback behaviour.
+
+Important:
+This is a Stage 2 planner task only.
+Do not redesign Stage 1 extraction.
+Do not redesign Tower.
+Do not add broad new agent strategy logic.
+Do not use LLM-based tool choice.
+Keep this deterministic, explicit, and production-grade.
+
+==================================================
+STAGE 2 TARGET
+==================================================
+
+Planner input:
+- entity_category
+- location_text
+- constraints[]
+- mission_mode
+
+Planner output:
+- tool sequence
+- verification steps
+- expected artefacts
+- clear reason why this plan was selected
+
+The planner must choose from explicit rule mappings based on constraint type.
+
+==================================================
+IMPLEMENT THESE 4 CORE PLANNER RULES
+==================================================
+
+RULE 1 — Discovery rule
+If the mission has an entity + location, always begin with candidate discovery.
+
+Default discovery step:
+SEARCH_PLACES
+
+Purpose:
+Get candidate entities first before deeper verification.
+
+Examples:
+- pubs in Arundel
+- dentists in Brighton
+- organisations in Blackpool
+
+==================================================
+
+RULE 2 — Direct field check rule
+If a constraint can be checked directly against known structured fields, do not send the run into generic website/evidence logic first.
+
+Examples:
+- text_compare on name
+- simple direct attribute/category/class checks that can be checked from search/discovery results
+
+Plan shape:
+SEARCH_PLACES
+→ FILTER_FIELDS / MATCH_DIRECT_FIELDS
+
+Examples:
+- “pubs in Arundel with Swan in the name”
+- “dentists in Brighton with clinic in the name”
+
+Important:
+This rule should avoid unnecessary web visits.
+
+==================================================
+
+RULE 3 — Website evidence rule
+If the constraint requires evidence from the organisation’s own site, use website verification after discovery.
+
+Examples:
+- mentions live music on website
+- says vegan on site
+- mentions private dentistry on its website
+
+Plan shape:
+SEARCH_PLACES
+→ WEB_VISIT
+→ EVIDENCE_EXTRACT
+→ TOWER_JUDGE
+
+Applies mainly to:
+- website_evidence
+- some status_check
+- some attribute_check
+
+==================================================
+
+RULE 4 — Relationship / external evidence rule
+If the constraint is about a relationship that is not directly present in Places-style discovery data, it must never compile to SEARCH_PLACES-only.
+
+Examples:
+- works with local authority
+- supplies pubs
+- partners with universities
+- funded by council
+
+Plan shape:
+SEARCH_PLACES
+→ WEB_SEARCH
+→ WEB_VISIT
+→ EVIDENCE_EXTRACT
+→ TOWER_JUDGE
+
+Critical requirement:
+relationship_check must never silently degrade into plain discovery-only planning.
+
+This is the key Blackpool failure we are fixing.
+
+==================================================
+IMPLEMENTATION REQUIREMENTS
+==================================================
+
+1. Planner must read canonical structured mission constraints directly
+Use the Stage 1 canonical mission as the source of truth.
+
+2. Add an explicit constraint-type → plan-strategy mapping layer
+Do not bury this inside vague conditionals.
+Make it visible and easy to audit.
+
+3. Preserve deterministic behaviour
+No LLM choosing tools.
+No prompt-based plan generation.
+Use explicit rule selection.
+
+4. Produce a clearer plan artefact
+For every plan, include:
+- canonical constraints received
+- which planner rule(s) fired
+- chosen tool sequence
+- expected verification method
+- why this plan was chosen
+
+5. Handle multiple constraints sensibly
+If multiple constraints exist, planner should combine them in a reasonable sequence.
+Basic expectation:
+- discover candidates first
+- then apply cheapest/direct checks first
+- then website evidence checks
+- then relationship/external evidence checks
+
+6. Do not overbuild
+Do not try to solve every future constraint type.
+Implement the deterministic rule system cleanly for the core rule set above.
+
+==================================================
+SPECIFIC TEST CASES THAT MUST WORK
+==================================================
+
+Test 1:
+“Find pubs in Arundel with Swan in the name”
+Expected planner behaviour:
+SEARCH_PLACES
+→ direct name filtering
+Not generic website verification first.
+
+Test 2:
+“Find pubs in Arundel that mention live music on their website”
+Expected planner behaviour:
+SEARCH_PLACES
+→ WEB_VISIT
+→ EVIDENCE_EXTRACT
+→ TOWER_JUDGE
+
+Test 3:
+“Find organisations that work with the local authority in Blackpool”
+Expected planner behaviour:
+SEARCH_PLACES
+→ WEB_SEARCH
+→ WEB_VISIT
+→ EVIDENCE_EXTRACT
+→ TOWER_JUDGE
+Must not compile to SEARCH_PLACES-only.
+
+Test 4:
+“Find the best dentists in Brighton”
+Expected planner behaviour:
+SEARCH_PLACES
+→ ranking / scoring path
+No relationship or website evidence path unless required by constraints.
+
+==================================================
+WHAT I WANT BACK
+==================================================
+
+1. Exact files changed
+2. The new planner rule mapping structure
+3. How multiple constraints are sequenced
+4. Example plan outputs for the 4 test cases above
+5. Confirmation that relationship_check no longer compiles to discovery-only
