@@ -1,5 +1,6 @@
 import type { StructuredMission, MissionConstraint, MissionConstraintType } from './mission-schema';
 import { createArtefact } from './artefacts';
+import { analyseRelationshipDirection, type RelationshipDirectionResult } from './relationship-direction';
 
 export type MissionToolStep =
   | 'SEARCH_PLACES'
@@ -60,6 +61,7 @@ export interface MissionPlan {
   verification_methods: VerificationMethod[];
   expected_artefacts: string[];
   selection_reason: string;
+  relationship_direction?: RelationshipDirectionResult;
   canonical_input: {
     entity_category: string;
     location_text: string | null;
@@ -320,6 +322,28 @@ export function buildMissionPlan(mission: StructuredMission): MissionPlan {
 
   const selectionReason = buildSelectionReason(mission, mappings, finalStrategy);
 
+  let relationshipDirection: RelationshipDirectionResult | undefined;
+  const relMapping = mappings.find(m => m.constraint_type === 'relationship_check');
+  if (relMapping) {
+    const relConstraint = mission.constraints[relMapping.constraint_index];
+    const relTarget = typeof relConstraint?.value === 'string' ? relConstraint.value : null;
+    const relOperator = relConstraint?.operator ?? null;
+
+    relationshipDirection = analyseRelationshipDirection(
+      mission.entity_category,
+      relTarget,
+      relOperator,
+    );
+
+    if (relationshipDirection.relationship_query) {
+      console.log(
+        `[MISSION_PLANNER] Relationship direction: ${relationshipDirection.chosen_direction} ` +
+        `(left="${relationshipDirection.left_entity?.raw}" score=${relationshipDirection.left_entity?.institutional_score}, ` +
+        `right="${relationshipDirection.right_entity?.raw}" score=${relationshipDirection.right_entity?.institutional_score})`
+      );
+    }
+  }
+
   return {
     strategy: finalStrategy,
     tool_sequence: toolSequence,
@@ -329,6 +353,7 @@ export function buildMissionPlan(mission: StructuredMission): MissionPlan {
     verification_methods: verificationMethods,
     expected_artefacts: expectedArtefacts,
     selection_reason: selectionReason,
+    relationship_direction: relationshipDirection,
     canonical_input: canonicalInput,
   };
 }
@@ -411,6 +436,17 @@ export function logMissionPlan(plan: MissionPlan, runId: string): void {
       console.error(`[MISSION_PLANNER] INVARIANT VIOLATION: relationship_check compiled to discovery_only — this must never happen`);
     } else {
       console.log(`[MISSION_PLANNER] INVARIANT OK: relationship_check → ${relStrategy} (includes external evidence)`);
+    }
+
+    if (plan.relationship_direction) {
+      const rd = plan.relationship_direction;
+      console.log(`[MISSION_PLANNER] Relationship direction: ${rd.chosen_direction}`);
+      console.log(`[MISSION_PLANNER]   left="${rd.left_entity?.raw}" (${rd.left_entity?.label}, score=${rd.left_entity?.institutional_score})`);
+      console.log(`[MISSION_PLANNER]   right="${rd.right_entity?.raw}" (${rd.right_entity?.label}, score=${rd.right_entity?.institutional_score})`);
+      console.log(`[MISSION_PLANNER]   reason: ${rd.reason}`);
+      if (rd.reverse_search_queries.length > 0) {
+        console.log(`[MISSION_PLANNER]   reverse_queries: ${rd.reverse_search_queries.join(' | ')}`);
+      }
     }
   }
 

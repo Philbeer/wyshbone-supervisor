@@ -332,6 +332,35 @@ export async function executeMissionDrivenPlan(
     console.log(`[MISSION_EXEC] Relationship predicate detected: "${relationshipPredicate.detected_predicate}" target="${relationshipPredicate.relationship_target}"`);
   }
 
+  const relationshipDir = plan.relationship_direction;
+  if (relationshipDir?.relationship_query) {
+    console.log(`[MISSION_EXEC] Relationship direction: ${relationshipDir.chosen_direction} (left="${relationshipDir.left_entity?.raw}" right="${relationshipDir.right_entity?.raw}")`);
+    if (relationshipDir.chosen_direction === 'reverse') {
+      console.log(`[MISSION_EXEC] Reverse search queries: ${relationshipDir.reverse_search_queries.join(' | ')}`);
+    }
+
+    await createArtefact({
+      runId,
+      type: 'planner_relationship_direction',
+      title: `Relationship Direction: ${relationshipDir.chosen_direction}`,
+      summary: `${relationshipDir.chosen_direction === 'reverse' ? 'Searching from authority/institutional entity first' : 'Standard forward search'} — ${relationshipDir.reason}`,
+      payload: {
+        relationship_query: relationshipDir.relationship_query,
+        left_entity: relationshipDir.left_entity?.raw ?? null,
+        left_entity_label: relationshipDir.left_entity?.label ?? null,
+        left_entity_score: relationshipDir.left_entity?.institutional_score ?? null,
+        right_entity: relationshipDir.right_entity?.raw ?? null,
+        right_entity_label: relationshipDir.right_entity?.label ?? null,
+        right_entity_score: relationshipDir.right_entity?.institutional_score ?? null,
+        chosen_direction: relationshipDir.chosen_direction,
+        reason: relationshipDir.reason,
+        reverse_search_queries: relationshipDir.reverse_search_queries,
+      },
+      userId,
+      conversationId,
+    }).catch(() => {});
+  }
+
   console.log(`[MISSION_EXEC] === Phase: SEARCH_PLACES ===`);
   const searchStepStart = Date.now();
   try {
@@ -486,32 +515,52 @@ export async function executeMissionDrivenPlan(
       let webSearchSnippets: string[] = [];
 
       if (needsWebSearch && constraintsToVerify.length > 0) {
-        const searchQuery = relationshipConstraints.length > 0
-          ? `"${lead.name}" ${relationshipPredicate.relationship_target || ''} ${relationshipPredicate.detected_predicate || ''}`
-          : `"${lead.name}" ${constraintsToVerify.map(c => String(c.value)).join(' ')}`;
+        const useReverseQueries = relationshipDir?.chosen_direction === 'reverse' && relationshipDir.reverse_search_queries.length > 0;
 
-        try {
-          runToolCallCount++;
-          const wsResult = await executeAction({
-            toolName: 'WEB_SEARCH',
-            toolArgs: { query: searchQuery.trim(), max_results: 5 },
-            userId,
-            tracker: toolTracker,
-            runId,
-            conversationId,
-            clientRequestId,
-          });
-
-          if (wsResult.success && wsResult.data) {
-            const results = (wsResult.data as any)?.results || (wsResult.data as any)?.envelope?.outputs?.results || [];
-            if (Array.isArray(results)) {
-              webSearchSnippets = results.map((r: any) => r.snippet || r.description || '').filter(Boolean);
-            }
+        const searchQueries: string[] = [];
+        if (useReverseQueries) {
+          const leadSpecificReverse = relationshipDir.reverse_search_queries.map(
+            q => q.includes(lead.name) ? q : `${q} "${lead.name}"`
+          );
+          searchQueries.push(leadSpecificReverse[0] || `"${lead.name}" ${relationshipPredicate.relationship_target || ''}`);
+          if (eli === 0 && leadSpecificReverse.length > 1) {
+            searchQueries.push(...leadSpecificReverse.slice(1, 3));
           }
-          console.log(`[MISSION_EXEC] WEB_SEARCH for "${lead.name}": ${webSearchSnippets.length} snippets`);
-        } catch (wsErr: any) {
-          console.warn(`[MISSION_EXEC] WEB_SEARCH failed for "${lead.name}": ${wsErr.message}`);
+        } else if (relationshipConstraints.length > 0) {
+          searchQueries.push(
+            `"${lead.name}" ${relationshipPredicate.relationship_target || ''} ${relationshipPredicate.detected_predicate || ''}`
+          );
+        } else {
+          searchQueries.push(
+            `"${lead.name}" ${constraintsToVerify.map(c => String(c.value)).join(' ')}`
+          );
         }
+
+        for (const searchQuery of searchQueries) {
+          try {
+            runToolCallCount++;
+            const wsResult = await executeAction({
+              toolName: 'WEB_SEARCH',
+              toolArgs: { query: searchQuery.trim(), max_results: 5 },
+              userId,
+              tracker: toolTracker,
+              runId,
+              conversationId,
+              clientRequestId,
+            });
+
+            if (wsResult.success && wsResult.data) {
+              const results = (wsResult.data as any)?.results || (wsResult.data as any)?.envelope?.outputs?.results || [];
+              if (Array.isArray(results)) {
+                const snippets = results.map((r: any) => r.snippet || r.description || '').filter(Boolean);
+                webSearchSnippets.push(...snippets);
+              }
+            }
+          } catch (wsErr: any) {
+            console.warn(`[MISSION_EXEC] WEB_SEARCH failed for "${lead.name}" (query="${searchQuery}"): ${wsErr.message}`);
+          }
+        }
+        console.log(`[MISSION_EXEC] WEB_SEARCH for "${lead.name}": ${webSearchSnippets.length} snippets (direction=${useReverseQueries ? 'reverse' : 'forward'}, queries=${searchQueries.length})`);
       }
 
       if (needsWebVisit && lead.website) {
