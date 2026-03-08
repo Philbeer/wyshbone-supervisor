@@ -1,0 +1,169 @@
+Search the entire repository before answering. Do not limit to open files.
+
+We need the single highest-impact evidence improvement for Wyshbone:
+
+Constraint-led quote extraction.
+
+Goal:
+When a tool visits a website, do not just return generic page text / titles.
+Extract actual short, relevant evidence quotes based on the active constraint, so Tower can judge real proof.
+
+This is not a planner redesign.
+This is not a Tower redesign.
+This is an evidence extraction upgrade between WEB_VISIT and Tower.
+
+==================================================
+PROBLEM
+==================================================
+
+Current pattern is too weak:
+
+WEB_VISIT
+→ generic page text / title / weak summary
+→ Tower receives poor evidence
+→ Tower fails
+
+We need:
+
+WEB_VISIT
+→ extract relevant quotes for the active constraint
+→ structured evidence items
+→ Tower judges those evidence items
+
+==================================================
+WHAT TO BUILD
+==================================================
+
+Add a constraint-led evidence extraction layer.
+
+For any website-based verification path, given:
+- page text
+- page title
+- url
+- active constraint
+
+extract the most relevant short text snippets / quotes that support or refute the constraint.
+
+==================================================
+OUTPUT SHAPE
+==================================================
+
+Return evidence items like:
+
+{
+  "quote": "Live music every Friday from 8pm",
+  "url": "https://example.com/events",
+  "page_title": "What's On",
+  "constraint_type": "website_evidence",
+  "match_reason": "contains live music phrase",
+  "confidence": "high"
+}
+
+Allow multiple evidence items per lead/page.
+
+==================================================
+FIRST VERSION: SUPPORT THESE CONSTRAINT TYPES
+==================================================
+
+1. website_evidence
+Examples:
+- mentions live music
+- says vegan
+- mentions private dentistry
+
+2. relationship_check
+Examples:
+- works with local authority
+- partners with universities
+- supplies pubs
+
+3. status_check
+Examples:
+- currently accepting residents
+- taking bookings
+- open now
+
+4. attribute_check
+Examples:
+- dog friendly
+- wheelchair accessible
+- family run
+
+==================================================
+BEHAVIOUR
+==================================================
+
+1. Build a small keyword/phrase set from the active constraint.
+2. Scan visited page text for matching or near-matching sentences/lines.
+3. Extract the top 1–3 most relevant snippets.
+4. Return them as structured evidence items.
+5. If nothing useful is found, say no evidence found explicitly.
+
+==================================================
+IMPORTANT
+==================================================
+
+Do NOT just dump raw page text.
+Do NOT only return titles.
+Do NOT weaken Tower.
+The point is to feed Tower better proof.
+
+==================================================
+NICE EXTRA IF EASY
+==================================================
+
+Bias page selection toward likely evidence pages.
+
+Examples:
+For venue/music checks:
+- /events
+- /whats-on
+- /live-music
+- /entertainment
+
+For relationship checks:
+- /about
+- /partners
+- /projects
+- /services
+- /news
+
+But do not overbuild this if it complicates the first version.
+
+==================================================
+OBSERVABILITY
+==================================================
+
+Emit artefacts / diagnostics showing:
+- active constraint
+- pages scanned
+- evidence items extracted
+- no-evidence-found if none found
+
+==================================================
+SUCCESS CRITERIA
+==================================================
+
+For a query like:
+Find pubs in Arundel that mention live music on their website
+
+we should get evidence items like:
+- "Live music every Saturday night"
+- "Join us for acoustic sessions"
+
+instead of generic page metadata.
+
+For relationship queries, Tower should receive actual candidate quotes like:
+- "We work with Blackpool Council"
+- "In partnership with the local authority"
+
+==================================================
+WHAT I WANT BACK
+==================================================
+
+1. Exact files changed
+2. Where constraint-led extraction now happens
+3. Evidence item shape
+4. Which constraint types are supported in v1
+5. Example extracted evidence for website_evidence and relationship_check
+6. How the new evidence is surfaced to Tower

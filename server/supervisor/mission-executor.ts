@@ -1,4 +1,5 @@
 import type { StructuredMission, MissionConstraint, MissionExtractionTrace } from './mission-schema';
+import { extractConstraintLedEvidence, type ConstraintLedExtractionResult, type EvidenceItem } from './constraint-led-extractor';
 import type {
   MissionPlan,
   MissionToolStep,
@@ -539,19 +540,33 @@ export async function executeMissionDrivenPlan(
         }
       }
 
+      const allText = [
+        ...pages.map((p: any) => p.text_clean || p.text || p.content || ''),
+        ...webSearchSnippets,
+      ].join('\n');
+
       for (const constraint of constraintsToVerify) {
         const constraintValue = typeof constraint.value === 'string' ? constraint.value : String(constraint.value ?? '');
-        const allText = [
-          ...pages.map((p: any) => p.text || p.content || ''),
-          ...webSearchSnippets,
-        ].join('\n');
 
-        const keywordFound = allText.toLowerCase().includes(constraintValue.toLowerCase());
-        const extractedQuotes: string[] = [];
+        const extraction: ConstraintLedExtractionResult = extractConstraintLedEvidence(
+          pages,
+          {
+            type: constraint.type,
+            field: constraint.field,
+            operator: constraint.operator,
+            value: constraintValue,
+            hardness: constraint.hardness,
+          },
+          webSearchSnippets,
+        );
 
-        if (keywordFound) {
-          const sentences = allText.split(/[.!?\n]+/).filter(s => s.toLowerCase().includes(constraintValue.toLowerCase()));
-          extractedQuotes.push(...sentences.slice(0, 3).map(s => s.trim().substring(0, 200)));
+        const extractedQuotes = extraction.evidence_items.map(e => e.quote);
+        const keywordFound = extraction.evidence_items.length > 0;
+
+        if (extraction.evidence_items.length > 0) {
+          console.log(`[MISSION_EXEC] Constraint-led extraction for "${lead.name}" + "${constraintValue}": ${extraction.evidence_items.length} evidence item(s)`);
+        } else {
+          console.log(`[MISSION_EXEC] Constraint-led extraction for "${lead.name}" + "${constraintValue}": no evidence found`);
         }
 
         let towerStatus: TowerSemanticStatus | null = null;
@@ -559,6 +574,9 @@ export async function executeMissionDrivenPlan(
         let towerReasoning: string | null = null;
 
         if (requiresTowerJudge(plan) && allText.length > 50) {
+          const bestEvidenceUrl = extraction.evidence_items[0]?.url || lead.website || 'web_search';
+          const bestPageTitle = extraction.evidence_items[0]?.page_title || pages[0]?.title || null;
+
           try {
             const verifyResult = await requestSemanticVerification({
               request: {
@@ -567,10 +585,10 @@ export async function executeMissionDrivenPlan(
                 lead_name: lead.name,
                 lead_place_id: lead.placeId,
                 constraint_to_check: constraintValue,
-                source_url: lead.website || 'web_search',
+                source_url: bestEvidenceUrl,
                 evidence_text: allText.substring(0, 5000),
                 extracted_quotes: extractedQuotes,
-                page_title: pages[0]?.title || null,
+                page_title: bestPageTitle,
               },
               userId,
               conversationId,
@@ -608,6 +626,41 @@ export async function executeMissionDrivenPlan(
           sourceUrl: lead.website || null,
           snippets: extractedQuotes,
         });
+
+        await createArtefact({
+          runId,
+          type: 'constraint_led_evidence',
+          title: `Evidence: "${lead.name}" — ${constraint.type}: "${constraintValue}"`,
+          summary: extraction.no_evidence
+            ? `No evidence found for "${constraintValue}" on "${lead.name}"`
+            : `${extraction.evidence_items.length} evidence item(s) for "${constraintValue}" (${extraction.extraction_method})`,
+          payload: {
+            lead_name: lead.name,
+            lead_place_id: lead.placeId,
+            constraint: {
+              type: constraint.type,
+              field: constraint.field,
+              operator: constraint.operator,
+              value: constraintValue,
+              hardness: constraint.hardness,
+            },
+            pages_scanned: extraction.pages_scanned,
+            extraction_method: extraction.extraction_method,
+            no_evidence: extraction.no_evidence,
+            evidence_items: extraction.evidence_items.map(e => ({
+              quote: e.quote,
+              url: e.url,
+              page_title: e.page_title,
+              match_reason: e.match_reason,
+              confidence: e.confidence,
+              keyword_matched: e.keyword_matched,
+            })),
+            tower_status: towerStatus,
+            tower_confidence: towerConfidence,
+          },
+          userId,
+          conversationId,
+        });
       }
 
       await createArtefact({
@@ -630,6 +683,7 @@ export async function executeMissionDrivenPlan(
               strength: r.evidenceStrength,
               tower_status: r.towerStatus,
               tower_confidence: r.towerConfidence,
+              snippets: r.snippets,
             })),
         },
         userId,
