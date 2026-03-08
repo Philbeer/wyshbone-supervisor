@@ -4,6 +4,7 @@ import type {
   MissionPlan,
   MissionToolStep,
   ConstraintPlanMapping,
+  CandidatePoolStrategy,
 } from './mission-planner';
 import {
   hasRelationshipConstraint,
@@ -319,9 +320,16 @@ export async function executeMissionDrivenPlan(
   let leads: DiscoveredLead[] = [];
   let usedStub = false;
   let candidateCountFromGoogle = 0;
-  let currentSearchBudget = searchBudget;
+  const poolStrategy = plan.candidate_pool;
+  const effectiveSearchBudget = poolStrategy?.applied
+    ? Math.max(searchBudget, poolStrategy.candidate_pool_size)
+    : searchBudget;
+  let currentSearchBudget = effectiveSearchBudget;
   let currentLocation = location;
   let currentBusinessType = businessType;
+  const effectiveEnrichBatch = poolStrategy?.applied
+    ? Math.min(poolStrategy.candidate_pool_size, 30)
+    : ENRICH_BATCH_SIZE;
 
   const relationshipConstraints = getRelationshipConstraints(mission);
   const relationshipPredicate: RelationshipPredicateResult = relationshipConstraints.length > 0
@@ -330,6 +338,27 @@ export async function executeMissionDrivenPlan(
 
   if (relationshipPredicate.requires_relationship_evidence) {
     console.log(`[MISSION_EXEC] Relationship predicate detected: "${relationshipPredicate.detected_predicate}" target="${relationshipPredicate.relationship_target}"`);
+  }
+
+  if (poolStrategy?.applied) {
+    console.log(`[MISSION_EXEC] Candidate pool expansion active: search_budget=${effectiveSearchBudget} enrich_batch=${effectiveEnrichBatch} (requested=${requestedCount ?? 'any'} pool=${poolStrategy.candidate_pool_size})`);
+    await createArtefact({
+      runId,
+      type: 'candidate_pool_strategy',
+      title: `Candidate Pool: ${poolStrategy.candidate_pool_size} (×${poolStrategy.multiplier})`,
+      summary: poolStrategy.reason,
+      payload: {
+        requested_results: poolStrategy.requested_results,
+        candidate_pool_size: poolStrategy.candidate_pool_size,
+        multiplier: poolStrategy.multiplier,
+        effective_search_budget: effectiveSearchBudget,
+        effective_enrich_batch: effectiveEnrichBatch,
+        reason: poolStrategy.reason,
+        applied: poolStrategy.applied,
+      },
+      userId,
+      conversationId,
+    }).catch(() => {});
   }
 
   const relationshipDir = plan.relationship_direction;
@@ -505,7 +534,7 @@ export async function executeMissionDrivenPlan(
     const enrichableLeads = leads
       .map((l, i) => ({ ...l, _idx: i }))
       .filter(l => needsWebSearch || (needsWebVisit && l.website))
-      .slice(0, ENRICH_BATCH_SIZE);
+      .slice(0, effectiveEnrichBatch);
 
     console.log(`[MISSION_EXEC] Evidence gathering for ${enrichableLeads.length} leads (web_search=${needsWebSearch} web_visit=${needsWebVisit})`);
 

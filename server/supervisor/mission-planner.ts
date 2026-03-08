@@ -52,6 +52,14 @@ export interface ConstraintPlanMapping {
   verification_method: VerificationMethod;
 }
 
+export interface CandidatePoolStrategy {
+  requested_results: number | null;
+  candidate_pool_size: number;
+  multiplier: number;
+  reason: string;
+  applied: boolean;
+}
+
 export interface MissionPlan {
   strategy: PlanStrategyId;
   tool_sequence: MissionToolStep[];
@@ -61,6 +69,7 @@ export interface MissionPlan {
   verification_methods: VerificationMethod[];
   expected_artefacts: string[];
   selection_reason: string;
+  candidate_pool?: CandidatePoolStrategy;
   relationship_direction?: RelationshipDirectionResult;
   canonical_input: {
     entity_category: string;
@@ -156,6 +165,67 @@ function classifyConstraint(c: MissionConstraint, index: number): ConstraintPlan
     strategy,
     required_tools: requiredTools,
     verification_method: verificationMethod,
+  };
+}
+
+const POOL_MULTIPLIER = 3;
+const POOL_DEFAULT_BASE = 20;
+const POOL_MAX_CAP = 30;
+
+const VERIFICATION_CONSTRAINT_TYPES: Set<MissionConstraintType> = new Set([
+  'text_compare',
+  'website_evidence',
+  'relationship_check',
+  'attribute_check',
+  'status_check',
+  'ranking',
+]);
+
+function computeCandidatePoolStrategy(
+  requestedCount: number | null,
+  mappings: ConstraintPlanMapping[],
+): CandidatePoolStrategy {
+  const hasVerificationConstraints = mappings.some(
+    m => VERIFICATION_CONSTRAINT_TYPES.has(m.constraint_type),
+  );
+
+  if (!hasVerificationConstraints) {
+    const base = requestedCount ?? POOL_DEFAULT_BASE;
+    return {
+      requested_results: requestedCount,
+      candidate_pool_size: base,
+      multiplier: 1,
+      reason: 'Discovery-only query — no downstream verification, pool equals requested count.',
+      applied: false,
+    };
+  }
+
+  const verifyTypes = mappings
+    .filter(m => VERIFICATION_CONSTRAINT_TYPES.has(m.constraint_type))
+    .map(m => m.constraint_type);
+  const uniqueTypes = [...new Set(verifyTypes)];
+
+  if (requestedCount === null || requestedCount === undefined) {
+    return {
+      requested_results: null,
+      candidate_pool_size: POOL_DEFAULT_BASE,
+      multiplier: 1,
+      reason: `Discovery query with downstream verification (${uniqueTypes.join(', ')}) — no explicit count requested, using default pool of ${POOL_DEFAULT_BASE}.`,
+      applied: false,
+    };
+  }
+
+  const expanded = Math.min(requestedCount * POOL_MULTIPLIER, POOL_MAX_CAP);
+  const actuallyExpanded = expanded > requestedCount;
+
+  return {
+    requested_results: requestedCount,
+    candidate_pool_size: expanded,
+    multiplier: POOL_MULTIPLIER,
+    reason: actuallyExpanded
+      ? `Discovery query with downstream verification (${uniqueTypes.join(', ')}) — expanding candidate pool from ${requestedCount} to ${expanded} before verification.`
+      : `Discovery query with downstream verification (${uniqueTypes.join(', ')}) — requested count ${requestedCount} already at or above pool cap.`,
+    applied: actuallyExpanded,
   };
 }
 
@@ -322,6 +392,13 @@ export function buildMissionPlan(mission: StructuredMission): MissionPlan {
 
   const selectionReason = buildSelectionReason(mission, mappings, finalStrategy);
 
+  const candidatePool = computeCandidatePoolStrategy(mission.requested_count, mappings);
+  if (candidatePool.applied) {
+    console.log(
+      `[MISSION_PLANNER] Candidate pool expansion: requested=${candidatePool.requested_results ?? 'any'} → pool=${candidatePool.candidate_pool_size} (×${candidatePool.multiplier})`
+    );
+  }
+
   let relationshipDirection: RelationshipDirectionResult | undefined;
   const relMapping = mappings.find(m => m.constraint_type === 'relationship_check');
   if (relMapping) {
@@ -353,6 +430,7 @@ export function buildMissionPlan(mission: StructuredMission): MissionPlan {
     verification_methods: verificationMethods,
     expected_artefacts: expectedArtefacts,
     selection_reason: selectionReason,
+    candidate_pool: candidatePool,
     relationship_direction: relationshipDirection,
     canonical_input: canonicalInput,
   };
@@ -427,6 +505,10 @@ export function logMissionPlan(plan: MissionPlan, runId: string): void {
 
   console.log(`[MISSION_PLANNER] verification_methods=${plan.verification_methods.join(', ')}`);
   console.log(`[MISSION_PLANNER] expected_artefacts=${plan.expected_artefacts.join(', ')}`);
+  if (plan.candidate_pool) {
+    const cp = plan.candidate_pool;
+    console.log(`[MISSION_PLANNER] candidate_pool: applied=${cp.applied} requested=${cp.requested_results ?? 'any'} pool=${cp.candidate_pool_size} multiplier=${cp.multiplier}`);
+  }
   console.log(`[MISSION_PLANNER] reason: ${plan.selection_reason}`);
 
   const hasRelationship = plan.constraint_mappings.some(m => m.constraint_type === 'relationship_check');
