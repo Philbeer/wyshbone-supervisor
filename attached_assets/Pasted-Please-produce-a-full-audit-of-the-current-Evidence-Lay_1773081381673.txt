@@ -1,0 +1,72 @@
+Please produce a full audit of the current Evidence Layer implementation in the Supervisor repo.
+
+Do NOT change code yet.
+I want a diagnostic report of what currently exists.
+
+Goal:
+Understand exactly why evidence is often weak before we build stronger replanning on top of it.
+
+Please identify:
+
+1. Exact files and functions responsible for:
+   - website evidence extraction
+   - relationship evidence extraction
+   - evidence artefact creation
+   - fallback evidence sourcing
+   - phrase/target matching against constraints
+
+2. Current evidence artefact structure
+   Show the exact fields currently produced for evidence-related artefacts.
+   I want to know what Tower currently receives.
+
+3. Constraint usage
+   Explain whether the extractor currently uses:
+   - raw user text
+   - mission constraints
+   - planner outputs
+   - hardcoded phrase logic
+   - any synonym expansion
+
+4. Quote extraction
+   Confirm whether the current system extracts:
+   - direct quotes
+   - matched phrases
+   - context snippets
+   - page summaries only
+   - full text blobs
+
+5. Fallback behaviour
+   Explain what currently happens when:
+   - WEB_VISIT fails
+   - crawler is blocked
+   - no phrase match is found
+   - search results are weak
+
+6. Evidence weakness diagnosis
+   For the current implementation, explain which of these are true:
+   - candidate sourcing too broad
+   - phrase matching too weak
+   - evidence not tied tightly enough to constraints
+   - artefacts too generic for Tower
+   - relationship evidence strategy too weak
+   - crawler fallback too weak
+
+7. Benchmark impact
+   Based on current code, tell me which benchmark tests are most likely failing because of:
+   - weak extraction
+   - weak sourcing
+   - weak relationship verification
+   - blocked websites
+
+Output format:
+
+SECTION 1 – FILES AND FUNCTIONS
+SECTION 2 – CURRENT EVIDENCE ARTEFACT SHAPE
+SECTION 3 – HOW CONSTRAINTS ARE USED TODAY
+SECTION 4 – CURRENT FALLBACK LOGIC
+SECTION 5 – ROOT CAUSES OF WEAK EVIDENCE
+SECTION 6 – WHICH BENCHMARK TESTS ARE AFFECTED
+
+Important:
+Do not propose broad architecture changes yet.
+First tell me exactly what is in the code now.
