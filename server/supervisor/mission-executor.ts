@@ -1,5 +1,5 @@
 import type { StructuredMission, MissionConstraint, MissionExtractionTrace } from './mission-schema';
-import { extractConstraintLedEvidence, type ConstraintLedExtractionResult, type EvidenceItem } from './constraint-led-extractor';
+import { extractConstraintLedEvidence, type ConstraintLedExtractionResult, type EvidenceItem, getPageHintsForConstraint } from './constraint-led-extractor';
 import type {
   MissionPlan,
   MissionToolStep,
@@ -629,10 +629,27 @@ export async function executeMissionDrivenPlan(
 
       if (needsWebVisit && lead.website) {
         try {
+          const allPageHints: string[] = [];
+          for (const c of constraintsToVerify) {
+            const cValue = typeof c.value === 'string' ? c.value : String(c.value ?? '');
+            const hints = getPageHintsForConstraint({
+              type: c.type, field: c.field, operator: c.operator, value: cValue, hardness: c.hardness,
+            });
+            for (const h of hints) {
+              if (!allPageHints.includes(h)) allPageHints.push(h);
+            }
+          }
+          const pageHintsArg = allPageHints.length > 0 ? allPageHints.slice(0, 6) : undefined;
+
           runToolCallCount++;
           const wvResult = await executeAction({
             toolName: 'WEB_VISIT',
-            toolArgs: { url: lead.website, max_pages: 3, same_domain_only: true },
+            toolArgs: {
+              url: lead.website,
+              max_pages: 5,
+              same_domain_only: true,
+              ...(pageHintsArg ? { page_hints: pageHintsArg } : {}),
+            },
             userId,
             tracker: toolTracker,
             runId,
@@ -658,43 +675,63 @@ export async function executeMissionDrivenPlan(
         webVisitFailed = true;
       }
 
-      let fallbackSnippets: string[] = [];
-      let fallbackUsed = false;
-      if (webVisitFailed && webSearchSnippets.length === 0 && constraintsToVerify.length > 0) {
-        try {
-          const constraintTerms = constraintsToVerify.map(c => String(c.value ?? '')).join(' ');
-          const fallbackQuery = `"${lead.name}" ${constraintTerms}`.trim();
-          console.log(`[MISSION_EXEC] WEB_VISIT failed for "${lead.name}", attempting fallback WEB_SEARCH`);
-          runToolCallCount++;
-          const fallbackResult = await executeAction({
-            toolName: 'WEB_SEARCH',
-            toolArgs: { query: fallbackQuery, max_results: 5 },
-            userId,
-            tracker: toolTracker,
-            runId,
-            conversationId,
-            clientRequestId,
-          });
+      const constraintFallbackSnippets = new Map<string, string[]>();
+      const constraintFallbackUsed = new Map<string, boolean>();
 
-          if (fallbackResult.success && fallbackResult.data) {
-            const results = (fallbackResult.data as any)?.results || (fallbackResult.data as any)?.envelope?.outputs?.results || [];
-            if (Array.isArray(results)) {
-              fallbackSnippets = results.map((r: any) => r.snippet || r.description || '').filter(Boolean);
-              if (fallbackSnippets.length > 0) {
-                fallbackUsed = true;
-                console.log(`[MISSION_EXEC] Fallback WEB_SEARCH for "${lead.name}": ${fallbackSnippets.length} snippets`);
+      if (webVisitFailed && webSearchSnippets.length === 0 && constraintsToVerify.length > 0) {
+        console.log(`[MISSION_EXEC] WEB_VISIT failed for "${lead.name}", attempting constraint-specific fallback searches`);
+
+        const fallbackBudget = Math.min(constraintsToVerify.length, 3);
+        for (let ci = 0; ci < fallbackBudget; ci++) {
+          const c = constraintsToVerify[ci];
+          const cValue = typeof c.value === 'string' ? c.value : String(c.value ?? '');
+          const cKey = `${c.type}:${cValue}`;
+
+          try {
+            const pageHints = getPageHintsForConstraint({
+              type: c.type, field: c.field, operator: c.operator, value: cValue, hardness: c.hardness,
+            });
+            const hintTerms = pageHints.length > 0 ? pageHints.slice(0, 2).join(' ') : '';
+            const fallbackQuery = c.type === 'relationship_check'
+              ? `"${lead.name}" ${cValue} ${hintTerms}`.trim()
+              : `"${lead.name}" "${cValue}" ${hintTerms}`.trim();
+
+            runToolCallCount++;
+            const fallbackResult = await executeAction({
+              toolName: 'WEB_SEARCH',
+              toolArgs: { query: fallbackQuery, max_results: 5 },
+              userId,
+              tracker: toolTracker,
+              runId,
+              conversationId,
+              clientRequestId,
+            });
+
+            if (fallbackResult.success && fallbackResult.data) {
+              const results = (fallbackResult.data as any)?.results || (fallbackResult.data as any)?.envelope?.outputs?.results || [];
+              if (Array.isArray(results)) {
+                const snippets = results.map((r: any) => r.snippet || r.description || '').filter(Boolean);
+                if (snippets.length > 0) {
+                  constraintFallbackSnippets.set(cKey, snippets);
+                  constraintFallbackUsed.set(cKey, true);
+                  console.log(`[MISSION_EXEC] Constraint-specific fallback for "${lead.name}" + "${cValue}": ${snippets.length} snippets`);
+                }
               }
             }
+          } catch (fbErr: any) {
+            console.warn(`[MISSION_EXEC] Constraint fallback failed for "${lead.name}" + "${cValue}": ${(fbErr as Error).message}`);
           }
-        } catch (fbErr: any) {
-          console.warn(`[MISSION_EXEC] Fallback WEB_SEARCH failed for "${lead.name}": ${fbErr.message}`);
         }
       }
 
-      const effectiveSnippets = webSearchSnippets.length > 0 ? webSearchSnippets : fallbackSnippets;
-
       for (const constraint of constraintsToVerify) {
         const constraintValue = typeof constraint.value === 'string' ? constraint.value : String(constraint.value ?? '');
+        const cKey = `${constraint.type}:${constraintValue}`;
+
+        const effectiveSnippets = webSearchSnippets.length > 0
+          ? webSearchSnippets
+          : constraintFallbackSnippets.get(cKey) || [];
+        const fallbackUsed = constraintFallbackUsed.get(cKey) || false;
 
         const extraction: ConstraintLedExtractionResult = extractConstraintLedEvidence(
           pages,
