@@ -39,6 +39,8 @@ import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQ
 import { requestSemanticVerification, towerStatusToVerdict, type TowerSemanticRequest, type TowerSemanticStatus, type TowerSemanticResponse, type SemanticVerifyResult } from './supervisor/tower-semantic-verify';
 import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, type PolicyApplicationResult, type PolicyBundleV1, type RunOverrides } from './supervisor/learning-layer';
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './supervisor/query-shape-key';
+import { recordBenchmarkRun, type BenchmarkRunInput } from './evaluator/benchmarkLogger';
+import type { RunContext, PlanHistoryEntry } from './evaluator/classifyRunFailure';
 import { readLearningStore, mergePolicyKnobs, buildPolicyAppliedPayload, emitPolicyAppliedArtefact, handleLearningUpdate, BASELINE_DEFAULTS, type FinalPolicy, type PolicyAppliedArtefact, type LearningUpdatePayload } from './supervisor/learning-store';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
@@ -2325,6 +2327,46 @@ class SupervisorService {
     console.log(`[FINAL_MESSAGE] final_message_created run_id=${jobId} conversation_id=${task.conversation_id} message_id=${messageResult.data.id} task_status=${taskStatus} status=${runFailed ? 'FAIL' : 'OK'}`);
 
     await emitTaskExecutionCompleted('run_completed', { runFailed, leadCount: leadIds.length });
+
+    try {
+      const ds = towerResult.deliverySummary;
+      const benchmarkRunContext: RunContext = {
+        missionParsed: !!(missionResult?.ok && missionResult.mission),
+        constraintsValid: !!(missionResult?.ok && missionResult.mission && Array.isArray(missionResult.mission.constraints)),
+        planGenerated: !!activeMissionPlan,
+        planEmpty: !!activeMissionPlan && (activeMissionPlan.tool_sequence?.length ?? 0) === 0,
+        candidatePoolSize: ds?.delivered_total_count ?? leadIds.length,
+        requestedCount: ds?.requested_count ?? earlyParsedGoal?.requested_count ?? 10,
+        crawlerFailed: false,
+        crawlerReturnedEmpty: false,
+        pagesFetched: (ds?.delivered_total_count ?? 0) > 0,
+        evidenceItemCount: ds?.cvl_verified_exact_count ?? ds?.delivered_exact_count ?? 0,
+        evidenceHasQuotes: (ds?.cvl_verified_exact_count ?? 0) > 0,
+        towerRejectedStrongEvidence: ds?.status === 'STOP' && (ds?.cvl_verified_exact_count ?? 0) > 0,
+      };
+      const benchmarkPlanHistory: PlanHistoryEntry[] = (ds?.plan_versions ?? []).map((pv: any) => ({
+        version: pv.version,
+        strategyId: activeMissionPlan?.strategy ?? undefined,
+        radiusKm: undefined,
+        queryText: undefined,
+      }));
+      const benchmarkInput: BenchmarkRunInput = {
+        runId: jobId,
+        query: rawMsg.trim().substring(0, 500),
+        requestedCount: ds?.requested_count ?? earlyParsedGoal?.requested_count ?? 10,
+        deliveredCount: ds?.delivered_total_count ?? leadIds.length,
+        verifiedCount: ds?.cvl_verified_exact_count ?? ds?.delivered_exact_count ?? 0,
+        towerVerdict: towerResult.towerVerdict ?? ds?.tower_verdict ?? null,
+        replansTriggered: Math.max(0, (ds?.plan_versions?.length ?? 1) - 1),
+        runContext: benchmarkRunContext,
+        planHistory: benchmarkPlanHistory,
+        uiVerdict: dsStatus,
+        notes: runFailed ? `Run failed: ${failureReason.substring(0, 200)}` : undefined,
+      };
+      recordBenchmarkRun(benchmarkInput);
+    } catch (benchErr: any) {
+      console.warn(`[BENCHMARK] Failed to record benchmark run (non-fatal): ${benchErr.message}`);
+    }
 
     } catch (topLevelErr: any) {
       const stage = 'processChatTask_top_level';

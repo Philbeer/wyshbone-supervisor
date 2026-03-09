@@ -1,0 +1,228 @@
+You are implementing a benchmarking and failure-classification system for the Wyshbone agent.
+
+IMPORTANT
+Do NOT modify agent behaviour, planner logic, or tool execution.
+This task is instrumentation and observability only.
+
+The goal is to make debugging and evaluation easier by automatically classifying failures in benchmark runs.
+
+The system must record structured information for each run so we can see which layer of the agent loop broke.
+
+--------------------------------------------------
+
+SYSTEM CONTEXT
+
+Wyshbone agent loop:
+
+PLAN
+EXECUTE
+TOWER JUDGE
+REPLAN
+STOP
+
+Current architecture:
+
+UI → Supervisor → Tools → Tower → Supervisor
+
+We now want to add a lightweight benchmarking layer.
+
+--------------------------------------------------
+
+PART 1 — BENCHMARK QUERY SET
+
+Create a small benchmark pack stored in a config file.
+
+File:
+
+/config/benchmarkQueries.ts
+
+Structure:
+
+export const BENCHMARK_QUERIES = [
+  "Find dentists in Brighton",
+  "Find coffee roasters in Manchester",
+  "Find pubs in Arundel mentioning live music",
+  "Find cafes in Bristol that mention vegan food",
+  "Find pubs called Swan in Sussex",
+  "Find organisations that work with Blackpool council",
+  "Find companies partnered with the University of Manchester",
+  "Find pubs in York that mention quiz night",
+  "Find hotels in London mentioning rooftop bars",
+  "Find the best rated coffee shops in Cambridge",
+  "Find breweries supplying pubs in Leeds",
+  "Find pubs in Brighton that brew their own beer"
+];
+
+Do NOT change how runs work.
+This is only a reference list.
+
+--------------------------------------------------
+
+PART 2 — FAILURE CLASSIFICATION MODEL
+
+Create a failure classification enum.
+
+File:
+
+/src/evaluator/failureClassification.ts
+
+Enum values:
+
+INTERPRETATION_FAILURE
+PLANNER_FAILURE
+DISCOVERY_FAILURE
+CRAWL_FAILURE
+EVIDENCE_EXTRACTION_FAILURE
+TOWER_JUDGEMENT_FAILURE
+REPLAN_FAILURE
+UI_TRUTH_FAILURE
+NONE
+
+These correspond to the layers of the Wyshbone system.
+
+--------------------------------------------------
+
+PART 3 — FAILURE CLASSIFICATION LOGIC
+
+Create a classifier utility:
+
+/src/evaluator/classifyRunFailure.ts
+
+Function:
+
+classifyRunFailure(runContext, towerVerdict, planHistory)
+
+Goal:
+
+Return the most likely failure bucket.
+
+Rules (simple heuristics):
+
+1. If mission parsing failed or constraints invalid
+→ INTERPRETATION_FAILURE
+
+2. If plan generated but obviously empty or invalid
+→ PLANNER_FAILURE
+
+3. If candidate pool < requested results / 2
+→ DISCOVERY_FAILURE
+
+4. If crawler failed or returned empty pages
+→ CRAWL_FAILURE
+
+5. If pages fetched but evidence items are weak or missing quotes
+→ EVIDENCE_EXTRACTION_FAILURE
+
+6. If strong evidence exists but Tower rejected it
+→ TOWER_JUDGEMENT_FAILURE
+
+7. If Tower returned CHANGE_PLAN but plan v2 is nearly identical
+→ REPLAN_FAILURE
+
+8. If Tower verdict differs from what UI presents
+→ UI_TRUTH_FAILURE
+
+Otherwise:
+
+→ NONE
+
+Keep the classifier simple and deterministic.
+
+--------------------------------------------------
+
+PART 4 — BENCHMARK RUN RECORD
+
+Create a run summary structure.
+
+File:
+
+/src/types/BenchmarkRunRecord.ts
+
+Structure:
+
+{
+  run_id: string
+  query: string
+  requested_count: number
+  delivered_count: number
+  verified_count: number
+  tower_verdict: string
+  replans_triggered: number
+  failure_classification: FailureClassification
+  notes?: string
+  timestamp: string
+}
+
+--------------------------------------------------
+
+PART 5 — BENCHMARK LOGGER
+
+Create a logger:
+
+/src/evaluator/benchmarkLogger.ts
+
+Function:
+
+recordBenchmarkRun(runContext, towerVerdict, planHistory)
+
+This should:
+
+1. call classifyRunFailure()
+2. build a BenchmarkRunRecord
+3. log it
+
+For now simply output JSON to logs.
+
+Example output:
+
+{
+  "query": "Find pubs in Arundel mentioning live music",
+  "requested_count": 10,
+  "delivered_count": 6,
+  "verified_count": 4,
+  "tower_verdict": "ACCEPT",
+  "replans_triggered": 1,
+  "failure_classification": "EVIDENCE_EXTRACTION_FAILURE"
+}
+
+--------------------------------------------------
+
+PART 6 — INTEGRATION
+
+Call recordBenchmarkRun() at the end of every completed run.
+
+Location:
+
+Supervisor run completion point
+(where Tower verdict is finalised).
+
+This must not alter existing behaviour.
+
+It should only record the run.
+
+--------------------------------------------------
+
+PART 7 — FUTURE EXTENSION (COMMENT ONLY)
+
+Add comments noting that later we may store benchmark runs in a database table:
+
+benchmark_runs
+
+But for now logging is sufficient.
+
+--------------------------------------------------
+
+GOAL
+
+After implementation, every run will automatically produce:
+
+• query
+• result counts
+• Tower verdict
+• replan count
+• classified failure type
+
+This will allow us to analyse benchmark performance quickly and focus fixes on the correct system layer.
+
+Do not refactor unrelated code.
+Keep implementation minimal and safe.
