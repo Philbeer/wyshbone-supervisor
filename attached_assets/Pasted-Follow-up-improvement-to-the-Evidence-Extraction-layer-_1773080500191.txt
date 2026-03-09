@@ -1,0 +1,119 @@
+Follow-up improvement to the Evidence Extraction layer.
+
+Context
+
+The previous change introduced constraint-driven, quote-based evidence artefacts.
+
+Now we want to make those artefacts easier for Tower to judge by explicitly explaining how the quote satisfies the constraint.
+
+This should not change Tower, the planner, or the UI.
+Only the evidence artefact structure and extraction logic should be modified.
+
+---
+
+Goal
+
+Add a deterministic field to each evidence item that explains why the quote satisfies the constraint.
+
+This will make Tower judgement clearer and improve explainability in AFR.
+
+---
+
+New field
+
+Add a field to evidence items:
+
+constraint_match_reason
+
+This should be a short deterministic explanation linking the quote to the constraint.
+
+---
+
+Example evidence artefact
+
+Before
+
+{
+source_url: "https://examplepub.com/events",
+constraint_type: "website_evidence",
+constraint_value: "live music",
+matched_phrase: "live music",
+direct_quote: "Live music every Friday night from 8pm.",
+context_snippet: "Join us for live music every Friday night from 8pm in the main bar.",
+source_type: "website",
+confidence_score: 0.92
+}
+
+After
+
+{
+source_url: "https://examplepub.com/events",
+constraint_type: "website_evidence",
+constraint_value: "live music",
+matched_phrase: "live music",
+direct_quote: "Live music every Friday night from 8pm.",
+context_snippet: "Join us for live music every Friday night from 8pm in the main bar.",
+constraint_match_reason: "Quote explicitly contains the phrase 'live music', satisfying the website evidence constraint.",
+source_type: "website",
+confidence_score: 0.92
+}
+
+---
+
+Relationship example
+
+Constraint:
+
+relationship_check
+value: "local authority"
+
+Evidence:
+
+{
+source_url: "https://example.org/partners",
+matched_phrase: "Blackpool Council",
+direct_quote: "Our organisation works with Blackpool Council to deliver community services.",
+constraint_match_reason: "Blackpool Council is a local authority, therefore this quote demonstrates a relationship with a local authority."
+}
+
+---
+
+Implementation rules
+
+1. The explanation must be deterministic and short.
+
+2. It must reference:
+
+   * the constraint_value
+   * the matched_phrase
+   * the logical relationship between them.
+
+3. Do not use large LLM summaries.
+
+This should be generated programmatically from:
+
+constraint object
+matched phrase
+quote
+
+4. Do not modify Tower logic.
+
+Tower should simply receive better artefacts.
+
+5. Maintain compatibility with the new quote-based evidence structure added in the previous change.
+
+---
+
+Deliverables
+
+After implementing, provide:
+
+1. Files modified
+2. Updated evidence artefact schema
+3. Example artefact payload
+4. Confirmation that existing Tower logic remains unchanged
+5. Confirmation that AFR displays the new field
+
+Expected effect
+
+Tower judgements become easier and more deterministic because each quote explicitly states why it satisfies the constraint.

@@ -6,12 +6,20 @@ export interface ConstraintContext {
   hardness: string;
 }
 
+export type SourceType = 'website' | 'search_snippet' | 'gov_page' | 'social_media' | 'directory' | 'unknown';
+
 export interface EvidenceItem {
-  quote: string;
-  url: string;
+  source_url: string;
   page_title: string;
   constraint_type: string;
   constraint_value: string;
+  matched_phrase: string;
+  direct_quote: string;
+  context_snippet: string;
+  source_type: SourceType;
+  confidence_score: number;
+  quote: string;
+  url: string;
   match_reason: string;
   confidence: 'high' | 'medium' | 'low';
   keyword_matched: string | null;
@@ -23,6 +31,7 @@ export interface ConstraintLedExtractionResult {
   constraint: ConstraintContext;
   no_evidence: boolean;
   extraction_method: 'keyword_sentence' | 'keyword_chunk' | 'no_match';
+  phrase_targets: string[];
 }
 
 interface PageInput {
@@ -71,15 +80,73 @@ const SYNONYM_MAP: Record<string, string[]> = {
   'bookings': ['booking', 'bookings', 'reservations', 'reserve', 'book online', 'book now', 'book a table'],
 };
 
-function buildKeywordSet(constraint: ConstraintContext): string[] {
+const ENTITY_EXPANSION_PATTERNS: Record<string, string[]> = {
+  'local authority': ['council', 'borough council', 'district council', 'city council', 'county council', 'metropolitan borough'],
+  'nhs': ['nhs trust', 'hospital trust', 'clinical commissioning group', 'ccg', 'integrated care board', 'icb'],
+  'university': ['university', 'uni', 'college', 'academic institution', 'faculty'],
+  'school': ['school', 'academy', 'primary school', 'secondary school', 'high school', 'grammar school'],
+  'hospital': ['hospital', 'medical centre', 'medical center', 'clinic', 'infirmary', 'health centre'],
+  'charity': ['charity', 'charitable', 'not-for-profit', 'nonprofit', 'non-profit', 'voluntary organisation'],
+  'government': ['government', 'gov', 'public sector', 'state', 'central government', 'department'],
+  'police': ['police', 'constabulary', 'law enforcement', 'police force', 'police service'],
+  'fire service': ['fire service', 'fire brigade', 'fire and rescue', 'fire department'],
+  'housing association': ['housing association', 'registered social landlord', 'social housing', 'housing provider'],
+};
+
+const RELATIONSHIP_PREDICATES: Record<string, string[]> = {
+  'works with': ['works with', 'working with', 'work with', 'collaborated with', 'in partnership with', 'partnered with'],
+  'supplies': ['supplies', 'supplier', 'supplying', 'provides', 'provider', 'delivering', 'contracted by'],
+  'funded by': ['funded by', 'funding from', 'grant from', 'supported by', 'financed by', 'investment from'],
+  'serves': ['serves', 'serving', 'service provider for', 'contracted to', 'commissioned by'],
+  'affiliated with': ['affiliated with', 'affiliated to', 'associated with', 'member of', 'part of'],
+};
+
+export function generatePhraseTargets(constraint: ConstraintContext): string[] {
   const value = constraint.value.toLowerCase().trim();
-  const keywords: string[] = [value];
+  const targets: string[] = [value];
 
   for (const [key, synonyms] of Object.entries(SYNONYM_MAP)) {
     if (value.includes(key) || key.includes(value)) {
       for (const syn of synonyms) {
-        if (!keywords.includes(syn.toLowerCase())) {
-          keywords.push(syn.toLowerCase());
+        if (!targets.includes(syn.toLowerCase())) {
+          targets.push(syn.toLowerCase());
+        }
+      }
+    }
+  }
+
+  if (constraint.type === 'relationship_check') {
+    for (const [entityKey, expansions] of Object.entries(ENTITY_EXPANSION_PATTERNS)) {
+      if (value.includes(entityKey) || entityKey.includes(value)) {
+        for (const expansion of expansions) {
+          if (!targets.includes(expansion.toLowerCase())) {
+            targets.push(expansion.toLowerCase());
+          }
+        }
+      }
+    }
+
+    for (const [, predicates] of Object.entries(RELATIONSHIP_PREDICATES)) {
+      for (const pred of predicates) {
+        if (value.includes(pred.split(' ')[0])) {
+          for (const variant of predicates) {
+            if (!targets.includes(variant.toLowerCase())) {
+              targets.push(variant.toLowerCase());
+            }
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  if (constraint.type === 'status_check' || constraint.type === 'attribute_check') {
+    for (const [entityKey, expansions] of Object.entries(ENTITY_EXPANSION_PATTERNS)) {
+      if (value.includes(entityKey)) {
+        for (const expansion of expansions) {
+          if (!targets.includes(expansion.toLowerCase())) {
+            targets.push(expansion.toLowerCase());
+          }
         }
       }
     }
@@ -87,16 +154,36 @@ function buildKeywordSet(constraint: ConstraintContext): string[] {
 
   const words = value.split(/\s+/).filter(w => w.length >= 4);
   for (const word of words) {
-    if (!keywords.includes(word)) {
-      keywords.push(word);
+    if (!targets.includes(word)) {
+      targets.push(word);
     }
   }
 
-  return keywords;
+  const hyphenated = value.replace(/\s+/g, '-');
+  if (hyphenated !== value && !targets.includes(hyphenated)) {
+    targets.push(hyphenated);
+  }
+  const dehyphenated = value.replace(/-/g, ' ');
+  if (dehyphenated !== value && !targets.includes(dehyphenated)) {
+    targets.push(dehyphenated);
+  }
+
+  return targets;
 }
 
 function getPageText(page: PageInput): string {
   return page.text_clean || page.text || page.content || '';
+}
+
+function classifySourceType(url: string): SourceType {
+  if (!url || url === 'web_search_snippet') return 'search_snippet';
+  const lower = url.toLowerCase();
+  if (lower.includes('.gov.') || lower.includes('.gov/') || lower.includes('government')) return 'gov_page';
+  if (lower.includes('facebook.com') || lower.includes('twitter.com') || lower.includes('x.com') ||
+      lower.includes('linkedin.com') || lower.includes('instagram.com')) return 'social_media';
+  if (lower.includes('yell.com') || lower.includes('yelp.com') || lower.includes('tripadvisor') ||
+      lower.includes('google.com/maps') || lower.includes('192.com') || lower.includes('thomsonlocal')) return 'directory';
+  return 'website';
 }
 
 function scorePageRelevance(page: PageInput, constraintType: string): number {
@@ -122,6 +209,19 @@ function splitSentences(text: string): string[] {
     .split('\n')
     .map(s => s.trim())
     .filter(s => s.length >= 10 && s.length <= 500);
+}
+
+function extractContextSnippet(text: string, matchIndex: number): string {
+  const contextRadius = 80;
+  const start = Math.max(0, matchIndex - contextRadius);
+  const end = Math.min(text.length, matchIndex + contextRadius);
+
+  let snippet = text.slice(start, end).trim();
+
+  if (start > 0) snippet = '...' + snippet;
+  if (end < text.length) snippet = snippet + '...';
+
+  return snippet;
 }
 
 function scoreSentence(sentence: string, keywords: string[]): { score: number; matchedKeyword: string | null } {
@@ -151,6 +251,24 @@ function scoreSentence(sentence: string, keywords: string[]): { score: number; m
   return { score, matchedKeyword: bestMatch };
 }
 
+function computeConfidenceScore(
+  score: number,
+  matchedKeyword: string | null,
+  constraintValue: string,
+  sourceType: SourceType,
+): number {
+  let base = Math.min(score / 10, 1.0);
+
+  if (matchedKeyword && matchedKeyword.toLowerCase() === constraintValue.toLowerCase()) {
+    base = Math.min(base + 0.2, 1.0);
+  }
+
+  if (sourceType === 'search_snippet') base *= 0.5;
+  if (sourceType === 'gov_page') base = Math.min(base + 0.05, 1.0);
+
+  return Math.round(base * 100) / 100;
+}
+
 function determineConfidence(
   score: number,
   matchedKeyword: string | null,
@@ -172,7 +290,7 @@ export function extractConstraintLedEvidence(
   webSearchSnippets?: string[],
   maxItems: number = 3,
 ): ConstraintLedExtractionResult {
-  const keywords = buildKeywordSet(constraint);
+  const phraseTargets = generatePhraseTargets(constraint);
   const constraintValue = constraint.value;
 
   const sortedPages = [...pages].sort(
@@ -185,6 +303,9 @@ export function extractConstraintLedEvidence(
     page_title: string;
     score: number;
     matchedKeyword: string | null;
+    context_snippet: string;
+    source_type: SourceType;
+    full_text: string;
   }> = [];
 
   let pagesScanned = 0;
@@ -194,18 +315,29 @@ export function extractConstraintLedEvidence(
     if (!text || text.trim().length < 20) continue;
     pagesScanned++;
 
+    const pageUrl = page.url || '';
+    const sourceType = classifySourceType(pageUrl);
+
     const sentences = splitSentences(text);
 
     if (sentences.length > 0) {
       for (const sentence of sentences) {
-        const { score, matchedKeyword } = scoreSentence(sentence, keywords);
+        const { score, matchedKeyword } = scoreSentence(sentence, phraseTargets);
         if (score > 0) {
+          const matchIdx = matchedKeyword
+            ? text.toLowerCase().indexOf(matchedKeyword.toLowerCase())
+            : text.toLowerCase().indexOf(sentence.toLowerCase().substring(0, 30));
+          const contextSnippet = extractContextSnippet(text, matchIdx >= 0 ? matchIdx : 0);
+
           allCandidates.push({
             quote: sentence.substring(0, 250),
-            url: page.url || '',
+            url: pageUrl,
             page_title: page.title || '',
             score,
             matchedKeyword,
+            context_snippet: contextSnippet,
+            source_type: sourceType,
+            full_text: text,
           });
         }
       }
@@ -213,14 +345,17 @@ export function extractConstraintLedEvidence(
       for (let i = 0; i < text.length; i += 180) {
         const chunk = text.slice(i, i + 220).trim();
         if (chunk.length < 15) continue;
-        const { score, matchedKeyword } = scoreSentence(chunk, keywords);
+        const { score, matchedKeyword } = scoreSentence(chunk, phraseTargets);
         if (score > 0) {
           allCandidates.push({
             quote: chunk.substring(0, 250),
-            url: page.url || '',
+            url: pageUrl,
             page_title: page.title || '',
             score,
             matchedKeyword,
+            context_snippet: chunk.substring(0, 300),
+            source_type: sourceType,
+            full_text: text,
           });
         }
       }
@@ -230,7 +365,7 @@ export function extractConstraintLedEvidence(
   if (webSearchSnippets && webSearchSnippets.length > 0) {
     for (const snippet of webSearchSnippets) {
       if (!snippet || snippet.trim().length < 10) continue;
-      const { score, matchedKeyword } = scoreSentence(snippet, keywords);
+      const { score, matchedKeyword } = scoreSentence(snippet, phraseTargets);
       if (score > 0) {
         allCandidates.push({
           quote: snippet.substring(0, 250),
@@ -238,6 +373,9 @@ export function extractConstraintLedEvidence(
           page_title: 'Web Search Result',
           score: score - 1,
           matchedKeyword,
+          context_snippet: snippet.substring(0, 300),
+          source_type: 'search_snippet' as SourceType,
+          full_text: snippet,
         });
       }
     }
@@ -255,16 +393,26 @@ export function extractConstraintLedEvidence(
 
   const topCandidates = dedupedCandidates.slice(0, maxItems);
 
-  const evidenceItems: EvidenceItem[] = topCandidates.map(c => ({
-    quote: c.quote,
-    url: c.url,
-    page_title: c.page_title,
-    constraint_type: constraint.type,
-    constraint_value: constraintValue,
-    match_reason: buildMatchReason(c.matchedKeyword, constraint.type),
-    confidence: determineConfidence(c.score, c.matchedKeyword, constraintValue),
-    keyword_matched: c.matchedKeyword,
-  }));
+  const evidenceItems: EvidenceItem[] = topCandidates.map(c => {
+    const confidenceScore = computeConfidenceScore(c.score, c.matchedKeyword, constraintValue, c.source_type);
+
+    return {
+      source_url: c.url,
+      page_title: c.page_title,
+      constraint_type: constraint.type,
+      constraint_value: constraintValue,
+      matched_phrase: c.matchedKeyword || constraintValue,
+      direct_quote: c.quote,
+      context_snippet: c.context_snippet,
+      source_type: c.source_type,
+      confidence_score: confidenceScore,
+      quote: c.quote,
+      url: c.url,
+      match_reason: buildMatchReason(c.matchedKeyword, constraint.type),
+      confidence: determineConfidence(c.score, c.matchedKeyword, constraintValue),
+      keyword_matched: c.matchedKeyword,
+    };
+  });
 
   const usedChunkFallback = allCandidates.length > 0 && sortedPages.every(page => {
     const text = getPageText(page);
@@ -282,5 +430,6 @@ export function extractConstraintLedEvidence(
     constraint,
     no_evidence: evidenceItems.length === 0,
     extraction_method: method,
+    phrase_targets: phraseTargets,
   };
 }

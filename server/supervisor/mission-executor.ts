@@ -653,10 +653,45 @@ export async function executeMissionDrivenPlan(
         }
       }
 
-      const allText = [
-        ...pages.map((p: any) => p.text_clean || p.text || p.content || ''),
-        ...webSearchSnippets,
-      ].join('\n');
+      let webVisitFailed = false;
+      if (needsWebVisit && lead.website && pages.length === 0) {
+        webVisitFailed = true;
+      }
+
+      let fallbackSnippets: string[] = [];
+      let fallbackUsed = false;
+      if (webVisitFailed && webSearchSnippets.length === 0 && constraintsToVerify.length > 0) {
+        try {
+          const constraintTerms = constraintsToVerify.map(c => String(c.value ?? '')).join(' ');
+          const fallbackQuery = `"${lead.name}" ${constraintTerms}`.trim();
+          console.log(`[MISSION_EXEC] WEB_VISIT failed for "${lead.name}", attempting fallback WEB_SEARCH`);
+          runToolCallCount++;
+          const fallbackResult = await executeAction({
+            toolName: 'WEB_SEARCH',
+            toolArgs: { query: fallbackQuery, max_results: 5 },
+            userId,
+            tracker: toolTracker,
+            runId,
+            conversationId,
+            clientRequestId,
+          });
+
+          if (fallbackResult.success && fallbackResult.data) {
+            const results = (fallbackResult.data as any)?.results || (fallbackResult.data as any)?.envelope?.outputs?.results || [];
+            if (Array.isArray(results)) {
+              fallbackSnippets = results.map((r: any) => r.snippet || r.description || '').filter(Boolean);
+              if (fallbackSnippets.length > 0) {
+                fallbackUsed = true;
+                console.log(`[MISSION_EXEC] Fallback WEB_SEARCH for "${lead.name}": ${fallbackSnippets.length} snippets`);
+              }
+            }
+          }
+        } catch (fbErr: any) {
+          console.warn(`[MISSION_EXEC] Fallback WEB_SEARCH failed for "${lead.name}": ${fbErr.message}`);
+        }
+      }
+
+      const effectiveSnippets = webSearchSnippets.length > 0 ? webSearchSnippets : fallbackSnippets;
 
       for (const constraint of constraintsToVerify) {
         const constraintValue = typeof constraint.value === 'string' ? constraint.value : String(constraint.value ?? '');
@@ -670,14 +705,14 @@ export async function executeMissionDrivenPlan(
             value: constraintValue,
             hardness: constraint.hardness,
           },
-          webSearchSnippets,
+          effectiveSnippets,
         );
 
-        const extractedQuotes = extraction.evidence_items.map(e => e.quote);
+        const extractedQuotes = extraction.evidence_items.map(e => e.direct_quote);
         const keywordFound = extraction.evidence_items.length > 0;
 
         if (extraction.evidence_items.length > 0) {
-          console.log(`[MISSION_EXEC] Constraint-led extraction for "${lead.name}" + "${constraintValue}": ${extraction.evidence_items.length} evidence item(s)`);
+          console.log(`[MISSION_EXEC] Constraint-led extraction for "${lead.name}" + "${constraintValue}": ${extraction.evidence_items.length} evidence item(s), phrases=${extraction.phrase_targets.length}`);
         } else {
           console.log(`[MISSION_EXEC] Constraint-led extraction for "${lead.name}" + "${constraintValue}": no evidence found`);
         }
@@ -686,9 +721,18 @@ export async function executeMissionDrivenPlan(
         let towerConfidence: number | null = null;
         let towerReasoning: string | null = null;
 
-        if (requiresTowerJudge(plan) && allText.length > 50) {
-          const bestEvidenceUrl = extraction.evidence_items[0]?.url || lead.website || 'web_search';
-          const bestPageTitle = extraction.evidence_items[0]?.page_title || pages[0]?.title || null;
+        const structuredEvidenceText = extraction.evidence_items.length > 0
+          ? extraction.evidence_items.map((e, i) =>
+              `[Evidence ${i + 1}] Source: ${e.source_url} | Type: ${e.source_type} | Constraint: ${e.constraint_type}="${e.constraint_value}" | Matched: "${e.matched_phrase}" | Quote: "${e.direct_quote}" | Context: ${e.context_snippet}`
+            ).join('\n')
+          : '';
+
+        const hasSubstantialEvidence = structuredEvidenceText.length > 30 || extractedQuotes.length > 0;
+
+        if (requiresTowerJudge(plan) && hasSubstantialEvidence) {
+          const bestEvidence = extraction.evidence_items[0];
+          const bestEvidenceUrl = bestEvidence?.source_url || lead.website || 'web_search';
+          const bestPageTitle = bestEvidence?.page_title || pages[0]?.title || null;
 
           try {
             const verifyResult = await requestSemanticVerification({
@@ -699,7 +743,7 @@ export async function executeMissionDrivenPlan(
                 lead_place_id: lead.placeId,
                 constraint_to_check: constraintValue,
                 source_url: bestEvidenceUrl,
-                evidence_text: allText.substring(0, 5000),
+                evidence_text: structuredEvidenceText.substring(0, 5000),
                 extracted_quotes: extractedQuotes,
                 page_title: bestPageTitle,
               },
@@ -760,6 +804,8 @@ export async function executeMissionDrivenPlan(
             pages_scanned: extraction.pages_scanned,
             extraction_method: extraction.extraction_method,
             no_evidence: extraction.no_evidence,
+            phrase_targets: extraction.phrase_targets,
+            fallback_used: fallbackUsed,
             evidence_items: extraction.evidence_items.map(e => ({
               quote: e.quote,
               url: e.url,
@@ -767,6 +813,14 @@ export async function executeMissionDrivenPlan(
               match_reason: e.match_reason,
               confidence: e.confidence,
               keyword_matched: e.keyword_matched,
+              source_url: e.source_url,
+              constraint_type: e.constraint_type,
+              constraint_value: e.constraint_value,
+              matched_phrase: e.matched_phrase,
+              direct_quote: e.direct_quote,
+              context_snippet: e.context_snippet,
+              source_type: e.source_type,
+              confidence_score: e.confidence_score,
             })),
             tower_status: towerStatus,
             tower_confidence: towerConfidence,
