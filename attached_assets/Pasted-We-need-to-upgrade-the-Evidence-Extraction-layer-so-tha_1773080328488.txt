@@ -1,0 +1,188 @@
+We need to upgrade the Evidence Extraction layer so that Tower receives strong, constraint-linked evidence instead of generic page summaries.
+
+Goal
+
+Improve evidence artefacts so Tower can judge verification deterministically.
+Evidence must be tied directly to the constraint being checked and include direct quotes from the source.
+
+The benchmark shows many runs failing because the agent finds the right candidates but the evidence artefacts are weak (page titles, summaries, or large text blobs).
+
+This change should be generic and work for any constraint, not just specific benchmark queries.
+
+---
+
+Design principles
+
+Evidence extraction must be:
+
+constraint-driven
+quote-based
+generic (no hardcoded query-specific lists)
+compatible with Tower judgement
+
+The extractor must operate from the structured mission constraints, not from raw natural language.
+
+---
+
+Implementation requirements
+
+1. Evidence must be constraint-led
+
+When a run contains constraints, the evidence extractor should inspect the constraint object and derive search targets from it.
+
+Example constraint object:
+
+{
+type: "relationship_check",
+field: "client",
+value: "local authority"
+}
+
+Extractor should derive phrase targets such as:
+
+local authority
+Blackpool council
+council partnership
+
+But this must be generated generically from the constraint value and entity type, not hardcoded.
+
+---
+
+2. Evidence items must be quote-based
+
+Instead of sending large text blocks or page summaries to Tower, the extractor should emit structured evidence items.
+
+Each evidence item must contain:
+
+source_url
+page_title (if available)
+constraint_type
+constraint_value
+matched_phrase
+direct_quote
+context_snippet
+source_type (website, search_snippet, gov_page, etc.)
+confidence_score (optional)
+
+Example evidence artefact:
+
+{
+source_url: "https://example.org/partners",
+constraint_type: "relationship_check",
+constraint_value: "local authority",
+matched_phrase: "Blackpool Council",
+direct_quote: "We work with Blackpool Council to deliver community services.",
+context_snippet: "Our organisation works with Blackpool Council to deliver community services across the region.",
+source_type: "website",
+confidence_score: 0.82
+}
+
+Tower should judge these quotes instead of full page text.
+
+---
+
+3. Constraint phrase generation must be generic
+
+Do not hardcode lists like "live music", "vegan", etc.
+
+Instead:
+
+constraint.value → phrase targets → phrase variants
+
+Example patterns:
+
+relationship_check → expand organisation entity names
+
+website_evidence → expand text targets
+
+Examples:
+
+Constraint value: "local authority"
+
+Variants may include:
+
+local authority
+council
+borough council
+district council
+city council
+
+Constraint value: "NHS hospitals"
+
+Variants may include:
+
+NHS
+NHS trust
+hospital trust
+
+But these must be generated programmatically from the constraint entity rather than hardcoded query lists.
+
+---
+
+4. Extract only short quotes
+
+Evidence items should capture:
+
+1–3 sentence quotes
+containing the matched phrase
+
+Avoid returning large text blobs.
+
+Tower performs better with compact evidence items.
+
+---
+
+5. Handle crawler failures gracefully
+
+If WEB_VISIT fails, the extractor should attempt fallback evidence sources.
+
+Fallback hierarchy:
+
+1. alternate pages from same domain
+2. search snippets
+3. broader web search
+
+Fallback evidence must be labelled with lower confidence.
+
+Example:
+
+source_type: "search_snippet"
+confidence_score: 0.4
+
+---
+
+6. Do not change Tower
+
+Tower logic should remain unchanged.
+
+This change only improves the artefacts Tower receives.
+
+---
+
+7. Preserve current architecture
+
+Supervisor orchestration should remain unchanged.
+
+This change should only modify:
+
+evidence extraction logic
+evidence artefact structure
+phrase generation logic
+
+No planner or Tower behaviour changes should be introduced here.
+
+---
+
+Deliverables
+
+After implementing this change, provide:
+
+1. Files modified
+2. Old evidence artefact example
+3. New evidence artefact example
+4. Explanation of how phrase targets are derived from constraint objects
+5. Which benchmark tests should improve from this change
+
+Expected result
+
+Benchmark tests involving website evidence (live music, vegan menu, spa facilities, etc.) should pass more often because Tower will receive strong, constraint-specific quotes rather than generic page summaries.
