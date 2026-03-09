@@ -463,11 +463,37 @@ export async function executeMissionDrivenPlan(
     metadata: { step: 1, tool: 'SEARCH_PLACES', leads_count: leads.length },
   });
 
+  const evidenceResults: EvidenceResult[] = [];
+
   if (plan.tool_sequence.includes('FILTER_FIELDS')) {
     console.log(`[MISSION_EXEC] === Phase: FILTER_FIELDS ===`);
     const beforeFilter = leads.length;
+    const filterConstraints = getTextCompareConstraints(mission);
     leads = applyFieldFilters(leads, mission, runId);
     console.log(`[MISSION_EXEC] FILTER_FIELDS: ${beforeFilter} → ${leads.length}`);
+
+    for (let i = 0; i < leads.length; i++) {
+      for (const fc of filterConstraints) {
+        const filterValue = typeof fc.value === 'string' ? fc.value : String(fc.value ?? '');
+        if (!filterValue) continue;
+        evidenceResults.push({
+          leadIndex: i,
+          leadName: leads[i].name,
+          leadPlaceId: leads[i].placeId,
+          constraintField: fc.field,
+          constraintValue: filterValue,
+          constraintType: fc.type,
+          evidenceFound: true,
+          evidenceStrength: 'strong',
+          towerStatus: null,
+          towerConfidence: null,
+          towerReasoning: null,
+          sourceUrl: null,
+          snippets: [`Field match: ${fc.field} ${fc.operator} "${filterValue}" → matched "${leads[i].name}"`],
+        });
+      }
+    }
+    console.log(`[MISSION_EXEC] FILTER_FIELDS: generated ${leads.length * filterConstraints.length} field_match evidence items`);
 
     await createArtefact({
       runId,
@@ -479,7 +505,7 @@ export async function executeMissionDrivenPlan(
         step_tool: 'FILTER_FIELDS',
         before_count: beforeFilter,
         after_count: leads.length,
-        filters_applied: getTextCompareConstraints(mission).map(c => ({
+        filters_applied: filterConstraints.map(c => ({
           field: c.field,
           operator: c.operator,
           value: c.value,
@@ -518,7 +544,6 @@ export async function executeMissionDrivenPlan(
   }
 
   const evidenceConstraints = getEvidenceConstraints(mission);
-  const evidenceResults: EvidenceResult[] = [];
   const webVisitPages = new Map<number, any[]>();
 
   if (
@@ -818,6 +843,27 @@ export async function executeMissionDrivenPlan(
     console.log(`[MISSION_EXEC] === Phase: RANK_SCORE ===`);
     const rankingConstraint = getRankingConstraints(mission)[0];
     if (rankingConstraint) {
+      if (evidenceResults.length === 0) {
+        for (let i = 0; i < leads.length; i++) {
+          const rankValue = typeof rankingConstraint.value === 'string' ? rankingConstraint.value : String(rankingConstraint.value ?? '');
+          evidenceResults.push({
+            leadIndex: i,
+            leadName: leads[i].name,
+            leadPlaceId: leads[i].placeId,
+            constraintField: rankingConstraint.field || 'ranking',
+            constraintValue: rankValue,
+            constraintType: 'ranking',
+            evidenceFound: true,
+            evidenceStrength: 'weak',
+            towerStatus: null,
+            towerConfidence: null,
+            towerReasoning: null,
+            sourceUrl: null,
+            snippets: [`Ranked by Google Places relevance for "${rankValue}" in position ${i + 1}/${leads.length}`],
+          });
+        }
+        console.log(`[MISSION_EXEC] RANK_SCORE: generated ${leads.length} ranking source evidence items (no prior evidence to score by)`);
+      }
       const evidenceByLead = new Map<number, number>();
       for (const er of evidenceResults) {
         const current = evidenceByLead.get(er.leadIndex) || 0;
@@ -933,7 +979,35 @@ export async function executeMissionDrivenPlan(
           }
 
           if (plan.tool_sequence.includes('FILTER_FIELDS')) {
+            const preFilterCount = leads.length;
             leads = applyFieldFilters(leads, mission, runId);
+            const replanFilterConstraints = getTextCompareConstraints(mission);
+            for (let i = 0; i < leads.length; i++) {
+              const alreadyHasEvidence = evidenceResults.some(
+                er => er.leadPlaceId === leads[i].placeId && er.constraintType === 'text_compare'
+              );
+              if (alreadyHasEvidence) continue;
+              for (const fc of replanFilterConstraints) {
+                const filterValue = typeof fc.value === 'string' ? fc.value : String(fc.value ?? '');
+                if (!filterValue) continue;
+                evidenceResults.push({
+                  leadIndex: i,
+                  leadName: leads[i].name,
+                  leadPlaceId: leads[i].placeId,
+                  constraintField: fc.field,
+                  constraintValue: filterValue,
+                  constraintType: fc.type,
+                  evidenceFound: true,
+                  evidenceStrength: 'strong',
+                  towerStatus: null,
+                  towerConfidence: null,
+                  towerReasoning: null,
+                  sourceUrl: null,
+                  snippets: [`Field match (replan v${planVersion}): ${fc.field} ${fc.operator} "${filterValue}" → matched "${leads[i].name}"`],
+                });
+              }
+            }
+            console.log(`[MISSION_EXEC] Replan v${planVersion}: FILTER_FIELDS ${preFilterCount} → ${leads.length}, evidence items=${evidenceResults.length}`);
           }
 
           console.log(`[MISSION_EXEC] Replan v${planVersion}: +${newLeadsAdded} new leads, total=${leads.length}`);
@@ -1044,7 +1118,7 @@ export async function executeMissionDrivenPlan(
   console.log(`[MISSION_EXEC] === Phase: FINAL_DELIVERY ===`);
 
   const hasEvidenceConstraints = evidenceConstraints.length > 0 || relationshipConstraints.length > 0;
-  const evidenceSummary = hasEvidenceConstraints
+  const evidenceSummary = evidenceResults.length > 0
     ? {
         total_checks: evidenceResults.length,
         checks_with_evidence: evidenceResults.filter(r => r.evidenceFound).length,
@@ -1061,7 +1135,8 @@ export async function executeMissionDrivenPlan(
   }
 
   const isRankingOnly = plan.strategy === 'discovery_then_rank' && !hasEvidenceConstraints;
-  const evidenceWasAttempted = hasEvidenceConstraints && evidenceResults.length > 0;
+  const isFieldFilterOnly = plan.strategy === 'discovery_then_direct_filter' && !hasEvidenceConstraints;
+  const evidenceWasAttempted = evidenceResults.length > 0;
 
   const deliveredLeadsWithEvidence = finalLeads.map(l => {
     const leadEvidence = evidenceByPlaceId.get(l.placeId) || [];
@@ -1091,7 +1166,7 @@ export async function executeMissionDrivenPlan(
       verified: evidenceWasAttempted ? hasAnyEvidence : (isRankingOnly ? false : undefined),
       verification_status: evidenceWasAttempted
         ? (strongCount > 0 ? 'verified' as const : weakCount > 0 ? 'weak_match' as const : 'no_evidence' as const)
-        : (isRankingOnly ? 'ranking_only' as const : 'not_attempted' as const),
+        : (isRankingOnly ? 'ranking_only' as const : (isFieldFilterOnly ? 'field_filter_only' as const : 'not_attempted' as const)),
       evidence: evidenceAttachment,
     };
   });
@@ -1114,6 +1189,7 @@ export async function executeMissionDrivenPlan(
       evidence_sources_attached: evidenceSourcesAttached,
       evidence_was_attempted: evidenceWasAttempted,
       is_ranking_only: isRankingOnly,
+      is_field_filter_only: isFieldFilterOnly,
       strategy: plan.strategy,
     },
     userId,
