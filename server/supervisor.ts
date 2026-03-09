@@ -41,9 +41,16 @@ import { applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLo
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './supervisor/query-shape-key';
 import { recordBenchmarkRun, type BenchmarkRunInput } from './evaluator/benchmarkLogger';
 import type { RunContext, PlanHistoryEntry } from './evaluator/classifyRunFailure';
+import { buildQALayerSummary, type QALayerInput } from './evaluator/qaLayerSummary';
 import { readLearningStore, mergePolicyKnobs, buildPolicyAppliedPayload, emitPolicyAppliedArtefact, handleLearningUpdate, BASELINE_DEFAULTS, type FinalPolicy, type PolicyAppliedArtefact, type LearningUpdatePayload } from './supervisor/learning-store';
+import { BENCHMARK_QUERIES } from '../config/benchmarkQueries';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
+
+const _benchmarkQueriesLower = new Set(BENCHMARK_QUERIES.map(q => q.toLowerCase().trim()));
+function isBenchmarkQuery(query: string): boolean {
+  return _benchmarkQueriesLower.has(query.toLowerCase().trim());
+}
 
 // --- Session Isolation Guard ---
 // Tracks the active taskId per conversationId so that stale in-flight work
@@ -856,6 +863,26 @@ class SupervisorService {
       }).catch(() => {});
     };
 
+    const emitQALayerSummary = async (qaInput: QALayerInput) => {
+      try {
+        const qaSummary = buildQALayerSummary(qaInput);
+        console.log(`[QA_LAYER] ${JSON.stringify(qaSummary)}`);
+        await createArtefact({
+          runId: jobId,
+          type: 'diagnostic',
+          title: 'QA Layer Summary',
+          summary: `${qaSummary.overall_outcome}: ${qaSummary.outcome_reason}`,
+          payload: qaSummary as unknown as Record<string, unknown>,
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch((artErr: any) => {
+          console.warn(`[QA_LAYER] Failed to emit artefact (non-fatal): ${artErr.message}`);
+        });
+      } catch (qaErr: any) {
+        console.warn(`[QA_LAYER] Failed to build QA layer summary (non-fatal): ${qaErr.message}`);
+      }
+    };
+
     try {
     this.backfillUserMessageRunId(task.user_id, jobId, task.conversation_id, task.created_at).catch((e: any) =>
       console.error(`[BACKFILL] user_message_received backfill failed (non-fatal): ${e.message}`)
@@ -1517,6 +1544,13 @@ class SupervisorService {
         });
 
         await emitTaskExecutionCompleted('preflight_clarify', { reason: preflightResult.reason });
+        await emitQALayerSummary({
+          query: rawMsg.trim().substring(0, 500), isBenchmarkQuery: isBenchmarkQuery(rawMsg.trim()),
+          missionParsed: false, constraintsExtracted: false, planGenerated: false, planEmpty: false,
+          executionStarted: false, executionSource: null, runFailed: false, runTimedOut: false,
+          blockedByClarify: true, blockedByGate: false,
+          leadsDiscovered: 0, leadsDelivered: 0, leadsWithVerification: 0, towerVerdict: null,
+        });
         return;
       }
     }
@@ -1704,6 +1738,14 @@ class SupervisorService {
         await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'constraint_stop', endedAt: new Date(), metadata: { verdict: 'constraint_gate_stop', constraint_contract: resolvedContract } }).catch(() => {});
         console.log(`[CONSTRAINT_GATE] STOP — constraints cannot be satisfied`);
         await emitTaskExecutionCompleted('constraint_gate_stop');
+        await emitQALayerSummary({
+          query: rawMsg.trim().substring(0, 500), isBenchmarkQuery: isBenchmarkQuery(rawMsg.trim()),
+          missionParsed: !!(missionResult?.ok), constraintsExtracted: !!(missionResult?.ok && missionResult.mission),
+          planGenerated: false, planEmpty: false,
+          executionStarted: false, executionSource: null, runFailed: false, runTimedOut: false,
+          blockedByClarify: false, blockedByGate: true,
+          leadsDiscovered: 0, leadsDelivered: 0, leadsWithVerification: 0, towerVerdict: null,
+        });
         return;
       }
 
@@ -1720,6 +1762,14 @@ class SupervisorService {
         await storage.updateAgentRun(jobId, { status: 'clarifying', terminalState: null, metadata: { verdict: 'constraint_gate_clarify', awaiting: 'user_input', constraint_contract: resolvedContract, original_message: pendingConstraint.originalMessage } }).catch(() => {});
         console.log(`[CONSTRAINT_GATE] Still blocked — asking again — run paused`);
         await emitTaskExecutionCompleted('constraint_gate_clarify');
+        await emitQALayerSummary({
+          query: rawMsg.trim().substring(0, 500), isBenchmarkQuery: isBenchmarkQuery(rawMsg.trim()),
+          missionParsed: !!(missionResult?.ok), constraintsExtracted: !!(missionResult?.ok && missionResult.mission),
+          planGenerated: false, planEmpty: false,
+          executionStarted: false, executionSource: null, runFailed: false, runTimedOut: false,
+          blockedByClarify: true, blockedByGate: false,
+          leadsDiscovered: 0, leadsDelivered: 0, leadsWithVerification: 0, towerVerdict: null,
+        });
         return;
       }
 
@@ -2000,6 +2050,14 @@ class SupervisorService {
         });
 
         await emitTaskExecutionCompleted('clarify_before_run');
+        await emitQALayerSummary({
+          query: rawMsg.trim().substring(0, 500), isBenchmarkQuery: isBenchmarkQuery(rawMsg.trim()),
+          missionParsed: !!(missionResult?.ok), constraintsExtracted: !!(missionResult?.ok && missionResult.mission),
+          planGenerated: !!activeMissionPlan, planEmpty: false,
+          executionStarted: false, executionSource: null, runFailed: false, runTimedOut: false,
+          blockedByClarify: true, blockedByGate: false,
+          leadsDiscovered: 0, leadsDelivered: 0, leadsWithVerification: 0, towerVerdict: null,
+        });
         return;
       }
     }
@@ -2368,6 +2426,29 @@ class SupervisorService {
       console.warn(`[BENCHMARK] Failed to record benchmark run (non-fatal): ${benchErr.message}`);
     }
 
+    {
+      const ds = towerResult.deliverySummary;
+      const rawLeadsFound = ds?.found_count_raw ?? ds?.delivered_total_count ?? leadIds.length;
+      await emitQALayerSummary({
+        query: rawMsg.trim().substring(0, 500),
+        isBenchmarkQuery: isBenchmarkQuery(rawMsg.trim()),
+        missionParsed: !!(missionResult?.ok && missionResult.mission),
+        constraintsExtracted: !!(missionResult?.ok && missionResult.mission && Array.isArray(missionResult.mission.constraints)),
+        planGenerated: !!activeMissionPlan,
+        planEmpty: !!activeMissionPlan && (activeMissionPlan.tool_sequence?.length ?? 0) === 0,
+        executionStarted: true,
+        executionSource,
+        runFailed,
+        runTimedOut: false,
+        blockedByClarify: false,
+        blockedByGate: false,
+        leadsDiscovered: rawLeadsFound,
+        leadsDelivered: ds?.delivered_total_count ?? leadIds.length,
+        leadsWithVerification: ds?.cvl_verified_exact_count ?? ds?.delivered_exact_count ?? 0,
+        towerVerdict: towerResult.towerVerdict ?? ds?.tower_verdict ?? null,
+      });
+    }
+
     } catch (topLevelErr: any) {
       const stage = 'processChatTask_top_level';
       const errMsg = topLevelErr instanceof Error ? topLevelErr.message : String(topLevelErr);
@@ -2432,6 +2513,14 @@ class SupervisorService {
       }).eq('id', task.id).catch(() => {});
 
       await emitTaskExecutionCompleted('run_error', { error: errMsg.substring(0, 200) });
+      await emitQALayerSummary({
+        query: rawMsg.trim().substring(0, 500), isBenchmarkQuery: isBenchmarkQuery(rawMsg.trim()),
+        missionParsed: !!(missionResult?.ok), constraintsExtracted: !!(missionResult?.ok && missionResult.mission),
+        planGenerated: !!activeMissionPlan, planEmpty: false,
+        executionStarted: true, executionSource: null, runFailed: true, runTimedOut: false,
+        blockedByClarify: false, blockedByGate: false,
+        leadsDiscovered: 0, leadsDelivered: 0, leadsWithVerification: 0, towerVerdict: 'error',
+      });
       throw topLevelErr;
     }
   }
