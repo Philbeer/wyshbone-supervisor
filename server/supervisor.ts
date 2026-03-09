@@ -27,6 +27,7 @@ import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-
 import { evaluateClarifyGate, evaluateClarifyGateFromIntent, extractBusinessType, extractLocation, extractCount, extractTimeFilter, type ClarifyGateResult, type ClarifyMissingField, type ClarifyTriggerCategory } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
+import { deriveVerificationPolicyFromLegacyConstraints, emitVerificationPolicyArtefact, type VerificationPolicyResult } from './supervisor/verification-policy';
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
 import { extractStructuredMission, getMissionExtractorMode } from './supervisor/mission-extractor';
 import { checkMissionCompleteness, logCompletenessToAFR, type CompletenessCheckResult } from './supervisor/mission-completeness-check';
@@ -3207,6 +3208,20 @@ class SupervisorService {
     }
     console.log(`[TOWER_LOOP_CHAT] Typed constraints for Tower: ${JSON.stringify(typedConstraints)}`);
 
+    const legacyVerificationPolicy = deriveVerificationPolicyFromLegacyConstraints(
+      structuredConstraints.map(c => c.type),
+    );
+    console.log(`[TOWER_LOOP_CHAT] Verification policy: ${legacyVerificationPolicy.verification_policy} — ${legacyVerificationPolicy.reason}`);
+
+    await emitVerificationPolicyArtefact({
+      runId: chatRunId,
+      userId: task.user_id,
+      conversationId,
+      query: originalUserGoal,
+      strategy: 'discovery_only',
+      policyResult: legacyVerificationPolicy,
+    }).catch((e: any) => console.warn(`[TOWER_LOOP_CHAT] verification_policy artefact failed (non-fatal): ${e.message}`));
+
     if (!preComputedParsedGoal) {
       const cvlConstraintsPayload = buildConstraintsExtractedPayload(originalUserGoal, userRequestedCountFinal, structuredConstraints);
       try {
@@ -5915,6 +5930,8 @@ class SupervisorService {
       run_deadline_exceeded: runDeadlineExceeded,
       intent_source: canonicalIntent ? 'canonical' : 'legacy',
       evidence_ready_for_tower: attributeVerificationAttempted,
+      verification_policy: legacyVerificationPolicy.verification_policy,
+      verification_policy_reason: legacyVerificationPolicy.reason,
     };
 
     console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=final_delivery`);
@@ -5965,6 +5982,8 @@ class SupervisorService {
       accumulated_matching_count: totalMatchingLeads,
       attribute_verification_stopped: attributeVerificationStopped,
       run_deadline_exceeded: runDeadlineExceeded,
+      verification_policy: legacyVerificationPolicy.verification_policy,
+      verification_policy_reason: legacyVerificationPolicy.reason,
       ...(queryShapeKey ? { query_shape_key: queryShapeKey } : {}),
       ...(hasContactRequests ? {
         contact_requests: contactRequests,
@@ -6222,6 +6241,8 @@ class SupervisorService {
         relationship_target: relationshipPredicate.relationship_target,
         verified_relationship_count: 0,
       } : undefined,
+      verificationPolicy: legacyVerificationPolicy.verification_policy,
+      verificationPolicyReason: legacyVerificationPolicy.reason,
     };
     const mainDsPayload = await emitDeliverySummary(mainDsInput);
 

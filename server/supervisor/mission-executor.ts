@@ -17,6 +17,7 @@ import {
   logMissionPlan,
   persistMissionPlan,
 } from './mission-planner';
+import { emitVerificationPolicyArtefact } from './verification-policy';
 import { executeAction, createRunToolTracker, type RunToolTracker } from './action-executor';
 import { createArtefact } from './artefacts';
 import { judgeArtefact } from './tower-artefact-judge';
@@ -272,6 +273,15 @@ export async function executeMissionDrivenPlan(
     userId,
     conversationId,
   });
+
+  await emitVerificationPolicyArtefact({
+    runId,
+    userId,
+    conversationId,
+    query: rawUserInput,
+    strategy: plan.strategy,
+    policyResult: plan.verification_policy,
+  }).catch((e: any) => console.warn(`[MISSION_EXEC] verification_policy artefact failed (non-fatal): ${e.message}`));
 
   if (missionTrace.pass1_constraint_checklist) {
     await createArtefact({
@@ -1217,6 +1227,8 @@ export async function executeMissionDrivenPlan(
       evidence_summary: evidenceSummary,
       evidence_ready_for_tower: evidenceWasAttempted,
       run_deadline_exceeded: runDeadlineExceeded,
+      verification_policy: plan.verification_policy.verification_policy,
+      verification_policy_reason: plan.verification_policy.reason,
       leads: deliveredLeadsWithEvidence,
     },
     userId,
@@ -1243,6 +1255,8 @@ export async function executeMissionDrivenPlan(
     max_replan_versions: MAX_REPLANS + 1,
     requires_relationship_evidence: relationshipPredicate.requires_relationship_evidence,
     run_deadline_exceeded: runDeadlineExceeded,
+    verification_policy: plan.verification_policy.verification_policy,
+    verification_policy_reason: plan.verification_policy.reason,
   };
 
   try {
@@ -1358,6 +1372,8 @@ export async function executeMissionDrivenPlan(
           ).length,
         }
       : undefined,
+    verificationPolicy: plan.verification_policy.verification_policy,
+    verificationPolicyReason: plan.verification_policy.reason,
   });
 
   await logAFREvent({

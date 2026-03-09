@@ -1,4 +1,5 @@
 import { createArtefact } from './artefacts';
+import type { VerificationPolicy } from './verification-policy';
 
 export interface PlanVersionEntry {
   version: number;
@@ -59,6 +60,8 @@ export interface DeliverySummaryPayload {
   cvl_verified_exact_count: number | null;
   cvl_unverifiable_count: number | null;
   relationship_context: RelationshipContext | null;
+  verification_policy?: VerificationPolicy;
+  verification_policy_reason?: string;
 }
 
 export interface DeliverySummaryLeadInput {
@@ -107,6 +110,8 @@ export interface DeliverySummaryInput {
   cvlLocationBreakdown?: CvlLocationBreakdown | null;
   cvlLeadVerifications?: CvlLeadVerification[];
   relationshipContext?: RelationshipContext;
+  verificationPolicy?: VerificationPolicy;
+  verificationPolicyReason?: string;
 }
 
 export function determineLeadExactness(
@@ -402,6 +407,10 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
     cvl_verified_exact_count: hasCvl ? input.cvlVerifiedExactCount! : null,
     cvl_unverifiable_count: input.cvlUnverifiableCount ?? null,
     relationship_context: relCtx,
+    ...(input.verificationPolicy ? {
+      verification_policy: input.verificationPolicy,
+      verification_policy_reason: input.verificationPolicyReason,
+    } : {}),
   };
 }
 

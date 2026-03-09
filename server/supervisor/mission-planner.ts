@@ -1,6 +1,7 @@
 import type { StructuredMission, MissionConstraint, MissionConstraintType } from './mission-schema';
 import { createArtefact } from './artefacts';
 import { analyseRelationshipDirection, type RelationshipDirectionResult } from './relationship-direction';
+import { deriveVerificationPolicy, type VerificationPolicy, type VerificationPolicyResult } from './verification-policy';
 
 export type MissionToolStep =
   | 'SEARCH_PLACES'
@@ -69,6 +70,7 @@ export interface MissionPlan {
   verification_methods: VerificationMethod[];
   expected_artefacts: string[];
   selection_reason: string;
+  verification_policy: VerificationPolicyResult;
   candidate_pool?: CandidatePoolStrategy;
   relationship_direction?: RelationshipDirectionResult;
   canonical_input: {
@@ -421,7 +423,7 @@ export function buildMissionPlan(mission: StructuredMission): MissionPlan {
     }
   }
 
-  return {
+  const plan: MissionPlan = {
     strategy: finalStrategy,
     tool_sequence: toolSequence,
     steps,
@@ -430,10 +432,15 @@ export function buildMissionPlan(mission: StructuredMission): MissionPlan {
     verification_methods: verificationMethods,
     expected_artefacts: expectedArtefacts,
     selection_reason: selectionReason,
+    verification_policy: deriveVerificationPolicy({
+      constraint_mappings: mappings,
+    }),
     candidate_pool: candidatePool,
     relationship_direction: relationshipDirection,
     canonical_input: canonicalInput,
   };
+
+  return plan;
 }
 
 export function hasRelationshipConstraint(plan: MissionPlan): boolean {
