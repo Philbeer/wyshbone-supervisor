@@ -16,6 +16,7 @@ export interface EvidenceItem {
   matched_phrase: string;
   direct_quote: string;
   context_snippet: string;
+  constraint_match_reason: string;
   source_type: SourceType;
   confidence_score: number;
   quote: string;
@@ -284,6 +285,83 @@ function buildMatchReason(matchedKeyword: string | null, constraintType: string)
   return `contains "${matchedKeyword}" phrase`;
 }
 
+const CONSTRAINT_TYPE_LABELS: Record<string, string> = {
+  website_evidence: 'website evidence',
+  relationship_check: 'relationship',
+  attribute_check: 'attribute',
+  status_check: 'status',
+  text_compare: 'text',
+};
+
+function extractEntityFromConstraintValue(constraintValue: string): string {
+  const valueLC = constraintValue.toLowerCase();
+  for (const predicates of Object.values(RELATIONSHIP_PREDICATES)) {
+    for (const pred of predicates) {
+      if (valueLC.startsWith(pred.toLowerCase() + ' ')) {
+        return constraintValue.substring(pred.length).trim();
+      }
+      if (valueLC.endsWith(' ' + pred.toLowerCase())) {
+        return constraintValue.substring(0, constraintValue.length - pred.length).trim();
+      }
+    }
+  }
+  return constraintValue;
+}
+
+function buildConstraintMatchReason(
+  constraintType: string,
+  constraintValue: string,
+  matchedPhrase: string,
+): string {
+  const phraseLC = matchedPhrase.toLowerCase();
+  const valueLC = constraintValue.toLowerCase();
+  const constraintLabel = CONSTRAINT_TYPE_LABELS[constraintType] || constraintType.replace(/_/g, ' ');
+
+  if (phraseLC === valueLC) {
+    return `Quote explicitly contains the phrase '${matchedPhrase}', satisfying the ${constraintLabel} constraint.`;
+  }
+
+  const entityTarget = constraintType === 'relationship_check'
+    ? extractEntityFromConstraintValue(constraintValue)
+    : constraintValue;
+  const entityTargetLC = entityTarget.toLowerCase();
+
+  for (const [entityKey, expansions] of Object.entries(ENTITY_EXPANSION_PATTERNS)) {
+    if (entityTargetLC.includes(entityKey) || entityKey.includes(entityTargetLC)) {
+      for (const expansion of expansions) {
+        if (phraseLC.includes(expansion.toLowerCase())) {
+          if (constraintType === 'relationship_check') {
+            return `Quote mentions '${matchedPhrase}', an entity expansion of '${entityTarget}', supporting the relationship constraint '${constraintValue}'.`;
+          }
+          return `'${matchedPhrase}' is a type of ${entityTarget}, satisfying the ${constraintLabel} constraint.`;
+        }
+      }
+    }
+  }
+
+  for (const [key] of Object.entries(SYNONYM_MAP)) {
+    if (valueLC.includes(key) || key.includes(valueLC)) {
+      const synonyms = SYNONYM_MAP[key];
+      if (synonyms.some(s => phraseLC.includes(s.toLowerCase()))) {
+        return `'${matchedPhrase}' is a synonym or variant of '${constraintValue}', satisfying the ${constraintLabel} constraint.`;
+      }
+    }
+  }
+
+  if (constraintType === 'relationship_check') {
+    if (phraseLC.includes(entityTargetLC) || entityTargetLC.includes(phraseLC)) {
+      return `Quote mentions '${matchedPhrase}' which relates to '${entityTarget}', supporting the relationship constraint '${constraintValue}'.`;
+    }
+    return `Quote mentions '${matchedPhrase}' which is relevant to the relationship constraint '${constraintValue}'.`;
+  }
+
+  if (phraseLC.includes(valueLC) || valueLC.includes(phraseLC)) {
+    return `Quote contains '${matchedPhrase}' which relates to '${constraintValue}', satisfying the ${constraintLabel} constraint.`;
+  }
+
+  return `Quote contains '${matchedPhrase}' which is relevant to the ${constraintLabel} constraint for '${constraintValue}'.`;
+}
+
 export function extractConstraintLedEvidence(
   pages: PageInput[],
   constraint: ConstraintContext,
@@ -396,14 +474,17 @@ export function extractConstraintLedEvidence(
   const evidenceItems: EvidenceItem[] = topCandidates.map(c => {
     const confidenceScore = computeConfidenceScore(c.score, c.matchedKeyword, constraintValue, c.source_type);
 
+    const matchedPhrase = c.matchedKeyword || constraintValue;
+
     return {
       source_url: c.url,
       page_title: c.page_title,
       constraint_type: constraint.type,
       constraint_value: constraintValue,
-      matched_phrase: c.matchedKeyword || constraintValue,
+      matched_phrase: matchedPhrase,
       direct_quote: c.quote,
       context_snippet: c.context_snippet,
+      constraint_match_reason: buildConstraintMatchReason(constraint.type, constraintValue, matchedPhrase),
       source_type: c.source_type,
       confidence_score: confidenceScore,
       quote: c.quote,
