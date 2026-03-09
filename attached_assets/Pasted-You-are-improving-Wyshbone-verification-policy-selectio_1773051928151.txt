@@ -1,0 +1,129 @@
+You are improving Wyshbone verification policy selection.
+
+IMPORTANT
+Do NOT make the system more permissive by lying.
+Do NOT weaken Tower truthfulness.
+Do NOT fabricate evidence.
+
+This task is about choosing the correct verification standard for different query types.
+
+Problem
+
+Wyshbone currently appears to apply too uniform a verification expectation across different query classes.
+
+As a result, simple discovery queries can fail because they do not carry website-style evidence, even though directory/map evidence would be sufficient and truthful.
+
+We need the planner / delivery policy to distinguish between:
+
+1. basic discovery queries
+2. website-content evidence queries
+3. relationship evidence queries
+
+Goal
+
+Choose the correct evidence standard based on the mission / constraint type, so verification is truthful and proportionate.
+
+Required policy
+
+PART 1 — BASIC DISCOVERY / DIRECTORY-VERIFIED
+
+For queries whose main goal is to find entities, directory evidence is sufficient.
+
+Examples:
+- Find 10 cafes in York
+- Find dentists in Brighton
+- Find pubs called Swan in Sussex
+
+Allowed evidence types:
+- Google Places / map listing
+- place_id
+- listing URL
+- address / phone / website from listing
+- rating / review count if relevant
+
+These runs should be marked as something like:
+- directory_verified
+or equivalent internal status
+
+They should NOT require website quote evidence unless the user asked for website content specifically.
+
+PART 2 — WEBSITE-CONTENT VERIFIED
+
+For queries that require website claims or attributes, website evidence is required.
+
+Examples:
+- mention live music on their website
+- mention vegan options
+- mention spa facilities
+- offer personal training
+
+Required evidence:
+- source_url
+- quote or extracted snippet
+- evidence tied to the requested attribute
+
+Directory-only evidence is not sufficient here.
+
+PART 3 — RELATIONSHIP VERIFIED
+
+For relationship queries, relationship evidence is required.
+
+Examples:
+- work with Blackpool council
+- supply to NHS hospitals in Leeds
+
+Required evidence:
+- relationship source
+- quote or structured evidence from a credible source
+- authority-side or public-source verification where appropriate
+
+Directory-only evidence is not sufficient here.
+
+Implementation task
+
+1. Audit where verification expectations are currently inferred.
+2. Add deterministic logic that sets an evidence standard per run / plan / strategy:
+   - DIRECTORY_VERIFIED
+   - WEBSITE_VERIFIED
+   - RELATIONSHIP_VERIFIED
+   or equivalent internal enum / field
+
+3. Ensure final delivery and Tower input preserve this evidence type clearly.
+
+4. Do NOT fabricate verification.
+If evidence is weak, keep it weak.
+If a run is only directory-verified, do not represent it as website-verified.
+
+5. Emit a diagnostic artefact:
+Verification Policy Selected
+
+Payload should include:
+- query
+- strategy
+- verification_policy
+- reason
+
+Examples:
+- verification_policy: DIRECTORY_VERIFIED
+  reason: entity discovery query with no website-content constraint
+
+- verification_policy: WEBSITE_VERIFIED
+  reason: attribute requires page-level text evidence
+
+- verification_policy: RELATIONSHIP_VERIFIED
+  reason: relationship predicate requires source-backed relationship evidence
+
+Success criteria
+
+- simple discovery runs no longer fail merely because they lack website quote evidence
+- website-evidence runs remain strict
+- relationship runs remain strict
+- truthfulness is preserved
+- AFR clearly shows which verification policy was selected
+
+Deliverables
+
+1. files changed
+2. exact policy logic added
+3. examples of which benchmark queries now map to which verification policy
+4. confirmation that no fake verification was introduced

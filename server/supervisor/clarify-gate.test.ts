@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { evaluateClarifyGate, extractBusinessType, extractLocation, extractCount, extractTimeFilter } from './clarify-gate';
+import { evaluateClarifyGate, evaluateClarifyGateFromIntent, extractBusinessType, extractLocation, extractCount, extractTimeFilter } from './clarify-gate';
+import type { CanonicalIntent } from './canonical-intent';
 
 describe('ClarifyGate — tightened gate: only empty, nonsense, or multiple concatenated requests trigger clarify', () => {
 
@@ -168,9 +169,11 @@ describe('ClarifyGate — tightened gate: only empty, nonsense, or multiple conc
       assert.strictEqual(result.route, 'agent_run');
     });
 
-    it('"Find good cafes" → agent_run (missing location, allowed through)', () => {
+    it('"Find good cafes" → clarify_before_run (missing location, entity discovery requires location)', () => {
       const result = evaluateClarifyGate('Find good cafes');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.deepStrictEqual(result.missingFields, ['location']);
+      assert.deepStrictEqual(result.questions, ['Where should I search?']);
     });
 
     it('"find places with good atmosphere in Leeds" → agent_run (vague entity + subjective, allowed)', () => {
@@ -311,9 +314,11 @@ describe('ClarifyGate — tightened gate: only empty, nonsense, or multiple conc
       assert.strictEqual(result.route, 'agent_run');
     });
 
-    it('"find pubs" → agent_run (short but valid)', () => {
+    it('"find pubs" → clarify_before_run (entity discovery missing location)', () => {
       const result = evaluateClarifyGate('find pubs');
-      assert.strictEqual(result.route, 'agent_run');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.deepStrictEqual(result.missingFields, ['location']);
+      assert.deepStrictEqual(result.questions, ['Where should I search?']);
     });
 
     it('"bars Brighton" → agent_run (short but valid)', () => {
@@ -421,5 +426,132 @@ describe('Intent preview extractors — regex-based field extraction for intent_
       const loc = extractLocation(msg);
       assert.ok(bt !== null || loc !== null, 'at least one field should be extracted from malformed input');
     });
+  });
+});
+
+function makeIntent(overrides: Partial<CanonicalIntent>): CanonicalIntent {
+  return {
+    mission_type: 'find_businesses',
+    entity_kind: 'venue',
+    entity_category: 'pubs',
+    location_text: null,
+    geo_mode: 'unspecified',
+    radius_km: null,
+    requested_count: null,
+    default_count_policy: 'page_1',
+    constraints: [],
+    plan_template_hint: 'simple_search',
+    preferred_evidence_order: ['google_places'],
+    ...overrides,
+  };
+}
+
+describe('ClarifyGateFromIntent — entity discovery missing-location gate', () => {
+
+  describe('find_businesses without location triggers clarify', () => {
+    it('"Find breweries" with no location → clarify_before_run', () => {
+      const intent = makeIntent({ entity_category: 'breweries', location_text: null });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find breweries');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.deepStrictEqual(result.missingFields, ['location']);
+      assert.deepStrictEqual(result.questions, ['Where should I search?']);
+    });
+
+    it('"Find dentists" with no location → clarify_before_run', () => {
+      const intent = makeIntent({ entity_category: 'dentists', location_text: null });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find dentists');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.deepStrictEqual(result.missingFields, ['location']);
+    });
+
+    it('"Find pubs" with empty-string location → clarify_before_run', () => {
+      const intent = makeIntent({ entity_category: 'pubs', location_text: '' });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find pubs');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.deepStrictEqual(result.missingFields, ['location']);
+    });
+  });
+
+  describe('deep_research without location triggers clarify', () => {
+    it('"Research breweries" with no location → clarify_before_run', () => {
+      const intent = makeIntent({ mission_type: 'deep_research', entity_category: 'breweries', location_text: null });
+      const result = evaluateClarifyGateFromIntent(intent, 'Research breweries');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.deepStrictEqual(result.missingFields, ['location']);
+    });
+  });
+
+  describe('find_businesses WITH location proceeds to agent_run', () => {
+    it('"Find breweries in Brighton" → agent_run', () => {
+      const intent = makeIntent({ entity_category: 'breweries', location_text: 'Brighton' });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find breweries in Brighton');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+  });
+
+  describe('global-by-design queries bypass missing-location gate', () => {
+    it('"largest breweries in the world" → agent_run (global scope)', () => {
+      const intent = makeIntent({ entity_category: 'breweries', location_text: null });
+      const result = evaluateClarifyGateFromIntent(intent, 'largest breweries in the world');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"find companies worldwide" → agent_run (global scope)', () => {
+      const intent = makeIntent({ entity_category: 'companies', location_text: null });
+      const result = evaluateClarifyGateFromIntent(intent, 'find companies worldwide');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"breweries around the world" → agent_run (global scope)', () => {
+      const intent = makeIntent({ entity_category: 'breweries', location_text: null });
+      const result = evaluateClarifyGateFromIntent(intent, 'breweries around the world');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+  });
+
+  describe('monitor mission type bypasses missing-location gate', () => {
+    it('monitor mission without location → agent_run', () => {
+      const intent = makeIntent({ mission_type: 'monitor', entity_category: 'breweries', location_text: null });
+      const result = evaluateClarifyGateFromIntent(intent, 'monitor breweries');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+  });
+
+  describe('clarify result contains correct parsedFields', () => {
+    it('parsedFields include business type from intent', () => {
+      const intent = makeIntent({ entity_category: 'breweries', location_text: null, requested_count: 10 });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find 10 breweries');
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.strictEqual(result.parsedFields?.businessType, 'breweries');
+      assert.strictEqual(result.parsedFields?.location, null);
+      assert.strictEqual(result.parsedFields?.count, 10);
+      assert.strictEqual(result.semantic_source, 'canonical');
+    });
+  });
+});
+
+describe('ClarifyGate regex — entity discovery missing-location gate', () => {
+
+  it('"Find breweries" → clarify_before_run', () => {
+    const result = evaluateClarifyGate('Find breweries');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.deepStrictEqual(result.missingFields, ['location']);
+    assert.deepStrictEqual(result.questions, ['Where should I search?']);
+  });
+
+  it('"Find dentists" → clarify_before_run', () => {
+    const result = evaluateClarifyGate('Find dentists');
+    assert.strictEqual(result.route, 'clarify_before_run');
+    assert.deepStrictEqual(result.missingFields, ['location']);
+  });
+
+  it('"Find breweries in Brighton" → agent_run', () => {
+    const result = evaluateClarifyGate('Find breweries in Brighton');
+    assert.strictEqual(result.route, 'agent_run');
+  });
+
+  it('"largest breweries in the world" → agent_run (global-by-design bypass)', () => {
+    const result = evaluateClarifyGate('largest breweries in the world');
+    assert.strictEqual(result.route, 'agent_run');
   });
 });

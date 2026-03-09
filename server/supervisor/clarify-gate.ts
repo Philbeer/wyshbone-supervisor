@@ -187,6 +187,12 @@ function isMissingLocation(msg: string): boolean {
   return true;
 }
 
+const GLOBAL_SCOPE_PATTERN = /\b(?:in the world|worldwide|globally|around the world|across the globe|on earth|international(?:ly)?|every country|all countries)\b/i;
+
+function isGlobalByDesign(msg: string): boolean {
+  return GLOBAL_SCOPE_PATTERN.test(msg);
+}
+
 function hasVagueEntityType(msg: string): boolean {
   const lower = msg.toLowerCase();
   for (const vague of VAGUE_ENTITY_TYPES) {
@@ -404,6 +410,25 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
     };
   }
 
+  if (hasSearchIntent(msg) && isMissingLocation(msg) && !isGlobalByDesign(msg)) {
+    const bt = extractBusinessType(msg);
+    if (bt) {
+      console.log(`[CLARIFY_GATE] route=clarify_before_run — entity discovery missing location (regex) bt=${bt}`);
+      return {
+        route: 'clarify_before_run',
+        reason: 'Clarification needed: entity discovery query is missing a location constraint.',
+        questions: ['Where should I search?'],
+        missingFields: ['location'],
+        parsedFields: {
+          businessType: bt,
+          location: null,
+          count: extractCount(msg),
+          timeFilter: extractTimeFilter(msg),
+        },
+      };
+    }
+  }
+
   return {
     route: 'agent_run',
     reason: 'Intent is clear and runnable — proceeding with agent execution.',
@@ -510,6 +535,28 @@ export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: s
     const fallback = evaluateClarifyGate(rawMsg);
     fallback.semantic_source = 'fallback_regex';
     return fallback;
+  }
+
+  if (
+    (intent.mission_type === 'find_businesses' || intent.mission_type === 'deep_research') &&
+    !intent.location_text?.trim() &&
+    !isGlobalByDesign(msg)
+  ) {
+    const timeConstraint = intent.constraints.find(c => c.type === 'time');
+    console.log(`[CLARIFY_GATE] semantic_source=canonical route=clarify_before_run — entity discovery missing location mission_type=${intent.mission_type}`);
+    return {
+      route: 'clarify_before_run',
+      reason: 'Clarification needed: entity discovery query is missing a location constraint.',
+      questions: ['Where should I search?'],
+      missingFields: ['location'],
+      parsedFields: {
+        businessType: intent.entity_category,
+        location: null,
+        count: intent.requested_count,
+        timeFilter: timeConstraint?.raw ?? null,
+      },
+      semantic_source: 'canonical',
+    };
   }
 
   const timeConstraint = intent.constraints.find(c => c.type === 'time');
