@@ -1053,11 +1053,78 @@ export async function executeMissionDrivenPlan(
       }
     : null;
 
+  const evidenceByPlaceId = new Map<string, EvidenceResult[]>();
+  for (const er of evidenceResults) {
+    const existing = evidenceByPlaceId.get(er.leadPlaceId) || [];
+    existing.push(er);
+    evidenceByPlaceId.set(er.leadPlaceId, existing);
+  }
+
+  const isRankingOnly = plan.strategy === 'discovery_then_rank' && !hasEvidenceConstraints;
+  const evidenceWasAttempted = hasEvidenceConstraints && evidenceResults.length > 0;
+
+  const deliveredLeadsWithEvidence = finalLeads.map(l => {
+    const leadEvidence = evidenceByPlaceId.get(l.placeId) || [];
+    const hasAnyEvidence = leadEvidence.some(e => e.evidenceFound);
+    const strongCount = leadEvidence.filter(e => e.evidenceStrength === 'strong').length;
+    const weakCount = leadEvidence.filter(e => e.evidenceStrength === 'weak').length;
+
+    const evidenceAttachment = leadEvidence.map(e => ({
+      constraint_field: e.constraintField,
+      constraint_value: e.constraintValue,
+      constraint_type: e.constraintType,
+      evidence_found: e.evidenceFound,
+      evidence_strength: e.evidenceStrength,
+      source_url: e.sourceUrl,
+      snippets: e.snippets,
+      tower_status: e.towerStatus,
+      tower_confidence: e.towerConfidence,
+    }));
+
+    return {
+      name: l.name,
+      address: l.address,
+      phone: l.phone,
+      website: l.website,
+      placeId: l.placeId,
+      source: l.source,
+      verified: evidenceWasAttempted ? hasAnyEvidence : (isRankingOnly ? false : undefined),
+      verification_status: evidenceWasAttempted
+        ? (strongCount > 0 ? 'verified' as const : weakCount > 0 ? 'weak_match' as const : 'no_evidence' as const)
+        : (isRankingOnly ? 'ranking_only' as const : 'not_attempted' as const),
+      evidence: evidenceAttachment,
+    };
+  });
+
+  const leadsWithVerification = deliveredLeadsWithEvidence.filter(l => l.verified === true).length;
+  const leadsWithoutVerification = deliveredLeadsWithEvidence.filter(l => l.verified !== true).length;
+  const evidenceSourcesAttached = new Set(evidenceResults.filter(r => r.sourceUrl).map(r => r.sourceUrl)).size;
+
+  console.log(`[MISSION_EXEC] Evidence attachment: total_delivered=${deliveredLeadsWithEvidence.length} with_verification=${leadsWithVerification} without_verification=${leadsWithoutVerification} evidence_sources=${evidenceSourcesAttached}`);
+
+  await createArtefact({
+    runId,
+    type: 'diagnostic',
+    title: 'Verification attachment summary',
+    summary: `${leadsWithVerification}/${deliveredLeadsWithEvidence.length} leads carry verification data`,
+    payload: {
+      total_delivered: deliveredLeadsWithEvidence.length,
+      with_verification_data: leadsWithVerification,
+      without_verification_data: leadsWithoutVerification,
+      evidence_sources_attached: evidenceSourcesAttached,
+      evidence_was_attempted: evidenceWasAttempted,
+      is_ranking_only: isRankingOnly,
+      strategy: plan.strategy,
+    },
+    userId,
+    conversationId,
+  }).catch(() => {});
+
   const finalDeliveryArtefact = await createArtefact({
     runId,
     type: 'final_delivery',
-    title: `Final delivery: ${finalLeads.length} leads`,
-    summary: `${finalLeads.length} leads delivered | strategy=${plan.strategy} | plans=${planVersion}`,
+    title: `Final delivery: ${finalLeads.length} leads${leadsWithVerification > 0 ? ` (${leadsWithVerification} verified)` : ''}`,
+    summary: `${finalLeads.length} leads delivered | strategy=${plan.strategy} | plans=${planVersion} | verified=${leadsWithVerification}`,
     payload: {
       execution_source: 'mission',
       mission_strategy: plan.strategy,
@@ -1072,15 +1139,9 @@ export async function executeMissionDrivenPlan(
       replans_used: replansUsed,
       candidate_count_from_google: candidateCountFromGoogle,
       evidence_summary: evidenceSummary,
+      evidence_ready_for_tower: evidenceWasAttempted,
       run_deadline_exceeded: runDeadlineExceeded,
-      leads: finalLeads.map(l => ({
-        name: l.name,
-        address: l.address,
-        phone: l.phone,
-        website: l.website,
-        placeId: l.placeId,
-        source: l.source,
-      })),
+      leads: deliveredLeadsWithEvidence,
     },
     userId,
     conversationId,
