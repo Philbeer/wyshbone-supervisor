@@ -282,6 +282,37 @@ function getRankingConstraints(mission: StructuredMission): MissionConstraint[] 
   return mission.constraints.filter(c => c.type === 'ranking');
 }
 
+export interface HardEvidenceFilterInput {
+  leadIndex: number;
+  constraintField: string;
+  constraintValue: string;
+  evidenceFound: boolean;
+}
+
+export interface HardEvidenceConstraintRef {
+  field: string;
+  value: string | number | boolean | null;
+}
+
+export function applyHardEvidenceFilter<T>(
+  leads: T[],
+  evidenceResults: HardEvidenceFilterInput[],
+  hardEvidenceConstraints: HardEvidenceConstraintRef[],
+): T[] {
+  const leadsWithEvidence = new Set<number>();
+  for (const er of evidenceResults) {
+    if (er.evidenceFound && hardEvidenceConstraints.some(c => c.field === er.constraintField || String(c.value) === er.constraintValue)) {
+      leadsWithEvidence.add(er.leadIndex);
+    }
+  }
+
+  const leadsChecked = new Set(evidenceResults.map(r => r.leadIndex));
+  return leads.filter((_, i) => {
+    if (!leadsChecked.has(i)) return false;
+    return leadsWithEvidence.has(i);
+  });
+}
+
 function applyFieldFilters(
   leads: DiscoveredLead[],
   mission: StructuredMission,
@@ -1293,18 +1324,7 @@ export async function executeMissionDrivenPlan(
   let filteredLeads = leads;
 
   if (hardEvidenceConstraints.length > 0 && evidenceResults.length > 0) {
-    const leadsWithEvidence = new Set<number>();
-    for (const er of evidenceResults) {
-      if (er.evidenceFound && hardEvidenceConstraints.some(c => c.field === er.constraintField || String(c.value) === er.constraintValue)) {
-        leadsWithEvidence.add(er.leadIndex);
-      }
-    }
-
-    const leadsChecked = new Set(evidenceResults.map(r => r.leadIndex));
-    filteredLeads = leads.filter((_, i) => {
-      if (!leadsChecked.has(i)) return true;
-      return leadsWithEvidence.has(i);
-    });
+    filteredLeads = applyHardEvidenceFilter(leads, evidenceResults, hardEvidenceConstraints);
 
     if (filteredLeads.length < leads.length) {
       console.log(`[MISSION_EXEC] Hard evidence filter: ${leads.length} → ${filteredLeads.length} (removed ${leads.length - filteredLeads.length} leads without evidence for hard constraints)`);
