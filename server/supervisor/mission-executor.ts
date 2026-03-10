@@ -405,6 +405,7 @@ export async function executeMissionDrivenPlan(
   const softConstraints = buildSoftConstraintLabels(mission);
   const toolTracker = createRunToolTracker();
   const createdLeadIds: string[] = [];
+  const placeIdToDbId = new Map<string, string>();
 
   const normalizedGoal = `Find ${requestedCount ? requestedCount + ' ' : ''}${businessType} in ${location}`;
 
@@ -724,6 +725,7 @@ export async function executeMissionDrivenPlan(
         },
       });
       createdLeadIds.push(created.id);
+      placeIdToDbId.set(lead.placeId, created.id);
     } catch (leadErr: any) {
       console.error(`[MISSION_EXEC] Failed to persist lead "${lead.name}": ${leadErr.message}`);
     }
@@ -1333,13 +1335,8 @@ export async function executeMissionDrivenPlan(
 
   const finalLeads = requestedCount !== null ? filteredLeads.slice(0, requestedCount) : filteredLeads;
 
-  const persistedPlaceIds = new Set<string>();
-  for (let i = 0; i < Math.min(leads.length, createdLeadIds.length); i++) {
-    persistedPlaceIds.add(leads[i].placeId);
-  }
-
   for (const lead of finalLeads) {
-    if (persistedPlaceIds.has(lead.placeId)) continue;
+    if (placeIdToDbId.has(lead.placeId)) continue;
     try {
       const created = await storage.createSuggestedLead({
         userId,
@@ -1357,11 +1354,15 @@ export async function executeMissionDrivenPlan(
         },
       });
       createdLeadIds.push(created.id);
-      persistedPlaceIds.add(lead.placeId);
+      placeIdToDbId.set(lead.placeId, created.id);
     } catch (e: any) {
       console.error(`[MISSION_EXEC] Failed to persist replan lead "${lead.name}": ${e.message}`);
     }
   }
+
+  const filteredLeadIds = finalLeads
+    .map(l => placeIdToDbId.get(l.placeId))
+    .filter((id): id is string => id !== undefined);
 
   const leadsListArtefact = await createArtefact({
     runId,
@@ -1713,7 +1714,7 @@ export async function executeMissionDrivenPlan(
 
   return {
     response: chatResponse,
-    leadIds: createdLeadIds,
+    leadIds: filteredLeadIds,
     deliverySummary: dsPayload,
     towerVerdict: finalVerdict,
     leads: finalLeads.map(l => ({
