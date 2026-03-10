@@ -14,12 +14,25 @@ export interface SoftRelaxation {
   plan_version: number;
 }
 
+export interface MatchEvidenceItem {
+  constraint_type: string;
+  source_url: string | null;
+  source_type: string | null;
+  quote: string | null;
+  matched_phrase: string | null;
+  context_snippet: string | null;
+  confidence: number;
+  verification_status: 'verified' | 'weak_match' | 'proxy' | 'unverified';
+}
+
 export interface DeliveredEntity {
   entity_id: string;
   name: string;
   address: string;
   match_level: 'exact' | 'closest';
   soft_violations: string[];
+  match_evidence?: MatchEvidenceItem[];
+  match_summary?: string;
 }
 
 export type CanonicalVerdict = 'PASS' | 'PARTIAL' | 'STOP' | 'ERROR' | 'COMPLETED';
@@ -71,6 +84,8 @@ export interface DeliverySummaryLeadInput {
   name: string;
   address: string;
   found_in_plan_version?: number;
+  match_evidence?: MatchEvidenceItem[];
+  match_summary?: string;
 }
 
 export type CvlLocationStatus = 'verified_geo' | 'search_bounded' | 'out_of_area' | 'unknown' | 'not_applicable';
@@ -310,6 +325,8 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
       address: lead.address,
       match_level,
       soft_violations,
+      ...(lead.match_evidence && lead.match_evidence.length > 0 ? { match_evidence: lead.match_evidence } : {}),
+      ...(lead.match_summary ? { match_summary: lead.match_summary } : {}),
     };
 
     if (match_level === 'exact') {

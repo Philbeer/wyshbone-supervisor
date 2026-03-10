@@ -17,7 +17,7 @@ import { buildShortfallDirective, applyLeadgenReplanPolicy, constraintsAreIdenti
 import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, buildRequestedCount, DEFAULT_LEADS_TARGET, sanitiseLocationString, detectExactnessMode, detectDoNotStop, isAttributeLikeConstraint, type ParsedGoal, type StructuredConstraint, type RequestedCountCanonical, type ExactnessMode } from './supervisor/goal-to-constraints';
 import { emitSearchQueryCompiled, type SearchQueryCompiledPayload } from './supervisor/search-query-compiled';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
-import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type DeliverySummaryPayload } from './supervisor/delivery-summary';
+import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type DeliverySummaryPayload, type MatchEvidenceItem } from './supervisor/delivery-summary';
 import { emitRunReceipt } from './supervisor/run-receipt';
 import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
@@ -5895,10 +5895,70 @@ class SupervisorService {
       console.log(`[FINAL_DELIVERY] Trimmed leads from ${foundCountRaw} to ${finalLeads.length} (requested_count=${userRequestedCountFinal})`);
     }
 
+    const legacyEvidenceByPlaceId = new Map<string, MatchEvidenceItem[]>();
+    const legacySummaryByPlaceId = new Map<string, string>();
+    if (attrVerificationResults.length > 0) {
+      const grouped = new Map<string, typeof attrVerificationResults>();
+      for (const r of attrVerificationResults) {
+        const arr = grouped.get(r.lead_place_id) || [];
+        arr.push(r);
+        grouped.set(r.lead_place_id, arr);
+      }
+      grouped.forEach((results, placeId) => {
+        const items: MatchEvidenceItem[] = [];
+        for (const r of results) {
+          if (r.verdict === 'no') continue;
+          const vs: MatchEvidenceItem['verification_status'] =
+            r.tower_semantic_status === 'verified' ? 'verified' :
+            r.tower_semantic_status === 'weak_match' ? 'weak_match' :
+            r.evidence_strength === 'strong' ? 'proxy' : 'unverified';
+          const conf = r.tower_semantic_confidence !== null ? r.tower_semantic_confidence :
+            r.evidence_strength === 'strong' ? 0.8 : r.evidence_strength === 'weak' ? 0.4 : 0.1;
+          items.push({
+            constraint_type: 'attribute_check',
+            source_url: r.url_visited,
+            source_type: r.url_visited ? 'website' : null,
+            quote: r.extracted_quotes.length > 0 ? r.extracted_quotes[0].substring(0, 300) : null,
+            matched_phrase: r.attribute_raw,
+            context_snippet: r.extracted_quotes.length > 1 ? r.extracted_quotes[1].substring(0, 200) : null,
+            confidence: conf,
+            verification_status: vs,
+          });
+        }
+        items.sort((a, b) => b.confidence - a.confidence);
+        const capped = items.slice(0, 3);
+        legacyEvidenceByPlaceId.set(placeId, capped);
+        if (capped.length > 0) {
+          const reasons = capped.map(ev => {
+            const st = ev.verification_status === 'verified' ? 'verified' : ev.verification_status === 'weak_match' ? 'partially matched' : 'matched';
+            return `${st} "${ev.matched_phrase}"${ev.source_url ? ' on their website' : ''}`;
+          });
+          legacySummaryByPlaceId.set(placeId, `Included because ${reasons.join('; ')}.`);
+        } else {
+          legacySummaryByPlaceId.set(placeId, `Included as a candidate — evidence was checked but not confirmed.`);
+        }
+      });
+    }
+
+    const lookupEvidence = (placeId: string | undefined, name: string): MatchEvidenceItem[] | undefined => {
+      if (placeId && legacyEvidenceByPlaceId.has(placeId)) return legacyEvidenceByPlaceId.get(placeId);
+      const fl = finalLeads.find(f => f.name === name);
+      if (fl && fl.placeId && legacyEvidenceByPlaceId.has(fl.placeId)) return legacyEvidenceByPlaceId.get(fl.placeId);
+      return undefined;
+    };
+    const lookupSummary = (placeId: string | undefined, name: string): string | undefined => {
+      if (placeId && legacySummaryByPlaceId.has(placeId)) return legacySummaryByPlaceId.get(placeId);
+      const fl = finalLeads.find(f => f.name === name);
+      if (fl && fl.placeId && legacySummaryByPlaceId.has(fl.placeId)) return legacySummaryByPlaceId.get(fl.placeId);
+      return `Included as a candidate based on search results.`;
+    };
+
     const finalDeliveryPayload = {
       run_id: chatRunId,
       delivered_leads: finalLeads.map(l => {
         const lvMatch = cvlVerification?.leadVerifications.find(lv => lv.lead_place_id === l.placeId);
+        const leadMatchEvidence = lookupEvidence(l.placeId, l.name);
+        const leadMatchSummary = lookupSummary(l.placeId, l.name);
         return {
           name: l.name,
           address: l.address,
@@ -5912,6 +5972,8 @@ class SupervisorService {
             location_confidence: lvMatch.location_confidence,
             constraint_checks: lvMatch.constraint_checks,
           } : null,
+          ...(leadMatchEvidence && leadMatchEvidence.length > 0 ? { match_evidence: leadMatchEvidence } : {}),
+          ...(leadMatchSummary ? { match_summary: leadMatchSummary } : {}),
         };
       }),
       requested_count: userRequestedCountFinal,
@@ -6228,8 +6290,22 @@ class SupervisorService {
     const dsLeadsRaw = accumulatedCandidates.size > 0
       ? Array.from(accumulatedCandidates.values())
           .filter(c => finalLeads.some(fl => fl.placeId === c.place_id || fl.name === c.name))
-          .map(c => ({ entity_id: c.place_id || c.dedupe_key, name: c.name, address: c.address || '', found_in_plan_version: c.found_in_plan_version }))
-      : finalLeads.map(l => ({ entity_id: l.placeId, name: l.name, address: l.address, found_in_plan_version: 1 }));
+          .map(c => ({
+            entity_id: c.place_id || c.dedupe_key,
+            name: c.name,
+            address: c.address || '',
+            found_in_plan_version: c.found_in_plan_version,
+            match_evidence: lookupEvidence(c.place_id, c.name),
+            match_summary: lookupSummary(c.place_id, c.name),
+          }))
+      : finalLeads.map(l => ({
+            entity_id: l.placeId,
+            name: l.name,
+            address: l.address,
+            found_in_plan_version: 1,
+            match_evidence: lookupEvidence(l.placeId, l.name),
+            match_summary: lookupSummary(l.placeId, l.name),
+          }));
     const dsLeads = userRequestedCountFinal !== null ? dsLeadsRaw.slice(0, userRequestedCountFinal) : dsLeadsRaw;
     const dsHardUnverifiable = cvlVerification?.summary?.unverifiable_hard_constraints ?? [];
     const dsVerdict = finalLeads.length > 0 ? 'pass' : finalVerdict;

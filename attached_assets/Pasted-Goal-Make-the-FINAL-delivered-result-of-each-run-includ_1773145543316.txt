@@ -1,0 +1,111 @@
+Goal
+
+Make the FINAL delivered result of each run include the supporting evidence that justifies why each delivered entity matched the user’s request.
+
+Core rule:
+If Wyshbone claims an entity/outlet/business matches the query, the final delivered result must include the evidence that supports that claim.
+
+This is needed for:
+- user trust in the chat/result bubble
+- Behaviour evaluation accuracy
+- AFR auditability
+- debugging whether the run genuinely succeeded
+
+Do NOT change:
+- Tower scoring logic
+- benchmark definitions
+- broad planner behaviour
+- run lifecycle
+
+This change is about final delivery payload completeness.
+
+What to inspect first
+
+- final delivery artefact generation
+- delivery summary artefact generation
+- lead / result packaging code
+- evidence extraction artefacts
+- any verification attachment summary logic
+- any place where delivered entities are built from verified entities
+
+Goal output shape
+
+Each final delivered entity/result should carry a compact evidence attachment block.
+
+Target structure per delivered entity should look roughly like:
+
+{
+  "name": "...",
+  "location": "...",
+  "website": "...",
+  "match_evidence": [
+    {
+      "constraint_type": "website_evidence | name_match | relationship_check | attribute_check | location_check | etc",
+      "source_url": "...",
+      "source_type": "...",
+      "quote": "...",
+      "matched_phrase": "...",
+      "context_snippet": "...",
+      "confidence": 0.0-1.0,
+      "verification_status": "verified | weak_match | proxy | unverified"
+    }
+  ],
+  "match_summary": "Short plain-English summary of why this result was included."
+}
+
+Tasks
+
+1. Find the final delivery artefact payload
+Locate where the final result / final delivery / leads list is assembled for completed runs.
+
+2. Attach evidence to delivered entities
+For each entity that is actually delivered in the final result:
+- gather the evidence artefacts tied to that entity
+- attach only the most relevant evidence items
+- prefer evidence that directly supports the query constraint(s)
+
+3. Evidence must be query-relevant
+Do not attach random generic verification.
+Prefer evidence that answers why the entity matched the request.
+
+Examples:
+- For "pubs in Arundel with Swan in the name":
+  attach name evidence and location evidence
+- For "restaurants in Bath that mention vegan options on their website":
+  attach website quote/snippet and source URL
+- For relationship queries:
+  attach the quote/snippet showing the relationship
+
+4. Add a compact match summary
+For each delivered result create a short summary like:
+- "Included because the website mentions vegan dishes."
+- "Included because the business name contains Swan and address is in Arundel."
+- "Included because the organisation website states it works with Blackpool Council."
+
+5. Keep payload compact
+Do not attach huge raw payloads.
+Cap to best relevant evidence items per result, for example 1 to 3.
+
+6. Preserve existing final delivery behaviour
+Do not remove existing fields.
+This is additive.
+The final delivery artefact should still work for current UI consumers.
+
+7. Make this the source of truth for downstream consumers
+The final delivered result with attached evidence should be the object later used by:
+- UI chat/result display
+- Behaviour evaluation packet
+- AFR export
+
+Definition of done
+
+When a run completes, the final delivered results include:
+- the delivered entities
+- the evidence attached to each delivered entity
+- a short summary of why each was included
+
+At the end, report:
+- which file(s) changed
+- where final delivery is assembled
+- the final per-result evidence schema
+- one example delivered result with evidence attached

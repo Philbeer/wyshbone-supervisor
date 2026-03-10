@@ -27,6 +27,7 @@ import {
   type DeliverySummaryPayload,
   type PlanVersionEntry,
   type SoftRelaxation,
+  type MatchEvidenceItem,
 } from './delivery-summary';
 import { logAFREvent } from './afr-logger';
 import { storage } from '../storage';
@@ -93,6 +94,73 @@ interface EvidenceResult {
   towerReasoning: string | null;
   sourceUrl: string | null;
   snippets: string[];
+}
+
+function buildMatchEvidence(evidenceResults: EvidenceResult[]): MatchEvidenceItem[] {
+  const items: MatchEvidenceItem[] = [];
+  for (const er of evidenceResults) {
+    if (!er.evidenceFound) continue;
+    const verificationStatus: MatchEvidenceItem['verification_status'] =
+      er.towerStatus === 'verified' ? 'verified' :
+      er.towerStatus === 'weak_match' ? 'weak_match' :
+      er.evidenceStrength === 'strong' ? 'proxy' :
+      'unverified';
+
+    const confidence =
+      er.towerConfidence !== null ? er.towerConfidence :
+      er.evidenceStrength === 'strong' ? 0.8 :
+      er.evidenceStrength === 'weak' ? 0.4 :
+      0.1;
+
+    items.push({
+      constraint_type: er.constraintType,
+      source_url: er.sourceUrl,
+      source_type: er.constraintType === 'text_compare' ? 'field_match' :
+                   er.constraintType === 'relationship_check' ? 'web_search' :
+                   er.sourceUrl ? 'website' : null,
+      quote: er.snippets.length > 0 ? er.snippets[0].substring(0, 300) : null,
+      matched_phrase: er.constraintValue,
+      context_snippet: er.snippets.length > 1 ? er.snippets[1].substring(0, 200) : null,
+      confidence,
+      verification_status: verificationStatus,
+    });
+  }
+
+  items.sort((a, b) => b.confidence - a.confidence);
+  return items.slice(0, 3);
+}
+
+function buildMatchSummary(
+  leadName: string,
+  evidence: MatchEvidenceItem[],
+  allResults: EvidenceResult[],
+): string {
+  if (evidence.length === 0 && allResults.length === 0) {
+    return `Included as a search result.`;
+  }
+  if (evidence.length === 0) {
+    return `Included as a candidate — evidence was checked but not confirmed.`;
+  }
+
+  const reasons: string[] = [];
+  for (const ev of evidence) {
+    const status = ev.verification_status === 'verified' ? 'verified' :
+                   ev.verification_status === 'weak_match' ? 'partially matched' :
+                   'matched';
+    if (ev.constraint_type === 'text_compare') {
+      reasons.push(`the name/field ${status} "${ev.matched_phrase}"`);
+    } else if (ev.constraint_type === 'website_evidence' || ev.constraint_type === 'attribute_check') {
+      const via = ev.source_url ? ` on their website` : '';
+      reasons.push(`${status} "${ev.matched_phrase}"${via}`);
+    } else if (ev.constraint_type === 'relationship_check') {
+      reasons.push(`evidence of relationship with "${ev.matched_phrase}" was ${status}`);
+    } else if (ev.constraint_type === 'status_check') {
+      reasons.push(`status "${ev.matched_phrase}" was ${status}`);
+    } else {
+      reasons.push(`${status} "${ev.matched_phrase}"`);
+    }
+  }
+  return `Included because ${reasons.join('; ')}.`;
 }
 
 function deriveSearchParams(mission: StructuredMission): {
@@ -1261,6 +1329,9 @@ export async function executeMissionDrivenPlan(
       tower_confidence: e.towerConfidence,
     }));
 
+    const matchEvidence = buildMatchEvidence(leadEvidence);
+    const matchSummary = buildMatchSummary(l.name, matchEvidence, leadEvidence);
+
     return {
       name: l.name,
       address: l.address,
@@ -1273,6 +1344,8 @@ export async function executeMissionDrivenPlan(
         ? (strongCount > 0 ? 'verified' as const : weakCount > 0 ? 'weak_match' as const : 'no_evidence' as const)
         : (isRankingOnly ? 'ranking_only' as const : (isFieldFilterOnly ? 'field_filter_only' as const : 'not_attempted' as const)),
       evidence: evidenceAttachment,
+      match_evidence: matchEvidence,
+      match_summary: matchSummary,
     };
   });
 
@@ -1464,12 +1537,18 @@ export async function executeMissionDrivenPlan(
     },
   }).catch((e: any) => console.warn(`[MISSION_EXEC] agent_run completion update failed: ${e.message}`));
 
-  const dsLeads = finalLeads.map(l => ({
-    entity_id: l.placeId,
-    name: l.name,
-    address: l.address,
-    found_in_plan_version: 1,
-  }));
+  const evidenceLookup = new Map(deliveredLeadsWithEvidence.map(l => [l.placeId, l]));
+  const dsLeads = finalLeads.map(l => {
+    const ev = evidenceLookup.get(l.placeId);
+    return {
+      entity_id: l.placeId,
+      name: l.name,
+      address: l.address,
+      found_in_plan_version: 1,
+      match_evidence: ev?.match_evidence,
+      match_summary: ev?.match_summary,
+    };
+  });
 
   const dsPayload = await emitDeliverySummary({
     runId,
