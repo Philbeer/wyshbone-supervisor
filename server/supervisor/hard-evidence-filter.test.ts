@@ -138,7 +138,45 @@ describe('applyHardEvidenceFilter', () => {
     expect(result).toHaveLength(0);
   });
 
-  it('handles empty evidence array (caller guard would prevent this, but safe)', () => {
+  it('AFR regression: leads without websites are rejected when evidence was gathered for others', () => {
+    const leads = [
+      lead('The Black Horse', 'p1'),
+      lead('The Red Lion', 'p2'),
+      lead('The Kings Arms', 'p3'),
+      lead('George & Dragon', 'p4'),
+      lead('The Eagle Inn', 'p5'),
+    ];
+
+    const evidence: HardEvidenceFilterInput[] = [
+      evidenceHit(0, 'website_text', 'live music'),
+      evidenceHit(1, 'website_text', 'live music'),
+      evidenceHit(3, 'website_text', 'live music'),
+    ];
+
+    const result = applyHardEvidenceFilter(leads, evidence, [LIVE_MUSIC_CONSTRAINT]);
+
+    expect(result).toHaveLength(3);
+    expect(result.map(l => l.name)).toEqual([
+      'The Black Horse',
+      'The Red Lion',
+      'George & Dragon',
+    ]);
+    expect(result.some(l => l.name === 'The Kings Arms')).toBe(false);
+    expect(result.some(l => l.name === 'The Eagle Inn')).toBe(false);
+  });
+
+  it('outer guard bypass: empty evidence array still filters all leads when hard constraints exist', () => {
+    const leads = [
+      lead('The Swan', 'p1'),
+      lead('The Crown', 'p2'),
+    ];
+
+    const result = applyHardEvidenceFilter(leads, [], [LIVE_MUSIC_CONSTRAINT]);
+
+    expect(result).toHaveLength(0);
+  });
+
+  it('handles empty evidence array with no hard constraints — should not be called but is safe', () => {
     const leads = [
       lead('The Swan', 'p1'),
     ];

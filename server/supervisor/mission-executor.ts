@@ -1323,7 +1323,7 @@ export async function executeMissionDrivenPlan(
   const hardEvidenceConstraints = [...evidenceConstraints, ...relationshipConstraints].filter(c => c.hardness === 'hard');
   let filteredLeads = leads;
 
-  if (hardEvidenceConstraints.length > 0 && evidenceResults.length > 0) {
+  if (hardEvidenceConstraints.length > 0) {
     filteredLeads = applyHardEvidenceFilter(leads, evidenceResults, hardEvidenceConstraints);
 
     if (filteredLeads.length < leads.length) {

@@ -40,7 +40,7 @@ if (!leadsChecked.has(i)) return false;   // unchecked leads fail — correct
 
 **File:** `server/supervisor/hard-evidence-filter.test.ts`
 
-Seven test cases covering:
+Nine test cases covering:
 
 | Test | Purpose |
 |------|---------|
@@ -50,23 +50,35 @@ Seven test cases covering:
 | regression: unchecked leads do not survive | Multi-lead scenario with batch limit simulation |
 | multiple hard constraints | Lead passes if at least one hard constraint matches |
 | all leads fail | Returns empty array when no evidence found |
-| empty evidence array | Edge case — no evidence gathered at all |
+| AFR regression (5 leads, 2 without website) | Exact reproduction of AFR run 30b2a043 |
+| outer guard bypass (empty evidence array) | All leads rejected when no evidence gathered |
+| empty evidence array with no constraints | Safe no-op when function shouldn't be called |
+
+## Additional Fix: Outer Guard Bypass (found during AFR validation)
+
+The original outer guard at the call site:
+
+```typescript
+if (hardEvidenceConstraints.length > 0 && evidenceResults.length > 0) {
+```
+
+skipped the filter entirely when `evidenceResults` was empty (e.g. all enrichment
+failed). This meant hard constraints were silently ignored. Fixed by removing the
+`evidenceResults.length > 0` condition. See `SUPERVISOR_EVIDENCE_FILTER_RUNTIME_AUDIT.md`
+for the full trace.
 
 ## Edge Cases Still Remaining
 
-1. **Outer guard skips entire block when `evidenceResults.length === 0`:** If no
-   evidence was gathered at all (e.g. enrichment step completely failed), the
-   `if (hardEvidenceConstraints.length > 0 && evidenceResults.length > 0)` guard
-   at the call site means the filter never runs and all leads pass through
-   unfiltered. This is a separate design decision — fixing it here would risk
-   dropping all leads on enrichment failures.
-
-2. **OR semantics across constraints:** The current matching logic
+1. **OR semantics across constraints:** The current matching logic
    (`hardEvidenceConstraints.some(...)`) uses OR across multiple hard constraints.
    A lead with evidence for *any one* hard constraint passes the filter, even if
    it lacks evidence for others. This is inherited behaviour and not changed here.
 
-3. **Field/value matching ambiguity:** The evidence→constraint matching uses
+2. **Field/value matching ambiguity:** The evidence→constraint matching uses
    `c.field === er.constraintField || String(c.value) === er.constraintValue`,
    which can produce false positives when unrelated constraints share the same
    value string. Not addressed in this minimal fix.
+
+3. **Index staleness during replanning:** If replanning changes the leads array,
+   old evidence entries retain stale `leadIndex` values. Should use `placeId`
+   instead of array index for evidence tracking. Not addressed in this patch.
