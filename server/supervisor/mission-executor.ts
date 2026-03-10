@@ -35,7 +35,7 @@ import { detectRelationshipPredicate, type RelationshipPredicateResult } from '.
 import { RADIUS_LADDER_KM } from './agent-loop';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
-const MAX_RUN_DURATION_MS_DEFAULT = 180_000;
+const RUN_EXECUTION_TIMEOUT_MS_DEFAULT = 120_000;
 const MAX_TOOL_CALLS_DEFAULT = 150;
 const MAX_REPLANS_DEFAULT = 5;
 const HARD_CAP_MAX_REPLANS = 10;
@@ -203,7 +203,9 @@ export async function executeMissionDrivenPlan(
     parseInt(process.env.MAX_REPLANS || String(MAX_REPLANS_DEFAULT), 10),
     HARD_CAP_MAX_REPLANS,
   );
-  const MAX_RUN_DURATION_MS = parseInt(process.env.MAX_RUN_DURATION_MS || String(MAX_RUN_DURATION_MS_DEFAULT), 10);
+  const RUN_EXECUTION_TIMEOUT_MS = parseInt(
+    process.env.RUN_EXECUTION_TIMEOUT_MS || process.env.MAX_RUN_DURATION_MS || String(RUN_EXECUTION_TIMEOUT_MS_DEFAULT), 10,
+  );
   const MAX_TOOL_CALLS = parseInt(process.env.MAX_TOOL_CALLS_PER_RUN || String(MAX_TOOL_CALLS_DEFAULT), 10);
 
   const runStartTime = Date.now();
@@ -213,9 +215,9 @@ export async function executeMissionDrivenPlan(
 
   const checkDeadline = (): boolean => {
     const elapsed = Date.now() - runStartTime;
-    if (elapsed > MAX_RUN_DURATION_MS) {
+    if (elapsed > RUN_EXECUTION_TIMEOUT_MS) {
       runDeadlineExceeded = true;
-      runDeadlineReason = `wall_clock_timeout: ${Math.round(elapsed / 1000)}s > ${Math.round(MAX_RUN_DURATION_MS / 1000)}s`;
+      runDeadlineReason = `execution_timeout: ${Math.round(elapsed / 1000)}s > ${Math.round(RUN_EXECUTION_TIMEOUT_MS / 1000)}s`;
       return true;
     }
     if (runToolCallCount > MAX_TOOL_CALLS) {
@@ -237,6 +239,7 @@ export async function executeMissionDrivenPlan(
   console.log(`[MISSION_EXEC] runId=${runId} strategy=${plan.strategy} tools=${plan.tool_sequence.join(' → ')}`);
   console.log(`[MISSION_EXEC] entity="${businessType}" location="${location}" country="${country}" count=${requestedCount}`);
   console.log(`[MISSION_EXEC] constraints=${mission.constraints.length} hard=${hardConstraints.length} soft=${softConstraints.length}`);
+  console.log(`[MISSION_EXEC] timeout=${RUN_EXECUTION_TIMEOUT_MS}ms max_tool_calls=${MAX_TOOL_CALLS}`);
 
   logMissionPlan(plan, runId);
 
@@ -1398,6 +1401,7 @@ export async function executeMissionDrivenPlan(
     if (runDeadlineExceeded && finalVerdict !== 'pass') {
       finalVerdict = 'timeout';
       finalAction = 'stop';
+      console.warn(`[MISSION_EXEC] Run timed out — reason: ${runDeadlineReason}`);
     }
   } catch (towerErr: any) {
     console.error(`[MISSION_EXEC] Tower final judgement failed: ${towerErr.message}`);
@@ -1420,9 +1424,34 @@ export async function executeMissionDrivenPlan(
     }).catch(() => {});
   }
 
+  const runTimedOut = runDeadlineExceeded;
+  const finalRunStatus = runTimedOut ? 'timed_out' : 'completed';
+  const finalTerminalState = runTimedOut ? 'timed_out' : 'completed';
+
+  if (runTimedOut) {
+    await createArtefact({
+      runId,
+      type: 'diagnostic',
+      title: 'Run timed out',
+      summary: `Execution exceeded time/call limit: ${runDeadlineReason}`,
+      payload: {
+        run_id: runId,
+        deadline_reason: runDeadlineReason,
+        elapsed_ms: Date.now() - runStartTime,
+        tool_calls: runToolCallCount,
+        timeout_limit_ms: RUN_EXECUTION_TIMEOUT_MS,
+        tool_call_limit: MAX_TOOL_CALLS,
+        leads_at_timeout: finalLeads.length,
+        execution_source: 'mission',
+      },
+      userId,
+      conversationId,
+    }).catch(() => {});
+  }
+
   await storage.updateAgentRun(runId, {
-    status: 'completed',
-    terminalState: 'completed',
+    status: finalRunStatus,
+    terminalState: finalTerminalState,
     metadata: {
       verdict: finalVerdict,
       action: finalAction,
@@ -1431,6 +1460,7 @@ export async function executeMissionDrivenPlan(
       replans_used: replansUsed,
       execution_source: 'mission',
       mission_strategy: plan.strategy,
+      ...(runTimedOut ? { timed_out: true, timeout_reason: runDeadlineReason } : {}),
     },
   }).catch((e: any) => console.warn(`[MISSION_EXEC] agent_run completion update failed: ${e.message}`));
 

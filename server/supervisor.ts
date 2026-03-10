@@ -387,7 +387,8 @@ class SupervisorService {
     if (!supabase) return;
 
     try {
-      const staleThreshold = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+      const orphanThresholdMs = Math.max(parseInt(process.env.RUN_EXECUTION_TIMEOUT_MS || process.env.MAX_RUN_DURATION_MS || '120000', 10) + 60_000, 180_000);
+      const staleThreshold = new Date(Date.now() - orphanThresholdMs).toISOString();
       const { data: stuckRuns, error } = await supabase
         .from('agent_runs')
         .select('id, status, started_at, metadata')
@@ -413,13 +414,13 @@ class SupervisorService {
         try {
           const existingMeta = (run.metadata as Record<string, any>) || {};
           await storage.updateAgentRun(run.id, {
-            status: 'failed',
-            terminalState: null,
+            status: 'timed_out',
+            terminalState: 'timed_out',
             error: 'Run was interrupted by a server restart and could not be recovered',
             endedAt: new Date(),
-            metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'server_restart', recovered_at: new Date().toISOString() },
+            metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'server_restart', timed_out: true, recovered_at: new Date().toISOString() },
           });
-          console.log(`[RECOVERY_RUNS] Marked agent_run ${run.id} as failed (server_restart_orphan)`);
+          console.log(`[RECOVERY_RUNS] Marked agent_run ${run.id} as timed_out (server_restart_orphan)`);
           recovered++;
         } catch (err: any) {
           console.error(`[RECOVERY_RUNS] Failed to recover agent_run ${run.id}: ${err.message}`);
@@ -485,7 +486,8 @@ class SupervisorService {
   private async sweepOrphanedAgentRuns(): Promise<void> {
     if (!supabase) return;
     try {
-      const staleThreshold = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+      const orphanThresholdMs = Math.max(parseInt(process.env.RUN_EXECUTION_TIMEOUT_MS || process.env.MAX_RUN_DURATION_MS || '120000', 10) + 60_000, 180_000);
+      const staleThreshold = new Date(Date.now() - orphanThresholdMs).toISOString();
       const { data: stuckRuns, error } = await supabase
         .from('agent_runs')
         .select('id, status, started_at, metadata')
@@ -500,13 +502,13 @@ class SupervisorService {
         try {
           const existingMeta = (run.metadata as Record<string, any>) || {};
           await storage.updateAgentRun(run.id, {
-            status: 'failed',
-            terminalState: null,
+            status: 'timed_out',
+            terminalState: 'timed_out',
             error: 'Run was orphaned — no active processing detected after timeout',
             endedAt: new Date(),
-            metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'stale_sweep', recovered_at: new Date().toISOString() },
+            metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'stale_sweep', timed_out: true, recovered_at: new Date().toISOString() },
           });
-          console.log(`[STALE_SWEEP] Marked orphaned agent_run ${run.id} as failed`);
+          console.log(`[STALE_SWEEP] Marked orphaned agent_run ${run.id} as timed_out`);
         } catch (err: any) {
           console.error(`[STALE_SWEEP] Failed to recover agent_run ${run.id}: ${err.message}`);
         }
@@ -547,6 +549,25 @@ class SupervisorService {
     const hasLeadsList = artefacts.some((a: any) => a.type === 'leads_list');
     const hasStepResult = artefacts.some((a: any) => a.type === 'step_result');
     const hasTowerJudgement = artefacts.some((a: any) => a.type === 'tower_judgement');
+
+    if (agentRun && agentRun.status === 'timed_out') {
+      console.log(`${logPrefix} runId=${runId} is timed_out — fully terminal, skipping recovery`);
+      await supabase
+        .from('supervisor_tasks')
+        .update({ status: 'failed', result: { recovered: false, trigger, note: 'Run timed out — not recoverable' } })
+        .eq('id', task.id);
+
+      logAFREvent({
+        userId: task.user_id, runId, clientRequestId,
+        conversationId: task.conversation_id,
+        actionTaken: 'task_recovery_skipped', status: 'failed',
+        taskGenerated: `Task not recoverable — agent_run timed out`,
+        runType: 'plan',
+        metadata: { taskId: task.id, trigger, agentRunStatus: 'timed_out' },
+      }).catch(() => {});
+
+      return 'skipped';
+    }
 
     if (agentRun && (agentRun.status === 'completed' || agentRun.status === 'failed')) {
       if (hasLeadsList && hasStepResult && hasTowerJudgement) {
@@ -3289,16 +3310,16 @@ class SupervisorService {
     let learned_max_replans = MAX_REPLANS;
     let effective_max_replans = MAX_REPLANS;
 
-    const MAX_RUN_DURATION_MS = parseInt(process.env.MAX_RUN_DURATION_MS || '180000', 10);
+    const RUN_EXECUTION_TIMEOUT_MS = parseInt(process.env.RUN_EXECUTION_TIMEOUT_MS || process.env.MAX_RUN_DURATION_MS || '120000', 10);
     const MAX_TOOL_CALLS_PER_RUN = parseInt(process.env.MAX_TOOL_CALLS_PER_RUN || '150', 10);
     let runDeadlineExceeded = false;
     let runDeadlineReason = '';
 
     const checkRunDeadline = (): boolean => {
       const elapsed = Date.now() - runStartTime;
-      if (elapsed > MAX_RUN_DURATION_MS) {
+      if (elapsed > RUN_EXECUTION_TIMEOUT_MS) {
         runDeadlineExceeded = true;
-        runDeadlineReason = `wall_clock_timeout: ${Math.round(elapsed / 1000)}s > ${Math.round(MAX_RUN_DURATION_MS / 1000)}s limit`;
+        runDeadlineReason = `execution_timeout: ${Math.round(elapsed / 1000)}s > ${Math.round(RUN_EXECUTION_TIMEOUT_MS / 1000)}s limit`;
         console.warn(`[RUN_DEADLINE] ${runDeadlineReason} runId=${chatRunId}`);
         return true;
       }
@@ -5853,7 +5874,7 @@ class SupervisorService {
           delivered: finalLeads.length,
           tool_calls: runToolCallCount,
           elapsed_ms: Date.now() - runStartTime,
-          max_duration_ms: MAX_RUN_DURATION_MS,
+          max_duration_ms: RUN_EXECUTION_TIMEOUT_MS,
           max_tool_calls: MAX_TOOL_CALLS_PER_RUN,
         },
         userId: task.user_id,
@@ -6108,7 +6129,11 @@ class SupervisorService {
     });
     console.log(`[TOWER_LOOP_CHAT] [run_completed] verdict=${finalVerdict} leads=${finalLeads.length} accumulated_unique=${totalUniqueLeads} accumulated_matching=${totalMatchingLeads} plan_version=${planVersion} tower_returned_stop=${towerReturnedStop}`);
 
-    await storage.updateAgentRun(chatRunId, { status: 'completed', terminalState: 'completed', metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: false, plan_version: planVersion, replans_used: replansUsed, tower_returned_stop: towerReturnedStop } });
+    const legacyTimedOut = runDeadlineExceeded;
+    const legacyRunStatus = legacyTimedOut ? 'timed_out' : 'completed';
+    const legacyTerminalState = legacyTimedOut ? 'timed_out' : 'completed';
+
+    await storage.updateAgentRun(chatRunId, { status: legacyRunStatus, terminalState: legacyTerminalState, metadata: { verdict: finalVerdict, action: finalAction, leads_count: finalLeads.length, accumulated_unique: totalUniqueLeads, accumulated_matching: totalMatchingLeads, halted: false, plan_version: planVersion, replans_used: replansUsed, tower_returned_stop: towerReturnedStop, ...(legacyTimedOut ? { timed_out: true, timeout_reason: runDeadlineReason } : {}) } });
 
     const isHalted = false;
 

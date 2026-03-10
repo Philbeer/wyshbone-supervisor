@@ -1,0 +1,91 @@
+Target repo: Supervisor
+
+Goal
+
+Implement a real execution timeout so that runs actually stop and finalize instead of remaining pending indefinitely.
+
+The QA harness should never invent timeouts. If a run is called "timeout", the run itself must have actually timed out and been stopped by Supervisor.
+
+Current problem
+
+Runs can remain pending or running long after the QA harness stops polling. Some runs appear stuck even hours later.
+
+Supervisor must enforce a real execution timeout and finalize the run state.
+
+Required behaviour
+
+1. Introduce a run execution timeout configuration.
+
+Example:
+
+RUN_EXECUTION_TIMEOUT_MS = 120000   // 2 minutes
+
+2. When a run starts, store:
+
+run_started_at
+
+3. During execution, check:
+
+current_time - run_started_at
+
+If this exceeds RUN_EXECUTION_TIMEOUT_MS then Supervisor must:
+
+- stop further plan execution
+- stop any pending step execution
+- prevent new steps from being scheduled
+- finalize the run
+
+4. When a run exceeds the timeout:
+
+Set final run state to:
+
+run_status = "timed_out"
+
+Emit an AFR artefact/event:
+
+type: run_timeout
+reason: execution_timeout_exceeded
+timeout_ms: RUN_EXECUTION_TIMEOUT_MS
+
+5. Ensure the run can no longer remain in:
+
+pending
+running
+
+after timeout.
+
+6. If a step is currently executing when timeout occurs:
+
+- abort that step safely
+- mark step_result = aborted_due_to_timeout
+
+7. Supervisor must guarantee that every run ends in one of these final states:
+
+completed
+failed
+clarifying
+timed_out
+
+No run should remain pending indefinitely.
+
+8. Add stale-run cleanup logic.
+
+If Supervisor detects a run that is:
+
+pending or running
+AND
+past RUN_EXECUTION_TIMEOUT_MS
+
+Supervisor should finalize it as timed_out.
+
+This prevents orphaned runs.
+
+Deliverables
+
+After implementing, report:
+
+1. Files changed
+2. Where RUN_EXECUTION_TIMEOUT_MS is defined
+3. How step abortion is handled
+4. Example run where Supervisor stops execution and emits run_timeout
+5. Confirmation that no run can remain pending forever
