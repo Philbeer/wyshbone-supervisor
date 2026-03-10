@@ -25,14 +25,37 @@ export interface MatchEvidenceItem {
   verification_status: 'verified' | 'weak_match' | 'proxy' | 'unverified';
 }
 
+export interface MatchBasisItem {
+  constraint_type: string;
+  constraint_value: string;
+  valid: boolean;
+  reason: string;
+}
+
+export interface SupportingEvidenceItem {
+  entity_name: string;
+  constraint_type: string;
+  constraint_value: string;
+  source_url: string | null;
+  source_type: string | null;
+  quote: string | null;
+  matched_phrase: string | null;
+  context_snippet: string | null;
+  verification_status: 'verified' | 'weak_match' | 'proxy' | 'no_relevant_evidence';
+  confidence: number;
+}
+
 export interface DeliveredEntity {
   entity_id: string;
   name: string;
   address: string;
   match_level: 'exact' | 'closest';
   soft_violations: string[];
-  match_evidence?: MatchEvidenceItem[];
+  match_valid?: boolean;
   match_summary?: string;
+  match_basis?: MatchBasisItem[];
+  supporting_evidence?: SupportingEvidenceItem[];
+  match_evidence?: MatchEvidenceItem[];
 }
 
 export type CanonicalVerdict = 'PASS' | 'PARTIAL' | 'STOP' | 'ERROR' | 'COMPLETED';
@@ -84,8 +107,11 @@ export interface DeliverySummaryLeadInput {
   name: string;
   address: string;
   found_in_plan_version?: number;
-  match_evidence?: MatchEvidenceItem[];
+  match_valid?: boolean;
   match_summary?: string;
+  match_basis?: MatchBasisItem[];
+  supporting_evidence?: SupportingEvidenceItem[];
+  match_evidence?: MatchEvidenceItem[];
 }
 
 export type CvlLocationStatus = 'verified_geo' | 'search_bounded' | 'out_of_area' | 'unknown' | 'not_applicable';
@@ -325,8 +351,11 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
       address: lead.address,
       match_level,
       soft_violations,
-      ...(lead.match_evidence && lead.match_evidence.length > 0 ? { match_evidence: lead.match_evidence } : {}),
+      ...(lead.match_valid !== undefined ? { match_valid: lead.match_valid } : {}),
       ...(lead.match_summary ? { match_summary: lead.match_summary } : {}),
+      ...(lead.match_basis && lead.match_basis.length > 0 ? { match_basis: lead.match_basis } : {}),
+      ...(lead.supporting_evidence && lead.supporting_evidence.length > 0 ? { supporting_evidence: lead.supporting_evidence } : {}),
+      ...(lead.match_evidence && lead.match_evidence.length > 0 ? { match_evidence: lead.match_evidence } : {}),
     };
 
     if (match_level === 'exact') {

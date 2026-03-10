@@ -1,0 +1,135 @@
+Goal
+
+Implement a complete evidence chain in the FINAL delivered results so every delivered entity can be traced backwards from:
+
+match
+→ why it matches
+→ what the evidence is
+→ where the evidence came from
+
+This is now a core product rule.
+
+If Wyshbone claims an outlet/entity matches the user query, the final delivered result must carry the evidence chain that justifies that claim.
+
+Required backward chain for every delivered result:
+
+1. matches and outlet/entity if valid
+2. there is evidence for this, which is why it is valid
+3. this is the evidence
+4. this is where the evidence came from
+
+This is needed for:
+- user-facing chat bubble trust
+- Behaviour LLM judgement
+- AFR auditability
+- internal debugging
+
+Do NOT change:
+- Tower logic
+- benchmark definitions
+- broad planner architecture
+- scoring semantics
+
+This is about final delivery payload completeness and truthfulness.
+
+Inspect first
+
+- final delivery artefact generation
+- delivery summary artefact generation
+- any lead/result packaging code
+- evidence artefacts / evidence extraction artefacts
+- verification attachment summary logic
+- any code that assembles delivered entities from verified / candidate entities
+
+Target output shape
+
+Each delivered result/entity in the final delivery payload must include an explicit evidence chain.
+
+Target per-result structure should look roughly like:
+
+{
+  "name": "...",
+  "location": "...",
+  "website": "...",
+  "match_valid": true,
+  "match_summary": "Short plain-English reason this result was included.",
+  "match_basis": [
+    {
+      "constraint_type": "website_evidence | name_match | relationship_check | attribute_check | location_check | etc",
+      "constraint_value": "...",
+      "valid": true,
+      "reason": "Short plain-English explanation"
+    }
+  ],
+  "supporting_evidence": [
+    {
+      "entity_name": "...",
+      "constraint_type": "...",
+      "constraint_value": "...",
+      "source_url": "...",
+      "source_type": "...",
+      "quote": "...",
+      "matched_phrase": "...",
+      "context_snippet": "...",
+      "verification_status": "verified | weak_match | proxy | no_relevant_evidence",
+      "confidence": 0.0-1.0
+    }
+  ]
+}
+
+Tasks
+
+1. Find where final delivered entities are assembled
+Locate the true final delivery payload / final delivery artefact / delivery summary source of truth.
+
+2. Attach the evidence chain to every delivered result
+For each delivered entity:
+- attach why it matched
+- attach the actual supporting evidence items
+- attach where that evidence came from
+
+3. Make evidence query-relevant
+Only attach evidence that explains why the entity matched the user request.
+
+Examples:
+- "pubs in Arundel with Swan in the name"
+  include name-match and location evidence
+- "restaurants in Bath that mention vegan options on their website"
+  include website quote/snippet and source URL
+- relationship queries
+  include the quote/snippet showing that relationship
+
+4. Add plain-English match summary
+Each delivered result needs a short user-facing explanation such as:
+- "Included because the website mentions vegan dishes."
+- "Included because the business name contains Swan and the address is in Arundel."
+- "Included because the organisation website states it works with Blackpool Council."
+
+5. Keep payload compact
+Do not attach huge raw artefacts.
+Cap to best relevant evidence items per delivered result, for example 1 to 3.
+
+6. Preserve existing final delivery behaviour
+Do not remove existing fields.
+This is additive and production-grade.
+
+7. Make this the downstream source of truth
+The final delivery payload must become the source of truth later used by:
+- UI result/chat rendering
+- Behaviour evaluation packet
+- AFR export
+
+Definition of done
+
+When a run completes, each final delivered result includes:
+- the delivered entity
+- whether it matches
+- why it matches
+- the evidence supporting that
+- the source of that evidence
+
+At the end, report:
+- which files changed
+- where final delivery is assembled
+- the final per-result evidence-chain schema
+- one example delivered result with the full evidence chain attached

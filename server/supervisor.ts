@@ -17,7 +17,7 @@ import { buildShortfallDirective, applyLeadgenReplanPolicy, constraintsAreIdenti
 import { parseGoalToConstraints, checkHardConstraintsSatisfied, filterLeadsByNameConstraint, buildRequestedCount, DEFAULT_LEADS_TARGET, sanitiseLocationString, detectExactnessMode, detectDoNotStop, isAttributeLikeConstraint, type ParsedGoal, type StructuredConstraint, type RequestedCountCanonical, type ExactnessMode } from './supervisor/goal-to-constraints';
 import { emitSearchQueryCompiled, type SearchQueryCompiledPayload } from './supervisor/search-query-compiled';
 import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
-import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type DeliverySummaryPayload, type MatchEvidenceItem } from './supervisor/delivery-summary';
+import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type DeliverySummaryPayload, type MatchEvidenceItem, type MatchBasisItem, type SupportingEvidenceItem } from './supervisor/delivery-summary';
 import { emitRunReceipt } from './supervisor/run-receipt';
 import { writeBeliefs } from './supervisor/belief-writer';
 import { executeFactoryDemo } from './supervisor/factory-demo';
@@ -5897,6 +5897,9 @@ class SupervisorService {
 
     const legacyEvidenceByPlaceId = new Map<string, MatchEvidenceItem[]>();
     const legacySummaryByPlaceId = new Map<string, string>();
+    const legacyBasisByPlaceId = new Map<string, MatchBasisItem[]>();
+    const legacySupportingByPlaceId = new Map<string, SupportingEvidenceItem[]>();
+    const legacyValidByPlaceId = new Map<string, boolean>();
     if (attrVerificationResults.length > 0) {
       const grouped = new Map<string, typeof attrVerificationResults>();
       for (const r of attrVerificationResults) {
@@ -5905,7 +5908,41 @@ class SupervisorService {
         grouped.set(r.lead_place_id, arr);
       }
       grouped.forEach((results, placeId) => {
-        const items: MatchEvidenceItem[] = [];
+        const matchEvidenceItems: MatchEvidenceItem[] = [];
+        const supportItems: SupportingEvidenceItem[] = [];
+        const basisItems: MatchBasisItem[] = [];
+        const leadName = results[0]?.lead_name ?? '';
+        let anyValid = false;
+
+        const byAttr = new Map<string, typeof attrVerificationResults>();
+        for (const r of results) {
+          const key = r.attribute_raw;
+          const arr = byAttr.get(key) || [];
+          arr.push(r);
+          byAttr.set(key, arr);
+        }
+
+        byAttr.forEach((attrResults, attrRaw) => {
+          const best = attrResults.reduce((a, b) => {
+            const aConf = a.tower_semantic_confidence ?? (a.evidence_strength === 'strong' ? 0.8 : 0.4);
+            const bConf = b.tower_semantic_confidence ?? (b.evidence_strength === 'strong' ? 0.8 : 0.4);
+            return (b.verdict === 'yes' && a.verdict !== 'yes') || bConf > aConf ? b : a;
+          });
+          const valid = best.verdict === 'yes' && best.evidence_strength !== 'none';
+          if (valid) anyValid = true;
+          const towerNote = best.tower_semantic_status === 'verified' ? ' (Tower verified)' :
+            best.tower_semantic_status === 'weak_match' ? ' (weak match)' : '';
+          const src = best.url_visited ? ' on their website' : '';
+          basisItems.push({
+            constraint_type: 'attribute_check',
+            constraint_value: attrRaw,
+            valid,
+            reason: valid
+              ? `Evidence of "${attrRaw}" found${src}${towerNote}.`
+              : `No evidence of "${attrRaw}" found.`,
+          });
+        });
+
         for (const r of results) {
           if (r.verdict === 'no') continue;
           const vs: MatchEvidenceItem['verification_status'] =
@@ -5914,7 +5951,7 @@ class SupervisorService {
             r.evidence_strength === 'strong' ? 'proxy' : 'unverified';
           const conf = r.tower_semantic_confidence !== null ? r.tower_semantic_confidence :
             r.evidence_strength === 'strong' ? 0.8 : r.evidence_strength === 'weak' ? 0.4 : 0.1;
-          items.push({
+          matchEvidenceItems.push({
             constraint_type: 'attribute_check',
             source_url: r.url_visited,
             source_type: r.url_visited ? 'website' : null,
@@ -5924,11 +5961,31 @@ class SupervisorService {
             confidence: conf,
             verification_status: vs,
           });
+          const seVs: SupportingEvidenceItem['verification_status'] =
+            r.tower_semantic_status === 'verified' ? 'verified' :
+            r.tower_semantic_status === 'weak_match' ? 'weak_match' :
+            r.evidence_strength === 'strong' ? 'proxy' : 'no_relevant_evidence';
+          supportItems.push({
+            entity_name: r.lead_name,
+            constraint_type: 'attribute_check',
+            constraint_value: r.attribute_raw,
+            source_url: r.url_visited,
+            source_type: r.url_visited ? 'website' : null,
+            quote: r.extracted_quotes.length > 0 ? r.extracted_quotes[0].substring(0, 300) : null,
+            matched_phrase: r.attribute_raw,
+            context_snippet: r.extracted_quotes.length > 1 ? r.extracted_quotes[1].substring(0, 200) : null,
+            verification_status: seVs,
+            confidence: conf,
+          });
         }
-        items.sort((a, b) => b.confidence - a.confidence);
-        const capped = items.slice(0, 3);
-        legacyEvidenceByPlaceId.set(placeId, capped);
-        if (capped.length > 0) {
+        matchEvidenceItems.sort((a, b) => b.confidence - a.confidence);
+        supportItems.sort((a, b) => b.confidence - a.confidence);
+        legacyEvidenceByPlaceId.set(placeId, matchEvidenceItems.slice(0, 3));
+        legacySupportingByPlaceId.set(placeId, supportItems.slice(0, 3));
+        legacyBasisByPlaceId.set(placeId, basisItems);
+        legacyValidByPlaceId.set(placeId, anyValid);
+        if (matchEvidenceItems.length > 0) {
+          const capped = matchEvidenceItems.slice(0, 3);
           const reasons = capped.map(ev => {
             const st = ev.verification_status === 'verified' ? 'verified' : ev.verification_status === 'weak_match' ? 'partially matched' : 'matched';
             return `${st} "${ev.matched_phrase}"${ev.source_url ? ' on their website' : ''}`;
@@ -5940,25 +5997,78 @@ class SupervisorService {
       });
     }
 
-    const lookupEvidence = (placeId: string | undefined, name: string): MatchEvidenceItem[] | undefined => {
-      if (placeId && legacyEvidenceByPlaceId.has(placeId)) return legacyEvidenceByPlaceId.get(placeId);
+    const lookupByPlaceIdOrName = <T>(map: Map<string, T>, placeId: string | undefined, name: string): T | undefined => {
+      if (placeId && map.has(placeId)) return map.get(placeId);
       const fl = finalLeads.find(f => f.name === name);
-      if (fl && fl.placeId && legacyEvidenceByPlaceId.has(fl.placeId)) return legacyEvidenceByPlaceId.get(fl.placeId);
+      if (fl && fl.placeId && map.has(fl.placeId)) return map.get(fl.placeId);
       return undefined;
     };
-    const lookupSummary = (placeId: string | undefined, name: string): string | undefined => {
-      if (placeId && legacySummaryByPlaceId.has(placeId)) return legacySummaryByPlaceId.get(placeId);
-      const fl = finalLeads.find(f => f.name === name);
-      if (fl && fl.placeId && legacySummaryByPlaceId.has(fl.placeId)) return legacySummaryByPlaceId.get(fl.placeId);
-      return `Included as a candidate based on search results.`;
+    const lookupEvidence = (placeId: string | undefined, name: string) =>
+      lookupByPlaceIdOrName(legacyEvidenceByPlaceId, placeId, name);
+    const lookupSummary = (placeId: string | undefined, name: string): string =>
+      lookupByPlaceIdOrName(legacySummaryByPlaceId, placeId, name) ?? `Included as a candidate based on search results.`;
+    const lookupBasis = (placeId: string | undefined, name: string) =>
+      lookupByPlaceIdOrName(legacyBasisByPlaceId, placeId, name);
+    const lookupSupporting = (placeId: string | undefined, name: string) =>
+      lookupByPlaceIdOrName(legacySupportingByPlaceId, placeId, name);
+    const lookupValid = (placeId: string | undefined, name: string): boolean => {
+      const v = lookupByPlaceIdOrName(legacyValidByPlaceId, placeId, name);
+      return v !== undefined ? v : true;
+    };
+
+    interface LeadEvidenceChain {
+      match_valid: boolean;
+      match_summary: string;
+      match_basis: MatchBasisItem[];
+      supporting_evidence: SupportingEvidenceItem[];
+      match_evidence: MatchEvidenceItem[] | undefined;
+    }
+    const evidenceChainByPlaceId = new Map<string, LeadEvidenceChain>();
+    const evidenceChainByName = new Map<string, LeadEvidenceChain>();
+    for (const l of finalLeads) {
+      const lvMatch = cvlVerification?.leadVerifications.find(lv => lv.lead_place_id === l.placeId);
+      const attrBasis = lookupBasis(l.placeId, l.name) || [];
+      const cvlBasis: MatchBasisItem[] = [];
+      if (lvMatch) {
+        for (const cc of lvMatch.constraint_checks) {
+          const alreadyCovered = attrBasis.some(b =>
+            b.constraint_type === cc.constraint_type && b.constraint_value === cc.field
+          );
+          if (!alreadyCovered) {
+            cvlBasis.push({
+              constraint_type: cc.constraint_type,
+              constraint_value: cc.field,
+              valid: cc.status === 'yes' || cc.status === 'search_bounded',
+              reason: cc.reason,
+            });
+          }
+        }
+      }
+      const fullBasis = attrBasis.concat(cvlBasis);
+      const matchEvidence = lookupEvidence(l.placeId, l.name);
+      const supporting = lookupSupporting(l.placeId, l.name) || [];
+      const baseValid = lookupValid(l.placeId, l.name);
+      const chain: LeadEvidenceChain = {
+        match_valid: fullBasis.length > 0 ? fullBasis.every(b => b.valid) : baseValid,
+        match_summary: lookupSummary(l.placeId, l.name),
+        match_basis: fullBasis,
+        supporting_evidence: supporting,
+        match_evidence: matchEvidence,
+      };
+      if (l.placeId) evidenceChainByPlaceId.set(l.placeId, chain);
+      evidenceChainByName.set(l.name, chain);
+    }
+    const getChain = (placeId: string | undefined, name: string): LeadEvidenceChain | undefined => {
+      if (placeId && evidenceChainByPlaceId.has(placeId)) return evidenceChainByPlaceId.get(placeId);
+      return evidenceChainByName.get(name);
     };
 
     const finalDeliveryPayload = {
       run_id: chatRunId,
       delivered_leads: finalLeads.map(l => {
         const lvMatch = cvlVerification?.leadVerifications.find(lv => lv.lead_place_id === l.placeId);
-        const leadMatchEvidence = lookupEvidence(l.placeId, l.name);
-        const leadMatchSummary = lookupSummary(l.placeId, l.name);
+        const chain = getChain(l.placeId, l.name);
+
         return {
           name: l.name,
           address: l.address,
@@ -5972,8 +6082,11 @@ class SupervisorService {
             location_confidence: lvMatch.location_confidence,
             constraint_checks: lvMatch.constraint_checks,
           } : null,
-          ...(leadMatchEvidence && leadMatchEvidence.length > 0 ? { match_evidence: leadMatchEvidence } : {}),
-          ...(leadMatchSummary ? { match_summary: leadMatchSummary } : {}),
+          match_valid: chain?.match_valid ?? true,
+          match_summary: chain?.match_summary ?? `Included as a candidate based on search results.`,
+          ...(chain?.match_basis && chain.match_basis.length > 0 ? { match_basis: chain.match_basis } : {}),
+          ...(chain?.supporting_evidence && chain.supporting_evidence.length > 0 ? { supporting_evidence: chain.supporting_evidence } : {}),
+          ...(chain?.match_evidence && chain.match_evidence.length > 0 ? { match_evidence: chain.match_evidence } : {}),
         };
       }),
       requested_count: userRequestedCountFinal,
@@ -6290,22 +6403,34 @@ class SupervisorService {
     const dsLeadsRaw = accumulatedCandidates.size > 0
       ? Array.from(accumulatedCandidates.values())
           .filter(c => finalLeads.some(fl => fl.placeId === c.place_id || fl.name === c.name))
-          .map(c => ({
-            entity_id: c.place_id || c.dedupe_key,
-            name: c.name,
-            address: c.address || '',
-            found_in_plan_version: c.found_in_plan_version,
-            match_evidence: lookupEvidence(c.place_id, c.name),
-            match_summary: lookupSummary(c.place_id, c.name),
-          }))
-      : finalLeads.map(l => ({
-            entity_id: l.placeId,
-            name: l.name,
-            address: l.address,
-            found_in_plan_version: 1,
-            match_evidence: lookupEvidence(l.placeId, l.name),
-            match_summary: lookupSummary(l.placeId, l.name),
-          }));
+          .map(c => {
+            const chain = getChain(c.place_id, c.name);
+            return {
+              entity_id: c.place_id || c.dedupe_key,
+              name: c.name,
+              address: c.address || '',
+              found_in_plan_version: c.found_in_plan_version,
+              match_valid: chain?.match_valid ?? true,
+              match_summary: chain?.match_summary ?? `Included as a candidate based on search results.`,
+              match_basis: chain?.match_basis,
+              supporting_evidence: chain?.supporting_evidence,
+              match_evidence: chain?.match_evidence,
+            };
+          })
+      : finalLeads.map(l => {
+            const chain = getChain(l.placeId, l.name);
+            return {
+              entity_id: l.placeId,
+              name: l.name,
+              address: l.address,
+              found_in_plan_version: 1,
+              match_valid: chain?.match_valid ?? true,
+              match_summary: chain?.match_summary ?? `Included as a candidate based on search results.`,
+              match_basis: chain?.match_basis,
+              supporting_evidence: chain?.supporting_evidence,
+              match_evidence: chain?.match_evidence,
+            };
+          });
     const dsLeads = userRequestedCountFinal !== null ? dsLeadsRaw.slice(0, userRequestedCountFinal) : dsLeadsRaw;
     const dsHardUnverifiable = cvlVerification?.summary?.unverifiable_hard_constraints ?? [];
     const dsVerdict = finalLeads.length > 0 ? 'pass' : finalVerdict;

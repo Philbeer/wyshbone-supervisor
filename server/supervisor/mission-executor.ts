@@ -28,6 +28,8 @@ import {
   type PlanVersionEntry,
   type SoftRelaxation,
   type MatchEvidenceItem,
+  type MatchBasisItem,
+  type SupportingEvidenceItem,
 } from './delivery-summary';
 import { logAFREvent } from './afr-logger';
 import { storage } from '../storage';
@@ -126,6 +128,78 @@ function buildMatchEvidence(evidenceResults: EvidenceResult[]): MatchEvidenceIte
     });
   }
 
+  items.sort((a, b) => b.confidence - a.confidence);
+  return items.slice(0, 3);
+}
+
+function buildMatchBasis(leadName: string, evidenceResults: EvidenceResult[]): MatchBasisItem[] {
+  const byConstraint = new Map<string, EvidenceResult[]>();
+  for (const er of evidenceResults) {
+    const key = `${er.constraintType}::${er.constraintValue}`;
+    const arr = byConstraint.get(key) || [];
+    arr.push(er);
+    byConstraint.set(key, arr);
+  }
+  const items: MatchBasisItem[] = [];
+  byConstraint.forEach((results, _key) => {
+    const best = results.reduce((a, b) => {
+      const aScore = a.evidenceFound ? (a.towerConfidence ?? (a.evidenceStrength === 'strong' ? 0.8 : 0.4)) : 0;
+      const bScore = b.evidenceFound ? (b.towerConfidence ?? (b.evidenceStrength === 'strong' ? 0.8 : 0.4)) : 0;
+      return bScore > aScore ? b : a;
+    });
+    const valid = best.evidenceFound && best.evidenceStrength !== 'none';
+    let reason: string;
+    if (best.constraintType === 'text_compare') {
+      reason = valid ? `Name/field contains "${best.constraintValue}".` : `No match found for "${best.constraintValue}" in fields.`;
+    } else if (best.constraintType === 'website_evidence' || best.constraintType === 'attribute_check') {
+      const src = best.sourceUrl ? ' on their website' : '';
+      reason = valid
+        ? `Evidence of "${best.constraintValue}" found${src}${best.towerStatus === 'verified' ? ' (Tower verified)' : best.towerStatus === 'weak_match' ? ' (weak match)' : ''}.`
+        : `No evidence of "${best.constraintValue}" found.`;
+    } else if (best.constraintType === 'relationship_check') {
+      reason = valid
+        ? `Evidence of relationship with "${best.constraintValue}" found${best.towerStatus === 'verified' ? ' (Tower verified)' : ''}.`
+        : `No relationship evidence found for "${best.constraintValue}".`;
+    } else if (best.constraintType === 'status_check') {
+      reason = valid ? `Status "${best.constraintValue}" confirmed.` : `Status "${best.constraintValue}" not confirmed.`;
+    } else {
+      reason = valid ? `"${best.constraintValue}" matched.` : `"${best.constraintValue}" not matched.`;
+    }
+    items.push({
+      constraint_type: best.constraintType,
+      constraint_value: best.constraintValue,
+      valid,
+      reason,
+    });
+  });
+  return items;
+}
+
+function buildSupportingEvidence(leadName: string, evidenceResults: EvidenceResult[]): SupportingEvidenceItem[] {
+  const items: SupportingEvidenceItem[] = [];
+  for (const er of evidenceResults) {
+    if (!er.evidenceFound) continue;
+    const vs: SupportingEvidenceItem['verification_status'] =
+      er.towerStatus === 'verified' ? 'verified' :
+      er.towerStatus === 'weak_match' ? 'weak_match' :
+      er.evidenceStrength === 'strong' ? 'proxy' : 'no_relevant_evidence';
+    const conf = er.towerConfidence !== null ? er.towerConfidence :
+      er.evidenceStrength === 'strong' ? 0.8 : er.evidenceStrength === 'weak' ? 0.4 : 0.1;
+    items.push({
+      entity_name: leadName,
+      constraint_type: er.constraintType,
+      constraint_value: er.constraintValue,
+      source_url: er.sourceUrl,
+      source_type: er.constraintType === 'text_compare' ? 'field_match' :
+                   er.constraintType === 'relationship_check' ? 'web_search' :
+                   er.sourceUrl ? 'website' : null,
+      quote: er.snippets.length > 0 ? er.snippets[0].substring(0, 300) : null,
+      matched_phrase: er.constraintValue,
+      context_snippet: er.snippets.length > 1 ? er.snippets[1].substring(0, 200) : null,
+      verification_status: vs,
+      confidence: conf,
+    });
+  }
   items.sort((a, b) => b.confidence - a.confidence);
   return items.slice(0, 3);
 }
@@ -1331,6 +1405,11 @@ export async function executeMissionDrivenPlan(
 
     const matchEvidence = buildMatchEvidence(leadEvidence);
     const matchSummary = buildMatchSummary(l.name, matchEvidence, leadEvidence);
+    const matchBasis = buildMatchBasis(l.name, leadEvidence);
+    const supportingEvidence = buildSupportingEvidence(l.name, leadEvidence);
+    const matchValid = evidenceWasAttempted
+      ? hasAnyEvidence
+      : (isRankingOnly || isFieldFilterOnly ? true : true);
 
     return {
       name: l.name,
@@ -1344,8 +1423,11 @@ export async function executeMissionDrivenPlan(
         ? (strongCount > 0 ? 'verified' as const : weakCount > 0 ? 'weak_match' as const : 'no_evidence' as const)
         : (isRankingOnly ? 'ranking_only' as const : (isFieldFilterOnly ? 'field_filter_only' as const : 'not_attempted' as const)),
       evidence: evidenceAttachment,
-      match_evidence: matchEvidence,
+      match_valid: matchValid,
       match_summary: matchSummary,
+      match_basis: matchBasis,
+      supporting_evidence: supportingEvidence,
+      match_evidence: matchEvidence,
     };
   });
 
@@ -1545,8 +1627,11 @@ export async function executeMissionDrivenPlan(
       name: l.name,
       address: l.address,
       found_in_plan_version: 1,
-      match_evidence: ev?.match_evidence,
+      match_valid: ev?.match_valid,
       match_summary: ev?.match_summary,
+      match_basis: ev?.match_basis,
+      supporting_evidence: ev?.supporting_evidence,
+      match_evidence: ev?.match_evidence,
     };
   });
 
