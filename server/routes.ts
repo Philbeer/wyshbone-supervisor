@@ -590,7 +590,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const monitoring = hasMonitoringIntent(msg);
-      const gate = evaluateClarifyGate(msg);
+      const gate = await evaluateClarifyGate(msg);
 
       const route = monitoring ? 'supervisor_plan' : gate.route === 'agent_run' ? 'supervisor_plan' : gate.route;
 

@@ -19,20 +19,74 @@ export interface ClarifyGateOptions {
 // CLARIFY_GATE_FIX: Location validity result
 export type LocationValidity = 'recognised' | 'unrecognised' | 'fictional';
 
-// CLARIFY_GATE_FIX: Known fictional/nonsensical location names
-const FICTIONAL_LOCATIONS = new Set([
-  'narnia', 'mordor', 'hogwarts', 'hogsmeade', 'diagon alley', 'gotham',
-  'metropolis', 'westeros', 'winterfell', 'rivendell', 'gondor', 'rohan',
-  'shire', 'the shire', 'middle earth', 'middle-earth', 'neverland',
-  'atlantis', 'el dorado', 'shangri-la', 'camelot', 'avalon', 'valhalla',
-  'asgard', 'wakanda', 'bikini bottom', 'springfield', 'bedrock',
-  'emerald city', 'oz', 'wonderland', 'lilliput', 'utopia', 'xanadu',
-  'tatooine', 'coruscant', 'endor', 'naboo', 'hoth', 'dagobah',
-  'pandora', 'gallifrey', 'sunnydale', 'stars hollow', 'pawnee',
-  'eagleton', 'derry', 'castle rock', 'silent hill', 'raccoon city',
-  'hyrule', 'mushroom kingdom', 'skyrim', 'tamriel', 'cyrodiil',
-  'nowhere', 'somewhere', 'anywhere', 'neverland',
-]);
+const LOCATION_VALIDITY_SYSTEM_PROMPT = `You are a location validity checker for a B2B lead generation system. Your job is to determine whether a given location name refers to a real place where real businesses could plausibly operate.
+
+Respond with EXACTLY one JSON object:
+{ "verdict": "real" | "fictional" | "ambiguous" | "nonsense", "confidence": 0.0-1.0, "reason": "brief explanation" }
+
+Rules:
+- "real": Any real place on Earth where businesses could operate — including obscure villages, hamlets, small towns, historical places that still exist. Examples: "Little Snoring" (real Norfolk village), "Trumpington" (real Cambridge suburb), "Narborough" (real Norfolk village), "Llanfairpwllgwyngyll" (real Welsh town), "Arundel" (real West Sussex town).
+- "fictional": Places from books, films, TV, games, mythology, or pure invention. Examples: "Narnia", "Mordor", "Hogwarts", "Wakanda", "Gotham", "Westeros", "Tatooine", "Hyrule".
+- "nonsense": Strings that are not place names at all — gibberish, common English words used as locations, or obviously made-up words. Examples: "nowhere", "amazingville", "asdfgh", "things", "blah blah".
+- "ambiguous": The name could be real but you are not confident enough to say — it sounds plausible but you cannot confirm. This is rare; most real-sounding places ARE real.
+
+IMPORTANT: When in doubt between "real" and "ambiguous", lean toward "real". Obscure but real places must NOT be blocked. Only clearly fictional or nonsensical inputs should be flagged.
+
+Return ONLY the JSON object. No markdown, no explanation outside the JSON.`;
+
+async function callLLMForLocationValidity(location: string, entityType?: string | null): Promise<{ verdict: 'real' | 'fictional' | 'ambiguous' | 'nonsense'; confidence: number; reason: string }> {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+
+  const userPrompt = entityType
+    ? `Location: "${location}"\nBusiness type being searched: "${entityType}"\n\nIs "${location}" a real place where ${entityType} could plausibly operate?`
+    : `Location: "${location}"\n\nIs "${location}" a real place where businesses could plausibly operate?`;
+
+  try {
+    if (openaiKey) {
+      const { default: OpenAI } = await import('openai');
+      const client = new OpenAI({ apiKey: openaiKey });
+      const response = await client.chat.completions.create({
+        model: 'gpt-4o-mini',
+        temperature: 0,
+        max_tokens: 200,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: LOCATION_VALIDITY_SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+      });
+      const text = response.choices[0]?.message?.content || '{}';
+      return JSON.parse(text);
+    }
+
+    if (anthropicKey) {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': anthropicKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-3-5-haiku-20241022',
+          max_tokens: 200,
+          temperature: 0,
+          system: LOCATION_VALIDITY_SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: userPrompt + '\n\nReturn ONLY valid JSON.' }],
+        }),
+      });
+      const data = await response.json() as any;
+      const text = data.content?.[0]?.text || '{}';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      return jsonMatch ? JSON.parse(jsonMatch[0]) : { verdict: 'real', confidence: 0.5, reason: 'LLM response unparseable — defaulting to real' };
+    }
+  } catch (err) {
+    console.error(`[CLARIFY_GATE] LLM location validity call failed:`, err);
+  }
+
+  return { verdict: 'real', confidence: 0.5, reason: 'No LLM key available or call failed — defaulting to real (safe fallback)' };
+}
 
 export interface ClarifyGateResult {
   route: ClarifyRoute;
@@ -355,22 +409,34 @@ function extractLocation(msg: string): string | null {
   return null;
 }
 
-// CLARIFY_GATE_FIX: Check whether a location string is recognised, fictional, or unrecognised
-export function checkLocationValidity(location: string | null | undefined): LocationValidity {
+type LocationValidityFn = (location: string, entityType?: string | null) => Promise<{ verdict: 'real' | 'fictional' | 'ambiguous' | 'nonsense'; confidence: number; reason: string }>;
+let _locationValidityOverride: LocationValidityFn | null = null;
+
+export function _setLocationValidityOverride(fn: LocationValidityFn | null): void {
+  _locationValidityOverride = fn;
+}
+
+export async function checkLocationValidity(location: string | null | undefined, entityType?: string | null): Promise<LocationValidity> {
   if (!location || !location.trim()) return 'unrecognised';
   const loc = location.trim();
-  const lower = loc.toLowerCase();
-
-  if (FICTIONAL_LOCATIONS.has(lower)) return 'fictional';
 
   if (KNOWN_REGIONS.test(loc)) return 'recognised';
+
+  const llmResult = _locationValidityOverride
+    ? await _locationValidityOverride(loc, entityType)
+    : await callLLMForLocationValidity(loc, entityType);
+  console.log(`[CLARIFY_GATE] LLM location validity for "${loc}": verdict=${llmResult.verdict} confidence=${llmResult.confidence} reason="${llmResult.reason}"`);
+
+  if (llmResult.verdict === 'fictional' || llmResult.verdict === 'nonsense') return 'fictional';
+  if (llmResult.verdict === 'real') return 'recognised';
+  if (llmResult.verdict === 'ambiguous') return 'unrecognised';
 
   return 'unrecognised';
 }
 
 export { extractBusinessType, extractLocation, extractCount, extractTimeFilter, hasMonitoringIntent };
 
-export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
+export async function evaluateClarifyGate(userMessage: string): Promise<ClarifyGateResult> {
   const msg = userMessage.trim();
 
   if (!msg || msg.length === 0) {
@@ -433,7 +499,8 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   // CLARIFY_GATE_FIX: Check location validity for fictional/unrecognised locations
   const regexLoc = extractLocation(msg);
   if (regexLoc && hasSearchIntent(msg)) {
-    const locValidity = checkLocationValidity(regexLoc);
+    const bt = extractBusinessType(msg);
+    const locValidity = await checkLocationValidity(regexLoc, bt);
     if (locValidity === 'fictional') {
       console.log(`[CLARIFY_GATE] route=refuse — fictional location detected: "${regexLoc}"`);
       return {
@@ -442,7 +509,7 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
         triggerCategory: 'fictional_location',
         questions: [`"${regexLoc}" is not a real location. Please provide a real place — for example: "Find pubs in Brighton"`],
         parsedFields: {
-          businessType: extractBusinessType(msg),
+          businessType: bt,
           location: regexLoc,
           count: extractCount(msg),
           timeFilter: extractTimeFilter(msg),
@@ -496,11 +563,11 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
 }
 
 // CLARIFY_GATE_FIX: Added options parameter for delegatedClarify signal
-export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: string, options?: ClarifyGateOptions): ClarifyGateResult {
+export async function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: string, options?: ClarifyGateOptions): Promise<ClarifyGateResult> {
   const msg = rawMsg.trim();
 
   if (intent.location_text?.trim()) {
-    const locValidity = checkLocationValidity(intent.location_text);
+    const locValidity = await checkLocationValidity(intent.location_text, intent.entity_category);
     if (locValidity === 'fictional') {
       const locName = intent.location_text.trim();
       const timeConstraintFict = intent.constraints.find(c => c.type === 'time');
@@ -615,7 +682,7 @@ export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: s
 
   if (intent.mission_type === 'unknown') {
     console.log(`[CLARIFY_GATE] semantic_source=canonical mission_type=unknown — falling back to regex`);
-    const fallback = evaluateClarifyGate(rawMsg);
+    const fallback = await evaluateClarifyGate(rawMsg);
     fallback.semantic_source = 'fallback_regex';
     return fallback;
   }
@@ -644,7 +711,7 @@ export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: s
 
   // CLARIFY_GATE_FIX: Check delegatedClarify + unrecognised location (fictional already caught above)
   if (intent.location_text?.trim() && options?.delegatedClarify) {
-    const locValidity = checkLocationValidity(intent.location_text);
+    const locValidity = await checkLocationValidity(intent.location_text, intent.entity_category);
     if (locValidity === 'unrecognised') {
       const locName = intent.location_text.trim();
       const timeConstraintLoc = intent.constraints.find(c => c.type === 'time');

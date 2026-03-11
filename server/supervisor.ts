@@ -1996,9 +1996,9 @@ class SupervisorService {
       // CLARIFY_GATE_FIX: Build options — fictional locations are caught inside the gate;
       // delegatedClarify is reserved for external signals (e.g. future router enhancements)
       const clarifyGateOptions: ClarifyGateOptions = {};
-      const clarifyGate = canonicalIntent
+      const clarifyGate = await (canonicalIntent
         ? evaluateClarifyGateFromIntent(canonicalIntent, rawMsg, clarifyGateOptions)
-        : evaluateClarifyGate(rawMsg);
+        : evaluateClarifyGate(rawMsg));
       if (!clarifyGate.semantic_source) clarifyGate.semantic_source = 'fallback_regex';
       console.log(`[CLARIFY_GATE] route=${clarifyGate.route} reason="${clarifyGate.reason}" semantic_source=${clarifyGate.semantic_source}${clarifyGate.triggerCategory ? ` triggerCategory=${clarifyGate.triggerCategory}` : ''}${clarifyGate.questions ? ` questions=${JSON.stringify(clarifyGate.questions)}` : ''}`);
 
