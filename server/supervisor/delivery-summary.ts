@@ -345,12 +345,22 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
       cvlMatch,
     );
 
+    let effectiveMatchLevel = match_level;
+    const effectiveViolations = [...soft_violations];
+    const hasCvlForLead = !!cvlMatch;
+    if (match_level === 'exact' && lead.match_valid === false && !hasCvlForLead) {
+      effectiveMatchLevel = 'closest';
+      if (!effectiveViolations.includes('weak_or_missing_evidence')) {
+        effectiveViolations.push('weak_or_missing_evidence');
+      }
+    }
+
     const entity: DeliveredEntity = {
       entity_id: entityId,
       name: lead.name,
       address: lead.address,
-      match_level,
-      soft_violations,
+      match_level: effectiveMatchLevel,
+      soft_violations: effectiveViolations,
       ...(lead.match_valid !== undefined ? { match_valid: lead.match_valid } : {}),
       ...(lead.match_summary ? { match_summary: lead.match_summary } : {}),
       ...(lead.match_basis && lead.match_basis.length > 0 ? { match_basis: lead.match_basis } : {}),
@@ -358,7 +368,7 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
       ...(lead.match_evidence && lead.match_evidence.length > 0 ? { match_evidence: lead.match_evidence } : {}),
     };
 
-    if (match_level === 'exact') {
+    if (effectiveMatchLevel === 'exact') {
       exact.push(entity);
     } else {
       closest.push(entity);

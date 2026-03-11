@@ -1429,7 +1429,7 @@ export async function executeMissionDrivenPlan(
     const matchBasis = buildMatchBasis(l.name, leadEvidence);
     const supportingEvidence = buildSupportingEvidence(l.name, leadEvidence);
     const matchValid = evidenceWasAttempted
-      ? hasAnyEvidence
+      ? strongCount > 0
       : (isRankingOnly || isFieldFilterOnly ? true : true);
 
     return {
