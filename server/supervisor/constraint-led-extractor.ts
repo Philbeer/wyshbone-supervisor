@@ -8,6 +8,28 @@ export interface ConstraintContext {
 
 export type SourceType = 'website' | 'search_snippet' | 'gov_page' | 'social_media' | 'directory' | 'unknown';
 
+// PHASE_2: Canonical source trust tier — surfaces provenance for Tower
+export type SourceTier = 'first_party_website' | 'search_snippet' | 'directory_field' | 'lead_field' | 'external_source';
+
+// PHASE_2: Map existing source_type to canonical source_tier
+export function mapSourceTypeToTier(sourceType: SourceType): SourceTier {
+  switch (sourceType) {
+    case 'website':
+      return 'first_party_website';
+    case 'search_snippet':
+      return 'search_snippet';
+    case 'directory':
+      return 'directory_field';
+    case 'gov_page':
+      return 'external_source';
+    case 'social_media':
+      return 'external_source';
+    case 'unknown':
+    default:
+      return 'external_source';
+  }
+}
+
 export interface EvidenceItem {
   source_url: string;
   page_title: string;
@@ -18,6 +40,7 @@ export interface EvidenceItem {
   context_snippet: string;
   constraint_match_reason: string;
   source_type: SourceType;
+  source_tier: SourceTier; // PHASE_2
   confidence_score: number;
   quote: string;
   url: string;
@@ -958,6 +981,7 @@ export function extractConstraintLedEvidence(
       context_snippet: c.context_snippet,
       constraint_match_reason: buildConstraintMatchReason(constraint.type, constraintValue, matchedPhrase, c.matchTier),
       source_type: c.source_type,
+      source_tier: mapSourceTypeToTier(c.source_type),
       confidence_score: confidenceScore,
       quote: c.quote,
       url: c.url,

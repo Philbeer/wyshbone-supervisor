@@ -68,6 +68,48 @@ export const VALID_OPERATORS_BY_TYPE: Record<MissionConstraintType, readonly str
 
 export const HARDNESS_VALUES = ['hard', 'soft'] as const;
 
+// PHASE_2: Evidence requirement tiers — declares what kind of proof a constraint needs
+export const EVIDENCE_REQUIREMENT_VALUES = [
+  'none',
+  'lead_field',
+  'directory_data',
+  'search_snippet',
+  'website_text',
+  'external_source',
+] as const;
+
+export type EvidenceRequirement = typeof EVIDENCE_REQUIREMENT_VALUES[number];
+
+// PHASE_2: Mapping from constraint type to default evidence requirement
+export function defaultEvidenceRequirement(type: MissionConstraintType, operator?: string): EvidenceRequirement {
+  switch (type) {
+    case 'text_compare':
+      return 'none';
+    case 'entity_discovery':
+      return 'none';
+    case 'contact_extraction':
+      return 'none';
+    case 'numeric_range':
+      return 'none';
+    case 'ranking':
+      return 'none';
+    case 'location_constraint':
+      return 'directory_data';
+    case 'website_evidence':
+      return 'website_text';
+    case 'attribute_check':
+      return 'website_text';
+    case 'status_check':
+      return 'website_text';
+    case 'relationship_check':
+      return 'external_source';
+    case 'time_constraint':
+      return 'external_source';
+    default:
+      return 'external_source';
+  }
+}
+
 export const MissionConstraintSchema = z.object({
   type: z.enum(MISSION_CONSTRAINT_TYPES),
   field: z.string().min(1),
@@ -75,6 +117,7 @@ export const MissionConstraintSchema = z.object({
   value: z.union([z.string(), z.number(), z.boolean(), z.null()]),
   value_secondary: z.union([z.string(), z.number(), z.null()]).optional(),
   hardness: z.enum(HARDNESS_VALUES),
+  evidence_requirement: z.enum(EVIDENCE_REQUIREMENT_VALUES).optional(), // PHASE_2
 });
 
 export type MissionConstraint = z.infer<typeof MissionConstraintSchema>;
@@ -154,6 +197,12 @@ export function validateStructuredMission(raw: unknown): MissionValidationResult
 
   if (errors.length > 0) {
     return { ok: false, mission: null, errors };
+  }
+
+  for (const c of mission.constraints) {
+    if (!c.evidence_requirement) {
+      c.evidence_requirement = defaultEvidenceRequirement(c.type as MissionConstraintType, c.operator);
+    }
   }
 
   return { ok: true, mission, errors: [] };

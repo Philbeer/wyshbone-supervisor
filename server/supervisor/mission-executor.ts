@@ -1,4 +1,5 @@
-import type { StructuredMission, MissionConstraint, MissionExtractionTrace } from './mission-schema';
+import type { StructuredMission, MissionConstraint, MissionExtractionTrace, EvidenceRequirement } from './mission-schema';
+import { defaultEvidenceRequirement } from './mission-schema';
 import { extractConstraintLedEvidence, type ConstraintLedExtractionResult, type EvidenceItem, getPageHintsForConstraint } from './constraint-led-extractor';
 import type {
   MissionPlan,
@@ -366,6 +367,39 @@ function buildSoftConstraintLabels(mission: StructuredMission): string[] {
     .map(c => c.type);
 }
 
+export interface StructuredConstraintPayload {
+  id: string;
+  type: string;
+  field: string;
+  operator: string;
+  value: string | number | boolean | null;
+  hardness: 'hard' | 'soft';
+  evidence_requirement: EvidenceRequirement;
+  label: string;
+}
+
+function buildStructuredConstraints(mission: StructuredMission): StructuredConstraintPayload[] {
+  return mission.constraints.map((c, idx) => {
+    const evReq = c.evidence_requirement ?? defaultEvidenceRequirement(c.type as any, c.operator);
+    const label = c.type === 'text_compare'
+      ? `${c.field} ${c.operator} "${c.value}"`
+      : c.type === 'numeric_range'
+        ? `${c.field} ${c.operator} ${c.value}${c.value_secondary != null ? ` and ${c.value_secondary}` : ''}`
+        : `${c.type}: ${c.field} ${c.operator} ${String(c.value ?? '')}`;
+
+    return {
+      id: `c${idx}`,
+      type: c.type,
+      field: c.field,
+      operator: c.operator,
+      value: c.value,
+      hardness: c.hardness,
+      evidence_requirement: evReq,
+      label,
+    };
+  });
+}
+
 export async function executeMissionDrivenPlan(
   ctx: MissionExecutionContext,
 ): Promise<MissionExecutionResult> {
@@ -403,6 +437,7 @@ export async function executeMissionDrivenPlan(
 
   const hardConstraints = buildHardConstraintLabels(mission);
   const softConstraints = buildSoftConstraintLabels(mission);
+  const structuredConstraints = buildStructuredConstraints(mission);
   const toolTracker = createRunToolTracker();
   const createdLeadIds: string[] = [];
   const placeIdToDbId = new Map<string, string>();
@@ -412,7 +447,7 @@ export async function executeMissionDrivenPlan(
   console.log(`[MISSION_EXEC] ===== Mission-driven execution starting =====`);
   console.log(`[MISSION_EXEC] runId=${runId} strategy=${plan.strategy} tools=${plan.tool_sequence.join(' → ')}`);
   console.log(`[MISSION_EXEC] entity="${businessType}" location="${location}" country="${country}" count=${requestedCount}`);
-  console.log(`[MISSION_EXEC] constraints=${mission.constraints.length} hard=${hardConstraints.length} soft=${softConstraints.length}`);
+  console.log(`[MISSION_EXEC] constraints=${mission.constraints.length} hard=${hardConstraints.length} soft=${softConstraints.length} structured=${structuredConstraints.length}`);
   console.log(`[MISSION_EXEC] timeout=${RUN_EXECUTION_TIMEOUT_MS}ms max_tool_calls=${MAX_TOOL_CALLS}`);
 
   logMissionPlan(plan, runId);
@@ -444,6 +479,7 @@ export async function executeMissionDrivenPlan(
       mission_plan: plan as unknown as Record<string, unknown>,
       hard_constraints: hardConstraints,
       soft_constraints: softConstraints,
+      structured_constraints: structuredConstraints,
       requested_count: requestedCount,
       search_budget: searchBudget,
     },
@@ -938,7 +974,7 @@ export async function executeMissionDrivenPlan(
 
         const structuredEvidenceText = extraction.evidence_items.length > 0
           ? extraction.evidence_items.map((e, i) =>
-              `[Evidence ${i + 1}] Source: ${e.source_url} | Type: ${e.source_type} | Constraint: ${e.constraint_type}="${e.constraint_value}" | Matched: "${e.matched_phrase}" | Quote: "${e.direct_quote}" | Reason: ${e.constraint_match_reason} | Context: ${e.context_snippet}`
+              `[Evidence ${i + 1}] Source: ${e.source_url} | Type: ${e.source_type} | Tier: ${e.source_tier} | Constraint: ${e.constraint_type}="${e.constraint_value}" | Matched: "${e.matched_phrase}" | Quote: "${e.direct_quote}" | Reason: ${e.constraint_match_reason} | Context: ${e.context_snippet}`
             ).join('\n')
           : '';
 
@@ -1036,6 +1072,7 @@ export async function executeMissionDrivenPlan(
               context_snippet: e.context_snippet,
               constraint_match_reason: e.constraint_match_reason,
               source_type: e.source_type,
+              source_tier: e.source_tier,
               confidence_score: e.confidence_score,
             })),
             tower_status: towerStatus,
@@ -1375,6 +1412,7 @@ export async function executeMissionDrivenPlan(
       normalized_goal: normalizedGoal,
       hard_constraints: hardConstraints,
       soft_constraints: softConstraints,
+      structured_constraints: structuredConstraints,
       delivered_count: finalLeads.length,
       target_count: requestedCount,
       leads: finalLeads.map(l => ({ name: l.name, address: l.address, phone: l.phone, website: l.website, placeId: l.placeId })),
@@ -1489,6 +1527,7 @@ export async function executeMissionDrivenPlan(
       normalized_goal: normalizedGoal,
       hard_constraints: hardConstraints,
       soft_constraints: softConstraints,
+      structured_constraints: structuredConstraints,
       mission_plan_tool_sequence: plan.tool_sequence,
       delivered_count: finalLeads.length,
       target_count: requestedCount,
@@ -1516,6 +1555,7 @@ export async function executeMissionDrivenPlan(
     requested_count_value: requestedCount,
     hard_constraints: hardConstraints,
     soft_constraints: softConstraints,
+    structured_constraints: structuredConstraints,
     plan_constraints: {
       business_type: businessType,
       location: currentLocation,

@@ -1861,6 +1861,7 @@ class SupervisorService {
           if (!(task.request_data as any).search_query) (task.request_data as any).search_query = {};
           (task.request_data as any).search_query.business_type = searchParams.businessType;
           (task.request_data as any).search_query.location = searchParams.location;
+          (task.request_data as any).search_query.attributes = searchParams.attributes || [];
 
           console.log(`[CLARIFY_SESSION] Synthetic message: "${syntheticMsg}"`);
           sessionCompletedToRun = true;
@@ -1924,6 +1925,7 @@ class SupervisorService {
           if (!(task.request_data as any).search_query) (task.request_data as any).search_query = {};
           (task.request_data as any).search_query.business_type = searchParams.businessType;
           (task.request_data as any).search_query.location = searchParams.location;
+          (task.request_data as any).search_query.attributes = searchParams.attributes || [];
 
           console.log(`[CLARIFY_SESSION] Synthetic message: "${syntheticMsg}"`);
 
