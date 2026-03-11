@@ -1708,6 +1708,7 @@ export async function executeMissionDrivenPlan(
     softRelaxations: dsSoftRelaxations,
     leads: dsLeads,
     finalVerdict,
+    finalAction, // PHASE_3: pass Tower action to delivery summary
     stopReason: null,
     relationshipContext: relationshipPredicate.requires_relationship_evidence
       ? {

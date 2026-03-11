@@ -58,7 +58,8 @@ export interface DeliveredEntity {
   match_evidence?: MatchEvidenceItem[];
 }
 
-export type CanonicalVerdict = 'PASS' | 'PARTIAL' | 'STOP' | 'ERROR' | 'COMPLETED';
+// PHASE_3: Removed COMPLETED (meaningless — ignored Tower verdict). Removed TRUSTED.
+export type CanonicalVerdict = 'PASS' | 'PARTIAL' | 'STOP' | 'ERROR' | 'CHANGE_PLAN';
 
 export interface CvlLocationBreakdown {
   verified_geo_count: number;
@@ -74,7 +75,8 @@ export interface CvlSummary {
   location_breakdown: CvlLocationBreakdown | null;
 }
 
-export type TrustStatus = 'TRUSTED' | 'UNTRUSTED';
+// PHASE_3: Removed TRUSTED (was always set when leads existed, adding no signal).
+export type TrustStatus = 'VERIFIED' | 'UNVERIFIED' | 'UNTRUSTED';
 
 export interface DeliverySummaryPayload {
   requested_count: number | null;
@@ -143,6 +145,7 @@ export interface DeliverySummaryInput {
   softRelaxations: SoftRelaxation[];
   leads: DeliverySummaryLeadInput[];
   finalVerdict: string;
+  finalAction?: string | null; // PHASE_3: Tower action (accept/stop/change_plan/retry/continue)
   stopReason?: string | null;
   cvlVerifiedExactCount?: number | null;
   cvlUnverifiableCount?: number | null;
@@ -292,29 +295,68 @@ function deriveSuggestedNextQuestion(
   return 'Do you want me to include similar matches?';
 }
 
+// PHASE_3: Normalize Tower verdict (verdict field only — pass/fail/error)
 function normalizeTowerVerdict(raw: string | undefined | null): string | null {
   if (!raw) return null;
   const lower = raw.toLowerCase().trim();
   if (lower === 'error') return 'ERROR';
-  const stopVerdicts = ['stop', 'change_plan', 'reject', 'fail', 'blocked'];
-  if (stopVerdicts.includes(lower)) return 'STOP';
+  if (lower === 'timeout') return 'TIMEOUT';
+  const stopVerdicts = ['stop', 'reject', 'fail', 'blocked'];
+  if (stopVerdicts.includes(lower)) return 'FAIL';
+  if (lower === 'accept_with_unverified') return 'PASS_UNVERIFIED';
   const passVerdicts = ['pass', 'accept', 'approved', 'good'];
   if (passVerdicts.includes(lower)) return 'PASS';
+  if (lower === 'pending' || lower === 'completed') return null;
   return raw.toUpperCase();
 }
 
+// PHASE_3: Normalize Tower action (action field — accept/stop/change_plan/retry/continue)
+function normalizeTowerAction(raw: string | undefined | null): string | null {
+  if (!raw) return null;
+  const lower = raw.toLowerCase().trim();
+  if (lower === 'change_plan') return 'CHANGE_PLAN';
+  if (lower === 'stop') return 'STOP';
+  if (lower === 'accept') return 'ACCEPT';
+  if (lower === 'retry') return 'RETRY';
+  if (lower === 'continue') return 'CONTINUE';
+  return raw.toUpperCase();
+}
+
+// PHASE_3: Rewritten — Tower verdict and verification now drive status.
+// Rules:
+//   Tower PASS + all hard verified → PASS
+//   Tower PASS + some plausible, none unsupported → PARTIAL
+//   Tower accept_with_unverified → PARTIAL
+//   Tower action change_plan → CHANGE_PLAN
+//   Tower STOP/FAIL → STOP (even if leads delivered)
+//   verifiedExact=0 + deliveredCount>0 → max PARTIAL
+//   No leads → STOP
 function deriveCanonicalStatus(
   verifiedExact: number,
-  requested: number | null,
   towerVerdict: string | null,
+  towerAction: string | null,
   hasHardUnverifiable: boolean,
   deliveredTotal?: number,
 ): CanonicalVerdict {
   const totalDelivered = deliveredTotal ?? 0;
+
   if (towerVerdict === 'ERROR' && totalDelivered === 0) return 'ERROR';
-  if (totalDelivered > 0) return 'COMPLETED';
-  if (hasHardUnverifiable) return 'STOP';
-  return 'STOP';
+  if (totalDelivered === 0) return 'STOP';
+
+  if (towerAction === 'CHANGE_PLAN') return 'CHANGE_PLAN';
+  if (towerAction === 'STOP') return 'STOP';
+  if (towerVerdict === 'FAIL') return 'STOP';
+
+  if (towerVerdict === 'PASS_UNVERIFIED') return 'PARTIAL';
+  if (hasHardUnverifiable) return 'PARTIAL';
+  if (verifiedExact === 0) return 'PARTIAL';
+
+  if (towerVerdict === 'PASS' || towerVerdict === null) {
+    if (verifiedExact > 0) return 'PASS';
+    return 'PARTIAL';
+  }
+
+  return 'PARTIAL';
 }
 
 export function buildDeliverySummaryPayload(input: DeliverySummaryInput): DeliverySummaryPayload {
@@ -387,6 +429,7 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
   const shortfall = requestedCount === null ? 0 : Math.max(0, requestedCount - exactCount);
 
   const towerVerdict = normalizeTowerVerdict(input.finalVerdict);
+  const towerAction = normalizeTowerAction(input.finalAction); // PHASE_3
   const hardUnverifiable = input.cvlHardUnverifiable ?? [];
   const hasHardUnverifiable = hardUnverifiable.length > 0;
 
@@ -406,8 +449,11 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
   }
 
   const deliveredTotalForStatus = relationshipUnverified ? 0 : (exact.length + closest.length);
-  const status = deriveCanonicalStatus(effectiveExactCount, requestedCount, towerVerdict, hasHardUnverifiable, deliveredTotalForStatus);
-  const trustStatus: TrustStatus = (status === 'PASS' || status === 'PARTIAL' || status === 'COMPLETED') ? 'TRUSTED' : 'UNTRUSTED';
+  const status = deriveCanonicalStatus(effectiveExactCount, towerVerdict, towerAction, hasHardUnverifiable, deliveredTotalForStatus);
+  // PHASE_3: trust_status now reflects verification quality
+  const trustStatus: TrustStatus = status === 'PASS' ? 'VERIFIED'
+    : (status === 'PARTIAL') ? 'UNVERIFIED'
+    : 'UNTRUSTED';
 
   const cvlSummary: CvlSummary | null = hasCvl ? {
     verified_exact_count: input.cvlVerifiedExactCount!,
@@ -426,13 +472,15 @@ export function buildDeliverySummaryPayload(input: DeliverySummaryInput): Delive
       stopReason = input.stopReason;
     } else if (hasHardUnverifiable) {
       stopReason = `Unverifiable hard constraint: ${hardUnverifiable.join(', ')}`;
-    } else if (towerVerdict === 'STOP') {
+    } else if (towerVerdict === 'FAIL' || towerAction === 'STOP') {
       stopReason = `Tower verdict: ${input.finalVerdict}`;
-    } else if (requestedCount !== null) {
+    } else if (requestedCount !== null && deliveredTotalForStatus === 0) {
       stopReason = `Delivered 0 of ${requestedCount} requested`;
     } else {
       stopReason = `No results found`;
     }
+  } else if (status === 'CHANGE_PLAN') { // PHASE_3
+    stopReason = input.stopReason || `Tower action: change_plan`;
   } else if (status === 'PARTIAL') {
     stopReason = input.stopReason || (requestedCount !== null ? `Verified ${exactCount} of ${requestedCount} requested` : null);
   }

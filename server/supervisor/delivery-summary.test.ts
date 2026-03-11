@@ -204,7 +204,7 @@ describe('buildDeliverySummaryPayload', () => {
       expect(result.delivered_exact_count).toBe(30);
       expect(result.delivered_total_count).toBe(30);
       expect(result.shortfall).toBe(0);
-      expect(result.status).toBe('COMPLETED');
+      expect(result.status).toBe('PASS'); // PHASE_3: was COMPLETED
       assertArrayCountInvariant(result);
     });
 
@@ -391,7 +391,7 @@ describe('buildDeliverySummaryPayload', () => {
 
       expect(result.delivered_exact.length).toBe(2);
       expect(result.delivered_closest.length).toBe(0);
-      expect(result.status).toBe('COMPLETED');
+      expect(result.status).toBe('PASS'); // PHASE_3: was COMPLETED
       assertArrayCountInvariant(result);
     });
 
@@ -539,16 +539,17 @@ describe('buildDeliverySummaryPayload', () => {
     });
   });
 
-  describe('D) Hard truth contract — ERROR and trust_status', () => {
-    it('Tower error verdict with leads → status=COMPLETED (leads delivered)', () => {
+  // PHASE_3: Rewritten — status now respects Tower verdict
+  describe('D) Hard truth contract — Tower verdict drives status', () => {
+    it('Tower error verdict with leads → status=PARTIAL (error is not PASS)', () => {
       const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
       const result = buildDeliverySummaryPayload(baseInput({
         leads,
         finalVerdict: 'error',
         requestedCount: null,
       }));
-      expect(result.status).toBe('COMPLETED');
-      expect(result.trust_status).toBe('TRUSTED');
+      expect(result.status).toBe('PARTIAL');
+      expect(result.trust_status).toBe('UNVERIFIED');
     });
 
     it('Tower error verdict with no leads → status=ERROR', () => {
@@ -561,49 +562,49 @@ describe('buildDeliverySummaryPayload', () => {
       expect(result.trust_status).toBe('UNTRUSTED');
     });
 
-    it('Tower fail verdict with leads → status=COMPLETED, trust_status=TRUSTED', () => {
+    it('Tower fail verdict with leads → status=STOP (fail is authoritative)', () => {
       const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
       const result = buildDeliverySummaryPayload(baseInput({
         leads,
         finalVerdict: 'fail',
       }));
-      expect(result.status).toBe('COMPLETED');
-      expect(result.trust_status).toBe('TRUSTED');
+      expect(result.status).toBe('STOP');
+      expect(result.trust_status).toBe('UNTRUSTED');
     });
 
-    it('Tower stop verdict with leads → status=COMPLETED, trust_status=TRUSTED', () => {
+    it('Tower stop verdict with leads → status=STOP (not overridden by lead count)', () => {
       const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
       const result = buildDeliverySummaryPayload(baseInput({
         leads,
         finalVerdict: 'stop',
       }));
-      expect(result.status).toBe('COMPLETED');
-      expect(result.trust_status).toBe('TRUSTED');
+      expect(result.status).toBe('STOP');
+      expect(result.trust_status).toBe('UNTRUSTED');
     });
 
-    it('PASS verdict with leads → status=COMPLETED, trust_status=TRUSTED', () => {
+    it('PASS verdict with leads → status=PASS, trust_status=VERIFIED', () => {
       const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
       const result = buildDeliverySummaryPayload(baseInput({
         leads,
         finalVerdict: 'pass',
         requestedCount: null,
       }));
-      expect(result.status).toBe('COMPLETED');
-      expect(result.trust_status).toBe('TRUSTED');
+      expect(result.status).toBe('PASS');
+      expect(result.trust_status).toBe('VERIFIED');
     });
 
-    it('leads with requestedCount > delivered → status=COMPLETED, trust_status=TRUSTED', () => {
+    it('leads with requestedCount > delivered → status=PASS (leads verified)', () => {
       const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
       const result = buildDeliverySummaryPayload(baseInput({
         leads,
         finalVerdict: 'pass',
         requestedCount: 5,
       }));
-      expect(result.status).toBe('COMPLETED');
-      expect(result.trust_status).toBe('TRUSTED');
+      expect(result.status).toBe('PASS');
+      expect(result.trust_status).toBe('VERIFIED');
     });
 
-    it('error verdict with leads delivered → status=COMPLETED', () => {
+    it('error verdict with leads delivered → status=PARTIAL (error not conclusive)', () => {
       const leads = Array.from({ length: 30 }, (_, i) =>
         makeLead(`Pub ${i}`, `${i} High St`, `p${i}`)
       );
@@ -612,8 +613,37 @@ describe('buildDeliverySummaryPayload', () => {
         finalVerdict: 'error',
         requestedCount: 30,
       }));
-      expect(result.status).toBe('COMPLETED');
-      expect(result.trust_status).toBe('TRUSTED');
+      expect(result.status).toBe('PARTIAL');
+      expect(result.trust_status).toBe('UNVERIFIED');
+    });
+
+    it('Tower action change_plan with leads → status=CHANGE_PLAN', () => {
+      const leads = [makeLead('Pub A', '1 High St, Leeds', 'p1')];
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'fail',
+        finalAction: 'change_plan',
+      }));
+      expect(result.status).toBe('CHANGE_PLAN');
+      expect(result.trust_status).toBe('UNTRUSTED');
+    });
+
+    it('verifiedExact=0 with leads → max PARTIAL', () => {
+      const leads = Array.from({ length: 5 }, (_, i) =>
+        makeLead(`Pub ${i}`, `${i} High St`, `p${i}`)
+      );
+      const cvlVerifications = leads.map(l =>
+        makeCvlLv(l.place_id!, l.name, 'unknown', false)
+      );
+      const result = buildDeliverySummaryPayload(baseInput({
+        leads,
+        finalVerdict: 'pass',
+        requestedCount: 5,
+        cvlVerifiedExactCount: 0,
+        cvlLeadVerifications: cvlVerifications,
+      }));
+      expect(result.status).toBe('PARTIAL');
+      expect(result.trust_status).toBe('UNVERIFIED');
     });
   });
 
@@ -652,7 +682,7 @@ describe('buildDeliverySummaryPayload', () => {
       }));
       expect(result.delivered_exact.length).toBe(1);
       expect(result.delivered_closest.length).toBe(0);
-      expect(result.status).toBe('COMPLETED');
+      expect(result.status).toBe('PASS'); // PHASE_3: was COMPLETED
       expect(result.relationship_context).toBeNull();
     });
 
@@ -675,8 +705,9 @@ describe('buildDeliverySummaryPayload', () => {
     });
   });
 
-  describe('terminal state consistency (Bug Fix 3)', () => {
-    it('Tower PASS with delivered leads → status COMPLETED', () => {
+  // PHASE_3: Rewritten — Tower verdict now authoritative
+  describe('terminal state consistency (Phase 3)', () => {
+    it('Tower PASS with delivered leads → status PASS', () => {
       const leads = Array.from({ length: 10 }, (_, i) =>
         makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
       );
@@ -685,11 +716,11 @@ describe('buildDeliverySummaryPayload', () => {
         finalVerdict: 'pass',
         requestedCount: 10,
       }));
-      expect(result.status).toBe('COMPLETED');
-      expect(result.trust_status).toBe('TRUSTED');
+      expect(result.status).toBe('PASS');
+      expect(result.trust_status).toBe('VERIFIED');
     });
 
-    it('Tower PASS with 0 verified exact but leads delivered → COMPLETED', () => {
+    it('Tower PASS with 0 verified exact but leads delivered → PARTIAL', () => {
       const leads = Array.from({ length: 10 }, (_, i) =>
         makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
       );
@@ -703,11 +734,11 @@ describe('buildDeliverySummaryPayload', () => {
         cvlVerifiedExactCount: 0,
         cvlLeadVerifications: cvlVerifications,
       }));
-      expect(result.status).toBe('COMPLETED');
-      expect(result.trust_status).toBe('TRUSTED');
+      expect(result.status).toBe('PARTIAL');
+      expect(result.trust_status).toBe('UNVERIFIED');
     });
 
-    it('Tower STOP with leads → status COMPLETED (not STOP)', () => {
+    it('Tower STOP with leads → status STOP (Tower is authoritative)', () => {
       const leads = Array.from({ length: 10 }, (_, i) =>
         makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
       );
@@ -716,11 +747,11 @@ describe('buildDeliverySummaryPayload', () => {
         finalVerdict: 'stop',
         requestedCount: 10,
       }));
-      expect(result.status).toBe('COMPLETED');
-      expect(result.trust_status).toBe('TRUSTED');
+      expect(result.status).toBe('STOP');
+      expect(result.trust_status).toBe('UNTRUSTED');
     });
 
-    it('Tower PASS with verified exact >= requested → status COMPLETED', () => {
+    it('Tower PASS with verified exact >= requested → status PASS', () => {
       const leads = Array.from({ length: 10 }, (_, i) =>
         makeLead(`Pub ${i + 1}`, `${i + 1} High St`, `p${i + 1}`)
       );
@@ -734,8 +765,8 @@ describe('buildDeliverySummaryPayload', () => {
         cvlVerifiedExactCount: 10,
         cvlLeadVerifications: cvlVerifications,
       }));
-      expect(result.status).toBe('COMPLETED');
-      expect(result.trust_status).toBe('TRUSTED');
+      expect(result.status).toBe('PASS');
+      expect(result.trust_status).toBe('VERIFIED');
     });
 
     it('no leads + error → ERROR', () => {

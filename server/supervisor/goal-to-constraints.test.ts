@@ -252,13 +252,14 @@ describe('Regression: "Find 10 pubs in Arundel and include email" end-to-end', (
 
     const result = buildDeliverySummaryPayload(input);
 
-    expect(result.status).toBe('COMPLETED');
-    expect(result.trust_status).toBe('TRUSTED');
+    expect(result.status).toBe('PASS'); // PHASE_3: was COMPLETED
+    expect(result.trust_status).toBe('VERIFIED'); // PHASE_3: was TRUSTED
     expect(result.delivered_total_count).toBe(10);
     expect(result.stop_reason).toBeNull();
   });
 
-  it('delivery summary does NOT fail (STOP) when Tower verdict is fail due to missing emails', () => {
+  // PHASE_3: Tower fail verdict is now authoritative — status is STOP
+  it('delivery summary with Tower fail verdict → STOP (Tower is authoritative)', () => {
     const leads: DeliverySummaryLeadInput[] = Array.from({ length: 10 }, (_, i) => ({
       entity_id: `p${i + 1}`,
       place_id: `p${i + 1}`,
@@ -282,9 +283,8 @@ describe('Regression: "Find 10 pubs in Arundel and include email" end-to-end', (
 
     const result = buildDeliverySummaryPayload(input);
 
-    expect(result.status).toBe('COMPLETED');
-    expect(result.status).not.toBe('STOP');
-    expect(result.trust_status).toBe('TRUSTED');
+    expect(result.status).toBe('STOP'); // PHASE_3: Tower fail is authoritative
+    expect(result.trust_status).toBe('UNTRUSTED');
     expect(result.delivered_total_count).toBe(10);
   });
 });

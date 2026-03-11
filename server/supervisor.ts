@@ -2384,7 +2384,7 @@ class SupervisorService {
           run_lane: true,
           status: dsStatus,
           final_verdict: dsStatus,
-          trust_status: towerResult.deliverySummary?.trust_status ?? (runFailed ? 'UNTRUSTED' : 'TRUSTED'),
+          trust_status: towerResult.deliverySummary?.trust_status ?? (runFailed ? 'UNTRUSTED' : 'UNVERIFIED'), // PHASE_3: no more TRUSTED
           ...(towerResult.deliverySummary ? { deliverySummary: towerResult.deliverySummary } : {}),
           ...(towerResult.towerVerdict ? { towerVerdict: towerResult.towerVerdict } : {}),
           ...(towerResult.leads.length > 0 ? { leads: towerResult.leads } : {}),
@@ -6435,7 +6435,8 @@ class SupervisorService {
           });
     const dsLeads = userRequestedCountFinal !== null ? dsLeadsRaw.slice(0, userRequestedCountFinal) : dsLeadsRaw;
     const dsHardUnverifiable = cvlVerification?.summary?.unverifiable_hard_constraints ?? [];
-    const dsVerdict = finalLeads.length > 0 ? 'pass' : finalVerdict;
+    // PHASE_3: Pass actual Tower verdict — do NOT override with 'pass' when leads exist.
+    // deriveCanonicalStatus now handles Tower fail/stop/change_plan with leads correctly.
     const dsStopReason: string | null = null;
     const effectiveStopReason: string | null = null;
     const mainDsInput = {
@@ -6449,7 +6450,8 @@ class SupervisorService {
       planVersions: dsPlanVersions,
       softRelaxations: dsSoftRelaxations,
       leads: dsLeads,
-      finalVerdict: dsVerdict,
+      finalVerdict,
+      finalAction, // PHASE_3: pass Tower action to delivery summary
       stopReason: effectiveStopReason,
       cvlVerifiedExactCount: cvlVerifiedExactCount,
       cvlUnverifiableCount: cvlVerification?.summary?.unverifiable_count ?? null,
