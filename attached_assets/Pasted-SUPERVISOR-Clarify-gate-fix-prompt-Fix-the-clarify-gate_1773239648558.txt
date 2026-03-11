@@ -1,0 +1,24 @@
+SUPERVISOR — Clarify gate fix prompt:
+Fix the clarify gate so it honours location validity signals from the router. This is causing fictional and unrecognised locations to proceed to execution instead of asking for clarification.
+The exact bug:
+The router correctly identifies unrecognised locations and sets delegatedClarify: true in the routing signal. But the clarify gate then checks mission_type=find_businesses and overrides the clarify signal, proceeding with agent_run. The location validity information is being lost between the router decision and the clarify gate evaluation.
+What must change:
+
+Preserve the router's delegated clarify signal into the clarify gate evaluation. If the router set delegatedClarify: true, the clarify gate must treat this as a strong prior that clarification is needed. It should not be overridable by a clean mission shape alone.
+Add location validity as an explicit clarify gate check. The clarify gate must check whether the location in the mission is:
+
+A recognised real location (pass)
+Unrecognised but plausible (ask for clarification — "did you mean X?")
+Clearly fictional or nonsensical (refuse to run — "Narnia is not a real location, please provide a real place")
+
+
+The clarify gate route options must include refuse as a distinct outcome alongside agent_run and clarify. A fictional location is not a clarification case — it is a refusal case. The agent should not search for pubs in Narnia and return 20 results.
+When refusing, the Supervisor should return a clear user-facing message explaining why it cannot run, not silently proceed or deliver results.
+
+Definition of done:
+
+"Find pubs in Narnia" → clarify gate routes to refuse, user sees a message that Narnia is not a real location
+"Find breweries" (no location) → clarify gate routes to clarify, user is asked for a location
+"Find cafes in York" → clarify gate routes to agent_run as before
+The delegatedClarify: true signal from the router is never silently discarded
+Add a brief comment marking changes as CLARIFY_GATE_FIX

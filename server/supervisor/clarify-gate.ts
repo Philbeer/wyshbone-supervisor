@@ -2,11 +2,37 @@ import { RELATIONSHIP_PREDICATES } from './relationship-predicate';
 import type { CanonicalIntent } from './canonical-intent';
 import type { SemanticSource } from './constraint-gate';
 
-export type ClarifyRoute = 'direct_response' | 'clarify_before_run' | 'agent_run';
+// CLARIFY_GATE_FIX: Added 'refuse' as distinct outcome for fictional/nonsensical locations
+export type ClarifyRoute = 'direct_response' | 'clarify_before_run' | 'agent_run' | 'refuse';
 
-export type ClarifyTriggerCategory = 'empty' | 'multiple_requests' | 'malformed' | 'unknown';
+// CLARIFY_GATE_FIX: Added 'fictional_location' and 'unrecognised_location' trigger categories
+export type ClarifyTriggerCategory = 'empty' | 'multiple_requests' | 'malformed' | 'unknown' | 'fictional_location' | 'unrecognised_location';
 
 export type ClarifyMissingField = 'location' | 'entity_type' | 'relationship_clarification' | 'semantic_constraint';
+
+// CLARIFY_GATE_FIX: Options bag for evaluateClarifyGateFromIntent
+export interface ClarifyGateOptions {
+  delegatedClarify?: boolean;
+  delegatedClarifyReason?: string;
+}
+
+// CLARIFY_GATE_FIX: Location validity result
+export type LocationValidity = 'recognised' | 'unrecognised' | 'fictional';
+
+// CLARIFY_GATE_FIX: Known fictional/nonsensical location names
+const FICTIONAL_LOCATIONS = new Set([
+  'narnia', 'mordor', 'hogwarts', 'hogsmeade', 'diagon alley', 'gotham',
+  'metropolis', 'westeros', 'winterfell', 'rivendell', 'gondor', 'rohan',
+  'shire', 'the shire', 'middle earth', 'middle-earth', 'neverland',
+  'atlantis', 'el dorado', 'shangri-la', 'camelot', 'avalon', 'valhalla',
+  'asgard', 'wakanda', 'bikini bottom', 'springfield', 'bedrock',
+  'emerald city', 'oz', 'wonderland', 'lilliput', 'utopia', 'xanadu',
+  'tatooine', 'coruscant', 'endor', 'naboo', 'hoth', 'dagobah',
+  'pandora', 'gallifrey', 'sunnydale', 'stars hollow', 'pawnee',
+  'eagleton', 'derry', 'castle rock', 'silent hill', 'raccoon city',
+  'hyrule', 'mushroom kingdom', 'skyrim', 'tamriel', 'cyrodiil',
+  'nowhere', 'somewhere', 'anywhere', 'neverland',
+]);
 
 export interface ClarifyGateResult {
   route: ClarifyRoute;
@@ -329,29 +355,23 @@ function extractLocation(msg: string): string | null {
   return null;
 }
 
+// CLARIFY_GATE_FIX: Check whether a location string is recognised, fictional, or unrecognised
+export function checkLocationValidity(location: string | null | undefined): LocationValidity {
+  if (!location || !location.trim()) return 'unrecognised';
+  const loc = location.trim();
+  const lower = loc.toLowerCase();
+
+  if (FICTIONAL_LOCATIONS.has(lower)) return 'fictional';
+
+  if (KNOWN_REGIONS.test(loc)) return 'recognised';
+
+  return 'unrecognised';
+}
+
 export { extractBusinessType, extractLocation, extractCount, extractTimeFilter, hasMonitoringIntent };
 
 export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   const msg = userMessage.trim();
-
-  if (hasMonitoringIntent(msg)) {
-    const bt = extractBusinessType(msg);
-    const loc = extractLocation(msg);
-    const count = extractCount(msg);
-    const timeFilter = extractTimeFilter(msg);
-    console.log(`[CLARIFY_GATE] route=agent_run — monitoring verb detected (regex early exit) bt=${bt} loc=${loc}`);
-    return {
-      route: 'agent_run',
-      reason: `Monitoring verb detected — proceeding with agent execution.`,
-      parsedFields: {
-        businessType: bt,
-        location: loc,
-        count,
-        timeFilter,
-      },
-      semantic_source: 'fallback_regex',
-    };
-  }
 
   if (!msg || msg.length === 0) {
     return {
@@ -410,6 +430,46 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
     };
   }
 
+  // CLARIFY_GATE_FIX: Check location validity for fictional/unrecognised locations
+  const regexLoc = extractLocation(msg);
+  if (regexLoc && hasSearchIntent(msg)) {
+    const locValidity = checkLocationValidity(regexLoc);
+    if (locValidity === 'fictional') {
+      console.log(`[CLARIFY_GATE] route=refuse — fictional location detected: "${regexLoc}"`);
+      return {
+        route: 'refuse',
+        reason: `Refused: "${regexLoc}" is not a real location.`,
+        triggerCategory: 'fictional_location',
+        questions: [`"${regexLoc}" is not a real location. Please provide a real place — for example: "Find pubs in Brighton"`],
+        parsedFields: {
+          businessType: extractBusinessType(msg),
+          location: regexLoc,
+          count: extractCount(msg),
+          timeFilter: extractTimeFilter(msg),
+        },
+      };
+    }
+  }
+
+  if (hasMonitoringIntent(msg)) {
+    const bt = extractBusinessType(msg);
+    const loc = extractLocation(msg);
+    const count = extractCount(msg);
+    const timeFilter = extractTimeFilter(msg);
+    console.log(`[CLARIFY_GATE] route=agent_run — monitoring verb detected (regex early exit) bt=${bt} loc=${loc}`);
+    return {
+      route: 'agent_run',
+      reason: `Monitoring verb detected — proceeding with agent execution.`,
+      parsedFields: {
+        businessType: bt,
+        location: loc,
+        count,
+        timeFilter,
+      },
+      semantic_source: 'fallback_regex',
+    };
+  }
+
   if (hasSearchIntent(msg) && isMissingLocation(msg) && !isGlobalByDesign(msg)) {
     const bt = extractBusinessType(msg);
     if (bt) {
@@ -435,8 +495,31 @@ export function evaluateClarifyGate(userMessage: string): ClarifyGateResult {
   };
 }
 
-export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: string): ClarifyGateResult {
+// CLARIFY_GATE_FIX: Added options parameter for delegatedClarify signal
+export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: string, options?: ClarifyGateOptions): ClarifyGateResult {
   const msg = rawMsg.trim();
+
+  if (intent.location_text?.trim()) {
+    const locValidity = checkLocationValidity(intent.location_text);
+    if (locValidity === 'fictional') {
+      const locName = intent.location_text.trim();
+      const timeConstraintFict = intent.constraints.find(c => c.type === 'time');
+      console.log(`[CLARIFY_GATE] semantic_source=canonical route=refuse — fictional location: "${locName}"`);
+      return {
+        route: 'refuse',
+        reason: `Refused: "${locName}" is not a real location.`,
+        triggerCategory: 'fictional_location',
+        questions: [`"${locName}" is not a real location. Please provide a real place — for example: "Find pubs in Brighton"`],
+        parsedFields: {
+          businessType: intent.entity_category,
+          location: locName,
+          count: intent.requested_count,
+          timeFilter: timeConstraintFict?.raw ?? null,
+        },
+        semantic_source: 'canonical',
+      };
+    }
+  }
 
   if (intent.mission_type === 'monitor') {
     const timeConstraint = intent.constraints.find(c => c.type === 'time');
@@ -554,6 +637,49 @@ export function evaluateClarifyGateFromIntent(intent: CanonicalIntent, rawMsg: s
         location: null,
         count: intent.requested_count,
         timeFilter: timeConstraint?.raw ?? null,
+      },
+      semantic_source: 'canonical',
+    };
+  }
+
+  // CLARIFY_GATE_FIX: Check delegatedClarify + unrecognised location (fictional already caught above)
+  if (intent.location_text?.trim() && options?.delegatedClarify) {
+    const locValidity = checkLocationValidity(intent.location_text);
+    if (locValidity === 'unrecognised') {
+      const locName = intent.location_text.trim();
+      const timeConstraintLoc = intent.constraints.find(c => c.type === 'time');
+      console.log(`[CLARIFY_GATE] semantic_source=canonical route=clarify_before_run — delegatedClarify + unrecognised location: "${locName}"`);
+      return {
+        route: 'clarify_before_run',
+        reason: `Clarification needed: location "${locName}" is not recognised. ${options.delegatedClarifyReason || 'The router flagged this for clarification.'}`,
+        triggerCategory: 'unrecognised_location',
+        questions: [`I don't recognise "${locName}" as a location. Did you mean somewhere specific? Please provide a real place name.`],
+        missingFields: ['location'],
+        parsedFields: {
+          businessType: intent.entity_category,
+          location: locName,
+          count: intent.requested_count,
+          timeFilter: timeConstraintLoc?.raw ?? null,
+        },
+        semantic_source: 'canonical',
+      };
+    }
+  }
+
+  // CLARIFY_GATE_FIX: Honour delegatedClarify even without a location issue
+  if (options?.delegatedClarify && !intent.location_text?.trim()) {
+    const timeConstraintDel = intent.constraints.find(c => c.type === 'time');
+    console.log(`[CLARIFY_GATE] semantic_source=canonical route=clarify_before_run — delegatedClarify honoured (no location)`);
+    return {
+      route: 'clarify_before_run',
+      reason: `Clarification needed: ${options.delegatedClarifyReason || 'The router flagged this request for clarification.'}`,
+      questions: ['Where should I search?'],
+      missingFields: ['location'],
+      parsedFields: {
+        businessType: intent.entity_category,
+        location: null,
+        count: intent.requested_count,
+        timeFilter: timeConstraintDel?.raw ?? null,
       },
       semantic_source: 'canonical',
     };

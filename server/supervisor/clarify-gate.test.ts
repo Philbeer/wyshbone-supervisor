@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { evaluateClarifyGate, evaluateClarifyGateFromIntent, extractBusinessType, extractLocation, extractCount, extractTimeFilter } from './clarify-gate';
+import { evaluateClarifyGate, evaluateClarifyGateFromIntent, checkLocationValidity, extractBusinessType, extractLocation, extractCount, extractTimeFilter } from './clarify-gate';
 import type { CanonicalIntent } from './canonical-intent';
 
 describe('ClarifyGate — tightened gate: only empty, nonsense, or multiple concatenated requests trigger clarify', () => {
@@ -553,5 +553,200 @@ describe('ClarifyGate regex — entity discovery missing-location gate', () => {
   it('"largest breweries in the world" → agent_run (global-by-design bypass)', () => {
     const result = evaluateClarifyGate('largest breweries in the world');
     assert.strictEqual(result.route, 'agent_run');
+  });
+});
+
+// CLARIFY_GATE_FIX: Tests for fictional/unrecognised location handling
+describe('ClarifyGate — location validity and refuse route', () => {
+
+  describe('checkLocationValidity', () => {
+    it('Narnia → fictional', () => {
+      assert.strictEqual(checkLocationValidity('Narnia'), 'fictional');
+    });
+
+    it('Mordor → fictional', () => {
+      assert.strictEqual(checkLocationValidity('Mordor'), 'fictional');
+    });
+
+    it('Hogwarts → fictional', () => {
+      assert.strictEqual(checkLocationValidity('Hogwarts'), 'fictional');
+    });
+
+    it('Wakanda → fictional', () => {
+      assert.strictEqual(checkLocationValidity('Wakanda'), 'fictional');
+    });
+
+    it('Brighton → recognised', () => {
+      assert.strictEqual(checkLocationValidity('Brighton'), 'recognised');
+    });
+
+    it('York → recognised', () => {
+      assert.strictEqual(checkLocationValidity('York'), 'recognised');
+    });
+
+    it('London → recognised', () => {
+      assert.strictEqual(checkLocationValidity('London'), 'recognised');
+    });
+
+    it('West Sussex → recognised', () => {
+      assert.strictEqual(checkLocationValidity('West Sussex'), 'recognised');
+    });
+
+    it('Arundel → unrecognised (real but not in known list)', () => {
+      assert.strictEqual(checkLocationValidity('Arundel'), 'unrecognised');
+    });
+
+    it('null → unrecognised', () => {
+      assert.strictEqual(checkLocationValidity(null), 'unrecognised');
+    });
+
+    it('empty string → unrecognised', () => {
+      assert.strictEqual(checkLocationValidity(''), 'unrecognised');
+    });
+
+    it('"nowhere" → fictional', () => {
+      assert.strictEqual(checkLocationValidity('nowhere'), 'fictional');
+    });
+  });
+
+  describe('Regex gate: fictional locations → refuse', () => {
+    it('"Find pubs in Narnia" → refuse', () => {
+      const result = evaluateClarifyGate('Find pubs in Narnia');
+      assert.strictEqual(result.route, 'refuse');
+      assert.strictEqual(result.triggerCategory, 'fictional_location');
+      assert.ok(result.questions![0].includes('not a real location'));
+    });
+
+    it('"Find cafes in Mordor" → refuse', () => {
+      const result = evaluateClarifyGate('Find cafes in Mordor');
+      assert.strictEqual(result.route, 'refuse');
+      assert.strictEqual(result.triggerCategory, 'fictional_location');
+    });
+
+    it('"Find restaurants in Hogwarts" → refuse', () => {
+      const result = evaluateClarifyGate('Find restaurants in Hogwarts');
+      assert.strictEqual(result.route, 'refuse');
+      assert.strictEqual(result.triggerCategory, 'fictional_location');
+    });
+
+    it('"Find bars in Westeros" → refuse', () => {
+      const result = evaluateClarifyGate('Find bars in Westeros');
+      assert.strictEqual(result.route, 'refuse');
+      assert.strictEqual(result.triggerCategory, 'fictional_location');
+    });
+  });
+
+  describe('Regex gate: real locations still proceed', () => {
+    it('"Find cafes in York" → agent_run', () => {
+      const result = evaluateClarifyGate('Find cafes in York');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"Find pubs in Arundel" → agent_run (unrecognised but not fictional)', () => {
+      const result = evaluateClarifyGate('Find pubs in Arundel');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"Find 5 pubs in Arundel" → agent_run', () => {
+      const result = evaluateClarifyGate('find 5 pubs in Arundel');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+  });
+
+  describe('Intent gate: fictional locations → refuse', () => {
+    it('"Find pubs in Narnia" with canonical intent → refuse', () => {
+      const intent = makeIntent({ entity_category: 'pubs', location_text: 'Narnia' });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find pubs in Narnia');
+      assert.strictEqual(result.route, 'refuse');
+      assert.strictEqual(result.triggerCategory, 'fictional_location');
+      assert.ok(result.questions![0].includes('not a real location'));
+    });
+
+    it('"Find breweries in Mordor" with canonical intent → refuse', () => {
+      const intent = makeIntent({ entity_category: 'breweries', location_text: 'Mordor' });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find breweries in Mordor');
+      assert.strictEqual(result.route, 'refuse');
+      assert.strictEqual(result.triggerCategory, 'fictional_location');
+    });
+  });
+
+  describe('Intent gate: real locations still proceed', () => {
+    it('"Find cafes in York" with canonical intent → agent_run', () => {
+      const intent = makeIntent({ entity_category: 'cafes', location_text: 'York' });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find cafes in York');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('"Find pubs in Arundel" with canonical intent → agent_run (unrecognised but no delegatedClarify)', () => {
+      const intent = makeIntent({ entity_category: 'pubs', location_text: 'Arundel' });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find pubs in Arundel');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+  });
+
+  describe('Fictional locations refuse even with monitoring intent', () => {
+    it('"monitor pubs in Narnia" regex → refuse (fictional beats monitoring)', () => {
+      const result = evaluateClarifyGate('monitor pubs in Narnia');
+      assert.strictEqual(result.route, 'refuse');
+      assert.strictEqual(result.triggerCategory, 'fictional_location');
+    });
+
+    it('"monitor pubs in Narnia" intent → refuse (fictional beats monitoring)', () => {
+      const intent = makeIntent({ entity_category: 'pubs', location_text: 'Narnia' });
+      (intent as any).mission_type = 'monitor';
+      const result = evaluateClarifyGateFromIntent(intent, 'monitor pubs in Narnia');
+      assert.strictEqual(result.route, 'refuse');
+      assert.strictEqual(result.triggerCategory, 'fictional_location');
+    });
+
+    it('"monitor pubs in Brighton" regex → agent_run (real location + monitoring)', () => {
+      const result = evaluateClarifyGate('monitor pubs in Brighton');
+      assert.strictEqual(result.route, 'agent_run');
+    });
+  });
+
+  describe('delegatedClarify signal is honoured', () => {
+    it('delegatedClarify + unrecognised location → clarify_before_run', () => {
+      const intent = makeIntent({ entity_category: 'pubs', location_text: 'Grimbleshire' });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find pubs in Grimbleshire', {
+        delegatedClarify: true,
+        delegatedClarifyReason: 'Router flagged unrecognised location',
+      });
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.strictEqual(result.triggerCategory, 'unrecognised_location');
+      assert.ok(result.questions![0].includes('Grimbleshire'));
+    });
+
+    it('delegatedClarify + recognised location → agent_run (not overridden)', () => {
+      const intent = makeIntent({ entity_category: 'pubs', location_text: 'Brighton' });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find pubs in Brighton', {
+        delegatedClarify: true,
+      });
+      assert.strictEqual(result.route, 'agent_run');
+    });
+
+    it('delegatedClarify + fictional location → refuse (refuse takes priority)', () => {
+      const intent = makeIntent({ entity_category: 'pubs', location_text: 'Narnia' });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find pubs in Narnia', {
+        delegatedClarify: true,
+      });
+      assert.strictEqual(result.route, 'refuse');
+    });
+
+    it('delegatedClarify + no location → clarify_before_run', () => {
+      const intent = makeIntent({ entity_category: 'pubs', location_text: null });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find pubs', {
+        delegatedClarify: true,
+        delegatedClarifyReason: 'Router flagged missing location',
+      });
+      assert.strictEqual(result.route, 'clarify_before_run');
+      assert.deepStrictEqual(result.missingFields, ['location']);
+    });
+
+    it('no delegatedClarify + unrecognised location → agent_run (not blocked)', () => {
+      const intent = makeIntent({ entity_category: 'pubs', location_text: 'Grimbleshire' });
+      const result = evaluateClarifyGateFromIntent(intent, 'Find pubs in Grimbleshire');
+      assert.strictEqual(result.route, 'agent_run');
+    });
   });
 });

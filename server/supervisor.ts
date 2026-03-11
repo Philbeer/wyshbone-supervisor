@@ -24,7 +24,7 @@ import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput, type AttributeEvidenceMap } from './supervisor/cvl';
 import { evaluatePrePlanGate, type ClarificationResult } from './supervisor/pre-plan-gate';
-import { evaluateClarifyGate, evaluateClarifyGateFromIntent, extractBusinessType, extractLocation, extractCount, extractTimeFilter, type ClarifyGateResult, type ClarifyMissingField, type ClarifyTriggerCategory } from './supervisor/clarify-gate';
+import { evaluateClarifyGate, evaluateClarifyGateFromIntent, extractBusinessType, extractLocation, extractCount, extractTimeFilter, type ClarifyGateResult, type ClarifyMissingField, type ClarifyTriggerCategory, type ClarifyGateOptions } from './supervisor/clarify-gate';
 import { getClarifySession, didSessionExpire, createClarifySession, closeClarifySession, classifyFollowUp, applyFollowUp, incrementTurnCount, renderClarifySummary, sessionIsComplete, sessionIsAtTurnLimit, buildSearchFromSession, buildClarifyState, type ClarifySession, type ClarifyState } from './supervisor/clarify-session';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { deriveVerificationPolicyFromLegacyConstraints, emitVerificationPolicyArtefact, type VerificationPolicyResult } from './supervisor/verification-policy';
@@ -1993,8 +1993,11 @@ class SupervisorService {
 
     console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=clarify_gate`);
     if (!sessionCompletedToRun && (!existingSession || !getClarifySession(task.conversation_id))) {
+      // CLARIFY_GATE_FIX: Build options — fictional locations are caught inside the gate;
+      // delegatedClarify is reserved for external signals (e.g. future router enhancements)
+      const clarifyGateOptions: ClarifyGateOptions = {};
       const clarifyGate = canonicalIntent
-        ? evaluateClarifyGateFromIntent(canonicalIntent, rawMsg)
+        ? evaluateClarifyGateFromIntent(canonicalIntent, rawMsg, clarifyGateOptions)
         : evaluateClarifyGate(rawMsg);
       if (!clarifyGate.semantic_source) clarifyGate.semantic_source = 'fallback_regex';
       console.log(`[CLARIFY_GATE] route=${clarifyGate.route} reason="${clarifyGate.reason}" semantic_source=${clarifyGate.semantic_source}${clarifyGate.triggerCategory ? ` triggerCategory=${clarifyGate.triggerCategory}` : ''}${clarifyGate.questions ? ` questions=${JSON.stringify(clarifyGate.questions)}` : ''}`);
@@ -2027,6 +2030,27 @@ class SupervisorService {
 
         await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'direct_response', endedAt: new Date(), metadata: { verdict: 'direct_response', clarify_gate: clarifyGate } }).catch(() => {});
         await emitTaskExecutionCompleted('direct_response');
+        return;
+      }
+
+      // CLARIFY_GATE_FIX: Handle refuse route for fictional/nonsensical locations
+      if (clarifyGate.route === 'refuse') {
+        closeClarifySession(task.conversation_id);
+        const refuseMsg = clarifyGate.questions?.[0]
+          || `I can't run that search — the location doesn't appear to be a real place. Please provide a real location and I'll get to work.`;
+
+        const messageId = randomUUID();
+
+        const [taskUpdateResult, msgResult] = await Promise.all([
+          supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: refuseMsg.substring(0, 200), message_id: messageId, clarify_gate: 'refuse' } }).eq('id', task.id),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(refuseMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'refuse', reason: clarifyGate.reason, triggerCategory: clarifyGate.triggerCategory }, created_at: Date.now() }).select().single(),
+        ]);
+
+        if (taskUpdateResult.error) console.error(`[CLARIFY_GATE] task update failed: ${taskUpdateResult.error.message}`);
+        if (msgResult.error) console.error(`[CLARIFY_GATE] message insert failed: ${msgResult.error.message}`);
+
+        await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'refused', endedAt: new Date(), metadata: { verdict: 'refuse', clarify_gate: clarifyGate } }).catch(() => {});
+        await emitTaskExecutionCompleted('refuse');
         return;
       }
 
