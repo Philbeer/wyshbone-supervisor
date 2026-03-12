@@ -12,7 +12,6 @@ import {
   hasWebsiteEvidenceConstraint,
   hasDirectFieldConstraint,
   hasRankingConstraint,
-  requiresWebSearch,
   requiresWebVisit,
   requiresTowerJudge,
   logMissionPlan,
@@ -771,75 +770,24 @@ export async function executeMissionDrivenPlan(
   const webVisitPages = new Map<number, any[]>();
 
   if (
-    (requiresWebVisit(plan) || requiresWebSearch(plan)) &&
+    requiresWebVisit(plan) &&
     leads.length > 0 &&
     !checkDeadline()
   ) {
     console.log(`[MISSION_EXEC] === Phase: Evidence Gathering ===`);
-    const needsWebSearch = requiresWebSearch(plan);
     const needsWebVisit = requiresWebVisit(plan);
     const constraintsToVerify = [...evidenceConstraints, ...relationshipConstraints];
 
     const enrichableLeads = leads
       .map((l, i) => ({ ...l, _idx: i }))
-      .filter(l => needsWebSearch || (needsWebVisit && l.website))
+      .filter(l => needsWebVisit && l.website)
       .slice(0, effectiveEnrichBatch);
 
-    console.log(`[MISSION_EXEC] Evidence gathering for ${enrichableLeads.length} leads (web_search=${needsWebSearch} web_visit=${needsWebVisit})`);
+    console.log(`[MISSION_EXEC] Evidence gathering for ${enrichableLeads.length} leads (web_visit=${needsWebVisit})`);
 
-    const processOneLead = async (lead: typeof enrichableLeads[0], eli: number) => {
+    const processOneLead = async (lead: typeof enrichableLeads[0], _eli: number) => {
       const leadIdx = lead._idx;
       let pages: any[] = [];
-      let webSearchSnippets: string[] = [];
-
-      if (needsWebSearch && constraintsToVerify.length > 0) {
-        const useReverseQueries = relationshipDir?.chosen_direction === 'reverse' && relationshipDir.reverse_search_queries.length > 0;
-
-        const searchQueries: string[] = [];
-        if (useReverseQueries) {
-          const leadSpecificReverse = relationshipDir.reverse_search_queries.map(
-            q => q.includes(lead.name) ? q : `${q} "${lead.name}"`
-          );
-          searchQueries.push(leadSpecificReverse[0] || `"${lead.name}" ${relationshipPredicate.relationship_target || ''}`);
-          if (eli === 0 && leadSpecificReverse.length > 1) {
-            searchQueries.push(...leadSpecificReverse.slice(1, 3));
-          }
-        } else if (relationshipConstraints.length > 0) {
-          searchQueries.push(
-            `"${lead.name}" ${relationshipPredicate.relationship_target || ''} ${relationshipPredicate.detected_predicate || ''}`
-          );
-        } else {
-          searchQueries.push(
-            `"${lead.name}" ${constraintsToVerify.map(c => String(c.value)).join(' ')}`
-          );
-        }
-
-        for (const searchQuery of searchQueries) {
-          try {
-            runToolCallCount++;
-            const wsResult = await executeAction({
-              toolName: 'WEB_SEARCH',
-              toolArgs: { query: searchQuery.trim(), max_results: 5 },
-              userId,
-              tracker: toolTracker,
-              runId,
-              conversationId,
-              clientRequestId,
-            });
-
-            if (wsResult.success && wsResult.data) {
-              const results = (wsResult.data as any)?.results || (wsResult.data as any)?.envelope?.outputs?.results || [];
-              if (Array.isArray(results)) {
-                const snippets = results.map((r: any) => r.snippet || r.description || '').filter(Boolean);
-                webSearchSnippets.push(...snippets);
-              }
-            }
-          } catch (wsErr: any) {
-            console.warn(`[MISSION_EXEC] WEB_SEARCH failed for "${lead.name}" (query="${searchQuery}"): ${wsErr.message}`);
-          }
-        }
-        console.log(`[MISSION_EXEC] WEB_SEARCH for "${lead.name}": ${webSearchSnippets.length} snippets (direction=${useReverseQueries ? 'reverse' : 'forward'}, queries=${searchQueries.length})`);
-      }
 
       if (needsWebVisit && lead.website) {
         try {
@@ -884,68 +832,8 @@ export async function executeMissionDrivenPlan(
         }
       }
 
-      let webVisitFailed = false;
-      if (needsWebVisit && lead.website && pages.length === 0) {
-        webVisitFailed = true;
-      }
-
-      const constraintFallbackSnippets = new Map<string, string[]>();
-      const constraintFallbackUsed = new Map<string, boolean>();
-
-      if (webVisitFailed && webSearchSnippets.length === 0 && constraintsToVerify.length > 0) {
-        console.log(`[MISSION_EXEC] WEB_VISIT failed for "${lead.name}", attempting constraint-specific fallback searches`);
-
-        const fallbackBudget = Math.min(constraintsToVerify.length, 3);
-        for (let ci = 0; ci < fallbackBudget; ci++) {
-          const c = constraintsToVerify[ci];
-          const cValue = typeof c.value === 'string' ? c.value : String(c.value ?? '');
-          const cKey = `${c.type}:${cValue}`;
-
-          try {
-            const pageHints = getPageHintsForConstraint({
-              type: c.type, field: c.field, operator: c.operator, value: cValue, hardness: c.hardness,
-            });
-            const hintTerms = pageHints.length > 0 ? pageHints.slice(0, 2).join(' ') : '';
-            const fallbackQuery = c.type === 'relationship_check'
-              ? `"${lead.name}" ${cValue} ${hintTerms}`.trim()
-              : `"${lead.name}" "${cValue}" ${hintTerms}`.trim();
-
-            runToolCallCount++;
-            const fallbackResult = await executeAction({
-              toolName: 'WEB_SEARCH',
-              toolArgs: { query: fallbackQuery, max_results: 5 },
-              userId,
-              tracker: toolTracker,
-              runId,
-              conversationId,
-              clientRequestId,
-            });
-
-            if (fallbackResult.success && fallbackResult.data) {
-              const results = (fallbackResult.data as any)?.results || (fallbackResult.data as any)?.envelope?.outputs?.results || [];
-              if (Array.isArray(results)) {
-                const snippets = results.map((r: any) => r.snippet || r.description || '').filter(Boolean);
-                if (snippets.length > 0) {
-                  constraintFallbackSnippets.set(cKey, snippets);
-                  constraintFallbackUsed.set(cKey, true);
-                  console.log(`[MISSION_EXEC] Constraint-specific fallback for "${lead.name}" + "${cValue}": ${snippets.length} snippets`);
-                }
-              }
-            }
-          } catch (fbErr: any) {
-            console.warn(`[MISSION_EXEC] Constraint fallback failed for "${lead.name}" + "${cValue}": ${(fbErr as Error).message}`);
-          }
-        }
-      }
-
       for (const constraint of constraintsToVerify) {
         const constraintValue = typeof constraint.value === 'string' ? constraint.value : String(constraint.value ?? '');
-        const cKey = `${constraint.type}:${constraintValue}`;
-
-        const effectiveSnippets = webSearchSnippets.length > 0
-          ? webSearchSnippets
-          : constraintFallbackSnippets.get(cKey) || [];
-        const fallbackUsed = constraintFallbackUsed.get(cKey) || false;
 
         const extraction: ConstraintLedExtractionResult = await extractConstraintLedEvidence(
           pages,
@@ -956,7 +844,7 @@ export async function executeMissionDrivenPlan(
             value: constraintValue,
             hardness: constraint.hardness,
           },
-          effectiveSnippets,
+          [],
           3,
           lead.name,
         );
@@ -1058,7 +946,7 @@ export async function executeMissionDrivenPlan(
             extraction_method: extraction.extraction_method,
             no_evidence: extraction.no_evidence,
             phrase_targets: extraction.phrase_targets,
-            fallback_used: fallbackUsed,
+            fallback_used: false,
             evidence_items: extraction.evidence_items.map(e => ({
               quote: e.quote,
               url: e.url,
@@ -1096,7 +984,7 @@ export async function executeMissionDrivenPlan(
           lead_name: lead.name,
           lead_place_id: lead.placeId,
           pages_visited: pages.length,
-          web_search_snippets: webSearchSnippets.length,
+          web_search_snippets: 0,
           evidence_results: evidenceResults
             .filter(r => r.leadIndex === leadIdx)
             .map(r => ({

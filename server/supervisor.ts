@@ -4316,14 +4316,12 @@ class SupervisorService {
         | 'active_visit_budget_exhausted'
         | 'web_search_budget_exhausted';
 
-      type InvestigationStrategy = 'cached_pages' | 'active_web_visit' | 'web_search_then_visit' | 'no_investigation_possible';
+      type InvestigationStrategy = 'cached_pages' | 'active_web_visit' | 'no_investigation_possible';
 
       const ATTR_TRACE = process.env.ATTR_VERIFY_TRACE === '1';
       const MAX_ACTIVE_VISITS = parseInt(process.env.ATTR_MAX_ACTIVE_VISITS || '8', 10);
-      const MAX_WEB_SEARCH_FALLBACKS = parseInt(process.env.ATTR_MAX_SEARCH_FALLBACKS || '5', 10);
       let activeVisitCount = 0;
-      let webSearchFallbackCount = 0;
-      const investigationBreakdown = { cached_pages: 0, active_web_visit: 0, web_search_then_visit: 0, no_investigation_possible: 0 };
+      const investigationBreakdown = { cached_pages: 0, active_web_visit: 0, no_investigation_possible: 0 };
 
       const buildScanText = (page: any): string => {
         const title = (page.title || '');
@@ -4632,58 +4630,6 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
         }
       };
 
-      const webSearchForAttribute = async (leadName: string, location: string, attrValue: string): Promise<string | null> => {
-        try {
-          runToolCallCount++;
-          const searchResult = await executeAction({
-            toolName: 'WEB_SEARCH',
-            toolArgs: { query: `${leadName} ${location} ${attrValue}`, max_results: 3 },
-            userId: task.user_id,
-            tracker: toolTracker,
-            runId: chatRunId,
-            conversationId,
-            clientRequestId,
-          });
-
-          if (searchResult.success && searchResult.data) {
-            const results = (searchResult.data?.envelope as any)?.outputs?.results || [];
-
-            await createArtefact({
-              runId: chatRunId,
-              type: 'step_result',
-              title: `Step result: WEB_SEARCH (attr investigation) – "${leadName}" + "${attrValue}"`,
-              summary: `${searchResult.success ? 'success' : 'fail'} – ${searchResult.summary}`,
-              payload: {
-                run_id: chatRunId,
-                step_id: `web_search_attr_${leadName.replace(/\s+/g, '_').substring(0, 20)}`,
-                step_title: `WEB_SEARCH (attr investigation) – ${leadName}`,
-                step_type: 'WEB_SEARCH',
-                step_status: 'success',
-                phase: 'attribute_investigation',
-                inputs_summary: { query: `${leadName} ${location} ${attrValue}`, max_results: 3 },
-                outputs_summary: { success: true, results_count: results.length, summary: searchResult.summary },
-              },
-              userId: task.user_id,
-              conversationId,
-            }).catch((e: any) => console.warn(`[ATTR_INVESTIGATE] step_result artefact failed for WEB_SEARCH "${leadName}" (non-fatal): ${e.message}`));
-
-            const SKIP_DOMAINS = ['google.com', 'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'youtube.com', 'tiktok.com', 'pinterest.com', 'linkedin.com'];
-            for (const r of results) {
-              const url = r.url || r.link;
-              if (!url) continue;
-              const domain = url.toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
-              if (SKIP_DOMAINS.some(d => domain.includes(d))) continue;
-              console.log(`[ATTR_INVESTIGATE] WEB_SEARCH found URL for "${leadName}": ${url}`);
-              return url;
-            }
-          }
-          return null;
-        } catch (err: any) {
-          console.warn(`[ATTR_INVESTIGATE] WEB_SEARCH failed for "${leadName}": ${err.message}`);
-          return null;
-        }
-      };
-
       const cachedWebVisitPages = new Map<string, { pages: any[]; sourceUrl: string }>();
       for (let i = 0; i < finalLeads.length; i++) {
         const wvData = accumulatedStepData[`WEB_VISIT_${i}`];
@@ -4798,48 +4744,11 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
               };
             }
             investigationBreakdown.active_web_visit++;
-          } else if (!leadWebsite && webSearchFallbackCount < MAX_WEB_SEARCH_FALLBACKS && !checkRunDeadline()) {
-            investigationStrategy = 'web_search_then_visit';
-            console.log(`[ATTR_INVESTIGATE] WEB_SEARCH fallback for "${lead.name}" — no website (search ${webSearchFallbackCount + 1}/${MAX_WEB_SEARCH_FALLBACKS})`);
-            webSearchFallbackCount++;
-
-            const foundUrl = await webSearchForAttribute(lead.name, city, attrValue);
-            if (foundUrl) {
-              webSearchSuccess = true;
-              const visitResult = await activeWebVisit(foundUrl, lead.name, lead.placeId);
-              if (visitResult.success && visitResult.pages.length > 0) {
-                webVisitSuccess = true;
-                urlVisited = foundUrl;
-                cachedWebVisitPages.set(lead.placeId, { pages: visitResult.pages, sourceUrl: foundUrl });
-                scan = await scanPagesForAttribute(visitResult.pages, foundUrl, keywords, negativeKeywords, lead.name, attrValue);
-              } else {
-                scan = {
-                  verdict: 'unknown', confidence: 'low', sourceUrl: foundUrl, quote: null,
-                  sourceType: classifySourceType(foundUrl, lead.name),
-                  matchedVariant: null, matchSource: null, snippets: [],
-                  extractedQuotes: [], pageUrl: null, pageTitle: null, extractionMethod: 'none',
-                  evidenceStrength: 'none',
-                  rationale: `WEB_SEARCH found URL (${foundUrl}) for ${lead.name} but WEB_VISIT failed or returned no pages. Cannot verify "${attrValue}".`,
-                  unknownReason: 'active_visit_failed', attributeFound: false,
-                };
-              }
-            } else {
-              scan = {
-                verdict: 'unknown', confidence: 'low', sourceUrl: null, quote: null,
-                sourceType: 'other',
-                matchedVariant: null, matchSource: null, snippets: [],
-                extractedQuotes: [], pageUrl: null, pageTitle: null, extractionMethod: 'none',
-                evidenceStrength: 'none',
-                rationale: `WEB_SEARCH for "${lead.name} ${city} ${attrValue}" returned no usable URLs. Cannot verify "${attrValue}".`,
-                unknownReason: 'web_search_no_url_found', attributeFound: false,
-              };
-            }
-            investigationBreakdown.web_search_then_visit++;
           } else {
             investigationStrategy = 'no_investigation_possible';
             const reason: UnknownReason = leadWebsite
               ? (activeVisitCount >= MAX_ACTIVE_VISITS ? 'active_visit_budget_exhausted' : 'no_relevant_pages_found')
-              : (webSearchFallbackCount >= MAX_WEB_SEARCH_FALLBACKS ? 'web_search_budget_exhausted' : 'no_website_from_places');
+              : 'no_website_from_places';
             scan = {
               verdict: 'unknown', confidence: 'low', sourceUrl: null, quote: null,
               sourceType: 'other',
@@ -4848,7 +4757,7 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
               evidenceStrength: 'none',
               rationale: leadWebsite
                 ? `Active visit budget exhausted (${MAX_ACTIVE_VISITS}). Cannot verify "${attrValue}" for ${lead.name}.`
-                : `No website from Places and web search budget exhausted (${MAX_WEB_SEARCH_FALLBACKS}). Cannot verify "${attrValue}" for ${lead.name}.`,
+                : `No website found via Google Places. Cannot verify "${attrValue}" for ${lead.name}.`,
               unknownReason: reason, attributeFound: false,
             };
             investigationBreakdown.no_investigation_possible++;
@@ -5059,7 +4968,7 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
           leads_with_attribute: leadsWithAttr,
           investigation_breakdown: investigationBreakdown,
           active_visits_used: activeVisitCount,
-          web_search_fallbacks_used: webSearchFallbackCount,
+          web_search_fallbacks_used: 0,
           evidence_ready_for_tower: totalChecked > 0,
           tower_semantic_summary: {
             tower_called: towerCalledCount,
@@ -5073,7 +4982,7 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
         userId: task.user_id,
         conversationId,
       });
-      console.log(`[ATTR_VERIFY] artefact id=${attrVerifArtefact.id} — ${leadsWithAttr}/${finalLeads.length} leads verified (Tower: ${towerVerifiedCount} verified, ${towerWeakCount} weak, ${towerNoEvidenceCount} no_evidence), investigation: cached=${investigationBreakdown.cached_pages} active_visit=${investigationBreakdown.active_web_visit} search_then_visit=${investigationBreakdown.web_search_then_visit} no_investigation=${investigationBreakdown.no_investigation_possible}`);
+      console.log(`[ATTR_VERIFY] artefact id=${attrVerifArtefact.id} — ${leadsWithAttr}/${finalLeads.length} leads verified (Tower: ${towerVerifiedCount} verified, ${towerWeakCount} weak, ${towerNoEvidenceCount} no_evidence), investigation: cached=${investigationBreakdown.cached_pages} active_visit=${investigationBreakdown.active_web_visit} no_investigation=${investigationBreakdown.no_investigation_possible}`);
 
       await logAFREvent({
         userId: task.user_id, runId: chatRunId, conversationId, clientRequestId,
