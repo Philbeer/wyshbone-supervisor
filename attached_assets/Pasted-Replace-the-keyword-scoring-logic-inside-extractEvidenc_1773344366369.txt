@@ -1,0 +1,68 @@
+Replace the keyword scoring logic inside 
+extractEvidenceSnippets() in server/supervisor.ts 
+with an LLM call.
+
+Current approach scores sentences by keyword 
+frequency which causes false matches — words 
+appearing in brand names, product names, or 
+unrelated context score the same as genuine 
+evidence sentences.
+
+New approach — replace the scoring logic with 
+a single gpt-4o-mini call:
+
+SYSTEM PROMPT:
+"You are an evidence extractor for a business 
+lead finder. Find sentences in a web page that 
+genuinely prove a business offers or provides 
+a specific thing."
+
+USER PAYLOAD (JSON):
+{
+  "business_name": "<lead_name>",
+  "constraint": "<constraint value>",
+  "page_text": "<page text>"
+}
+
+TASK INSTRUCTION IN PROMPT:
+"Find sentences from page_text that genuinely 
+demonstrate this business itself offers or 
+provides [constraint].
+
+Rules:
+- Sentence must describe something the business 
+  itself offers, sells, or provides
+- Incidental mentions do not count — a word in 
+  a brand name, product name, review snippet, 
+  or unrelated context is not evidence
+- Generic lists do not count unless [constraint] 
+  is explicitly named within them
+- If the constraint word appears in a different 
+  sense or context it does not count
+- Only return sentences where a reasonable person 
+  would say this proves the business offers 
+  [constraint]
+- If nothing qualifies return empty array
+- Do not force a match
+
+Respond with valid JSON only:
+{ 'evidence_sentences': ['sentence 1', 'sentence 2'] }
+Maximum 3 sentences. Empty array if nothing 
+qualifies."
+
+IMPLEMENTATION RULES:
+- Model: gpt-4o-mini
+- Temperature: 0.1
+- Max tokens: 300
+- Function signature unchanged — still returns 
+  { snippets: string[] }
+- If LLM call fails, fall back to existing keyword 
+  scoring as safety net
+- Do not change textMatchesKeywords() gate — it 
+  stays as the cheap pre-filter before this function 
+  is called
+- lead_name and constraint value must be passed into 
+  extractEvidenceSnippets() — add them as parameters 
+  if not already present
+
+Clean compile required.

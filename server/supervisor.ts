@@ -4331,15 +4331,11 @@ class SupervisorService {
         return `${title} ${body}`;
       };
 
-      const extractEvidenceSnippets = (
+      const keywordScoreFallback = (
         textClean: string,
         keywords: string[],
-        maxSnippets: number = 3,
+        maxSnippets: number,
       ): { snippets: string[]; method: 'keyword_sentence_match' | 'no_match' } => {
-        if (!textClean || textClean.trim().length === 0) {
-          return { snippets: [], method: 'no_match' };
-        }
-
         const sentences = textClean
           .replace(/([.!?])\s+/g, '$1\n')
           .split('\n')
@@ -4392,6 +4388,80 @@ class SupervisorService {
         };
       };
 
+      const extractEvidenceSnippets = async (
+        textClean: string,
+        keywords: string[],
+        maxSnippets: number = 3,
+        leadName: string = '',
+        constraint: string = '',
+      ): Promise<{ snippets: string[]; method: 'keyword_sentence_match' | 'no_match' }> => {
+        if (!textClean || textClean.trim().length === 0) {
+          return { snippets: [], method: 'no_match' };
+        }
+
+        const openaiKey = process.env.OPENAI_API_KEY;
+        if (openaiKey && leadName && constraint) {
+          try {
+            const { default: OpenAI } = await import('openai');
+            const client = new OpenAI({ apiKey: openaiKey });
+            const pageTextTruncated = textClean.substring(0, 6000);
+            const userPayload = JSON.stringify({
+              business_name: leadName,
+              constraint,
+              page_text: pageTextTruncated,
+            });
+            const taskInstruction = `Find sentences from page_text that genuinely demonstrate this business itself offers or provides "${constraint}".
+
+Rules:
+- Sentence must describe something the business itself offers, sells, or provides
+- Incidental mentions do not count — a word in a brand name, product name, review snippet, or unrelated context is not evidence
+- Generic lists do not count unless "${constraint}" is explicitly named within them
+- If the constraint word appears in a different sense or context it does not count
+- Only return sentences where a reasonable person would say this proves the business offers "${constraint}"
+- If nothing qualifies return empty array
+- Do not force a match
+
+Respond with valid JSON only:
+{ "evidence_sentences": ["sentence 1", "sentence 2"] }
+Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
+
+            const response = await client.chat.completions.create({
+              model: 'gpt-4o-mini',
+              temperature: 0.1,
+              max_tokens: 300,
+              messages: [
+                {
+                  role: 'system',
+                  content: 'You are an evidence extractor for a business lead finder. Find sentences in a web page that genuinely prove a business offers or provides a specific thing.',
+                },
+                {
+                  role: 'user',
+                  content: `${userPayload}\n\n${taskInstruction}`,
+                },
+              ],
+            });
+
+            const raw = response.choices[0]?.message?.content?.trim() || '';
+            const cleaned = raw.replace(/```json\n?|\n?```/g, '').trim();
+            const parsed = JSON.parse(cleaned);
+            const sentences: string[] = Array.isArray(parsed.evidence_sentences)
+              ? parsed.evidence_sentences
+                  .filter((s: any) => typeof s === 'string' && s.length > 0)
+                  .slice(0, maxSnippets)
+              : [];
+            console.log(`[EVIDENCE_EXTRACT_LLM] "${leadName}" + "${constraint}" → ${sentences.length} sentence(s) extracted`);
+            return {
+              snippets: sentences.map(s => s.substring(0, 300)),
+              method: sentences.length > 0 ? 'keyword_sentence_match' : 'no_match',
+            };
+          } catch (llmErr: any) {
+            console.warn(`[EVIDENCE_EXTRACT_LLM] LLM call failed for "${leadName}" + "${constraint}" (falling back to keyword scoring): ${llmErr.message}`);
+          }
+        }
+
+        return keywordScoreFallback(textClean, keywords, maxSnippets);
+      };
+
       interface PageScanResult {
         verdict: 'yes' | 'no' | 'unknown';
         confidence: 'high' | 'medium' | 'low';
@@ -4411,14 +4481,14 @@ class SupervisorService {
         attributeFound: boolean;
       }
 
-      const scanPagesForAttribute = (
+      const scanPagesForAttribute = async (
         pages: any[],
         primaryUrl: string,
         keywords: string[],
         negativeKeywords: string[],
         leadName: string,
         attrValue: string,
-      ): PageScanResult => {
+      ): Promise<PageScanResult> => {
         const result: PageScanResult = {
           verdict: 'unknown',
           confidence: 'low',
@@ -4449,7 +4519,7 @@ class SupervisorService {
             const negIdx = scanTextLower.indexOf(negPageMatch.matchedKeyword!);
             const negStart = Math.max(0, negIdx - 60);
             const negEnd = Math.min(scanText.length, negIdx + (negPageMatch.matchedKeyword?.length || 0) + 60);
-            const negEvidence = extractEvidenceSnippets(bodyText, [negPageMatch.matchedKeyword!], 2);
+            const negEvidence = await extractEvidenceSnippets(bodyText, [negPageMatch.matchedKeyword!], 2, leadName, attrValue);
             result.verdict = 'no';
             result.confidence = 'high';
             result.quote = `...${scanText.slice(negStart, negEnd)}...`.slice(0, 200);
@@ -4474,7 +4544,7 @@ class SupervisorService {
             const contextEnd = Math.min(scanText.length, idx + (posPageMatch.matchedKeyword?.length || 0) + 80);
             const pageSnippet = `...${scanText.slice(contextStart, contextEnd)}...`.slice(0, 240);
 
-            const evidence = extractEvidenceSnippets(bodyText, keywords, 3);
+            const evidence = await extractEvidenceSnippets(bodyText, keywords, 3, leadName, attrValue);
             result.extractedQuotes = evidence.snippets.length > 0 ? evidence.snippets : [pageSnippet];
             result.extractionMethod = evidence.snippets.length > 0 ? evidence.method : 'keyword_window';
             result.pageUrl = pageUrl;
@@ -4500,7 +4570,7 @@ class SupervisorService {
             if (ATTR_TRACE) console.log(`[ATTR_TRACE] pageScan: matched=true variant="${posPageMatch.matchedKeyword}" matchSource=${result.matchSource} url=${pageUrl} extractedQuotes=${result.extractedQuotes.length}`);
             return result;
           } else {
-            const noMatchEvidence = extractEvidenceSnippets(bodyText, keywords, 3);
+            const noMatchEvidence = await extractEvidenceSnippets(bodyText, keywords, 3, leadName, attrValue);
             if (noMatchEvidence.snippets.length > 0) {
               result.extractedQuotes = noMatchEvidence.snippets;
               result.extractionMethod = noMatchEvidence.method;
@@ -4701,7 +4771,7 @@ class SupervisorService {
 
             if (ATTR_TRACE) console.log(`[ATTR_TRACE] Using cached WEB_VISIT pages=${cached.pages.length} for "${lead.name}" url=${cached.sourceUrl}`);
 
-            scan = scanPagesForAttribute(cached.pages, cached!.sourceUrl, keywords, negativeKeywords, lead.name, attrValue);
+            scan = await scanPagesForAttribute(cached.pages, cached!.sourceUrl, keywords, negativeKeywords, lead.name, attrValue);
             investigationBreakdown.cached_pages++;
           } else if (leadWebsite && activeVisitCount < MAX_ACTIVE_VISITS && !checkRunDeadline()) {
             investigationStrategy = 'active_web_visit';
@@ -4713,7 +4783,7 @@ class SupervisorService {
               webVisitSuccess = true;
               urlVisited = leadWebsite;
               cachedWebVisitPages.set(lead.placeId, { pages: visitResult.pages, sourceUrl: leadWebsite });
-              scan = scanPagesForAttribute(visitResult.pages, leadWebsite, keywords, negativeKeywords, lead.name, attrValue);
+              scan = await scanPagesForAttribute(visitResult.pages, leadWebsite, keywords, negativeKeywords, lead.name, attrValue);
             } else {
               scan = {
                 verdict: 'unknown', confidence: 'low', sourceUrl: leadWebsite, quote: null,
@@ -4739,7 +4809,7 @@ class SupervisorService {
                 webVisitSuccess = true;
                 urlVisited = foundUrl;
                 cachedWebVisitPages.set(lead.placeId, { pages: visitResult.pages, sourceUrl: foundUrl });
-                scan = scanPagesForAttribute(visitResult.pages, foundUrl, keywords, negativeKeywords, lead.name, attrValue);
+                scan = await scanPagesForAttribute(visitResult.pages, foundUrl, keywords, negativeKeywords, lead.name, attrValue);
               } else {
                 scan = {
                   verdict: 'unknown', confidence: 'low', sourceUrl: foundUrl, quote: null,
