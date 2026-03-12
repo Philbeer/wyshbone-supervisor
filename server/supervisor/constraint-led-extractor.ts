@@ -873,7 +873,7 @@ export async function extractConstraintLedEvidence(
         const { default: OpenAI } = await import('openai');
         const client = new OpenAI({ apiKey: openaiKey });
 
-        const response = await client.chat.completions.create({
+        const llmCallPromise = client.chat.completions.create({
           model: 'gpt-4o-mini',
           temperature: 0.1,
           max_tokens: 300,
@@ -888,6 +888,12 @@ export async function extractConstraintLedEvidence(
             },
           ],
         });
+
+        const llmTimeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('LLM extraction timeout after 8s')), 8000),
+        );
+
+        const response = await Promise.race([llmCallPromise, llmTimeoutPromise]);
 
         const raw = response.choices[0]?.message?.content?.trim() || '';
         const cleaned = raw.replace(/```json\n?|\n?```/g, '').trim();
