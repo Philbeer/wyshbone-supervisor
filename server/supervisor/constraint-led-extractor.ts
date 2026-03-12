@@ -845,6 +845,8 @@ export async function extractConstraintLedEvidence(
   const constraintValue = constraint.value;
   const isRelationship = constraint.type === 'relationship_check';
 
+  console.log(`[EVIDENCE_EXTRACT] fired for "${leadName ?? 'undefined'}" + "${constraintValue}"`);
+
   const sortedPages = [...pages].sort(
     (a, b) => scorePageRelevance(b, constraint.type, constraintValue) - scorePageRelevance(a, constraint.type, constraintValue),
   );
@@ -905,6 +907,8 @@ export async function extractConstraintLedEvidence(
       const client = new OpenAI({ apiKey: openaiKey });
 
       const extracts = windows.map(w => w.text);
+
+      console.log(`[EVIDENCE_EXTRACT_LLM] sending ${extracts.length} windows to gpt-4o for "${leadName}"`);
 
       const llmCallPromise = client.chat.completions.create({
         model: 'gpt-4o',
