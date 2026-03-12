@@ -4401,6 +4401,7 @@ class SupervisorService {
 
         const openaiKey = process.env.OPENAI_API_KEY;
         if (openaiKey && leadName && constraint) {
+          console.log(`[EVIDENCE_EXTRACT_LLM] "${leadName}" + "${constraint}" → attempting LLM extraction`);
           try {
             const { default: OpenAI } = await import('openai');
             const client = new OpenAI({ apiKey: openaiKey });
@@ -4459,6 +4460,7 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
           }
         }
 
+        console.log(`[EVIDENCE_EXTRACT_FALLBACK] "${leadName}" + "${constraint}" → using keyword scoring`);
         return keywordScoreFallback(textClean, keywords, maxSnippets);
       };
 
