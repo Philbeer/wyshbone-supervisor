@@ -947,7 +947,7 @@ export async function executeMissionDrivenPlan(
           : constraintFallbackSnippets.get(cKey) || [];
         const fallbackUsed = constraintFallbackUsed.get(cKey) || false;
 
-        const extraction: ConstraintLedExtractionResult = extractConstraintLedEvidence(
+        const extraction: ConstraintLedExtractionResult = await extractConstraintLedEvidence(
           pages,
           {
             type: constraint.type,
@@ -957,6 +957,8 @@ export async function executeMissionDrivenPlan(
             hardness: constraint.hardness,
           },
           effectiveSnippets,
+          3,
+          lead.name,
         );
 
         const extractedQuotes = extraction.evidence_items.map(e => e.direct_quote);
