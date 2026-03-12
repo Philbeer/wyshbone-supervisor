@@ -849,107 +849,139 @@ export async function extractConstraintLedEvidence(
     (a, b) => scorePageRelevance(b, constraint.type, constraintValue) - scorePageRelevance(a, constraint.type, constraintValue),
   );
 
-  // === LLM evidence extraction path ===
+  // === Two-layer evidence extraction ===
   const openaiKey = process.env.OPENAI_API_KEY;
   if (openaiKey && leadName) {
     try {
-      console.log(`[EVIDENCE_EXTRACT_LLM] "${leadName}" + "${constraintValue}" → attempting LLM extraction`);
+      // LAYER 1 — Fast keyword scanning (no LLM)
+      const tokens = constraintValue.toLowerCase().split(/\s+/).filter(t => t.length > 0);
 
-      const topPages = sortedPages.slice(0, 3);
-      const pageTexts: Array<{ url: string; text: string; source_type: SourceType }> = [];
-      let totalChars = 0;
-      for (const page of topPages) {
-        const text = getPageText(page);
-        if (!text || text.trim().length < 20) continue;
-        const remaining = 6000 - totalChars;
-        if (remaining <= 0) break;
-        const truncated = text.substring(0, remaining);
-        pageTexts.push({ url: page.url || '', text: truncated, source_type: classifySourceType(page.url || '') });
-        totalChars += truncated.length;
-      }
+      type WindowEntry = { text: string; url: string; source_type: SourceType; pageIdx: number; matchPos: number };
+      const windows: WindowEntry[] = [];
+      let pagesWithText = 0;
 
-      if (pageTexts.length > 0) {
-        const combinedText = pageTexts.map(p => p.text).join('\n\n---\n\n');
-        const { default: OpenAI } = await import('openai');
-        const client = new OpenAI({ apiKey: openaiKey });
+      outer: for (let pageIdx = 0; pageIdx < sortedPages.length; pageIdx++) {
+        const page = sortedPages[pageIdx];
+        const rawText = getPageText(page);
+        if (!rawText || rawText.trim().length < 20) continue;
+        pagesWithText++;
+        const textLower = rawText.toLowerCase();
+        const pageUrl = page.url || '';
+        const sourceType = classifySourceType(pageUrl);
 
-        const llmCallPromise = client.chat.completions.create({
-          model: 'gpt-4o-mini',
-          temperature: 0.1,
-          max_tokens: 300,
-          messages: [
-            {
-              role: 'system',
-              content: 'You are an evidence extractor for a business lead finder. Find sentences in a web page that genuinely prove a business offers or provides a specific thing.',
-            },
-            {
-              role: 'user',
-              content: `${JSON.stringify({ business_name: leadName, constraint: constraintValue, page_text: combinedText })}\n\nFind sentences from page_text that genuinely demonstrate this business itself offers or provides "${constraintValue}".\n\nRules:\n- Sentence must describe something the business itself offers, sells, or provides\n- Incidental mentions do not count — a word in a brand name, product name, review snippet, or unrelated context is not evidence\n- Only return sentences where a reasonable person would say this proves the business offers "${constraintValue}"\n- If nothing qualifies return empty array\n- Do not force a match\n\nRespond with valid JSON only:\n{ "evidence_sentences": ["sentence 1", "sentence 2"] }\nMaximum ${maxItems} sentences. Empty array if nothing qualifies.`,
-            },
-          ],
-        });
-
-        const llmTimeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('LLM extraction timeout after 8s')), 8000),
-        );
-
-        const response = await Promise.race([llmCallPromise, llmTimeoutPromise]);
-
-        const raw = response.choices[0]?.message?.content?.trim() || '';
-        const cleaned = raw.replace(/```json\n?|\n?```/g, '').trim();
-        const parsed = JSON.parse(cleaned);
-        const sentences: string[] = Array.isArray(parsed.evidence_sentences)
-          ? parsed.evidence_sentences.filter((s: any) => typeof s === 'string' && s.length > 0).slice(0, maxItems)
-          : [];
-
-        if (sentences.length > 0) {
-          console.log(`[EVIDENCE_EXTRACT_LLM] "${leadName}" + "${constraintValue}" → ${sentences.length} sentence(s) extracted`);
-
-          const llmItems: EvidenceItem[] = sentences.map(sentence => {
-            const matchingPage = pageTexts.find(p =>
-              p.text.toLowerCase().includes(sentence.toLowerCase().substring(0, 50)),
-            );
-            const url = matchingPage?.url || pageTexts[0]?.url || '';
-            const sourceType = matchingPage?.source_type || 'website';
-
-            return {
-              source_url: url,
-              page_title: '',
-              constraint_type: constraint.type,
-              constraint_value: constraintValue,
-              matched_phrase: constraintValue,
-              direct_quote: sentence.substring(0, 250),
-              context_snippet: sentence.substring(0, 300),
-              constraint_match_reason: `LLM identified sentence as direct evidence of "${constraintValue}".`,
-              source_type: sourceType,
-              source_tier: mapSourceTypeToTier(sourceType),
-              confidence_score: 0.85,
-              quote: sentence.substring(0, 250),
-              url,
-              match_reason: `LLM extraction: "${constraintValue}"`,
-              confidence: 'high' as const,
-              keyword_matched: constraintValue,
-            };
-          });
-
-          return {
-            evidence_items: llmItems,
-            pages_scanned: pageTexts.length,
-            constraint,
-            no_evidence: false,
-            extraction_method: 'keyword_sentence',
-            phrase_targets: phraseTargets,
-          };
-        } else {
-          console.log(`[EVIDENCE_EXTRACT_LLM] "${leadName}" + "${constraintValue}" → 0 sentences, falling back to keyword scoring`);
+        for (const token of tokens) {
+          let searchPos = 0;
+          while (windows.length < 5) {
+            const idx = textLower.indexOf(token, searchPos);
+            if (idx === -1) break;
+            const overlaps = windows.some(w => w.pageIdx === pageIdx && Math.abs(w.matchPos - idx) < 300);
+            if (!overlaps) {
+              const start = Math.max(0, idx - 150);
+              const end = Math.min(rawText.length, idx + 150);
+              windows.push({ text: rawText.substring(start, end).trim(), url: pageUrl, source_type: sourceType, pageIdx, matchPos: idx });
+            }
+            searchPos = idx + token.length;
+          }
+          if (windows.length >= 5) break outer;
         }
       }
+
+      console.log(`[EVIDENCE_EXTRACT_L1] "${leadName}" + "${constraintValue}" → tokens=${JSON.stringify(tokens)} windows=${windows.length}/${pagesWithText} pages`);
+
+      if (windows.length === 0) {
+        console.log(`[EVIDENCE_EXTRACT_L1] "${leadName}" + "${constraintValue}" → 0 keyword hits — no_evidence`);
+        return {
+          evidence_items: [],
+          pages_scanned: pagesWithText,
+          constraint,
+          no_evidence: true,
+          extraction_method: 'keyword_sentence',
+          phrase_targets: phraseTargets,
+        };
+      }
+
+      // LAYER 2 — gpt-4o judges the windows
+      const { default: OpenAI } = await import('openai');
+      const client = new OpenAI({ apiKey: openaiKey });
+
+      const extracts = windows.map(w => w.text);
+
+      const llmCallPromise = client.chat.completions.create({
+        model: 'gpt-4o',
+        temperature: 0.1,
+        max_tokens: 200,
+        messages: [
+          {
+            role: 'system',
+            content: `You are a strict evidence judge for a business lead finder. You will receive short extracts from a business website where a keyword was found. Decide if any extract genuinely proves this business offers or provides "${constraintValue}".\nRules:\n- A word in a brand name, product name, or unrelated context does not count\n- A word appearing as part of an unrelated phrase does not count\n- Generic lists do not count unless "${constraintValue}" is explicitly named within them\n- Only return sentences where a reasonable person would say this proves the business offers "${constraintValue}"\n- If nothing qualifies return empty array\n- Do not force a match`,
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({ business_name: leadName, constraint: constraintValue, extracts }),
+          },
+        ],
+      });
+
+      const llmTimeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('LLM judge timeout after 6s')), 6000),
+      );
+
+      const response = await Promise.race([llmCallPromise, llmTimeoutPromise]);
+
+      const raw = response.choices[0]?.message?.content?.trim() || '';
+      const cleaned = raw.replace(/```json\n?|\n?```/g, '').trim();
+      const parsed = JSON.parse(cleaned);
+      const sentences: string[] = Array.isArray(parsed.evidence_sentences)
+        ? parsed.evidence_sentences.filter((s: any) => typeof s === 'string' && s.length > 0).slice(0, maxItems)
+        : [];
+
+      if (sentences.length > 0) {
+        console.log(`[EVIDENCE_EXTRACT_L2] "${leadName}" + "${constraintValue}" → ${sentences.length} sentence(s) approved by judge`);
+
+        const llmItems: EvidenceItem[] = sentences.map(sentence => {
+          const matchingWindow = windows.find(w =>
+            w.text.toLowerCase().includes(sentence.toLowerCase().substring(0, 50)),
+          );
+          const url = matchingWindow?.url || windows[0]?.url || '';
+          const sourceType = matchingWindow?.source_type || 'website';
+
+          return {
+            source_url: url,
+            page_title: '',
+            constraint_type: constraint.type,
+            constraint_value: constraintValue,
+            matched_phrase: constraintValue,
+            direct_quote: sentence.substring(0, 250),
+            context_snippet: sentence.substring(0, 300),
+            constraint_match_reason: `LLM judge approved sentence as direct evidence of "${constraintValue}".`,
+            source_type: sourceType,
+            source_tier: mapSourceTypeToTier(sourceType),
+            confidence_score: 0.85,
+            quote: sentence.substring(0, 250),
+            url,
+            match_reason: `LLM judge: "${constraintValue}"`,
+            confidence: 'high' as const,
+            keyword_matched: constraintValue,
+          };
+        });
+
+        return {
+          evidence_items: llmItems,
+          pages_scanned: pagesWithText,
+          constraint,
+          no_evidence: false,
+          extraction_method: 'keyword_sentence',
+          phrase_targets: phraseTargets,
+        };
+      } else {
+        console.log(`[EVIDENCE_EXTRACT_L2] "${leadName}" + "${constraintValue}" → judge approved 0 sentences, falling back to keyword scoring`);
+      }
     } catch (llmErr: any) {
-      console.warn(`[EVIDENCE_EXTRACT_LLM] LLM call failed for "${leadName}" + "${constraintValue}" (falling back): ${(llmErr as Error).message}`);
+      console.warn(`[EVIDENCE_EXTRACT_L2] LLM judge failed for "${leadName}" + "${constraintValue}" (falling back): ${(llmErr as Error).message}`);
     }
   }
   console.log(`[EVIDENCE_EXTRACT_FALLBACK] "${leadName || 'unknown'}" + "${constraintValue}" → using keyword scoring`);
-  // === end LLM path ===
+  // === end two-layer extraction ===
 
   const allCandidates: Array<{
     quote: string;
