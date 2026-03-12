@@ -501,13 +501,13 @@ class SupervisorService {
         try {
           const existingMeta = (run.metadata as Record<string, any>) || {};
           await storage.updateAgentRun(run.id, {
-            status: 'timed_out',
+            status: 'failed',
             terminalState: 'timed_out',
             error: 'Run was orphaned — no active processing detected after timeout',
             endedAt: new Date(),
             metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'stale_sweep', timed_out: true, recovered_at: new Date().toISOString() },
           });
-          console.log(`[STALE_SWEEP] Marked orphaned agent_run ${run.id} as timed_out`);
+          console.log(`[STALE_SWEEP] Marked orphaned agent_run ${run.id} as failed (timed_out)`);
         } catch (err: any) {
           console.error(`[STALE_SWEEP] Failed to recover agent_run ${run.id}: ${err.message}`);
         }
