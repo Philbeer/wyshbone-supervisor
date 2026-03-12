@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import { registerQaMetricsRoutes } from "./routes/qa-metrics";
 import { storage } from "./storage";
 import { insertUserSignalSchema, insertSuggestedLeadSchema } from "./schema";
 import type { Artefact, TowerJudgement, AgentRun } from "./schema";
@@ -2302,6 +2303,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.get("/api/afr/behaviour-judge", async (req, res) => {
+    const runId = req.query.run_id as string;
+    if (!runId) {
+      return res.status(400).json({ error: "run_id query parameter is required" });
+    }
+    if (!supabase) {
+      return res.status(503).json({ error: "Supabase not configured" });
+    }
+    try {
+      const { data, error } = await supabase
+        .from("behaviour_judge_results")
+        .select("*")
+        .eq("run_id", runId)
+        .maybeSingle();
+      if (error) {
+        console.error("[BEHAVIOUR_JUDGE] Query error:", error.message);
+        return res.status(500).json({ error: error.message });
+      }
+      return res.json(data ?? null);
+    } catch (err: any) {
+      console.error("[BEHAVIOUR_JUDGE] Unexpected error:", err.message);
+      return res.status(500).json({ error: err.message || "Failed to fetch behaviour judge result" });
+    }
+  });
+
   app.get("/api/afr/runs/:runId/snapshot", async (req, res) => {
     try {
       const { runId } = req.params;
@@ -2823,6 +2849,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   console.log('[DEBUG] Registered: POST /api/learning/update');
+
+  registerQaMetricsRoutes(app, supabase);
 
   const httpServer = createServer(app);
   return httpServer;

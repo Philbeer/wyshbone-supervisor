@@ -66,6 +66,17 @@ interface ArtefactData {
   createdAt: string;
 }
 
+interface BehaviourJudgeResult {
+  run_id: string;
+  outcome: string;
+  confidence: number | null;
+  reason: string | null;
+  tower_verdict: string | null;
+  delivered_count: number | null;
+  requested_count: number | null;
+  created_at: string | null;
+}
+
 function eventIcon(eventType: string, status: string) {
   if (status === "failed") return <AlertTriangle className="h-4 w-4 text-destructive" />;
   if (eventType === "plan_started") return <Play className="h-4 w-4 text-primary" />;
@@ -248,6 +259,63 @@ function DeliverySummaryCard({ payload }: { payload: DeliverySummaryPayload }) {
   );
 }
 
+function outcomeVariant(outcome: string): "secondary" | "destructive" | "outline" {
+  const o = outcome.toUpperCase();
+  if (o === "PASS") return "secondary";
+  if (o === "FAIL" || o === "WRONG_DECISION") return "destructive";
+  return "outline";
+}
+
+function BehaviourJudgeCard({ result }: { result: BehaviourJudgeResult }) {
+  const confidencePct = result.confidence != null ? Math.round(result.confidence * 100) : null;
+
+  return (
+    <Card className="border-2" data-testid="card-behaviour-judge">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4" />
+            Behaviour Judge
+          </CardTitle>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Badge variant={outcomeVariant(result.outcome)} data-testid="badge-behaviour-outcome">
+              {result.outcome}
+            </Badge>
+            {confidencePct != null && (
+              <Badge variant="outline" className="text-xs" data-testid="badge-behaviour-confidence">
+                {confidencePct}% confidence
+              </Badge>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {result.reason && (
+          <p className="text-xs text-muted-foreground" data-testid="text-behaviour-reason">
+            {result.reason}
+          </p>
+        )}
+        <div className="flex items-center gap-4 flex-wrap text-xs">
+          {result.tower_verdict && (
+            <div className="flex items-center gap-1.5" data-testid="badge-tower-verdict-wrapper">
+              <span className="text-muted-foreground">Tower:</span>
+              <Badge variant="outline" className="text-xs" data-testid="badge-tower-verdict">
+                {result.tower_verdict}
+              </Badge>
+            </div>
+          )}
+          {result.delivered_count != null && (
+            <span className="text-muted-foreground" data-testid="text-behaviour-delivered">
+              <span className="font-medium text-foreground">{result.delivered_count}</span>
+              {result.requested_count != null ? ` / ${result.requested_count} requested` : " delivered"}
+            </span>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function Activity() {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [connected, setConnected] = useState(false);
@@ -257,6 +325,7 @@ export default function Activity() {
   const [artefacts, setArtefacts] = useState<ArtefactData[]>([]);
   const [artefactsLoading, setArtefactsLoading] = useState(false);
   const [artefactsError, setArtefactsError] = useState<string | null>(null);
+  const [behaviourJudge, setBehaviourJudge] = useState<BehaviourJudgeResult | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -341,14 +410,22 @@ export default function Activity() {
     setArtefactsError(null);
     setResultsOpen(true);
     setArtefacts([]);
+    setBehaviourJudge(null);
     try {
-      const res = await fetch(`/api/afr/artefacts?run_id=${encodeURIComponent(viewRunId)}`);
-      if (!res.ok) {
-        setArtefactsError(`Failed to load results (${res.status})`);
+      const [artefactsRes, judgeRes] = await Promise.all([
+        fetch(`/api/afr/artefacts?run_id=${encodeURIComponent(viewRunId)}`),
+        fetch(`/api/afr/behaviour-judge?run_id=${encodeURIComponent(viewRunId)}`),
+      ]);
+      if (!artefactsRes.ok) {
+        setArtefactsError(`Failed to load results (${artefactsRes.status})`);
         return;
       }
-      const data: ArtefactData[] = await res.json();
+      const data: ArtefactData[] = await artefactsRes.json();
       setArtefacts(data);
+      if (judgeRes.ok) {
+        const judgeData: BehaviourJudgeResult | null = await judgeRes.json();
+        setBehaviourJudge(judgeData);
+      }
     } catch (err) {
       console.error("Failed to fetch artefacts:", err);
       setArtefactsError("Could not connect to the server.");
@@ -522,6 +599,10 @@ export default function Activity() {
               <div className="space-y-4">
                 {deliverySummary && (
                   <DeliverySummaryCard payload={deliverySummary} />
+                )}
+
+                {behaviourJudge && (
+                  <BehaviourJudgeCard result={behaviourJudge} />
                 )}
 
                 {leadsArtefact && (
