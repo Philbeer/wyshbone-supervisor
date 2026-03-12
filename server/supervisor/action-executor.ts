@@ -11,8 +11,6 @@ import { executeWebVisit } from './web-visit';
 import type { WebVisitInput } from './web-visit';
 import { executeContactExtract } from './contact-extract';
 import type { ContactExtractInput } from './contact-extract';
-import { executeWebSearch } from './web-search';
-import type { WebSearchInput } from './web-search';
 import { executeLeadEnrich } from './lead-enrich';
 import type { LeadEnrichInput } from './lead-enrich';
 import { executeAskLeadQuestion } from './ask-lead-question';
@@ -185,10 +183,6 @@ export async function executeAction(input: ActionInput): Promise<ActionResult> {
 
       case 'CONTACT_EXTRACT':
         result = await executeContactExtractAction(toolArgs, userId, runId, conversationId);
-        break;
-
-      case 'WEB_SEARCH':
-        result = await executeWebSearchAction(toolArgs, userId, runId, conversationId);
         break;
 
       case 'LEAD_ENRICH':
@@ -530,66 +524,6 @@ async function executeContactExtractAction(
   return {
     success: true,
     summary: `Extracted ${emailCount} email(s), ${phoneCount} phone(s), ${peopleCount} person(s)`,
-    data: { envelope },
-  };
-}
-
-async function executeWebSearchAction(
-  args: Record<string, unknown>,
-  userId: string,
-  runId?: string,
-  conversationId?: string,
-): Promise<ActionResult> {
-  const query = typeof args.query === 'string' ? args.query.trim() : '';
-  if (!query) {
-    return { success: false, summary: 'WEB_SEARCH requires a query parameter', error: 'Missing query' };
-  }
-
-  const input: WebSearchInput = {
-    query,
-    location_hint: typeof args.location_hint === 'string' ? args.location_hint : null,
-    entity_name: typeof args.entity_name === 'string' ? args.entity_name : null,
-    limit: Number(args.limit) || 5,
-  };
-
-  const envelope = await executeWebSearch(input, runId || `websearch-${Date.now()}`, undefined);
-
-  const results = (envelope.outputs as any)?.results ?? [];
-  const bestGuess = (envelope.outputs as any)?.best_guess_official_url;
-
-  if (runId) {
-    try {
-      await createArtefact({
-        runId,
-        type: 'web_search_results',
-        title: `WEB_SEARCH: "${query}" (${results.length} results)`,
-        summary: bestGuess
-          ? `Found ${results.length} result(s), best guess URL: ${bestGuess}`
-          : `Found ${results.length} result(s), no confident official URL`,
-        payload: envelope as unknown as Record<string, unknown>,
-        userId,
-        conversationId,
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[ACTION_EXECUTOR] Failed to write web_search_results artefact: ${msg}`);
-    }
-  }
-
-  if (results.length === 0) {
-    const errMsg = envelope.errors?.map(e => e.message).join('; ') || 'No results found';
-    return {
-      success: false,
-      summary: `WEB_SEARCH returned no results for "${query}": ${errMsg}`,
-      error: errMsg,
-      data: { envelope },
-    };
-  }
-
-  return {
-    success: true,
-    summary: `Found ${results.length} result(s) for "${query}"` +
-      (bestGuess ? ` — best guess: ${bestGuess}` : ''),
     data: { envelope },
   };
 }

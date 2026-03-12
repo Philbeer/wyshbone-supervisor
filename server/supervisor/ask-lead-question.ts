@@ -2,8 +2,6 @@ import { buildToolResult, buildToolError } from "@shared/tool-result-helpers";
 import type { ToolResultEnvelope, EvidenceItem } from "@shared/tool-result";
 import { executeWebVisit } from "./web-visit";
 import type { WebVisitInput } from "./web-visit";
-import { executeWebSearch } from "./web-search";
-import type { WebSearchInput } from "./web-search";
 
 const TOOL_NAME = "ASK_LEAD_QUESTION";
 const TOOL_VERSION = "1.0";
@@ -187,12 +185,10 @@ export async function executeAskLeadQuestion(
     });
   }
 
-  const searchBudget = Math.max(0, Math.min(input.search_budget ?? 3, 5));
   const visitBudget = Math.max(0, Math.min(input.visit_budget ?? 3, 5));
 
   const evidence: EvidenceItem[] = [];
   const collectedPages: CollectedPage[] = [];
-  let searchesUsed = 0;
   let visitsUsed = 0;
 
   if (lead.website && visitBudget > 0) {
@@ -237,110 +233,6 @@ export async function executeAskLeadQuestion(
     }
   }
 
-  const factsFromDirect = extractRelevantFacts(collectedPages, intentQuestion, evidenceQuery);
-
-  if (factsFromDirect.length === 0 && searchBudget > 0) {
-    const locationHint = lead.town ?? lead.address ?? null;
-    const searchQuery = `${lead.business_name} ${evidenceQuery}`;
-
-    try {
-      const searchInput: WebSearchInput = {
-        query: searchQuery,
-        location_hint: locationHint,
-        entity_name: lead.business_name,
-        limit: Math.min(5, searchBudget * 2),
-      };
-
-      const searchEnvelope = await executeWebSearch(searchInput, runId, goalId);
-      searchesUsed++;
-
-      const searchResults = (searchEnvelope.outputs as any)?.results ?? [];
-      const bestGuessUrl = (searchEnvelope.outputs as any)?.best_guess_official_url as string | null;
-      const whyThisUrl = (searchEnvelope.outputs as any)?.why_this_url as string | null;
-
-      evidence.push({
-        source_type: "search_result",
-        source_url: `brave_search:${searchQuery}`,
-        captured_at: new Date().toISOString(),
-        quote: `Web search: ${searchResults.length} result(s) for "${searchQuery}"` +
-          (bestGuessUrl ? ` — disambiguated URL: ${bestGuessUrl}` : ` — no disambiguation (${whyThisUrl ?? "insufficient signals"})`),
-        field_supported: "answer.sources",
-      });
-
-      const remainingVisitBudget = visitBudget - visitsUsed;
-      const urlsToVisit: string[] = [];
-
-      if (bestGuessUrl) {
-        urlsToVisit.push(bestGuessUrl);
-        evidence.push({
-          source_type: "search_result",
-          source_url: bestGuessUrl,
-          captured_at: new Date().toISOString(),
-          quote: `Disambiguation: visiting best guess official URL first (${whyThisUrl})`,
-          field_supported: "answer.disambiguation",
-        });
-      }
-
-      for (const r of searchResults) {
-        const rUrl = r.url as string;
-        if (rUrl && rUrl.startsWith("http") && !urlsToVisit.includes(rUrl)) {
-          urlsToVisit.push(rUrl);
-        }
-        if (urlsToVisit.length >= remainingVisitBudget) break;
-      }
-
-      for (const url of urlsToVisit) {
-        try {
-          const visitInput: WebVisitInput = {
-            url,
-            max_pages: 1,
-            same_domain_only: true,
-          };
-
-          const visitEnvelope = await executeWebVisit(visitInput, runId, goalId);
-          visitsUsed++;
-
-          const visitPages = (visitEnvelope.outputs as any)?.pages ?? [];
-          for (const page of visitPages) {
-            if (page.text_clean) {
-              collectedPages.push({
-                url: page.url,
-                text_clean: page.text_clean,
-                source: "search_visit",
-              });
-            }
-          }
-
-          evidence.push({
-            source_type: "website",
-            source_url: url,
-            captured_at: new Date().toISOString(),
-            quote: `Search-driven visit: ${visitPages.length} page(s) from ${url}`,
-            field_supported: "answer.sources",
-          });
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          evidence.push({
-            source_type: "website",
-            source_url: url,
-            captured_at: new Date().toISOString(),
-            quote: `Search-driven visit failed: ${msg}`,
-            field_supported: "answer.errors",
-          });
-        }
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      evidence.push({
-        source_type: "search_result",
-        source_url: "brave_search",
-        captured_at: new Date().toISOString(),
-        quote: `Web search failed: ${msg}`,
-        field_supported: "answer.errors",
-      });
-    }
-  }
-
   const allFacts = extractRelevantFacts(collectedPages, intentQuestion, evidenceQuery);
   const { verdict, confidence } = determineVerdict(allFacts, collectedPages, lead.website);
 
@@ -364,7 +256,7 @@ export async function executeAskLeadQuestion(
       key_facts: allFacts,
     },
     budget_used: {
-      searches_used: searchesUsed,
+      searches_used: 0,
       visits_used: visitsUsed,
     },
   };
@@ -378,7 +270,7 @@ export async function executeAskLeadQuestion(
       business_name: lead.business_name,
       intent_question: intentQuestion,
       evidence_query: evidenceQuery,
-      search_budget: searchBudget,
+      search_budget: 0,
       visit_budget: visitBudget,
     },
     outputs: outputs as unknown as Record<string, unknown>,

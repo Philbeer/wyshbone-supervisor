@@ -23,7 +23,6 @@ export type PlanStrategyId =
   | 'discovery_only'
   | 'discovery_then_direct_filter'
   | 'discovery_then_website_evidence'
-  | 'discovery_then_external_evidence'
   | 'discovery_then_rank'
   | 'composite';
 
@@ -109,7 +108,7 @@ const CONSTRAINT_TYPE_TO_STRATEGY: Record<MissionConstraintType, PlanStrategyId>
   attribute_check: 'discovery_then_website_evidence',
   status_check: 'discovery_then_website_evidence',
   website_evidence: 'discovery_then_website_evidence',
-  relationship_check: 'discovery_then_external_evidence',
+  relationship_check: 'discovery_then_website_evidence',
   numeric_range: 'discovery_then_direct_filter',
   time_constraint: 'discovery_then_website_evidence',
   contact_extraction: 'discovery_only',
@@ -120,7 +119,6 @@ const STRATEGY_TOOLS: Record<PlanStrategyId, MissionToolStep[]> = {
   discovery_only: ['SEARCH_PLACES'],
   discovery_then_direct_filter: ['SEARCH_PLACES', 'FILTER_FIELDS'],
   discovery_then_website_evidence: ['SEARCH_PLACES', 'WEB_VISIT', 'EVIDENCE_EXTRACT', 'TOWER_JUDGE'],
-  discovery_then_external_evidence: ['SEARCH_PLACES', 'WEB_SEARCH', 'WEB_VISIT', 'EVIDENCE_EXTRACT', 'TOWER_JUDGE'],
   discovery_then_rank: ['SEARCH_PLACES', 'RANK_SCORE'],
   composite: [],
 };
@@ -129,7 +127,6 @@ const STRATEGY_VERIFICATION: Record<PlanStrategyId, VerificationMethod> = {
   discovery_only: 'none',
   discovery_then_direct_filter: 'field_match',
   discovery_then_website_evidence: 'website_content_scan',
-  discovery_then_external_evidence: 'external_evidence_search',
   discovery_then_rank: 'ranking_sort',
   composite: 'none',
 };
@@ -138,7 +135,6 @@ const STRATEGY_ARTEFACTS: Record<PlanStrategyId, string[]> = {
   discovery_only: ['search_results'],
   discovery_then_direct_filter: ['search_results', 'filtered_candidates'],
   discovery_then_website_evidence: ['search_results', 'web_visit_pages', 'attribute_evidence', 'tower_semantic_judgement'],
-  discovery_then_external_evidence: ['search_results', 'web_search_results', 'web_visit_pages', 'attribute_evidence', 'tower_semantic_judgement'],
   discovery_then_rank: ['search_results', 'ranked_candidates'],
   composite: [],
 };
@@ -148,7 +144,6 @@ const STRATEGY_COST_ORDER: PlanStrategyId[] = [
   'discovery_then_direct_filter',
   'discovery_then_rank',
   'discovery_then_website_evidence',
-  'discovery_then_external_evidence',
 ];
 
 function classifyConstraint(c: MissionConstraint, index: number): ConstraintPlanMapping {
@@ -236,7 +231,6 @@ function mergeToolSequences(strategies: PlanStrategyId[]): MissionToolStep[] {
     'SEARCH_PLACES',
     'FILTER_FIELDS',
     'RANK_SCORE',
-    'WEB_SEARCH',
     'WEB_VISIT',
     'EVIDENCE_EXTRACT',
     'TOWER_JUDGE',
@@ -301,7 +295,7 @@ function buildSelectionReason(
   const hasRelationship = mappings.some(m => m.rule_fired === 'RULE_RELATIONSHIP_EXTERNAL');
   if (hasRelationship) {
     parts.push(
-      'relationship_check requires external evidence — plan includes WEB_SEARCH → WEB_VISIT → EVIDENCE_EXTRACT → TOWER_JUDGE (never discovery-only).'
+      'relationship_check requires website evidence — plan includes WEB_VISIT → EVIDENCE_EXTRACT → TOWER_JUDGE (never discovery-only).'
     );
   }
 

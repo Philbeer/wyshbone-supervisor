@@ -496,9 +496,6 @@ export async function executePlan(plan: Plan, options?: { learnedMaxReplans?: nu
 
       if (stepType === 'LEAD_ENRICH') {
         const merged = { ...currentStepArgs };
-        if (accumulatedStepData['WEB_SEARCH'] && !merged.web_search) {
-          merged.web_search = accumulatedStepData['WEB_SEARCH'];
-        }
         if (accumulatedStepData['SEARCH_PLACES'] && !merged.places_lead) {
           merged.places_lead = accumulatedStepData['SEARCH_PLACES'];
         }
@@ -509,7 +506,7 @@ export async function executePlan(plan: Plan, options?: { learnedMaxReplans?: nu
           merged.contact_extract = accumulatedStepData['CONTACT_EXTRACT'];
         }
         currentStepArgs = merged;
-        console.log(`[PLAN_EXECUTOR] LEAD_ENRICH injected accumulated data: web_search=${!!merged.web_search} places_lead=${!!merged.places_lead} web_visit_pages=${!!merged.web_visit_pages} contact_extract=${!!merged.contact_extract}`);
+        console.log(`[PLAN_EXECUTOR] LEAD_ENRICH injected accumulated data: places_lead=${!!merged.places_lead} web_visit_pages=${!!merged.web_visit_pages} contact_extract=${!!merged.contact_extract}`);
       }
 
       let stepRetryCount = 0;
@@ -715,16 +712,7 @@ export async function executePlan(plan: Plan, options?: { learnedMaxReplans?: nu
         updateRunSummary(runSummary, { success: true, leadsFound, costUnits: 0.25, validLeads: leadsFound });
 
         if (result.data) {
-          if (stepType === 'WEB_SEARCH') {
-            const env = (result.data as any).envelope;
-            if (env?.outputs?.results || env?.results) {
-              accumulatedStepData['WEB_SEARCH'] = {
-                results: env.outputs?.results ?? env.results ?? [],
-                outputs: env.outputs ?? {},
-              };
-              console.log(`[PLAN_EXECUTOR] Accumulated WEB_SEARCH results (${((env.outputs?.results ?? env.results) || []).length} items)`);
-            }
-          } else if (stepType === 'SEARCH_PLACES') {
+          if (stepType === 'SEARCH_PLACES') {
             const places = (result.data as any).places;
             if (Array.isArray(places) && places.length > 0) {
               accumulatedStepData['SEARCH_PLACES'] = places[0];
