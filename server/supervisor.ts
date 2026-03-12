@@ -413,13 +413,13 @@ class SupervisorService {
         try {
           const existingMeta = (run.metadata as Record<string, any>) || {};
           await storage.updateAgentRun(run.id, {
-            status: 'timed_out',
-            terminalState: 'timed_out',
+            status: 'failed',
+            terminalState: 'failed',
             error: 'Run was interrupted by a server restart and could not be recovered',
             endedAt: new Date(),
             metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'server_restart', timed_out: true, recovered_at: new Date().toISOString() },
           });
-          console.log(`[RECOVERY_RUNS] Marked agent_run ${run.id} as timed_out (server_restart_orphan)`);
+          console.log(`[RECOVERY_RUNS] Marked agent_run ${run.id} as failed (server_restart_orphan)`);
           recovered++;
         } catch (err: any) {
           console.error(`[RECOVERY_RUNS] Failed to recover agent_run ${run.id}: ${err.message}`);
@@ -502,12 +502,12 @@ class SupervisorService {
           const existingMeta = (run.metadata as Record<string, any>) || {};
           await storage.updateAgentRun(run.id, {
             status: 'failed',
-            terminalState: 'timed_out',
+            terminalState: 'failed',
             error: 'Run was orphaned — no active processing detected after timeout',
             endedAt: new Date(),
             metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'stale_sweep', timed_out: true, recovered_at: new Date().toISOString() },
           });
-          console.log(`[STALE_SWEEP] Marked orphaned agent_run ${run.id} as failed (timed_out)`);
+          console.log(`[STALE_SWEEP] Marked orphaned agent_run ${run.id} as failed`);
         } catch (err: any) {
           console.error(`[STALE_SWEEP] Failed to recover agent_run ${run.id}: ${err.message}`);
         }
