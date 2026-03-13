@@ -1375,6 +1375,14 @@ export async function executeMissionDrivenPlan(
       ? strongCount > 0
       : (isRankingOnly || isFieldFilterOnly ? true : true);
 
+    const constraintVerdicts = leadEvidence.map(er => ({
+      constraint: er.constraintValue,
+      verdict: er.towerStatus === 'verified' ? 'verified' as const
+        : er.towerStatus === 'weak_match' ? 'weak_match' as const
+        : er.isBotBlocked ? 'unreachable' as const
+        : 'unverified' as const,
+    }));
+
     return {
       name: l.name,
       address: l.address,
@@ -1386,6 +1394,7 @@ export async function executeMissionDrivenPlan(
       verification_status: evidenceWasAttempted
         ? (strongCount > 0 ? 'verified' as const : weakCount > 0 ? 'weak_match' as const : isBotBlocked ? 'unreachable' as const : 'no_evidence' as const)
         : (isRankingOnly ? 'ranking_only' as const : (isFieldFilterOnly ? 'field_filter_only' as const : 'not_attempted' as const)),
+      constraint_verdicts: constraintVerdicts,
       evidence: evidenceAttachment,
       match_valid: matchValid,
       match_summary: matchSummary,
@@ -1444,6 +1453,7 @@ export async function executeMissionDrivenPlan(
       run_deadline_exceeded: runDeadlineExceeded,
       verification_policy: plan.verification_policy.verification_policy,
       verification_policy_reason: plan.verification_policy.reason,
+      verifiable_constraints: [...new Set(evidenceResults.map(er => er.constraintValue))],
       leads: deliveredLeadsWithEvidence,
     },
     userId,
