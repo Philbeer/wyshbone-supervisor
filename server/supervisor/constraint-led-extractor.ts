@@ -855,8 +855,14 @@ export async function extractConstraintLedEvidence(
   const openaiKey = process.env.OPENAI_API_KEY;
   if (openaiKey && leadName) {
     try {
-      // LAYER 1 — Fast keyword scanning (no LLM)
-      const tokens = constraintValue.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+      // LAYER 1 — Semantic phrase scanning (no LLM)
+      const SYNONYM_MAP: Record<string, string[]> = {
+        'live music':     ['live music', 'gig', 'gigs', 'band', 'bands', 'music night', 'entertainment', 'live act'],
+        'vegan options':  ['vegan', 'plant-based', 'vegan menu', 'vegan options'],
+        'spa facilities': ['spa', 'wellness', 'treatment', 'spa facilities'],
+      };
+
+      const l1Phrases = (SYNONYM_MAP[constraintValue.toLowerCase()] ?? [constraintValue]).map(p => p.toLowerCase());
 
       type WindowEntry = { text: string; url: string; source_type: SourceType; pageIdx: number; matchPos: number };
       const windows: WindowEntry[] = [];
@@ -871,10 +877,10 @@ export async function extractConstraintLedEvidence(
         const pageUrl = page.url || '';
         const sourceType = classifySourceType(pageUrl);
 
-        for (const token of tokens) {
+        for (const phrase of l1Phrases) {
           let searchPos = 0;
           while (windows.length < 5) {
-            const idx = textLower.indexOf(token, searchPos);
+            const idx = textLower.indexOf(phrase, searchPos);
             if (idx === -1) break;
             const overlaps = windows.some(w => w.pageIdx === pageIdx && Math.abs(w.matchPos - idx) < 300);
             if (!overlaps) {
@@ -882,13 +888,13 @@ export async function extractConstraintLedEvidence(
               const end = Math.min(rawText.length, idx + 150);
               windows.push({ text: rawText.substring(start, end).trim(), url: pageUrl, source_type: sourceType, pageIdx, matchPos: idx });
             }
-            searchPos = idx + token.length;
+            searchPos = idx + phrase.length;
           }
           if (windows.length >= 5) break outer;
         }
       }
 
-      console.log(`[EVIDENCE_EXTRACT_L1] "${leadName}" + "${constraintValue}" → tokens=${JSON.stringify(tokens)} windows=${windows.length}/${pagesWithText} pages`);
+      console.log(`[EVIDENCE_EXTRACT_L1] "${leadName}" + "${constraintValue}" → phrases=${JSON.stringify(l1Phrases)} windows=${windows.length}/${pagesWithText} pages`);
 
       if (windows.length === 0) {
         console.log(`[EVIDENCE_EXTRACT_L1] "${leadName}" + "${constraintValue}" → 0 keyword hits — no_evidence`);
@@ -914,10 +920,11 @@ export async function extractConstraintLedEvidence(
         model: 'gpt-4o',
         temperature: 0.1,
         max_tokens: 200,
+        response_format: { type: 'json_object' },
         messages: [
           {
             role: 'system',
-            content: `You are a strict evidence judge for a business lead finder. You will receive short extracts from a business website where a keyword was found. Decide if any extract genuinely proves this business offers or provides "${constraintValue}".\nRules:\n- A word in a brand name, product name, or unrelated context does not count\n- A word appearing as part of an unrelated phrase does not count\n- Generic lists do not count unless "${constraintValue}" is explicitly named within them\n- Only return sentences where a reasonable person would say this proves the business offers "${constraintValue}"\n- If nothing qualifies return empty array\n- Do not force a match`,
+            content: `You are a strict evidence judge for a business lead finder. You will receive short extracts from a business website where a phrase was found. Decide if any extract genuinely proves this business offers or provides "${constraintValue}".\nRules:\n- A word in a brand name, product name, or unrelated context does not count\n- A phrase appearing in an unrelated context does not count\n- Generic lists do not count unless "${constraintValue}" is explicitly named within them\n- Only return sentences where a reasonable person would say this proves the business offers "${constraintValue}"\n- Do not force a match\nRespond with JSON only: {"evidence_sentences": ["..."]}. Return {"evidence_sentences": []} if nothing qualifies.`,
           },
           {
             role: 'user',
