@@ -978,13 +978,21 @@ export async function extractConstraintLedEvidence(
           phrase_targets: phraseTargets,
         };
       } else {
-        console.log(`[EVIDENCE_EXTRACT_L2] "${leadName}" + "${constraintValue}" → judge approved 0 sentences, falling back to keyword scoring`);
+        console.log(`[EVIDENCE_EXTRACT_L2] "${leadName}" + "${constraintValue}" → judge approved 0 sentences — no_evidence`);
+        return {
+          evidence_items: [],
+          pages_scanned: pagesWithText,
+          constraint,
+          no_evidence: true,
+          extraction_method: 'keyword_sentence',
+          phrase_targets: phraseTargets,
+        };
       }
     } catch (llmErr: any) {
-      console.warn(`[EVIDENCE_EXTRACT_L2] LLM judge failed for "${leadName}" + "${constraintValue}" (falling back): ${(llmErr as Error).message}`);
+      console.warn(`[EVIDENCE_EXTRACT_L2] LLM judge failed for "${leadName}" + "${constraintValue}" (falling back to keyword scoring): ${(llmErr as Error).message}`);
     }
   }
-  console.log(`[EVIDENCE_EXTRACT_FALLBACK] "${leadName || 'unknown'}" + "${constraintValue}" → using keyword scoring`);
+  console.log(`[EVIDENCE_EXTRACT_FALLBACK] "${leadName || 'unknown'}" + "${constraintValue}" → using keyword scoring (LLM unavailable)`);
   // === end two-layer extraction ===
 
   const allCandidates: Array<{
