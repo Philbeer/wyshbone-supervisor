@@ -91,6 +91,7 @@ interface EvidenceResult {
   constraintType: string;
   evidenceFound: boolean;
   evidenceStrength: 'strong' | 'weak' | 'none';
+  isBotBlocked: boolean;
   towerStatus: TowerSemanticStatus | null;
   towerConfidence: number | null;
   towerReasoning: string | null;
@@ -287,6 +288,7 @@ export interface HardEvidenceFilterInput {
   constraintField: string;
   constraintValue: string;
   evidenceFound: boolean;
+  isBotBlocked?: boolean;
 }
 
 export interface HardEvidenceConstraintRef {
@@ -306,9 +308,17 @@ export function applyHardEvidenceFilter<T>(
     }
   }
 
+  const botBlockedLeads = new Set<number>();
+  for (const er of evidenceResults) {
+    if (er.isBotBlocked) {
+      botBlockedLeads.add(er.leadIndex);
+    }
+  }
+
   const leadsChecked = new Set(evidenceResults.map(r => r.leadIndex));
   return leads.filter((_, i) => {
     if (!leadsChecked.has(i)) return false;
+    if (botBlockedLeads.has(i)) return true;
     return leadsWithEvidence.has(i);
   });
 }
@@ -909,6 +919,9 @@ export async function executeMissionDrivenPlan(
           towerStatus === 'weak_match' || keywordFound ? 'weak' :
           'none';
 
+        const pagesWithContent = pages.filter(p => (p.text_clean || p.text || '').trim().length > 50);
+        const isBotBlocked = pagesWithContent.length === 0 && !!lead.website;
+
         evidenceResults.push({
           leadIndex: leadIdx,
           leadName: lead.name,
@@ -918,6 +931,7 @@ export async function executeMissionDrivenPlan(
           constraintType: constraint.type,
           evidenceFound: evidenceStrength !== 'none',
           evidenceStrength,
+          isBotBlocked,
           towerStatus,
           towerConfidence,
           towerReasoning,
@@ -1339,6 +1353,7 @@ export async function executeMissionDrivenPlan(
     const hasAnyEvidence = leadEvidence.some(e => e.evidenceFound);
     const strongCount = leadEvidence.filter(e => e.evidenceStrength === 'strong').length;
     const weakCount = leadEvidence.filter(e => e.evidenceStrength === 'weak').length;
+    const isBotBlocked = leadEvidence.some(e => e.isBotBlocked);
 
     const evidenceAttachment = leadEvidence.map(e => ({
       constraint_field: e.constraintField,
@@ -1369,7 +1384,7 @@ export async function executeMissionDrivenPlan(
       source: l.source,
       verified: evidenceWasAttempted ? hasAnyEvidence : (isRankingOnly ? false : undefined),
       verification_status: evidenceWasAttempted
-        ? (strongCount > 0 ? 'verified' as const : weakCount > 0 ? 'weak_match' as const : 'no_evidence' as const)
+        ? (strongCount > 0 ? 'verified' as const : weakCount > 0 ? 'weak_match' as const : isBotBlocked ? 'unreachable' as const : 'no_evidence' as const)
         : (isRankingOnly ? 'ranking_only' as const : (isFieldFilterOnly ? 'field_filter_only' as const : 'not_attempted' as const)),
       evidence: evidenceAttachment,
       match_valid: matchValid,
