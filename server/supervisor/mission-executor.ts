@@ -874,7 +874,7 @@ export async function executeMissionDrivenPlan(
 
         const structuredEvidenceText = extraction.evidence_items.length > 0
           ? extraction.evidence_items.map((e, i) =>
-              `[Evidence ${i + 1}] Source: ${e.source_url} | Type: ${e.source_type} | Tier: ${e.source_tier} | Constraint: ${e.constraint_type}="${e.constraint_value}" | Matched: "${e.matched_phrase}" | Quote: "${e.direct_quote}" | Reason: ${e.constraint_match_reason} | Context: ${e.context_snippet}`
+              `[Evidence ${i + 1}] Source: ${e.source_url} | Quote: "${e.direct_quote}" | Context: ${e.context_snippet}`
             ).join('\n')
           : '';
 
