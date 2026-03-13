@@ -97,6 +97,16 @@ const migrations: Array<{ name: string; sql: string }> = [
       CREATE INDEX IF NOT EXISTS tower_judgements_artefact_id_idx ON tower_judgements(artefact_id);
     `,
   },
+  {
+    name: 'tower_judgements_idempotency_key',
+    sql: `
+      ALTER TABLE tower_judgements
+      ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+
+      CREATE INDEX IF NOT EXISTS tower_judgements_idempotency_key_idx
+      ON tower_judgements (idempotency_key);
+    `,
+  },
 ];
 
 async function run() {
