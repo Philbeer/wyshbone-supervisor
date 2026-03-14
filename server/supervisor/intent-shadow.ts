@@ -1,4 +1,5 @@
 import { extractCanonicalIntent, type IntentExtractionResult } from './intent-extractor';
+import type { CanonicalIntent } from './canonical-intent';
 import { createArtefact } from './artefacts';
 import { logAFREvent } from './afr-logger';
 
@@ -43,6 +44,26 @@ export interface ShadowIntentResult {
   ran: boolean;
   extraction: IntentExtractionResult | null;
   error: string | null;
+}
+
+/**
+ * Returns a deep-cloned CanonicalIntent with every constraint's
+ * clarify_if_needed forced to false.
+ *
+ * Shadow extraction is a diagnostic observer. Its clarify_if_needed
+ * fields must NEVER reach the constraint gate, evaluatePreflightClarify,
+ * or any routing decision. Call this function whenever promoting a shadow
+ * extraction result to a live canonicalIntent.
+ */
+export function neutraliseClarifyIfNeeded(intent: CanonicalIntent): CanonicalIntent {
+  return {
+    ...intent,
+    constraints: intent.constraints.map(c => ({
+      ...c,
+      clarify_if_needed: false,
+      clarify_question: null,
+    })),
+  };
 }
 
 export async function runIntentExtractorShadow(

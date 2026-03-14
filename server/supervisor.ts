@@ -25,7 +25,7 @@ import { normalizeSensorScript } from './supervisor/factory-sim';
 import { buildConstraintsExtractedPayload, buildCapabilityCheck, verifyLeads, type VerifiableLead, type CvlVerificationOutput, type AttributeEvidenceMap } from './supervisor/cvl';
 import { detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, type RelationshipPredicateResult, type RelationshipEvidenceSummary } from './supervisor/relationship-predicate';
 import { deriveVerificationPolicyFromLegacyConstraints, emitVerificationPolicyArtefact, type VerificationPolicyResult } from './supervisor/verification-policy';
-import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe } from './supervisor/intent-shadow';
+import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe, neutraliseClarifyIfNeeded } from './supervisor/intent-shadow';
 import { extractStructuredMission, getMissionExtractorMode } from './supervisor/mission-extractor';
 import { checkMissionCompleteness, logCompletenessToAFR, type CompletenessCheckResult } from './supervisor/mission-completeness-check';
 import { logMissionShadow, buildMissionDiagnosticPayload, missionToParsedGoal, buildHandoffDiagnostic, type HandoffDiagnostic } from './supervisor/mission-bridge';
@@ -1163,7 +1163,9 @@ class SupervisorService {
     let useMissionExecution = false;
 
     const canonicalValid = shadowResult.ran && shadowResult.extraction?.validation?.ok && shadowResult.extraction.validation.intent;
-    const canonicalIntent = canonicalValid ? shadowResult.extraction!.validation.intent! : null;
+    const canonicalIntent = canonicalValid
+      ? neutraliseClarifyIfNeeded(shadowResult.extraction!.validation.intent!)
+      : null;
 
     try {
 
