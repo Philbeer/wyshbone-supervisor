@@ -253,7 +253,13 @@ export interface IntentNarrative {
   entity_exclusions: string[];
   commercial_context: string;
   key_discriminator: string;
-  scarcity_expectation: 'abundant' | 'moderate' | 'scarce';
+  findability: 'easy' | 'moderate' | 'hard' | 'very_hard';
+  findability_reason: string;
+  suggested_approaches: string[];
+  fallback_intent: string;
+  scarcity_expectation: 'abundant' | 'moderate' | 'scarce' | 'unknown';
+  clarification_needed: boolean;
+  clarification_question: string | null;
   ambiguity_flags: string[];
 }
 

@@ -449,39 +449,91 @@ Semantic input: The user wants 5 vets in London that extract email addresses. Th
 
 Return ONLY valid JSON. No markdown fences, no commentary, no explanation.`;
 
-const PASS3_SYSTEM_PROMPT = `You are an intent analyst for a business search system. You receive a structured description of what a user is searching for and produce a concise intent narrative that captures the real-world meaning behind the query.
+const PASS3_SYSTEM_PROMPT = `You are an expert research strategist for a business intelligence agent. You receive a user's search goal and the structured intent extracted from it. Your job is to produce an intent narrative that tells the agent exactly what to look for, how hard it will be to find, and what to do if the primary approach fails.
 
-Your output helps the evaluation layer decide whether search results are genuinely relevant — not just superficially matching.
+Think like an experienced human researcher who understands what is and isn't findable on the internet. Every search eventually reduces to keywords and signals that appear on web pages. Your job is to work out what those signals are.
 
-INPUT: You will receive the original user message, the extracted entity category, the extracted constraints, and the Pass 1 semantic interpretation.
+INPUT:
+- original_message: the user's raw input
+- entity_category: what was extracted
+- constraints: the structured constraint list
+- semantic_interpretation: Pass 1 output
 
-OUTPUT FORMAT: Return a JSON object with exactly these fields:
-
+OUTPUT SCHEMA (JSON only, no markdown):
 {
-  "entity_description": "what the user actually wants — specific and literal, not the category label alone",
-  "entity_exclusions": ["list of things that superficially resemble the target but are NOT what the user wants"],
-  "commercial_context": "why the user likely wants this — what they will do with the results",
-  "key_discriminator": "the single most important thing that separates a correct result from a plausible but wrong one",
-  "scarcity_expectation": "abundant | moderate | scarce",
-  "ambiguity_flags": ["any parts of the query that are genuinely unclear or could be interpreted multiple ways"]
+  "entity_description": "specific plain English description of what the user actually wants",
+  "entity_exclusions": ["things that look similar but are wrong"],
+  "commercial_context": "why the user likely wants this and what they will do with the results",
+  "key_discriminator": "the single most important signal that separates a correct result from a plausible but wrong one",
+  "findability": "easy | moderate | hard | very_hard",
+  "findability_reason": "one sentence explaining why this is easy or hard to find on the internet",
+  "suggested_approaches": [
+    "first thing to try on the internet",
+    "second thing to try if first fails",
+    "third fallback if second fails"
+  ],
+  "fallback_intent": "what to search for if all primary approaches fail — a related but more findable proxy for what the user wants",
+  "scarcity_expectation": "abundant | moderate | scarce | unknown",
+  "clarification_needed": true | false,
+  "clarification_question": "the single most useful question to ask the user if clarification would significantly improve the result. null if not needed.",
+  "ambiguity_flags": ["any parts of the query that are genuinely unclear"]
 }
+
+FINDABILITY SCORING:
+- easy: attribute is commonly stated on business websites (opening hours, menus, services offered)
+- moderate: attribute is findable but requires visiting pages and reading content
+- hard: relationship or attribute is rarely stated directly — needs indirect evidence or third-party sources
+- very_hard: no reliable web signal exists — agent should clarify with user before attempting
 
 RULES:
 - entity_description must be specific. Do not just repeat the category label. Describe the type of business in plain terms.
-- entity_exclusions must list realistic confusables — things Google Places could return that would look right but are wrong.
-- commercial_context must be a single sentence about the user's likely intent. Do not speculate wildly.
-- key_discriminator must be a single sentence. It is the most important signal Tower should use to accept or reject a result.
-- scarcity_expectation: "abundant" means >50 easily findable results, "moderate" means 10–50, "scarce" means <10 or hard to find.
-- ambiguity_flags: return an empty array [] if there is no genuine ambiguity.
+- entity_exclusions must list realistic confusables — things a Places search could return that would look right but are wrong.
+- commercial_context is a single sentence about the user's likely intent. Do not speculate wildly.
+- key_discriminator is a single sentence. It is the most important signal Tower should use to accept or reject a result.
+- suggested_approaches must have exactly 3 entries, ordered from most to least promising.
+- fallback_intent describes a more findable proxy query if all primary approaches fail.
+- scarcity_expectation: "abundant" >50 findable results, "moderate" 10–50, "scarce" <10, "unknown" when genuinely unclear.
+- clarification_question must be null if clarification_needed is false.
+- ambiguity_flags: empty array [] if no genuine ambiguity.
 
-EXAMPLE — "bottle shops in East Sussex that sell craft beer":
+EXAMPLE 1 — "find bottle shops in East Sussex that sell craft beer":
 {
-  "entity_description": "independent retail shops that stock craft beer from multiple producers for off-premises consumption",
-  "entity_exclusions": ["breweries selling only their own beer", "supermarkets and off-licences", "pubs with a bottle shop counter", "online-only retailers"],
-  "commercial_context": "likely a brewer or supplier seeking retail stockists for their product range",
-  "key_discriminator": "the shop sells craft beer from multiple independent producers — it does not brew its own",
+  "entity_description": "independent retail shops that stock craft beer from multiple producers for sale to the public",
+  "entity_exclusions": ["breweries selling their own beer", "supermarkets and chain off-licences", "online-only retailers"],
+  "commercial_context": "likely a craft brewer seeking independent stockists to place their product in",
+  "key_discriminator": "sells multiple brands of craft beer from different producers — not a single producer's own shop",
+  "findability": "moderate",
+  "findability_reason": "bottle shops often have websites listing their stock or mentioning craft beer explicitly",
+  "suggested_approaches": [
+    "search Google Places for bottle shops and off-licences in East Sussex",
+    "visit each website and look for mentions of craft beer, local beer, or multiple brewery names",
+    "search for East Sussex craft beer retailers and independent off-licences"
+  ],
+  "fallback_intent": "independent off-licences and specialist drink retailers in East Sussex",
   "scarcity_expectation": "scarce",
+  "clarification_needed": false,
+  "clarification_question": null,
   "ambiguity_flags": []
+}
+
+EXAMPLE 2 — "find organisations that work with the local authority in Blackpool":
+{
+  "entity_description": "organisations that have a formal or funded relationship with Blackpool Council",
+  "entity_exclusions": ["organisations merely located in Blackpool", "organisations that mention Blackpool without a council relationship", "national organisations with no local Blackpool presence"],
+  "commercial_context": "likely researching the council supply chain or partnership ecosystem, possibly to identify decision-makers or entry points",
+  "key_discriminator": "explicit named relationship with Blackpool Council — not just operating in Blackpool",
+  "findability": "hard",
+  "findability_reason": "council relationships are rarely stated as searchable text on an organisation's own website — more likely found in council documents, tender records, or press releases",
+  "suggested_approaches": [
+    "check Blackpool Council website for named partners, suppliers, and funded organisations",
+    "search for organisations that mention Blackpool Council in their own content",
+    "search council meeting minutes and procurement records for named suppliers"
+  ],
+  "fallback_intent": "charities, housing associations, and social enterprises operating in Blackpool that typically work with local authorities",
+  "scarcity_expectation": "unknown",
+  "clarification_needed": true,
+  "clarification_question": "Are you looking for funded partners and grant recipients, or suppliers and contractors — or both?",
+  "ambiguity_flags": ["works with is vague — could mean funded, contracted, or informally partnered"]
 }
 
 Return ONLY valid JSON. No markdown fences, no commentary, no explanation.`;
@@ -823,19 +875,31 @@ Produce the intent narrative JSON for this search.`;
         Array.isArray(pass3Parsed.entity_exclusions) &&
         typeof pass3Parsed.commercial_context === 'string' &&
         typeof pass3Parsed.key_discriminator === 'string' &&
+        typeof pass3Parsed.findability === 'string' &&
+        typeof pass3Parsed.findability_reason === 'string' &&
+        Array.isArray(pass3Parsed.suggested_approaches) &&
+        typeof pass3Parsed.fallback_intent === 'string' &&
         typeof pass3Parsed.scarcity_expectation === 'string' &&
+        typeof pass3Parsed.clarification_needed === 'boolean' &&
         Array.isArray(pass3Parsed.ambiguity_flags)
       ) {
         const scarcity = pass3Parsed.scarcity_expectation;
+        const findability = pass3Parsed.findability;
         pass3IntentNarrative = {
           entity_description: pass3Parsed.entity_description,
           entity_exclusions: pass3Parsed.entity_exclusions,
           commercial_context: pass3Parsed.commercial_context,
           key_discriminator: pass3Parsed.key_discriminator,
-          scarcity_expectation: (scarcity === 'abundant' || scarcity === 'moderate' || scarcity === 'scarce') ? scarcity : 'moderate',
+          findability: (findability === 'easy' || findability === 'moderate' || findability === 'hard' || findability === 'very_hard') ? findability : 'moderate',
+          findability_reason: pass3Parsed.findability_reason,
+          suggested_approaches: pass3Parsed.suggested_approaches,
+          fallback_intent: pass3Parsed.fallback_intent,
+          scarcity_expectation: (scarcity === 'abundant' || scarcity === 'moderate' || scarcity === 'scarce' || scarcity === 'unknown') ? scarcity : 'unknown',
+          clarification_needed: pass3Parsed.clarification_needed,
+          clarification_question: typeof pass3Parsed.clarification_question === 'string' ? pass3Parsed.clarification_question : null,
           ambiguity_flags: pass3Parsed.ambiguity_flags,
         };
-        console.log(`[MISSION_EXTRACTOR] Pass 3 — discriminator="${pass3IntentNarrative.key_discriminator}" scarcity=${pass3IntentNarrative.scarcity_expectation} exclusions=${pass3IntentNarrative.entity_exclusions.length} duration=${pass3DurationMs}ms`);
+        console.log(`[MISSION_EXTRACTOR] Pass 3 — findability=${pass3IntentNarrative.findability} scarcity=${pass3IntentNarrative.scarcity_expectation} clarification_needed=${pass3IntentNarrative.clarification_needed} exclusions=${pass3IntentNarrative.entity_exclusions.length} duration=${pass3DurationMs}ms`);
       } else {
         console.warn(`[MISSION_EXTRACTOR] Pass 3 returned unexpected shape — skipping (non-fatal)`);
       }
