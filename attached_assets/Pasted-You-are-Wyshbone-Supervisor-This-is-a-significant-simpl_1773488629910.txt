@@ -1,0 +1,77 @@
+You are Wyshbone Supervisor. This is a significant 
+simplification. Report what you find first, then 
+implement.
+
+REMOVE entirely:
+1. clarify-session.ts — the entire file (519 lines)
+2. clarify-gate.ts — the entire file (768 lines)  
+3. evaluatePrePlanGate() and all call sites
+4. getClarifySession(), createClarifySession(), 
+   handleClarifyResponse(), classifyClarifyInput(),
+   buildClarifyStatePayload(), buildInitialQuestions(),
+   closeAllClarifySessions() — all imports and 
+   call sites in supervisor.ts
+5. The pendingClarifySession / pendingConstraintState 
+   Map lookups at lines 822–828
+6. The CLARIFY_RESUME block and all session 
+   slot-filling logic
+7. buildSearchFromSession() and synthetic query 
+   construction — the template string 
+   "find ${count} ${businessType} in ${location}"
+8. MAX_CLARIFY_TURNS hard limit logic
+9. All in-memory session Maps
+
+REPLACE WITH:
+The only clarification logic needed is in Pass 3.
+Pass 3 already runs on every message (line 994).
+Pass 3 already has access to conversationContextStr
+which includes full conversation history.
+
+When Pass 3 returns clarification_needed = true:
+1. Send the clarification_question to the UI 
+   as a plain assistant message — no special 
+   SSE event type needed, just a normal 
+   chat response
+2. Do NOT create any session state
+3. Do NOT return early from the pipeline in 
+   a special way — just respond with the 
+   question and complete the task normally
+
+When the user replies:
+1. Their reply arrives as a normal new message
+2. Pass 3 runs again with full conversation 
+   history (original message + question + 
+   reply all in context)
+3. Pass 3 sees the full exchange and sets 
+   clarification_needed = false
+4. Search proceeds normally from that point
+
+The conversation history IS the session.
+No Map, no TTL, no slot-filling needed.
+
+CRITICAL: Pass 3's prompt must instruct it 
+to look at conversation history when 
+evaluating clarification_needed. Update 
+the PASS3_SYSTEM_PROMPT to add:
+
+"If the conversation history shows that you 
+previously asked a clarification question 
+and the user has now answered it, treat 
+clarification_needed as false and proceed 
+with the enriched intent. Combine the 
+original request with the user's answer 
+to produce the intent narrative."
+
+Also update Pass 3 to receive the full 
+conversationContextStr as part of its 
+input — confirm it already does or wire 
+it in if not.
+
+Report:
+1. Confirm clarify-session.ts and 
+   clarify-gate.ts are fully removed
+2. Confirm all call sites cleaned up
+3. Confirm Pass 3 receives conversation 
+   history
+4. Show the updated PASS3_SYSTEM_PROMPT
+5. Show a before/after line count

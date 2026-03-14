@@ -458,6 +458,7 @@ INPUT:
 - entity_category: what was extracted
 - constraints: the structured constraint list
 - semantic_interpretation: Pass 1 output
+- conversation_context: (optional) prior conversation turns. If this shows the user was previously asked a clarification question and has now answered it, set clarification_needed=false and proceed with what they have provided — do not ask again unless genuinely still unclear.
 
 OUTPUT SCHEMA (JSON only, no markdown):
 {
@@ -860,7 +861,7 @@ export async function extractStructuredMission(
 Extracted entity category: "${mission.entity_category}"
 Pass 1 semantic interpretation: "${pass1Result}"
 Extracted constraints: ${JSON.stringify(mission.constraints, null, 2)}
-
+${truncatedContext ? `\nConversation context (prior turns):\n${truncatedContext}\n` : ''}
 Produce the intent narrative JSON for this search.`;
 
     const pass3Start = Date.now();

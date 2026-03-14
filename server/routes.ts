@@ -582,34 +582,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/chat/classify", async (req, res) => {
-    try {
-      const { evaluateClarifyGate, hasMonitoringIntent } = await import('./supervisor/clarify-gate');
-      const msg = String(req.body?.message || '').trim();
-      if (!msg) {
-        return res.status(400).json({ error: 'message is required' });
-      }
-
-      const monitoring = hasMonitoringIntent(msg);
-      const gate = await evaluateClarifyGate(msg);
-
-      const route = monitoring ? 'supervisor_plan' : gate.route === 'agent_run' ? 'supervisor_plan' : gate.route;
-
-      console.log(`[CLASSIFY] message="${msg.substring(0, 80)}" route=${route} monitoring=${monitoring} gate_route=${gate.route} reason=${gate.reason?.substring(0, 80)}`);
-
-      return res.json({
-        route,
-        monitoring,
-        gate_route: gate.route,
-        reason: gate.reason,
-        parsed_fields: gate.parsedFields ?? null,
-      });
-    } catch (err: any) {
-      console.error(`[CLASSIFY] Error: ${err.message}`);
-      return res.status(500).json({ error: err.message || 'Classification failed' });
-    }
-  });
-
   // Test endpoint - create supervisor chat task
   app.post("/api/test/supervisor-task", async (req, res) => {
     const { userId, conversationId, taskType, searchQuery } = req.body;
