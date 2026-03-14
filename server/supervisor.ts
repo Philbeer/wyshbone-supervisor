@@ -3066,7 +3066,9 @@ class SupervisorService {
     });
     console.log(`[PRE_PLAN_GATE] clarification_needed=${gateResult.clarification_needed} flags=${JSON.stringify(gateResult.gate_flags)}`);
 
-    if (gateResult.clarification_needed) {
+    const pass3SaysOk = missionResult?.intentNarrative?.clarification_needed === false;
+
+    if (gateResult.clarification_needed && !pass3SaysOk) {
       console.log(`[PRE_PLAN_GATE] CLARIFY — reason: ${gateResult.reason}`);
 
       await createArtefact({
@@ -3135,6 +3137,84 @@ class SupervisorService {
         response: gateResult.suggested_question || 'Could you clarify your request?',
         leadIds: [],
         deliverySummary: clarifyDsPayload,
+        towerVerdict: null,
+        leads: [],
+      };
+    } else if (gateResult.clarification_needed && pass3SaysOk) {
+      console.log(`[PRE_PLAN_GATE] Gate fired but Pass 3 says clarification_needed=false — deferring to Pass 3, proceeding with search`);
+    }
+
+    if (!gateResult.clarification_needed && missionResult?.intentNarrative?.clarification_needed) {
+      const q = missionResult.intentNarrative.clarification_question;
+      console.log(`[PRE_PLAN_GATE] Pass 3 requests clarification — question: ${q}`);
+
+      await createArtefact({
+        runId: chatRunId,
+        type: 'clarification_needed',
+        title: 'Clarification needed: Pass 3 intent analysis',
+        summary: q || 'Pass 3 flagged intent as requiring clarification before search',
+        payload: {
+          clarification_needed: true,
+          reason: 'Pass 3 intent narrative analysis determined the query needs clarification to produce accurate results',
+          suggested_question: q,
+          assumptions: null,
+          gate_flags: gateResult.gate_flags,
+          pass3_triggered: true,
+          parsed_business_type: businessType,
+          parsed_location: city,
+          original_user_goal: originalUserGoal,
+        },
+        userId: task.user_id,
+        conversationId,
+      });
+
+      await this.postArtefactToUI({
+        runId: chatRunId,
+        clientRequestId,
+        type: 'clarification_needed',
+        payload: {
+          clarification_needed: true,
+          reason: 'Pass 3 intent narrative analysis determined the query needs clarification to produce accurate results',
+          suggested_question: q,
+          assumptions: null,
+          gate_flags: { ...gateResult.gate_flags, pass3_triggered: true },
+        },
+        userId: task.user_id,
+        conversationId,
+      }).catch(() => {});
+
+      await storage.updateAgentRun(chatRunId, {
+        status: 'clarifying',
+        terminalState: null,
+        metadata: { verdict: 'clarification_needed', awaiting: 'user_input', source: 'pass3', gate_flags: gateResult.gate_flags },
+      });
+
+      const pass3ClarifyDs: DeliverySummaryPayload = {
+        requested_count: null,
+        hard_constraints,
+        soft_constraints,
+        plan_versions: [],
+        soft_relaxations: [],
+        delivered_exact: [],
+        delivered_closest: [],
+        delivered_exact_count: 0,
+        delivered_total_count: 0,
+        shortfall: 0,
+        status: 'STOP',
+        trust_status: 'UNTRUSTED',
+        tower_verdict: null,
+        cvl_summary: null,
+        stop_reason: 'Pass 3 requested clarification before search',
+        suggested_next_question: q,
+        cvl_verified_exact_count: null,
+        cvl_unverifiable_count: null,
+        relationship_context: null,
+      };
+
+      return {
+        response: q || 'Could you clarify your request?',
+        leadIds: [],
+        deliverySummary: pass3ClarifyDs,
         towerVerdict: null,
         leads: [],
       };
