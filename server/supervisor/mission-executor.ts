@@ -410,6 +410,84 @@ function buildStructuredConstraints(mission: StructuredMission): StructuredConst
   });
 }
 
+interface ExclusionFilterResult {
+  kept: DiscoveredLead[];
+  excluded: Array<{ name: string; reason: string }>;
+}
+
+async function filterByEntityExclusions(
+  leads: DiscoveredLead[],
+  intentNarrative: IntentNarrative,
+): Promise<ExclusionFilterResult> {
+  if (!intentNarrative.entity_exclusions || intentNarrative.entity_exclusions.length === 0) {
+    return { kept: leads, excluded: [] };
+  }
+
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    console.warn('[EXCL_FILTER] OPENAI_API_KEY not set — skipping exclusion filter');
+    return { kept: leads, excluded: [] };
+  }
+
+  const { default: OpenAI } = await import('openai');
+  const client = new OpenAI({ apiKey: openaiKey });
+
+  const kept: DiscoveredLead[] = [];
+  const excluded: Array<{ name: string; reason: string }> = [];
+  const BATCH_SIZE = 5;
+
+  for (let i = 0; i < leads.length; i += BATCH_SIZE) {
+    const batch = leads.slice(i, i + BATCH_SIZE);
+    const businessList = batch
+      .map((l, idx) => `${idx + 1}. Name: "${l.name}" | Address: "${l.address}"`)
+      .join('\n');
+
+    const prompt = `Given these entity exclusions: ${JSON.stringify(intentNarrative.entity_exclusions)}
+And this key discriminator: "${intentNarrative.key_discriminator}"
+
+For each of these businesses, classify as:
+- INCLUDE: likely matches what the user wants
+- EXCLUDE: matches an exclusion (state which one)
+- UNCERTAIN: cannot tell without visiting website
+
+Businesses:
+${businessList}
+
+Respond with a JSON array only, no markdown fences:
+[{ "name": "...", "decision": "INCLUDE|EXCLUDE|UNCERTAIN", "reason": "..." }]`;
+
+    try {
+      const resp = await client.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0,
+        max_tokens: 512,
+      });
+      const raw = (resp.choices[0]?.message?.content ?? '').trim();
+      const parsed = JSON.parse(raw) as Array<{ name: string; decision: string; reason: string }>;
+      for (let j = 0; j < batch.length; j++) {
+        const lead = batch[j];
+        const judgement = parsed[j] ?? { decision: 'UNCERTAIN', reason: 'no judgement returned' };
+        if (judgement.decision === 'EXCLUDE') {
+          excluded.push({ name: lead.name, reason: judgement.reason });
+          console.log(`[EXCL_FILTER] EXCLUDED "${lead.name}": ${judgement.reason}`);
+        } else {
+          kept.push(lead);
+          if (judgement.decision === 'UNCERTAIN') {
+            console.log(`[EXCL_FILTER] UNCERTAIN "${lead.name}" — kept for website verification`);
+          }
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[EXCL_FILTER] Batch ${Math.floor(i / BATCH_SIZE) + 1} failed (non-fatal): ${err.message} — keeping all ${batch.length} leads`);
+      kept.push(...batch);
+    }
+  }
+
+  console.log(`[EXCL_FILTER] Complete — kept=${kept.length} excluded=${excluded.length} from ${leads.length} candidates`);
+  return { kept, excluded };
+}
+
 export async function executeMissionDrivenPlan(
   ctx: MissionExecutionContext,
 ): Promise<MissionExecutionResult> {
@@ -636,13 +714,17 @@ export async function executeMissionDrivenPlan(
   }
 
   console.log(`[MISSION_EXEC] === Phase: SEARCH_PLACES ===`);
+  const primarySearchQuery = intentNarrative?.entity_description ?? currentBusinessType;
+  if (intentNarrative?.entity_description) {
+    console.log(`[MISSION_EXEC] Using entity_description as search query: "${primarySearchQuery.substring(0, 100)}"`);
+  }
   const searchStepStart = Date.now();
   try {
     runToolCallCount++;
     const searchResult = await executeAction({
       toolName: 'SEARCH_PLACES',
       toolArgs: {
-        query: currentBusinessType,
+        query: primarySearchQuery,
         location: currentLocation,
         country,
         maxResults: currentSearchBudget,
@@ -670,12 +752,63 @@ export async function executeMissionDrivenPlan(
           lng: typeof p.lng === 'number' ? p.lng : (p.geometry?.location?.lng ?? null),
         });
       }
-      console.log(`[MISSION_EXEC] SEARCH_PLACES returned ${leads.length} results`);
+      console.log(`[MISSION_EXEC] SEARCH_PLACES (primary) returned ${leads.length} results`);
     } else {
-      console.log(`[MISSION_EXEC] SEARCH_PLACES returned 0 results or failed`);
+      console.log(`[MISSION_EXEC] SEARCH_PLACES (primary) returned 0 results or failed`);
     }
   } catch (searchErr: any) {
     console.warn(`[MISSION_EXEC] SEARCH_PLACES failed: ${searchErr.message}`);
+  }
+
+  if (
+    intentNarrative &&
+    (intentNarrative.findability === 'hard' || intentNarrative.findability === 'very_hard') &&
+    intentNarrative.suggested_approaches.length > 0
+  ) {
+    const supplementaryQuery = intentNarrative.suggested_approaches[0];
+    console.log(`[MISSION_EXEC] findability=${intentNarrative.findability} — running supplementary search: "${supplementaryQuery.substring(0, 100)}"`);
+    try {
+      runToolCallCount++;
+      const suppResult = await executeAction({
+        toolName: 'SEARCH_PLACES',
+        toolArgs: {
+          query: supplementaryQuery,
+          location: currentLocation,
+          country,
+          maxResults: currentSearchBudget,
+          target_count: requestedCount ?? DEFAULT_SEARCH_BUDGET,
+        },
+        userId,
+        tracker: toolTracker,
+        runId,
+        conversationId,
+        clientRequestId,
+      });
+      if (suppResult.success && suppResult.data?.places && Array.isArray(suppResult.data.places)) {
+        const existingPlaceIds = new Set(leads.map(l => l.placeId));
+        let suppAdded = 0;
+        for (const p of suppResult.data.places as any[]) {
+          const pid = p.place_id || p.id || '';
+          if (pid && !existingPlaceIds.has(pid)) {
+            leads.push({
+              name: p.name || p.displayName?.text || 'Unknown Business',
+              address: p.formatted_address || p.formattedAddress || `${location}, ${country}`,
+              phone: p.phone || p.nationalPhoneNumber || p.internationalPhoneNumber || null,
+              website: p.website || p.websiteUri || null,
+              placeId: pid,
+              source: 'google_places',
+              lat: typeof p.lat === 'number' ? p.lat : (p.geometry?.location?.lat ?? null),
+              lng: typeof p.lng === 'number' ? p.lng : (p.geometry?.location?.lng ?? null),
+            });
+            suppAdded++;
+          }
+        }
+        candidateCountFromGoogle += suppAdded;
+        console.log(`[MISSION_EXEC] Supplementary search added ${suppAdded} new leads (total now: ${leads.length})`);
+      }
+    } catch (suppErr: any) {
+      console.warn(`[MISSION_EXEC] Supplementary search failed (non-fatal): ${suppErr.message}`);
+    }
   }
 
   const searchStepEnd = Date.now();
@@ -707,6 +840,32 @@ export async function executeMissionDrivenPlan(
     runType: 'plan',
     metadata: { step: 1, tool: 'SEARCH_PLACES', leads_count: leads.length },
   });
+
+  let excludedCandidates: Array<{ name: string; reason: string }> = [];
+  if (intentNarrative && intentNarrative.entity_exclusions.length > 0 && leads.length > 0) {
+    console.log(`[MISSION_EXEC] === Phase: EXCLUSION_FILTER (${intentNarrative.entity_exclusions.length} exclusion rules) ===`);
+    const filterResult = await filterByEntityExclusions(leads, intentNarrative);
+    excludedCandidates = filterResult.excluded;
+    leads = filterResult.kept;
+    if (filterResult.excluded.length > 0) {
+      await createArtefact({
+        runId,
+        type: 'exclusion_filter',
+        title: `Exclusion filter: ${filterResult.excluded.length} removed, ${filterResult.kept.length} kept`,
+        summary: `Removed ${filterResult.excluded.length} candidates matching entity_exclusions before website visits`,
+        payload: {
+          execution_source: 'mission',
+          entity_exclusions: intentNarrative.entity_exclusions,
+          key_discriminator: intentNarrative.key_discriminator,
+          excluded_count: filterResult.excluded.length,
+          kept_count: filterResult.kept.length,
+          excluded: filterResult.excluded,
+        },
+        userId,
+        conversationId,
+      }).catch((e: any) => console.warn(`[MISSION_EXEC] exclusion_filter artefact failed (non-fatal): ${e.message}`));
+    }
+  }
 
   const evidenceResults: EvidenceResult[] = [];
 
@@ -1142,7 +1301,16 @@ export async function executeMissionDrivenPlan(
     c => c.type === 'location_constraint' && c.hardness === 'soft',
   ) || softConstraints.length > 0;
 
-  if (hasShortfall && locationIsSoft && !checkDeadline()) {
+  const narrativeAcceptsShortfall = (() => {
+    if (!intentNarrative || !hasShortfall || leads.length === 0) return false;
+    if (intentNarrative.scarcity_expectation === 'scarce') {
+      console.log(`[BEHAVIOUR_JUDGE] scarcity_expectation="${intentNarrative.scarcity_expectation}" with ${leads.length} leads — accepting shortfall, skipping replan`);
+      return true;
+    }
+    return false;
+  })();
+
+  if (hasShortfall && locationIsSoft && !checkDeadline() && !narrativeAcceptsShortfall) {
     console.log(`[MISSION_EXEC] === Phase: REPLAN (shortfall) ===`);
 
     while (replansUsed < MAX_REPLANS && leads.length < (requestedCount ?? 0) && !checkDeadline()) {
@@ -1173,10 +1341,11 @@ export async function executeMissionDrivenPlan(
 
       try {
         runToolCallCount++;
+        const replanQuery = intentNarrative?.entity_description ?? currentBusinessType;
         const reSearchResult = await executeAction({
           toolName: 'SEARCH_PLACES',
           toolArgs: {
-            query: currentBusinessType,
+            query: replanQuery,
             location: currentLocation,
             country,
             maxResults: currentSearchBudget,
@@ -1249,6 +1418,52 @@ export async function executeMissionDrivenPlan(
           if (newLeadsAdded === 0) {
             console.log(`[MISSION_EXEC] Replan v${planVersion}: no new leads found — stopping replans`);
             break;
+          }
+        }
+
+        if (replansUsed === 1 && intentNarrative && intentNarrative.suggested_approaches.length > 1) {
+          const altQuery = intentNarrative.suggested_approaches[1];
+          console.log(`[BEHAVIOUR_JUDGE] First replan — running suggested_approaches[1] as alternative query: "${altQuery.substring(0, 100)}"`);
+          try {
+            runToolCallCount++;
+            const altResult = await executeAction({
+              toolName: 'SEARCH_PLACES',
+              toolArgs: {
+                query: altQuery,
+                location,
+                country,
+                maxResults: currentSearchBudget,
+                target_count: requestedCount ?? DEFAULT_SEARCH_BUDGET,
+              },
+              userId,
+              tracker: toolTracker,
+              runId,
+              conversationId,
+              clientRequestId,
+            });
+            if (altResult.success && altResult.data?.places && Array.isArray(altResult.data.places)) {
+              const existingAltIds = new Set(leads.map(l => l.placeId));
+              let altAdded = 0;
+              for (const p of altResult.data.places as any[]) {
+                const pid = p.place_id || p.id || '';
+                if (pid && !existingAltIds.has(pid)) {
+                  leads.push({
+                    name: p.name || p.displayName?.text || 'Unknown Business',
+                    address: p.formatted_address || p.formattedAddress || `${location}, ${country}`,
+                    phone: p.phone || p.nationalPhoneNumber || p.internationalPhoneNumber || null,
+                    website: p.website || p.websiteUri || null,
+                    placeId: pid,
+                    source: 'google_places',
+                    lat: typeof p.lat === 'number' ? p.lat : (p.geometry?.location?.lat ?? null),
+                    lng: typeof p.lng === 'number' ? p.lng : (p.geometry?.location?.lng ?? null),
+                  });
+                  altAdded++;
+                }
+              }
+              console.log(`[BEHAVIOUR_JUDGE] suggested_approaches[1] added ${altAdded} new leads (total now: ${leads.length})`);
+            }
+          } catch (altErr: any) {
+            console.warn(`[BEHAVIOUR_JUDGE] suggested_approaches[1] search failed (non-fatal): ${altErr.message}`);
           }
         }
       } catch (reSearchErr: any) {
@@ -1468,6 +1683,14 @@ export async function executeMissionDrivenPlan(
       verification_policy_reason: plan.verification_policy.reason,
       verifiable_constraints: [...new Set(evidenceResults.map(er => er.constraintValue))],
       leads: deliveredLeadsWithEvidence,
+      behaviour_judge: {
+        scarcity_accepted_shortfall: narrativeAcceptsShortfall,
+        wrong_type_excluded_pre_delivery: excludedCandidates.length,
+        wrong_type_candidates: excludedCandidates,
+        narrative_search_used: intentNarrative !== null && intentNarrative.entity_description !== businessType,
+        findability: intentNarrative?.findability ?? null,
+        supplementary_search_fired: intentNarrative !== null && (intentNarrative.findability === 'hard' || intentNarrative.findability === 'very_hard'),
+      },
     },
     userId,
     conversationId,

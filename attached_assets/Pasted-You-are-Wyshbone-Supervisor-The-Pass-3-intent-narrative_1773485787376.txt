@@ -1,0 +1,96 @@
+You are Wyshbone Supervisor. The Pass 3 intent_narrative 
+artefact is being created correctly but is not wired 
+into anything downstream. Fix this in four places.
+
+The intent_narrative object has these fields:
+- entity_description
+- entity_exclusions[]
+- commercial_context
+- key_discriminator
+- findability
+- suggested_approaches[]
+- fallback_intent
+- scarcity_expectation
+- clarification_needed
+- clarification_question
+
+1. GOOGLE PLACES SEARCH QUERY CONSTRUCTION
+   Currently: textQuery = "{entity_category} {location}"
+   
+   Change to use entity_description as the basis 
+   for the search query, not the raw entity_category.
+   
+   Also add a negative context hint where Places 
+   supports it. For example:
+   "independent bottle shops East Sussex craft beer 
+   stockists" instead of "bottle shops East Sussex"
+   
+   If findability = "hard" or "very_hard", also 
+   run the first suggested_approach as an additional 
+   search query alongside the main one.
+
+2. EVIDENCE FILTERING — EXCLUSION CHECK
+   After Google Places returns candidates, before 
+   website visits, add an LLM filter step:
+   
+   For each candidate, check its name and any 
+   available description against entity_exclusions[].
+   
+   Prompt (gpt-4o-mini, per batch of 5):
+   "Given these entity exclusions: {entity_exclusions}
+   And this key discriminator: {key_discriminator}
+   
+   For each of these businesses, classify as:
+   - INCLUDE: likely matches what the user wants
+   - EXCLUDE: matches an exclusion (state which one)
+   - UNCERTAIN: cannot tell without visiting website
+   
+   Businesses: {list of name + any available info}
+   
+   Respond with JSON array:
+   [{ name, decision, reason }]"
+   
+   Remove EXCLUDE candidates before website visits.
+   Mark UNCERTAIN candidates for website verification.
+   Log each exclusion with reason in the artefact.
+
+3. TOWER JUDGEMENT PAYLOAD
+   Add intent_narrative as a field in the Tower 
+   judgement request:
+   
+   {
+     ...existing fields,
+     intent_narrative: {
+       entity_description,
+       entity_exclusions,
+       key_discriminator,
+       scarcity_expectation,
+       findability
+     }
+   }
+   
+   Tower can then evaluate whether delivered leads 
+   match the intent_narrative, not just the raw 
+   constraint list.
+
+4. INTERNAL BEHAVIOUR JUDGE
+   The internal Behaviour Judge (the one that decides 
+   ACCEPT / REPLAN / ESCALATE) currently has no 
+   access to intent_narrative.
+   
+   Pass the full intent_narrative into it so it can:
+   - Check if delivered leads match entity_description
+   - Check if any delivered leads are in 
+     entity_exclusions (flag as wrong type)
+   - Use scarcity_expectation to calibrate whether 
+     low delivery count is acceptable
+   - Use suggested_approaches[1] as the replan 
+     strategy if replanning is needed
+   
+   If any delivered lead matches an entity_exclusion,
+   the judge should flag it as WRONG_TYPE and 
+   recommend a replan with corrected entity filter.
+
+Report what you find at each of the four points 
+before making changes, then implement one at a time 
+and confirm each before moving to the next.
