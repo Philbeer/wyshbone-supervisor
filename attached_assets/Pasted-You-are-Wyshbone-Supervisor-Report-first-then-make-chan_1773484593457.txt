@@ -1,0 +1,61 @@
+You are Wyshbone Supervisor. Report first, then make 
+changes.
+
+1. Remove the following — they are being replaced 
+   by the LLM passes:
+   - regexFallback() in goal-to-constraints.ts 
+     (already deprecated)
+   - sanitizeBusinessType() anywhere it is called
+   - Any regex-based entity or location extraction 
+     that runs before Pass 1 or Pass 2
+
+2. Add Pass 3 to the mission extractor. After Pass 2 
+   produces the StructuredMission, make a third 
+   gpt-4o-mini call that produces an intent narrative:
+
+   Input to Pass 3:
+   - original user message
+   - Pass 2 entity_category
+   - Pass 2 constraints[]
+   - Pass 2 semantic_interpretation
+
+   Output schema (JSON):
+   {
+     "entity_description": "what the user actually 
+       wants — specific and literal",
+     "entity_exclusions": ["list of things that look 
+       similar but are NOT what the user wants"],
+     "commercial_context": "why the user likely wants 
+       this — what they will do with the results",
+     "key_discriminator": "the single most important 
+       thing that separates a correct result from a 
+       plausible but wrong one",
+     "scarcity_expectation": "abundant|moderate|scarce",
+     "ambiguity_flags": ["any parts of the query that 
+       are genuinely unclear"]
+   }
+
+   For "bottle shops in East Sussex that sell craft beer":
+   {
+     "entity_description": "independent retail shops 
+       that stock craft beer from multiple producers",
+     "entity_exclusions": ["breweries selling own beer",
+       "supermarkets", "chain off-licences"],
+     "commercial_context": "likely a brewer or supplier 
+       seeking stockists for their product",
+     "key_discriminator": "sells multiple brands of 
+       craft beer, does not produce its own",
+     "scarcity_expectation": "scarce",
+     "ambiguity_flags": []
+   }
+
+3. Persist the Pass 3 output as a new artefact type 
+   intent_narrative alongside the existing 
+   mission_plan artefact.
+
+4. Pass the intent_narrative into the Tower judgement 
+   payload as a new field so Tower can evaluate 
+   against it.
+
+Report what you find before making changes, then 
+implement.

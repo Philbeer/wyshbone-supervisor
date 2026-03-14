@@ -5,6 +5,7 @@ import {
   type MissionFailureStage,
   type ConstraintChecklist,
   type ImplicitExpansionTrace,
+  type IntentNarrative,
   parseAndValidateMissionJSON,
   MISSION_CONSTRAINT_TYPES,
   MISSION_MODES,
@@ -448,6 +449,43 @@ Semantic input: The user wants 5 vets in London that extract email addresses. Th
 
 Return ONLY valid JSON. No markdown fences, no commentary, no explanation.`;
 
+const PASS3_SYSTEM_PROMPT = `You are an intent analyst for a business search system. You receive a structured description of what a user is searching for and produce a concise intent narrative that captures the real-world meaning behind the query.
+
+Your output helps the evaluation layer decide whether search results are genuinely relevant — not just superficially matching.
+
+INPUT: You will receive the original user message, the extracted entity category, the extracted constraints, and the Pass 1 semantic interpretation.
+
+OUTPUT FORMAT: Return a JSON object with exactly these fields:
+
+{
+  "entity_description": "what the user actually wants — specific and literal, not the category label alone",
+  "entity_exclusions": ["list of things that superficially resemble the target but are NOT what the user wants"],
+  "commercial_context": "why the user likely wants this — what they will do with the results",
+  "key_discriminator": "the single most important thing that separates a correct result from a plausible but wrong one",
+  "scarcity_expectation": "abundant | moderate | scarce",
+  "ambiguity_flags": ["any parts of the query that are genuinely unclear or could be interpreted multiple ways"]
+}
+
+RULES:
+- entity_description must be specific. Do not just repeat the category label. Describe the type of business in plain terms.
+- entity_exclusions must list realistic confusables — things Google Places could return that would look right but are wrong.
+- commercial_context must be a single sentence about the user's likely intent. Do not speculate wildly.
+- key_discriminator must be a single sentence. It is the most important signal Tower should use to accept or reject a result.
+- scarcity_expectation: "abundant" means >50 easily findable results, "moderate" means 10–50, "scarce" means <10 or hard to find.
+- ambiguity_flags: return an empty array [] if there is no genuine ambiguity.
+
+EXAMPLE — "bottle shops in East Sussex that sell craft beer":
+{
+  "entity_description": "independent retail shops that stock craft beer from multiple producers for off-premises consumption",
+  "entity_exclusions": ["breweries selling only their own beer", "supermarkets and off-licences", "pubs with a bottle shop counter", "online-only retailers"],
+  "commercial_context": "likely a brewer or supplier seeking retail stockists for their product range",
+  "key_discriminator": "the shop sells craft beer from multiple independent producers — it does not brew its own",
+  "scarcity_expectation": "scarce",
+  "ambiguity_flags": []
+}
+
+Return ONLY valid JSON. No markdown fences, no commentary, no explanation.`;
+
 export type MissionExtractorMode = 'off' | 'shadow' | 'active';
 
 export function getMissionExtractorMode(): MissionExtractorMode {
@@ -468,6 +506,7 @@ function truncateContext(ctx: string | undefined): string | undefined {
 export interface MissionExtractionResult {
   trace: MissionExtractionTrace;
   mission: StructuredMission | null;
+  intentNarrative: IntentNarrative | null;
   ok: boolean;
 }
 
@@ -607,6 +646,9 @@ export async function extractStructuredMission(
       pass2_structured_mission: null,
       pass2_raw_json: '',
       validation_result: { ok: false, mission: null, errors: ['No LLM API key available'] },
+      pass3_intent_narrative: null,
+      pass3_raw_json: '',
+      pass3_duration_ms: 0,
       model: 'none',
       pass1_duration_ms: 0,
       pass2_duration_ms: 0,
@@ -614,7 +656,7 @@ export async function extractStructuredMission(
       timestamp,
       failure_stage: 'no_api_key',
     };
-    return { trace, mission: null, ok: false };
+    return { trace, mission: null, intentNarrative: null, ok: false };
   }
 
   const truncatedContext = truncateContext(conversationContext);
@@ -640,6 +682,9 @@ export async function extractStructuredMission(
       pass2_structured_mission: null,
       pass2_raw_json: '',
       validation_result: { ok: false, mission: null, errors: [`Pass 1 LLM call failed: ${err.message}`] },
+      pass3_intent_narrative: null,
+      pass3_raw_json: '',
+      pass3_duration_ms: 0,
       model,
       pass1_duration_ms: duration,
       pass2_duration_ms: 0,
@@ -648,7 +693,7 @@ export async function extractStructuredMission(
       failure_stage: 'pass1_llm_call',
     };
     console.error(`[MISSION_EXTRACTOR] Pass 1 failed: ${err.message}`);
-    return { trace, mission: null, ok: false };
+    return { trace, mission: null, intentNarrative: null, ok: false };
   }
   const pass1Duration = Date.now() - pass1Start;
 
@@ -698,6 +743,9 @@ export async function extractStructuredMission(
       pass2_structured_mission: null,
       pass2_raw_json: '',
       validation_result: { ok: false, mission: null, errors: [`Pass 2 LLM call failed: ${err.message}`] },
+      pass3_intent_narrative: null,
+      pass3_raw_json: '',
+      pass3_duration_ms: 0,
       model,
       pass1_duration_ms: pass1Duration,
       pass2_duration_ms: pass2Duration,
@@ -706,7 +754,7 @@ export async function extractStructuredMission(
       failure_stage: 'pass2_llm_call',
     };
     console.error(`[MISSION_EXTRACTOR] Pass 2 failed: ${err.message}`);
-    return { trace, mission: null, ok: false };
+    return { trace, mission: null, intentNarrative: null, ok: false };
   }
   const pass2Duration = Date.now() - pass2Start;
   const totalDuration = pass1Duration + pass2Duration;
@@ -730,6 +778,9 @@ export async function extractStructuredMission(
       pass2_structured_mission: null,
       pass2_raw_json: pass2RawResponse,
       validation_result: validation,
+      pass3_intent_narrative: null,
+      pass3_raw_json: '',
+      pass3_duration_ms: 0,
       model,
       pass1_duration_ms: pass1Duration,
       pass2_duration_ms: pass2Duration,
@@ -738,13 +789,61 @@ export async function extractStructuredMission(
       failure_stage: 'pass2_json_parse',
     };
     console.error(`[MISSION_EXTRACTOR] Pass 2 JSON parse failed`);
-    return { trace, mission: null, ok: false };
+    return { trace, mission: null, intentNarrative: null, ok: false };
   }
 
   const cleaned = cleanupMissionValues(parsedRaw);
   const validation = parseAndValidateMissionJSON(JSON.stringify(cleaned));
 
   const failureStage: MissionFailureStage = validation.ok ? 'none' : 'pass2_schema_validation';
+
+  let pass3IntentNarrative: IntentNarrative | null = null;
+  let pass3RawJson = '';
+  let pass3DurationMs = 0;
+
+  if (validation.ok && validation.mission) {
+    const mission = validation.mission;
+    const pass3Prompt = `Original user message: "${userMessage}"
+
+Extracted entity category: "${mission.entity_category}"
+Pass 1 semantic interpretation: "${pass1Result}"
+Extracted constraints: ${JSON.stringify(mission.constraints, null, 2)}
+
+Produce the intent narrative JSON for this search.`;
+
+    const pass3Start = Date.now();
+    try {
+      pass3RawJson = await callLLM(model, PASS3_SYSTEM_PROMPT, pass3Prompt);
+      pass3DurationMs = Date.now() - pass3Start;
+      const pass3Cleaned = cleanJsonResponse(pass3RawJson);
+      const pass3Parsed = JSON.parse(pass3Cleaned);
+      if (
+        pass3Parsed &&
+        typeof pass3Parsed.entity_description === 'string' &&
+        Array.isArray(pass3Parsed.entity_exclusions) &&
+        typeof pass3Parsed.commercial_context === 'string' &&
+        typeof pass3Parsed.key_discriminator === 'string' &&
+        typeof pass3Parsed.scarcity_expectation === 'string' &&
+        Array.isArray(pass3Parsed.ambiguity_flags)
+      ) {
+        const scarcity = pass3Parsed.scarcity_expectation;
+        pass3IntentNarrative = {
+          entity_description: pass3Parsed.entity_description,
+          entity_exclusions: pass3Parsed.entity_exclusions,
+          commercial_context: pass3Parsed.commercial_context,
+          key_discriminator: pass3Parsed.key_discriminator,
+          scarcity_expectation: (scarcity === 'abundant' || scarcity === 'moderate' || scarcity === 'scarce') ? scarcity : 'moderate',
+          ambiguity_flags: pass3Parsed.ambiguity_flags,
+        };
+        console.log(`[MISSION_EXTRACTOR] Pass 3 — discriminator="${pass3IntentNarrative.key_discriminator}" scarcity=${pass3IntentNarrative.scarcity_expectation} exclusions=${pass3IntentNarrative.entity_exclusions.length} duration=${pass3DurationMs}ms`);
+      } else {
+        console.warn(`[MISSION_EXTRACTOR] Pass 3 returned unexpected shape — skipping (non-fatal)`);
+      }
+    } catch (err: any) {
+      pass3DurationMs = Date.now() - pass3Start;
+      console.warn(`[MISSION_EXTRACTOR] Pass 3 failed (non-fatal): ${err.message}`);
+    }
+  }
 
   const trace: MissionExtractionTrace = {
     raw_user_input: userMessage,
@@ -754,10 +853,13 @@ export async function extractStructuredMission(
     pass2_structured_mission: validation.mission,
     pass2_raw_json: pass2RawResponse,
     validation_result: validation,
+    pass3_intent_narrative: pass3IntentNarrative,
+    pass3_raw_json: pass3RawJson,
+    pass3_duration_ms: pass3DurationMs,
     model,
     pass1_duration_ms: pass1Duration,
     pass2_duration_ms: pass2Duration,
-    total_duration_ms: totalDuration,
+    total_duration_ms: totalDuration + pass3DurationMs,
     timestamp,
     failure_stage: failureStage,
   };
@@ -767,7 +869,7 @@ export async function extractStructuredMission(
       `[MISSION_EXTRACTOR] Success — entity="${validation.mission!.entity_category}" ` +
       `location="${validation.mission!.location_text}" mode="${validation.mission!.mission_mode}" ` +
       `constraints=${validation.mission!.constraints.length} model=${model} ` +
-      `pass1=${pass1Duration}ms pass2=${pass2Duration}ms total=${totalDuration}ms`
+      `pass1=${pass1Duration}ms pass2=${pass2Duration}ms pass3=${pass3DurationMs}ms total=${totalDuration + pass3DurationMs}ms`
     );
   } else {
     console.warn(
@@ -776,5 +878,5 @@ export async function extractStructuredMission(
     );
   }
 
-  return { trace, mission: validation.mission, ok: validation.ok };
+  return { trace, mission: validation.mission, intentNarrative: pass3IntentNarrative, ok: validation.ok };
 }

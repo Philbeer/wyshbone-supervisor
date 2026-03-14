@@ -248,6 +248,15 @@ export interface ImplicitExpansionTrace {
   had_addendum: boolean;
 }
 
+export interface IntentNarrative {
+  entity_description: string;
+  entity_exclusions: string[];
+  commercial_context: string;
+  key_discriminator: string;
+  scarcity_expectation: 'abundant' | 'moderate' | 'scarce';
+  ambiguity_flags: string[];
+}
+
 export interface MissionExtractionTrace {
   raw_user_input: string;
   pass1_semantic_interpretation: string;
@@ -256,6 +265,9 @@ export interface MissionExtractionTrace {
   pass2_structured_mission: StructuredMission | null;
   pass2_raw_json: string;
   validation_result: MissionValidationResult;
+  pass3_intent_narrative: IntentNarrative | null;
+  pass3_raw_json: string;
+  pass3_duration_ms: number;
   model: string;
   pass1_duration_ms: number;
   pass2_duration_ms: number;

@@ -2198,6 +2198,7 @@ class SupervisorService {
           clientRequestId,
           rawUserInput: rawMsg.trim(),
           missionTrace: missionResult!.trace,
+          intentNarrative: missionResult!.intentNarrative ?? null,
         };
         towerResult = await executeMissionDrivenPlan(missionCtx);
       } else {

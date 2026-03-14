@@ -1,4 +1,4 @@
-import type { StructuredMission, MissionConstraint, MissionExtractionTrace, EvidenceRequirement } from './mission-schema';
+import type { StructuredMission, MissionConstraint, MissionExtractionTrace, EvidenceRequirement, IntentNarrative } from './mission-schema';
 import { defaultEvidenceRequirement } from './mission-schema';
 import { extractConstraintLedEvidence, type ConstraintLedExtractionResult, type EvidenceItem, getPageHintsForConstraint } from './constraint-led-extractor';
 import type {
@@ -55,6 +55,7 @@ export interface MissionExecutionContext {
   clientRequestId?: string;
   rawUserInput: string;
   missionTrace: MissionExtractionTrace;
+  intentNarrative: IntentNarrative | null;
 }
 
 export interface MissionExecutionResult {
@@ -412,7 +413,7 @@ function buildStructuredConstraints(mission: StructuredMission): StructuredConst
 export async function executeMissionDrivenPlan(
   ctx: MissionExecutionContext,
 ): Promise<MissionExecutionResult> {
-  const { mission, plan, runId, userId, conversationId, clientRequestId, rawUserInput, missionTrace } = ctx;
+  const { mission, plan, runId, userId, conversationId, clientRequestId, rawUserInput, missionTrace, intentNarrative } = ctx;
   const { businessType, location, country, requestedCount, searchBudget } = deriveSearchParams(mission);
 
   const MAX_REPLANS = Math.min(
@@ -534,6 +535,18 @@ export async function executeMissionDrivenPlan(
       userId,
       conversationId,
     });
+  }
+
+  if (intentNarrative) {
+    await createArtefact({
+      runId,
+      type: 'intent_narrative',
+      title: 'Intent Narrative (Pass 3)',
+      summary: `entity="${intentNarrative.entity_description.substring(0, 80)}" scarcity=${intentNarrative.scarcity_expectation} exclusions=${intentNarrative.entity_exclusions.length}`,
+      payload: intentNarrative as unknown as Record<string, unknown>,
+      userId,
+      conversationId,
+    }).catch((e: any) => console.warn(`[MISSION_EXEC] intent_narrative artefact failed (non-fatal): ${e.message}`));
   }
 
   await logAFREvent({
@@ -1483,6 +1496,7 @@ export async function executeMissionDrivenPlan(
     run_deadline_exceeded: runDeadlineExceeded,
     verification_policy: plan.verification_policy.verification_policy,
     verification_policy_reason: plan.verification_policy.reason,
+    intent_narrative: intentNarrative ?? null,
   };
 
   try {
