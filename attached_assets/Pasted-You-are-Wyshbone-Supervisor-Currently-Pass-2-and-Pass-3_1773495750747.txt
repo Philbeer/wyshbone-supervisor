@@ -1,0 +1,99 @@
+You are Wyshbone Supervisor. Currently 
+Pass 2 and Pass 3 run independently from 
+the raw query. Pass 3 correctly interprets 
+intent but Pass 2 ignores it and extracts 
+constraints from raw text, producing wrong 
+constraints like relationship_check: "brewery" 
+for a query where brewery is an exclusion.
+
+Fix the pipeline order:
+
+CURRENT ORDER:
+raw query → Pass 1 (semantic interpretation)
+raw query → Pass 2 (constraint extraction)  
+raw query → Pass 3 (intent narrative)
+
+NEW ORDER:
+raw query → Pass 1 (semantic interpretation)
+Pass 1 output → Pass 3 (intent narrative)
+Pass 3 output → Pass 2 (constraint extraction)
+
+Changes required:
+
+1. Move Pass 3 to run BEFORE Pass 2 in 
+   extractStructuredMission().
+
+2. Pass 2 now receives as input:
+   - original user message
+   - Pass 1 semantic_interpretation
+   - Pass 3 intent_narrative fields:
+     * entity_description
+     * entity_exclusions[]
+     * commercial_context
+     * key_discriminator
+     * suggested_approaches[]
+
+3. Update the PASS2_SYSTEM_PROMPT to 
+   instruct the model:
+
+   "You are extracting verifiable constraints 
+   for a business search agent. You have 
+   already been given a rich interpretation 
+   of what the user wants. Use it.
+
+   The entity_description tells you what 
+   the user actually wants.
+   The entity_exclusions tell you what 
+   looks similar but is wrong.
+   The key_discriminator is the single 
+   most important signal.
+
+   Extract ONLY constraints that:
+   1. Can be verified by visiting a 
+      business website or checking 
+      a directory
+   2. Follow from the entity_description 
+      and key_discriminator — NOT from 
+      the literal words of the raw query
+   3. Would genuinely distinguish a 
+      correct result from an exclusion
+
+   For example:
+   - entity_description: independent retail 
+     shops stocking craft beer from multiple 
+     producers
+   - key_discriminator: sells multiple brands, 
+     not own production
+   - entity_exclusions: breweries selling 
+     own beer
+   → Correct constraint: 
+     website_evidence: 'craft beer' or 
+     'independent bottle shop'
+   → WRONG constraint: 
+     relationship_check: 'brewery' 
+     (this is an exclusion signal, not 
+     a verification target)
+
+   If no constraint can be reliably verified 
+   from a website visit, return an empty 
+   constraints array. A discovery_only 
+   strategy with good entity filtering is 
+   better than a wrong constraint."
+
+4. Pass 3 should still also receive 
+   conversation context (already wired).
+   Pass 2 should receive Pass 3 output 
+   as its primary context.
+
+5. Log the new order:
+   [MISSION] Pass 1 complete
+   [MISSION] Pass 3 complete — 
+     entity: {entity_description}
+   [MISSION] Pass 2 complete — 
+     constraints derived from Pass 3: 
+     {constraints}
+
+Show before/after for the bottle shop 
+query — what Pass 2 produced before vs 
+what it should produce after with 
+Pass 3 as input.

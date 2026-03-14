@@ -215,7 +215,30 @@ Output:
 
 Return ONLY valid JSON matching this structure. No markdown fences, no commentary.`;
 
-const PASS2_SYSTEM_PROMPT = `You are a schema mapper for a business search system. You receive a clean semantic interpretation of a user request. Your job is to convert it into a fixed JSON schema using ONLY the allowed types, operators, and values.
+const PASS2_SYSTEM_PROMPT = `You are a schema mapper for a business search system. You receive a clean semantic interpretation of a user request and, when available, an INTENT ANALYSIS CONTEXT section produced by a prior intent analysis pass. Your job is to convert the semantic interpretation into a fixed JSON schema using ONLY the allowed types, operators, and values.
+
+WHEN INTENT ANALYSIS CONTEXT IS PROVIDED, follow these rules before extracting any constraint:
+- entity_description tells you what the user actually wants. Use this, not the raw query phrasing, as your primary guide.
+- entity_exclusions list things that look similar but are wrong. These are NOT constraints to verify — they are exclusion signals. NEVER create a constraint whose value matches or targets something in entity_exclusions.
+- key_discriminator is the single most important signal separating a correct result from a plausible-but-wrong one. Ground your constraints in this signal.
+- commercial_context explains why the user wants this. If a phrase in the raw query is better explained by commercial_context than by a verifiable constraint, do NOT create a constraint for it.
+
+Extract ONLY constraints that:
+1. Can be verified by visiting a business website or checking a directory
+2. Follow from the entity_description and key_discriminator — NOT from literal words in the raw query
+3. Would genuinely distinguish a correct result from something in entity_exclusions
+
+EXAMPLE — bottle shop query:
+- entity_description: independent retail shops stocking craft beer from multiple producers
+- entity_exclusions: ["breweries selling their own beer", "supermarkets and chain off-licences"]
+- key_discriminator: sells multiple brands of craft beer — not a single producer's own products
+- commercial_context: brewery owner seeking retail stockists for their product
+→ CORRECT constraint: website_evidence containing "craft beer" or "bottle shop" or "independent off-licence"
+→ WRONG constraint: relationship_check for "brewery" — brewery appears in entity_exclusions, NOT as a target
+→ WRONG constraint: any constraint derived from "sell my beer from my brewery" — this is commercial_context only
+
+If no constraint can be reliably verified from a website visit, return an empty constraints array. A clean entity_category with good discovery is always better than a wrong constraint.
+
 
 OUTPUT SCHEMA (return ONLY this JSON object, no markdown fences, no commentary):
 {
@@ -455,10 +478,10 @@ Think like an experienced human researcher who understands what is and isn't fin
 
 INPUT:
 - original_message: the user's raw input
-- entity_category: what was extracted
-- constraints: the structured constraint list
-- semantic_interpretation: Pass 1 output
+- semantic_interpretation: Pass 1 output — a clean restatement of what the user is asking for
 - conversation_context: (optional) prior conversation turns. If this shows the user was previously asked a clarification question and has now answered it, set clarification_needed=false and proceed with what they have provided — do not ask again unless genuinely still unclear.
+
+NOTE: You run BEFORE structured constraint extraction. Your entity_description, entity_exclusions, and key_discriminator will be used to guide the constraint extractor — so be precise about what is a genuine search constraint versus what is the user's commercial motivation or context.
 
 OUTPUT SCHEMA (JSON only, no markdown):
 {
@@ -779,7 +802,81 @@ export async function extractStructuredMission(
     console.log(`[MISSION_EXTRACTOR] Pass 2 input enriched with addendum: "${expansion.semantic_addendum}"`);
   }
 
-  const pass2Prompt = `Convert this semantic interpretation into the structured mission JSON schema:\n\n"${pass2Input}"`;
+  console.log(`[MISSION] Pass 1 complete`);
+
+  // === PASS 3: intent narrative — runs BEFORE Pass 2 to guide constraint extraction ===
+  let pass3IntentNarrative: IntentNarrative | null = null;
+  let pass3RawJson = '';
+  let pass3DurationMs = 0;
+
+  const pass3Prompt = `Original user message: "${userMessage}"
+
+Pass 1 semantic interpretation: "${pass1Result}"
+${truncatedContext ? `\nConversation context (prior turns):\n${truncatedContext}\n` : ''}
+Produce the intent narrative JSON for this search.`;
+
+  const pass3Start = Date.now();
+  try {
+    pass3RawJson = await callLLM(model, PASS3_SYSTEM_PROMPT, pass3Prompt);
+    pass3DurationMs = Date.now() - pass3Start;
+    const pass3Cleaned = cleanJsonResponse(pass3RawJson);
+    const pass3Parsed = JSON.parse(pass3Cleaned);
+    if (
+      pass3Parsed &&
+      typeof pass3Parsed.entity_description === 'string' &&
+      Array.isArray(pass3Parsed.entity_exclusions) &&
+      typeof pass3Parsed.commercial_context === 'string' &&
+      typeof pass3Parsed.key_discriminator === 'string' &&
+      typeof pass3Parsed.findability === 'string' &&
+      typeof pass3Parsed.findability_reason === 'string' &&
+      Array.isArray(pass3Parsed.suggested_approaches) &&
+      typeof pass3Parsed.fallback_intent === 'string' &&
+      typeof pass3Parsed.scarcity_expectation === 'string' &&
+      typeof pass3Parsed.clarification_needed === 'boolean' &&
+      Array.isArray(pass3Parsed.ambiguity_flags)
+    ) {
+      const scarcity = pass3Parsed.scarcity_expectation;
+      const findability = pass3Parsed.findability;
+      pass3IntentNarrative = {
+        entity_description: pass3Parsed.entity_description,
+        entity_exclusions: pass3Parsed.entity_exclusions,
+        commercial_context: pass3Parsed.commercial_context,
+        key_discriminator: pass3Parsed.key_discriminator,
+        findability: (findability === 'easy' || findability === 'moderate' || findability === 'hard' || findability === 'very_hard') ? findability : 'moderate',
+        findability_reason: pass3Parsed.findability_reason,
+        suggested_approaches: pass3Parsed.suggested_approaches,
+        fallback_intent: pass3Parsed.fallback_intent,
+        scarcity_expectation: (scarcity === 'abundant' || scarcity === 'moderate' || scarcity === 'scarce' || scarcity === 'unknown') ? scarcity : 'unknown',
+        clarification_needed: pass3Parsed.clarification_needed,
+        clarification_question: typeof pass3Parsed.clarification_question === 'string' ? pass3Parsed.clarification_question : null,
+        ambiguity_flags: pass3Parsed.ambiguity_flags,
+      };
+      console.log(`[MISSION] Pass 3 complete — entity: ${pass3IntentNarrative.entity_description.substring(0, 100)}`);
+      console.log(`[MISSION_EXTRACTOR] Pass 3 — findability=${pass3IntentNarrative.findability} scarcity=${pass3IntentNarrative.scarcity_expectation} clarification_needed=${pass3IntentNarrative.clarification_needed} exclusions=${pass3IntentNarrative.entity_exclusions.length} duration=${pass3DurationMs}ms`);
+    } else {
+      console.warn(`[MISSION_EXTRACTOR] Pass 3 returned unexpected shape — skipping (non-fatal), Pass 2 will run without context`);
+    }
+  } catch (err: any) {
+    pass3DurationMs = Date.now() - pass3Start;
+    console.warn(`[MISSION_EXTRACTOR] Pass 3 failed (non-fatal): ${err.message} — Pass 2 will run without context`);
+  }
+
+  // === PASS 2: schema mapping — receives Pass 3 context when available ===
+  let pass2Prompt: string;
+  if (pass3IntentNarrative) {
+    pass2Prompt = `INTENT ANALYSIS CONTEXT (use this to guide constraint extraction):
+entity_description: ${pass3IntentNarrative.entity_description}
+entity_exclusions: ${JSON.stringify(pass3IntentNarrative.entity_exclusions)}
+commercial_context: ${pass3IntentNarrative.commercial_context}
+key_discriminator: ${pass3IntentNarrative.key_discriminator}
+suggested_approaches: ${JSON.stringify(pass3IntentNarrative.suggested_approaches)}
+
+Convert this semantic interpretation into the structured mission JSON schema:
+
+"${pass2Input}"`;
+  } else {
+    pass2Prompt = `Convert this semantic interpretation into the structured mission JSON schema:\n\n"${pass2Input}"`;
+  }
 
   let pass2RawResponse = '';
   const pass2Start = Date.now();
@@ -787,7 +884,7 @@ export async function extractStructuredMission(
     pass2RawResponse = await callLLM(model, PASS2_SYSTEM_PROMPT, pass2Prompt);
   } catch (err: any) {
     const pass2Duration = Date.now() - pass2Start;
-    const totalDuration = pass1Duration + pass2Duration;
+    const totalDuration = pass1Duration + pass3DurationMs + pass2Duration;
     const trace: MissionExtractionTrace = {
       raw_user_input: userMessage,
       pass1_semantic_interpretation: pass1Result,
@@ -796,9 +893,9 @@ export async function extractStructuredMission(
       pass2_structured_mission: null,
       pass2_raw_json: '',
       validation_result: { ok: false, mission: null, errors: [`Pass 2 LLM call failed: ${err.message}`] },
-      pass3_intent_narrative: null,
-      pass3_raw_json: '',
-      pass3_duration_ms: 0,
+      pass3_intent_narrative: pass3IntentNarrative,
+      pass3_raw_json: pass3RawJson,
+      pass3_duration_ms: pass3DurationMs,
       model,
       pass1_duration_ms: pass1Duration,
       pass2_duration_ms: pass2Duration,
@@ -807,10 +904,10 @@ export async function extractStructuredMission(
       failure_stage: 'pass2_llm_call',
     };
     console.error(`[MISSION_EXTRACTOR] Pass 2 failed: ${err.message}`);
-    return { trace, mission: null, intentNarrative: null, ok: false };
+    return { trace, mission: null, intentNarrative: pass3IntentNarrative, ok: false };
   }
   const pass2Duration = Date.now() - pass2Start;
-  const totalDuration = pass1Duration + pass2Duration;
+  const totalDuration = pass1Duration + pass3DurationMs + pass2Duration;
 
   const cleanedJson = cleanJsonResponse(pass2RawResponse);
 
@@ -831,9 +928,9 @@ export async function extractStructuredMission(
       pass2_structured_mission: null,
       pass2_raw_json: pass2RawResponse,
       validation_result: validation,
-      pass3_intent_narrative: null,
-      pass3_raw_json: '',
-      pass3_duration_ms: 0,
+      pass3_intent_narrative: pass3IntentNarrative,
+      pass3_raw_json: pass3RawJson,
+      pass3_duration_ms: pass3DurationMs,
       model,
       pass1_duration_ms: pass1Duration,
       pass2_duration_ms: pass2Duration,
@@ -842,7 +939,7 @@ export async function extractStructuredMission(
       failure_stage: 'pass2_json_parse',
     };
     console.error(`[MISSION_EXTRACTOR] Pass 2 JSON parse failed`);
-    return { trace, mission: null, intentNarrative: null, ok: false };
+    return { trace, mission: null, intentNarrative: pass3IntentNarrative, ok: false };
   }
 
   const cleaned = cleanupMissionValues(parsedRaw);
@@ -850,64 +947,8 @@ export async function extractStructuredMission(
 
   const failureStage: MissionFailureStage = validation.ok ? 'none' : 'pass2_schema_validation';
 
-  let pass3IntentNarrative: IntentNarrative | null = null;
-  let pass3RawJson = '';
-  let pass3DurationMs = 0;
-
   if (validation.ok && validation.mission) {
-    const mission = validation.mission;
-    const pass3Prompt = `Original user message: "${userMessage}"
-
-Extracted entity category: "${mission.entity_category}"
-Pass 1 semantic interpretation: "${pass1Result}"
-Extracted constraints: ${JSON.stringify(mission.constraints, null, 2)}
-${truncatedContext ? `\nConversation context (prior turns):\n${truncatedContext}\n` : ''}
-Produce the intent narrative JSON for this search.`;
-
-    const pass3Start = Date.now();
-    try {
-      pass3RawJson = await callLLM(model, PASS3_SYSTEM_PROMPT, pass3Prompt);
-      pass3DurationMs = Date.now() - pass3Start;
-      const pass3Cleaned = cleanJsonResponse(pass3RawJson);
-      const pass3Parsed = JSON.parse(pass3Cleaned);
-      if (
-        pass3Parsed &&
-        typeof pass3Parsed.entity_description === 'string' &&
-        Array.isArray(pass3Parsed.entity_exclusions) &&
-        typeof pass3Parsed.commercial_context === 'string' &&
-        typeof pass3Parsed.key_discriminator === 'string' &&
-        typeof pass3Parsed.findability === 'string' &&
-        typeof pass3Parsed.findability_reason === 'string' &&
-        Array.isArray(pass3Parsed.suggested_approaches) &&
-        typeof pass3Parsed.fallback_intent === 'string' &&
-        typeof pass3Parsed.scarcity_expectation === 'string' &&
-        typeof pass3Parsed.clarification_needed === 'boolean' &&
-        Array.isArray(pass3Parsed.ambiguity_flags)
-      ) {
-        const scarcity = pass3Parsed.scarcity_expectation;
-        const findability = pass3Parsed.findability;
-        pass3IntentNarrative = {
-          entity_description: pass3Parsed.entity_description,
-          entity_exclusions: pass3Parsed.entity_exclusions,
-          commercial_context: pass3Parsed.commercial_context,
-          key_discriminator: pass3Parsed.key_discriminator,
-          findability: (findability === 'easy' || findability === 'moderate' || findability === 'hard' || findability === 'very_hard') ? findability : 'moderate',
-          findability_reason: pass3Parsed.findability_reason,
-          suggested_approaches: pass3Parsed.suggested_approaches,
-          fallback_intent: pass3Parsed.fallback_intent,
-          scarcity_expectation: (scarcity === 'abundant' || scarcity === 'moderate' || scarcity === 'scarce' || scarcity === 'unknown') ? scarcity : 'unknown',
-          clarification_needed: pass3Parsed.clarification_needed,
-          clarification_question: typeof pass3Parsed.clarification_question === 'string' ? pass3Parsed.clarification_question : null,
-          ambiguity_flags: pass3Parsed.ambiguity_flags,
-        };
-        console.log(`[MISSION_EXTRACTOR] Pass 3 — findability=${pass3IntentNarrative.findability} scarcity=${pass3IntentNarrative.scarcity_expectation} clarification_needed=${pass3IntentNarrative.clarification_needed} exclusions=${pass3IntentNarrative.entity_exclusions.length} duration=${pass3DurationMs}ms`);
-      } else {
-        console.warn(`[MISSION_EXTRACTOR] Pass 3 returned unexpected shape — skipping (non-fatal)`);
-      }
-    } catch (err: any) {
-      pass3DurationMs = Date.now() - pass3Start;
-      console.warn(`[MISSION_EXTRACTOR] Pass 3 failed (non-fatal): ${err.message}`);
-    }
+    console.log(`[MISSION] Pass 2 complete — constraints derived from Pass 3: ${JSON.stringify(validation.mission.constraints)}`);
   }
 
   const trace: MissionExtractionTrace = {
@@ -924,7 +965,7 @@ Produce the intent narrative JSON for this search.`;
     model,
     pass1_duration_ms: pass1Duration,
     pass2_duration_ms: pass2Duration,
-    total_duration_ms: totalDuration + pass3DurationMs,
+    total_duration_ms: totalDuration,
     timestamp,
     failure_stage: failureStage,
   };
@@ -934,7 +975,7 @@ Produce the intent narrative JSON for this search.`;
       `[MISSION_EXTRACTOR] Success — entity="${validation.mission!.entity_category}" ` +
       `location="${validation.mission!.location_text}" mode="${validation.mission!.mission_mode}" ` +
       `constraints=${validation.mission!.constraints.length} model=${model} ` +
-      `pass1=${pass1Duration}ms pass2=${pass2Duration}ms pass3=${pass3DurationMs}ms total=${totalDuration + pass3DurationMs}ms`
+      `pass1=${pass1Duration}ms pass3=${pass3DurationMs}ms pass2=${pass2Duration}ms total=${totalDuration}ms`
     );
   } else {
     console.warn(
