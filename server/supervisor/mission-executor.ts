@@ -410,6 +410,72 @@ function buildStructuredConstraints(mission: StructuredMission): StructuredConst
   });
 }
 
+interface GeneratedQuery {
+  query: string;
+  rationale: string;
+}
+
+async function generatePlacesQueries(
+  intentNarrative: IntentNarrative,
+  fallbackQuery: string,
+): Promise<GeneratedQuery[]> {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    console.warn('[PLACES] OPENAI_API_KEY not set — using fallback query');
+    return [{ query: fallbackQuery, rationale: 'fallback — no API key' }];
+  }
+
+  const { default: OpenAI } = await import('openai');
+  const client = new OpenAI({ apiKey: openaiKey });
+
+  const prompt = `You are a Google Places search expert. Generate 3-5 search queries that will find the best results in Google Places for this business type.
+
+Entity the user wants:
+${intentNarrative.entity_description}
+
+Key discriminator (what makes a result correct):
+${intentNarrative.key_discriminator}
+
+Things to avoid:
+${JSON.stringify(intentNarrative.entity_exclusions)}
+
+Suggested approaches:
+${intentNarrative.suggested_approaches.join('\n')}
+
+Rules:
+- Each query should use different keywords to maximise coverage
+- Prefer specific terms over generic ones
+- Google Places works best with short noun phrases like "craft beer shop" or "independent off licence"
+- Do not include location — that is added separately
+- Order queries from most specific to least specific
+
+Respond with JSON only:
+{
+  "queries": [
+    { "query": "craft beer bottle shop", "rationale": "most specific term" },
+    ...
+  ]
+}`;
+
+  try {
+    const resp = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.2,
+      max_tokens: 512,
+      response_format: { type: 'json_object' },
+    });
+    const raw = (resp.choices[0]?.message?.content ?? '').trim();
+    const parsed = JSON.parse(raw) as { queries: GeneratedQuery[] };
+    const queries = parsed.queries?.filter(q => typeof q.query === 'string' && q.query.trim()) ?? [];
+    if (queries.length === 0) throw new Error('empty queries array');
+    return queries.slice(0, 5);
+  } catch (err: any) {
+    console.warn(`[PLACES] Query generation failed (non-fatal): ${err.message} — using fallback`);
+    return [{ query: fallbackQuery, rationale: 'fallback — query generation failed' }];
+  }
+}
+
 interface ExclusionFilterResult {
   kept: DiscoveredLead[];
   excluded: Array<{ name: string; reason: string }>;
@@ -714,68 +780,53 @@ export async function executeMissionDrivenPlan(
   }
 
   console.log(`[MISSION_EXEC] === Phase: SEARCH_PLACES ===`);
-  const primarySearchQuery = intentNarrative?.entity_description ?? currentBusinessType;
-  if (intentNarrative?.entity_description) {
-    console.log(`[MISSION_EXEC] Using entity_description as search query: "${primarySearchQuery.substring(0, 100)}"`);
-  }
   const searchStepStart = Date.now();
-  try {
-    runToolCallCount++;
-    const searchResult = await executeAction({
-      toolName: 'SEARCH_PLACES',
-      toolArgs: {
-        query: primarySearchQuery,
-        location: currentLocation,
-        country,
-        maxResults: currentSearchBudget,
-        target_count: requestedCount ?? DEFAULT_SEARCH_BUDGET,
-      },
-      userId,
-      tracker: toolTracker,
-      runId,
-      conversationId,
-      clientRequestId,
-    });
 
-    if (searchResult.success && searchResult.data?.places && Array.isArray(searchResult.data.places)) {
-      const places = searchResult.data.places as any[];
-      candidateCountFromGoogle = places.length;
-      for (const p of places) {
-        leads.push({
-          name: p.name || p.displayName?.text || 'Unknown Business',
-          address: p.formatted_address || p.formattedAddress || `${location}, ${country}`,
-          phone: p.phone || p.nationalPhoneNumber || p.internationalPhoneNumber || null,
-          website: p.website || p.websiteUri || null,
-          placeId: p.place_id || p.id || '',
-          source: 'google_places',
-          lat: typeof p.lat === 'number' ? p.lat : (p.geometry?.location?.lat ?? null),
-          lng: typeof p.lng === 'number' ? p.lng : (p.geometry?.location?.lng ?? null),
-        });
-      }
-      console.log(`[MISSION_EXEC] SEARCH_PLACES (primary) returned ${leads.length} results`);
-    } else {
-      console.log(`[MISSION_EXEC] SEARCH_PLACES (primary) returned 0 results or failed`);
-    }
-  } catch (searchErr: any) {
-    console.warn(`[MISSION_EXEC] SEARCH_PLACES failed: ${searchErr.message}`);
+  const fallbackQuery = currentBusinessType;
+  let generatedQueries: GeneratedQuery[];
+  if (intentNarrative) {
+    console.log(`[PLACES] Generating optimised queries from intent_narrative for "${intentNarrative.entity_description.substring(0, 80)}"`);
+    generatedQueries = await generatePlacesQueries(intentNarrative, fallbackQuery);
+  } else {
+    generatedQueries = [{ query: fallbackQuery, rationale: 'no intent_narrative — using entity_category' }];
   }
 
-  if (
-    intentNarrative &&
-    (intentNarrative.findability === 'hard' || intentNarrative.findability === 'very_hard') &&
-    intentNarrative.suggested_approaches.length > 0
-  ) {
-    const supplementaryQuery = intentNarrative.suggested_approaches[0];
-    console.log(`[MISSION_EXEC] findability=${intentNarrative.findability} — running supplementary search: "${supplementaryQuery.substring(0, 100)}"`);
+  console.log(`[PLACES] Generated ${generatedQueries.length} quer${generatedQueries.length === 1 ? 'y' : 'ies'} for "${(intentNarrative?.entity_description ?? fallbackQuery).substring(0, 80)}"`);
+
+  await createArtefact({
+    runId,
+    type: 'search_query_plan',
+    title: `Search query plan: ${generatedQueries.length} queries for "${businessType}"`,
+    summary: `${generatedQueries.length} optimised Places queries generated${intentNarrative ? ' from intent_narrative' : ' (fallback)'}`,
+    payload: {
+      execution_source: 'mission',
+      entity_description: intentNarrative?.entity_description ?? null,
+      key_discriminator: intentNarrative?.key_discriminator ?? null,
+      entity_exclusions: intentNarrative?.entity_exclusions ?? [],
+      suggested_approaches: intentNarrative?.suggested_approaches ?? [],
+      fallback_query: fallbackQuery,
+      generated_queries: generatedQueries,
+    },
+    userId,
+    conversationId,
+  }).catch((e: any) => console.warn(`[PLACES] search_query_plan artefact failed (non-fatal): ${e.message}`));
+
+  const placeMatchCount = new Map<string, { lead: DiscoveredLead; count: number }>();
+  const PLACES_PER_QUERY = 10;
+  const MAX_QUERIES = 5;
+  const queriesToRun = generatedQueries.slice(0, MAX_QUERIES);
+
+  for (let qi = 0; qi < queriesToRun.length; qi++) {
+    const { query: qText, rationale } = queriesToRun[qi];
     try {
       runToolCallCount++;
-      const suppResult = await executeAction({
+      const qResult = await executeAction({
         toolName: 'SEARCH_PLACES',
         toolArgs: {
-          query: supplementaryQuery,
+          query: qText,
           location: currentLocation,
           country,
-          maxResults: currentSearchBudget,
+          maxResults: PLACES_PER_QUERY,
           target_count: requestedCount ?? DEFAULT_SEARCH_BUDGET,
         },
         userId,
@@ -784,45 +835,70 @@ export async function executeMissionDrivenPlan(
         conversationId,
         clientRequestId,
       });
-      if (suppResult.success && suppResult.data?.places && Array.isArray(suppResult.data.places)) {
-        const existingPlaceIds = new Set(leads.map(l => l.placeId));
-        let suppAdded = 0;
-        for (const p of suppResult.data.places as any[]) {
+
+      let qResultCount = 0;
+      if (qResult.success && qResult.data?.places && Array.isArray(qResult.data.places)) {
+        const places = qResult.data.places as any[];
+        qResultCount = places.length;
+        for (const p of places) {
           const pid = p.place_id || p.id || '';
-          if (pid && !existingPlaceIds.has(pid)) {
-            leads.push({
-              name: p.name || p.displayName?.text || 'Unknown Business',
-              address: p.formatted_address || p.formattedAddress || `${location}, ${country}`,
-              phone: p.phone || p.nationalPhoneNumber || p.internationalPhoneNumber || null,
-              website: p.website || p.websiteUri || null,
-              placeId: pid,
-              source: 'google_places',
-              lat: typeof p.lat === 'number' ? p.lat : (p.geometry?.location?.lat ?? null),
-              lng: typeof p.lng === 'number' ? p.lng : (p.geometry?.location?.lng ?? null),
+          if (!pid) continue;
+          if (placeMatchCount.has(pid)) {
+            placeMatchCount.get(pid)!.count += 1;
+          } else {
+            placeMatchCount.set(pid, {
+              count: 1,
+              lead: {
+                name: p.name || p.displayName?.text || 'Unknown Business',
+                address: p.formatted_address || p.formattedAddress || `${location}, ${country}`,
+                phone: p.phone || p.nationalPhoneNumber || p.internationalPhoneNumber || null,
+                website: p.website || p.websiteUri || null,
+                placeId: pid,
+                source: 'google_places',
+                lat: typeof p.lat === 'number' ? p.lat : (p.geometry?.location?.lat ?? null),
+                lng: typeof p.lng === 'number' ? p.lng : (p.geometry?.location?.lng ?? null),
+              },
             });
-            suppAdded++;
           }
         }
-        candidateCountFromGoogle += suppAdded;
-        console.log(`[MISSION_EXEC] Supplementary search added ${suppAdded} new leads (total now: ${leads.length})`);
       }
-    } catch (suppErr: any) {
-      console.warn(`[MISSION_EXEC] Supplementary search failed (non-fatal): ${suppErr.message}`);
+      console.log(`[PLACES] Query ${qi + 1}: "${qText}" → ${qResultCount} results (rationale: ${rationale})`);
+    } catch (qErr: any) {
+      console.warn(`[PLACES] Query ${qi + 1} "${qText}" failed (non-fatal): ${qErr.message}`);
     }
   }
+
+  const sortedEntries = Array.from(placeMatchCount.values()).sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    return a.lead.name.localeCompare(b.lead.name);
+  });
+
+  const websiteVisitCap = requestedCount !== null ? requestedCount * 2 : currentSearchBudget;
+  const cappedCandidates = sortedEntries.slice(0, Math.max(websiteVisitCap, PLACES_PER_QUERY));
+
+  for (const entry of cappedCandidates) {
+    leads.push(entry.lead);
+  }
+
+  candidateCountFromGoogle = leads.length;
+  console.log(`[PLACES] After dedup: ${placeMatchCount.size} unique candidates | after cap (${websiteVisitCap}): ${leads.length} → proceeding to exclusion filter`);
 
   const searchStepEnd = Date.now();
   await createArtefact({
     runId,
     type: 'step_result',
-    title: `Step 1: SEARCH_PLACES — ${leads.length} results`,
-    summary: `${leads.length > 0 ? 'success' : 'fail'} — ${leads.length} ${businessType} found in ${location}`,
+    title: `Step 1: SEARCH_PLACES — ${leads.length} results (${queriesToRun.length} queries)`,
+    summary: `${leads.length > 0 ? 'success' : 'fail'} — ${leads.length} ${businessType} found in ${location} via ${queriesToRun.length} generated queries`,
     payload: {
       execution_source: 'mission',
       step_index: 0,
       step_tool: 'SEARCH_PLACES',
       step_status: leads.length > 0 ? 'success' : 'fail',
       results_count: leads.length,
+      unique_candidates_before_cap: placeMatchCount.size,
+      website_visit_cap: websiteVisitCap,
+      queries_run: queriesToRun.length,
+      queries: queriesToRun,
       timings: {
         started_at: new Date(searchStepStart).toISOString(),
         finished_at: new Date(searchStepEnd).toISOString(),
@@ -866,6 +942,8 @@ export async function executeMissionDrivenPlan(
       }).catch((e: any) => console.warn(`[MISSION_EXEC] exclusion_filter artefact failed (non-fatal): ${e.message}`));
     }
   }
+
+  console.log(`[PLACES] After exclusion filter: ${leads.length} kept${excludedCandidates.length > 0 ? ` (${excludedCandidates.length} removed)` : ''}`);
 
   const evidenceResults: EvidenceResult[] = [];
 
