@@ -1791,6 +1791,18 @@ class SupervisorService {
         console.log(`[CONSTRAINT_GATE_OUTER] no-proxy signal detected from original request "${noProxySource.substring(0, 60)}" — forcing STOP`);
       }
 
+      // Pass 3 is the sole authority on clarification — if it cleared the query,
+      // override any non-stop clarify block (e.g. relationship predicates that Pass 3
+      // correctly identified as commercial context rather than constraints).
+      if (!outerGateResult.can_execute && !outerGateResult.stop_recommended) {
+        const pass3ClearedClarification = missionMode === 'active' && missionResult?.ok &&
+          missionResult.intentNarrative?.clarification_needed === false;
+        if (pass3ClearedClarification) {
+          console.log(`[CONSTRAINT_GATE_OUTER] Pass 3 says clarification_needed=false — overriding clarify-only block (types: ${outerGateResult.constraints.map((c: any) => c.type).join(', ')}), proceeding to search`);
+          outerGateResult = { ...outerGateResult, can_execute: true, why_blocked: null, clarify_questions: [] };
+        }
+      }
+
       console.log(`[CONSTRAINT_GATE_OUTER] can_execute=${outerGateResult.can_execute} stop=${outerGateResult.stop_recommended} constraints=${outerGateResult.constraints.length} msg="${outerGateMsg.substring(0, 80)}"`);
 
       if (!outerGateResult.can_execute) {
