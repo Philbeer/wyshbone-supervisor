@@ -8,6 +8,7 @@ export interface ArtefactJudgementRequest {
   goal: string;
   successCriteria?: Record<string, unknown>;
   artefactType: string;
+  intent_narrative?: Record<string, unknown> | null;
 }
 
 export interface ArtefactJudgementResponse {
@@ -136,8 +137,9 @@ export async function judgeArtefact(params: {
   successCriteria?: Record<string, unknown>;
   stepIndex?: number;
   planVersion?: number;
+  intent_narrative?: Record<string, unknown> | null;
 }): Promise<JudgeArtefactResult> {
-  const { artefact, runId, goal, userId, conversationId, successCriteria, stepIndex, planVersion } = params;
+  const { artefact, runId, goal, userId, conversationId, successCriteria, stepIndex, planVersion, intent_narrative } = params;
 
   const request: ArtefactJudgementRequest = {
     runId,
@@ -145,6 +147,7 @@ export async function judgeArtefact(params: {
     goal,
     successCriteria,
     artefactType: artefact.type,
+    intent_narrative,
   };
 
   const idempotencyKey = `${runId}:${artefact.id}:${stepIndex ?? 0}:${planVersion ?? 1}`;

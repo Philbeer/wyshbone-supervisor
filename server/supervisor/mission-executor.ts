@@ -1808,6 +1808,7 @@ export async function executeMissionDrivenPlan(
       userId,
       conversationId,
       successCriteria: finalSuccessCriteria,
+      intent_narrative: intentNarrative ?? null,
     });
 
     finalVerdict = towerResult.judgement.verdict;
