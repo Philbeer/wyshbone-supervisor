@@ -1226,7 +1226,7 @@ export async function executeMissionDrivenPlan(
               context_snippet: e.context_snippet,
               constraint_match_reason: e.constraint_match_reason,
               source_type: e.source_type,
-              source_tier: e.source_tier,
+              source_tier: (e.url && e.url.trim()) ? 'first_party_website' : 'search_snippet',
               confidence_score: e.confidence_score,
             })),
             tower_status: towerStatus,
