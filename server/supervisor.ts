@@ -5739,6 +5739,7 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
         userId: task.user_id,
         conversationId,
         successCriteria: finalSuccessCriteria,
+        intent_narrative: null,
       });
     } catch (towerErr: any) {
       const errMsg = towerErr.message || 'Tower call threw an exception';

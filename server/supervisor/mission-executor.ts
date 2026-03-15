@@ -812,6 +812,7 @@ export async function executeMissionDrivenPlan(
   }).catch((e: any) => console.warn(`[PLACES] search_query_plan artefact failed (non-fatal): ${e.message}`));
 
   const placeMatchCount = new Map<string, { lead: DiscoveredLead; count: number }>();
+  const placeNameToId = new Map<string, string>();
   const PLACES_PER_QUERY = 10;
   const MAX_QUERIES = 5;
   const queriesToRun = generatedQueries.slice(0, MAX_QUERIES);
@@ -843,13 +844,19 @@ export async function executeMissionDrivenPlan(
         for (const p of places) {
           const pid = p.place_id || p.id || '';
           if (!pid) continue;
+          const rawName = p.name || p.displayName?.text || 'Unknown Business';
+          const normName = rawName.toLowerCase().trim().split(',')[0].trim();
           if (placeMatchCount.has(pid)) {
             placeMatchCount.get(pid)!.count += 1;
+          } else if (normName && placeNameToId.has(normName)) {
+            const existingPid = placeNameToId.get(normName)!;
+            placeMatchCount.get(existingPid)!.count += 1;
+            console.log(`[PLACES_DEDUP] Merged pid="${pid}" (${rawName}) → existing pid="${existingPid}" (same name)`);
           } else {
             placeMatchCount.set(pid, {
               count: 1,
               lead: {
-                name: p.name || p.displayName?.text || 'Unknown Business',
+                name: rawName,
                 address: p.formatted_address || p.formattedAddress || `${location}, ${country}`,
                 phone: p.phone || p.nationalPhoneNumber || p.internationalPhoneNumber || null,
                 website: p.website || p.websiteUri || null,
@@ -859,6 +866,7 @@ export async function executeMissionDrivenPlan(
                 lng: typeof p.lng === 'number' ? p.lng : (p.geometry?.location?.lng ?? null),
               },
             });
+            if (normName) placeNameToId.set(normName, pid);
           }
         }
       }
