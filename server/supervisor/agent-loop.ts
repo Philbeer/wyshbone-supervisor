@@ -157,6 +157,7 @@ export async function callTowerJudgeV1(
   successCriteria: Record<string, unknown>,
   artefactPayload: Record<string, unknown>,
   runId: string,
+  intent_narrative?: Record<string, unknown> | null,
 ): Promise<TowerVerdictV1> {
   if (process.env.TOWER_ARTEFACT_JUDGE_STUB === 'true') {
     const leadsCount = (artefactPayload.leads_count as number) ??
@@ -221,6 +222,7 @@ export async function callTowerJudgeV1(
         artefactId: (artefactPayload.artefact_id as string) || runId,
         artefactType: (artefactPayload.artefact_type as string) || 'leads_list',
         run_id: runId,
+        intent_narrative: intent_narrative ?? null,
       }),
     });
   } finally {
@@ -448,7 +450,7 @@ async function obtainVerdict(
   const startMs = Date.now();
 
   try {
-    const verdict = await callTowerJudgeV1(goal, successCriteria, artefactPayload, runId);
+    const verdict = await callTowerJudgeV1(goal, successCriteria, artefactPayload, runId, null /* intent_narrative not in scope at obtainVerdict — pass null */);
     const durationMs = Date.now() - startMs;
 
     await logAFREvent({
