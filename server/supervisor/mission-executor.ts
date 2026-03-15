@@ -1580,7 +1580,18 @@ export async function executeMissionDrivenPlan(
     }
   }
 
-  const finalLeads = requestedCount !== null ? filteredLeads.slice(0, requestedCount) : filteredLeads;
+  const seenIds = new Set<string>();
+  const seenNames = new Set<string>();
+  const dedupedLeads = filteredLeads.filter(lead => {
+    const pid = lead.placeId?.trim() ?? '';
+    const name = lead.name?.trim().toLowerCase() ?? '';
+    if (pid && seenIds.has(pid)) return false;
+    if (name && seenNames.has(name)) return false;
+    if (pid) seenIds.add(pid);
+    if (name) seenNames.add(name);
+    return true;
+  });
+  const finalLeads = requestedCount !== null ? dedupedLeads.slice(0, requestedCount) : dedupedLeads;
 
   for (const lead of finalLeads) {
     if (placeIdToDbId.has(lead.placeId)) continue;
