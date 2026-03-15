@@ -1584,13 +1584,26 @@ export async function executeMissionDrivenPlan(
   const seenNames = new Set<string>();
   const dedupedLeads = filteredLeads.filter(lead => {
     const pid = lead.placeId?.trim() ?? '';
-    const name = lead.name?.trim().toLowerCase() ?? '';
-    if (pid && seenIds.has(pid)) return false;
-    if (name && seenNames.has(name)) return false;
+    const fullName = lead.name?.trim().toLowerCase() ?? '';
+    const shortName = fullName.split(',')[0].trim();
+    if (pid && seenIds.has(pid)) {
+      console.log(`[DEDUP] Dropped duplicate placeId="${pid}" name="${lead.name}"`);
+      return false;
+    }
+    if (fullName && seenNames.has(fullName)) {
+      console.log(`[DEDUP] Dropped duplicate full-name="${lead.name}"`);
+      return false;
+    }
+    if (shortName && shortName !== fullName && seenNames.has(shortName)) {
+      console.log(`[DEDUP] Dropped duplicate short-name="${shortName}" (from "${lead.name}")`);
+      return false;
+    }
     if (pid) seenIds.add(pid);
-    if (name) seenNames.add(name);
+    if (fullName) seenNames.add(fullName);
+    if (shortName && shortName !== fullName) seenNames.add(shortName);
     return true;
   });
+  console.log(`[DEDUP] filteredLeads=${filteredLeads.length} after dedup=${dedupedLeads.length}`);
   const finalLeads = requestedCount !== null ? dedupedLeads.slice(0, requestedCount) : dedupedLeads;
 
   for (const lead of finalLeads) {

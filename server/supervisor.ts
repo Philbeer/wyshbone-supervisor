@@ -5641,6 +5641,38 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
       verification_policy_reason: legacyVerificationPolicy.reason,
     };
 
+    {
+      const svSeenIds = new Set<string>();
+      const svSeenNames = new Set<string>();
+      const svBefore = finalLeads.length;
+      finalLeads = finalLeads.filter(lead => {
+        const pid = (lead.placeId || '').trim();
+        const fullName = (lead.name || '').trim().toLowerCase();
+        const shortName = fullName.split(',')[0].trim();
+        if (pid && svSeenIds.has(pid)) {
+          console.log(`[DEDUP] supervisor: Dropped duplicate placeId="${pid}" name="${lead.name}"`);
+          return false;
+        }
+        if (fullName && svSeenNames.has(fullName)) {
+          console.log(`[DEDUP] supervisor: Dropped duplicate full-name="${lead.name}"`);
+          return false;
+        }
+        if (shortName && shortName !== fullName && svSeenNames.has(shortName)) {
+          console.log(`[DEDUP] supervisor: Dropped duplicate short-name="${shortName}" (from "${lead.name}")`);
+          return false;
+        }
+        if (pid) svSeenIds.add(pid);
+        if (fullName) svSeenNames.add(fullName);
+        if (shortName && shortName !== fullName) svSeenNames.add(shortName);
+        return true;
+      });
+      if (finalLeads.length !== svBefore) {
+        console.log(`[DEDUP] supervisor: before=${svBefore} after=${finalLeads.length}`);
+      } else {
+        console.log(`[DEDUP] supervisor: before=${svBefore} after=${finalLeads.length} (no duplicates)`);
+      }
+    }
+
     console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=final_delivery`);
     const finalDeliveryArtefact = await createArtefact({
       runId: chatRunId,
