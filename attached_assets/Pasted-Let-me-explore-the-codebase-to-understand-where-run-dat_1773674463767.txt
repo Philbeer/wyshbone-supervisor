@@ -1,0 +1,76 @@
+Let me explore the codebase to understand where run data is stored, then dig into the specifics of run B01.
+
+The database is empty — the run data must be stored elsewhere. Let me look at the filesystem for file-based storage, logs, or any cached run data.
+
+Found it — config/benchmarkQueries.ts has Swan/Arundel mentions, and supervisor.log may have run data. Let me read both.
+
+Found it. There's a dedicated reports/arundel-pubs-report.md. Let me read that along with the other relevant benchmark and audit files.
+
+Now let me look at the forensic and audit reports that reference the actual run B01 data with leads, evidence, and constraint verdicts.
+
+Now let me check the run-receipt test and constraint-gate test for the actual B01 lead data and constraint verdicts.
+
+Let me check the forensic reports and the intent test harness for the specific B01 lead data.
+
+I now have all the information needed. Let me compile the full report from the codebase documentation.
+
+B01 Investigative Report — "Find pubs in Arundel with Swan in the name"
+What I found and what I had to work from
+The live database is empty — no run records exist in agent_runs, artefacts, suggested_leads, or belief_store. The B01 data exists only in audit documents, test files, and the reports/arundel-pubs-report.md reference file. Everything below is drawn from SUPERVISOR_JUDGEMENT_AUDIT.md (section 6.1), docs/BENCHMARK_REFERENCE_EXPECTED_BEHAVIOUR.md (section 4.1), and the system's own description of how it processed this exact query.
+
+1. What location each lead is actually in — is it genuinely in Arundel?
+Based on the arundel-pubs-report.md reference (the system's own research document on Arundel pubs) and the architecture trace, here is the ground truth for Swan-named venues in the Arundel area:
+
+Lead	Actual Location	Genuinely in Arundel?
+The Swan Hotel	High Street, Arundel BN18 (facing Town Quay)	Yes — Fuller's house, est. 1759, Grade II listed
+The White Swan	Chichester Road (A27), Arundel BN18 0AD	Yes — on the edge of town, explicitly listed as Arundel
+The Swan at Bedhampton	Bedhampton, Hampshire	No — Bedhampton is near Havant, ~30 miles from Arundel
+Remaining 3 leads	Unknown — no persistent run data	Cannot verify from stored data
+The ground truth is: there are exactly two Swan-named pubs in Arundel itself (The Swan Hotel and The White Swan). Any run returning 6 leads for this query necessarily pulled results from outside Arundel. The Swan at Bedhampton is in a completely different county (Hampshire vs. West Sussex) and has no geographic proximity to Arundel.
+
+2. Was LOCATION verified for each lead, or just assumed from the search query?
+Assumed from the search query. Location was never independently verified per lead.
+
+The audit document is explicit on this. The LOCATION_EQUALS "Arundel" constraint is classified as soft by default in the system. In the CVL (Canonical Verification Layer), soft location constraints produce a status of search_bounded — meaning the geographic bound was applied at the search query level, not per-lead post-retrieval.
+
+What this means in practice:
+
+The agent called SEARCH_PLACES with a query like "pubs in Arundel" or "Swan pubs Arundel"
+Google Places returned whatever it returned, including results from its radius expansion
+No step cross-checked each returned lead's address against an Arundel bounding box
+No geocoding verification was applied
+No address string match to "Arundel" or "BN18" was performed
+The location constraint was considered "satisfied" the moment the search query contained the location name
+The BENCHMARK_REFERENCE_EXPECTED_BEHAVIOUR.md document states the expected tool sequence for this query as: SEARCH_PLACES → client-side name filter → leads_list → Tower judge. There is no LOCATION_VERIFY step in that sequence. Location is entirely delegated to whatever Google Places returns.
+
+3. Why was snippet-only evidence accepted for a name_match query with a clear location constraint?
+Two separate reasons, one for each constraint:
+
+For NAME_CONTAINS ("swan"): This constraint type (text_compare in the mission path, NAME_CONTAINS in the legacy path) is verified entirely from the lead's name field as returned by Google Places. No website visit is needed — the name field from the directory API is the evidence. This is correct behaviour for a name filter. However, if Google returns a lead named "The Swan at Bedhampton," its name contains "swan," so the name constraint passes. The name field is the source, and snippet-only (directory-only) is appropriate for text_compare. There is no bug here in isolation.
+
+For LOCATION_EQUALS ("Arundel"): This is where snippet-only is a problem. The audit documents a known gap: there is no evidence_requirement field per constraint. The system does not distinguish between constraints that require strong geographic proof vs. constraints that can be inferred from the search context. For a location constraint with a clear hard requirement, you would want geo-bbox verification or address string matching. Neither happens. The location constraint gets status: search_bounded, which is treated as "satisfied" because the search was bounded by location. Snippet-only (directory data from Google) is accepted because that is the only evidence type the system collects for location constraints.
+
+The root issue identified in the audit: no constraint-type-aware proof burden exists. A text_compare (name) constraint and a LOCATION_EQUALS constraint are both processed with the same evidence pipeline. The system never asks "what kind of proof does this constraint require?" — it just checks whether the search query was location-bounded and considers that sufficient.
+
+4. Did the agent apply any location filtering, or did it just return whatever the search returned?
+It returned whatever the search returned, with only a name filter applied.
+
+The pipeline for B01 (as documented in both BENCHMARK_REFERENCE_EXPECTED_BEHAVIOUR.md and SUPERVISOR_JUDGEMENT_AUDIT.md) was:
+
+SEARCH_PLACES — called with "pubs in Arundel" (location in the query string)
+FILTER_FIELDS (mission path) — applied applyFieldFilters() client-side, keeping only leads whose name contains "swan" (case-insensitive)
+Non-matching leads removed
+Remaining leads passed to Tower for judgement on count
+Step 2 is a name filter only. There is no FILTER_BY_LOCATION step. There is no geo-bbox filter. There is no address parser checking for "Arundel" or "BN18" postcodes. After SEARCH_PLACES returns, the only post-processing is the name string match.
+
+Google Places returned "The Swan at Bedhampton" as a result — likely because it expanded the search radius or because its internal rankings included it as a "nearby" result for a Swan-named pub search. Once it appeared in the results, the name filter kept it (it contains "swan"), and nothing downstream rejected it on location grounds.
+
+Additionally, the audit documents a specific architectural gap that makes this worse: the LOCATION_EQUALS constraint is soft by default. In the legacy pipeline path, a soft NAME_CONTAINS constraint means leads without "swan" in the name also pass CVL as verified_exact. This is the opposite problem — non-Swan pubs getting through — but it illustrates that both constraints had weak enforcement.
+
+Summary
+Question	Answer
+Is each lead actually in Arundel?	No. At most 2 of the leads (Swan Hotel, White Swan) are genuinely in Arundel. The Swan at Bedhampton is in Hampshire, ~30 miles away. The remaining 3 leads cannot be verified from stored data.
+Was LOCATION verified per lead?	No. Location was assumed from the search query string. CVL set location status to search_bounded — not verified, not checked.
+Why was snippet-only accepted for a name_match + location query?	For the name constraint, snippet-only (directory data) is the correct evidence tier — no issue there. For the location constraint, the system has no mechanism to require stronger evidence: there is no per-constraint evidence_requirement field, no geo-bbox filter, and LOCATION_EQUALS is classified as soft, meaning it can never force a lead rejection.
+Did the agent apply location filtering?	No. It applied a name filter (contains "swan") only. Whatever Google Places returned within its own geographic expansion was accepted as in-scope.
+The core failure is that the LOCATION constraint for B01 was verification-exempt by design: it was soft, it relied on the search query to bound results, and no post-retrieval check confirmed each lead's address was actually in Arundel.
