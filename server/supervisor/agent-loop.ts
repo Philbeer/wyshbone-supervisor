@@ -210,6 +210,19 @@ export async function callTowerJudgeV1(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TOWER_TIMEOUT_MS);
 
+  const towerPayload = {
+    runId,
+    goal,
+    success_criteria: successCriteria,
+    artefact: artefactPayload,
+    artefactId: (artefactPayload.artefact_id as string) || runId,
+    artefactType: (artefactPayload.artefact_type as string) || 'leads_list',
+    run_id: runId,
+    intent_narrative: intent_narrative ?? null,
+    query_id: queryId ?? null,
+  };
+  console.log('[TOWER-PAYLOAD] callTowerJudgeV1', JSON.stringify(towerPayload));
+
   let response: Response;
   try {
     response = await fetch(endpoint, {
@@ -219,17 +232,7 @@ export async function callTowerJudgeV1(
         ...(apiKey ? { 'X-TOWER-API-KEY': apiKey } : {}),
       },
       signal: controller.signal,
-      body: JSON.stringify({
-        runId,
-        goal,
-        success_criteria: successCriteria,
-        artefact: artefactPayload,
-        artefactId: (artefactPayload.artefact_id as string) || runId,
-        artefactType: (artefactPayload.artefact_type as string) || 'leads_list',
-        run_id: runId,
-        intent_narrative: intent_narrative ?? null,
-        query_id: queryId ?? null,
-      }),
+      body: JSON.stringify(towerPayload),
     });
   } finally {
     clearTimeout(timeoutId);

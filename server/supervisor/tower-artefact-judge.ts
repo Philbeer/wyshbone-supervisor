@@ -95,6 +95,8 @@ async function callTowerJudgeArtefact(
     }, null, 2));
   }
 
+  console.log('[TOWER-PAYLOAD] callTowerJudgeArtefact', JSON.stringify(request));
+
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
