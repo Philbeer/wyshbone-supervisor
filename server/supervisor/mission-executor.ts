@@ -559,6 +559,7 @@ export async function executeMissionDrivenPlan(
   ctx: MissionExecutionContext,
 ): Promise<MissionExecutionResult> {
   const { mission, plan, runId, userId, conversationId, clientRequestId, rawUserInput, missionTrace, intentNarrative, queryId } = ctx;
+  console.log('[QID-TRACE]', 'step3:executeMissionDrivenPlan_destructured', queryId);
   const { businessType, location, country, requestedCount, searchBudget } = deriveSearchParams(mission);
 
   const MAX_REPLANS = Math.min(
@@ -1834,6 +1835,7 @@ export async function executeMissionDrivenPlan(
   };
 
   try {
+    console.log('[QID-TRACE]', 'step4:judgeArtefact_call', queryId ?? null);
     const towerResult = await judgeArtefact({
       artefact: finalDeliveryArtefact,
       runId,

@@ -144,6 +144,7 @@ export async function judgeArtefact(params: {
   queryId?: string | null;
 }): Promise<JudgeArtefactResult> {
   const { artefact, runId, goal, userId, conversationId, successCriteria, stepIndex, planVersion, intent_narrative, queryId } = params;
+  console.log('[QID-TRACE]', 'step5:judgeArtefact_received', queryId);
 
   const request: ArtefactJudgementRequest = {
     runId,
@@ -154,6 +155,7 @@ export async function judgeArtefact(params: {
     intent_narrative,
     query_id: queryId ?? null,
   };
+  console.log('[QID-TRACE]', 'step6:ArtefactJudgementRequest_query_id', request.query_id);
 
   const idempotencyKey = `${runId}:${artefact.id}:${stepIndex ?? 0}:${planVersion ?? 1}`;
 

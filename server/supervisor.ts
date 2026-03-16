@@ -930,6 +930,7 @@ class SupervisorService {
     if (missionQueryId) {
       console.log(`[MISSION_EXEC] benchmark run detected — query_id=${missionQueryId}`);
     }
+    console.log('[QID-TRACE]', 'step1:processChatTask_computed', missionQueryId);
 
     console.log(`[SUPERVISOR] Executing task ${task.id} — message="${rawMsg.substring(0, 80)}"`);
     taskExecutionStartedEmitted = true;
@@ -1874,6 +1875,7 @@ class SupervisorService {
           intentNarrative: missionResult!.intentNarrative ?? null,
           queryId: missionQueryId,
         };
+        console.log('[QID-TRACE]', 'step2:missionCtx_built', missionCtx.queryId);
         towerResult = await executeMissionDrivenPlan(missionCtx);
       } else {
         console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=executeTowerLoopChat (legacy fallback)`);
