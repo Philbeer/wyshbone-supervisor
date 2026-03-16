@@ -222,6 +222,7 @@ export async function callTowerJudgeV1(
     query_id: queryId ?? null,
   };
   console.log('[TOWER-PAYLOAD] callTowerJudgeV1', JSON.stringify(towerPayload));
+  console.log('[TOWER-CALL] queryId:', queryId, 'goal:', goal?.slice(0, 60));
 
   let response: Response;
   try {
