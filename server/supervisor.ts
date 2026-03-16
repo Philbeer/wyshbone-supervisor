@@ -926,6 +926,10 @@ class SupervisorService {
     console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=build_user_context`);
     const userContext = await this.buildUserContext(task.user_id);
     let rawMsg = String(requestData.user_message || '');
+    const missionQueryId: string | null = (requestData as any).query_id || getBenchmarkQueryId(rawMsg.trim()) || null;
+    if (missionQueryId) {
+      console.log(`[MISSION_EXEC] benchmark run detected — query_id=${missionQueryId}`);
+    }
 
     console.log(`[SUPERVISOR] Executing task ${task.id} — message="${rawMsg.substring(0, 80)}"`);
     taskExecutionStartedEmitted = true;
@@ -1868,6 +1872,7 @@ class SupervisorService {
           rawUserInput: rawMsg.trim(),
           missionTrace: missionResult!.trace,
           intentNarrative: missionResult!.intentNarrative ?? null,
+          queryId: missionQueryId,
         };
         towerResult = await executeMissionDrivenPlan(missionCtx);
       } else {

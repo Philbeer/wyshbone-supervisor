@@ -56,6 +56,7 @@ export interface MissionExecutionContext {
   rawUserInput: string;
   missionTrace: MissionExtractionTrace;
   intentNarrative: IntentNarrative | null;
+  queryId?: string | null;
 }
 
 export interface MissionExecutionResult {
@@ -557,7 +558,7 @@ Respond with a JSON array only, no markdown fences:
 export async function executeMissionDrivenPlan(
   ctx: MissionExecutionContext,
 ): Promise<MissionExecutionResult> {
-  const { mission, plan, runId, userId, conversationId, clientRequestId, rawUserInput, missionTrace, intentNarrative } = ctx;
+  const { mission, plan, runId, userId, conversationId, clientRequestId, rawUserInput, missionTrace, intentNarrative, queryId } = ctx;
   const { businessType, location, country, requestedCount, searchBudget } = deriveSearchParams(mission);
 
   const MAX_REPLANS = Math.min(
@@ -1841,6 +1842,7 @@ export async function executeMissionDrivenPlan(
       conversationId,
       successCriteria: finalSuccessCriteria,
       intent_narrative: intentNarrative ?? null,
+      queryId: queryId ?? null,
     });
 
     finalVerdict = towerResult.judgement.verdict;
