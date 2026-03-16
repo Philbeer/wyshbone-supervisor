@@ -65,7 +65,14 @@ entity_category:
 location_text:
   Geographic location verbatim from user. "in Leeds" → "Leeds". "near Brighton" → "Brighton". "central London" → "central London".
   NEVER null when the user names a place.
-  Location goes ONLY here. NEVER emit a constraint with type "location".
+
+NAMED LOCATION CONSTRAINT RULE:
+  When the user specifies a named location (a specific town, city, or area — e.g. "in Arundel", "in Leeds", "in Bath", "in central London"),
+  you MUST emit a hard location constraint in the constraints array IN ADDITION to storing it in location_text:
+  { "type": "name_filter", "raw": "location: Arundel", "hardness": "hard", "evidence_mode": "google_places", "clarify_if_needed": false, "clarify_question": null }
+  Use type "name_filter" with raw set to "location: <place name>" to represent the named location constraint.
+  This does NOT apply to vague proximity phrases like "near me", "nearby", or "close to" — those are soft and do not produce a constraint.
+  Named location → hard constraint. Vague proximity → no constraint (location_text only).
 
 geo_mode:
   "city" = single city/town. "region" = county/state/area. "radius" = user said "near"/"within X miles". "national" = whole country. "unspecified" = no location given.
@@ -144,7 +151,9 @@ User: "find 10 pubs in Arundel"
   "radius_km": null,
   "requested_count": 10,
   "default_count_policy": "explicit",
-  "constraints": [],
+  "constraints": [
+    { "type": "name_filter", "raw": "location: Arundel", "hardness": "hard", "evidence_mode": "google_places", "clarify_if_needed": false, "clarify_question": null }
+  ],
   "plan_template_hint": "simple_search",
   "preferred_evidence_order": []
 }

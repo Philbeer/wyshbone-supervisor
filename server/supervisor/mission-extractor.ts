@@ -34,7 +34,7 @@ OUTPUT FORMAT: Return a JSON object with exactly two fields:
 
 CONSTRAINT CHECKLIST FIELDS (set true only if the user's request contains this type):
 - has_entity: an entity type is mentioned (e.g. pubs, cafes, hospitals)
-- has_location: a geographic location is specified
+- has_location: a geographic location is specified (named town, city, or area — this will produce a hard location_constraint downstream in addition to location_text)
 - has_text_compare: a name or text match is requested (e.g. "with Swan in the name")
 - has_attribute_check: a venue feature or amenity is required (e.g. "with a beer garden", "dog friendly")
 - has_relationship_check: a business-to-business or business-to-entity relationship (e.g. "works with NHS", "partnered with", "supplies", "serves [an entity]", "affiliated with")
@@ -347,8 +347,18 @@ entity_discovery: ${JSON.stringify(ENTITY_DISCOVERY_OPERATORS)}
   Only use if there is an ADDITIONAL category filter beyond entity_category.
 
 location_constraint: ${JSON.stringify(LOCATION_CONSTRAINT_OPERATORS)}
-  Only use if there is an ADDITIONAL or complex location filter beyond location_text (e.g. "near my area" as a secondary proximity filter).
+  NAMED LOCATION RULE (ALWAYS APPLY):
+  When the user specifies a named location — a specific town, city, or area (e.g. "in Arundel", "in Leeds", "in Bath", "in Manchester") —
+  you MUST emit a hard location_constraint in the constraints array IN ADDITION to setting location_text.
+  Use field "address", operator "within", hardness "hard", value = the place name exactly as it appears in location_text.
+  Named location example: "pubs in Arundel" → { "type": "location_constraint", "field": "address", "operator": "within", "value": "Arundel", "hardness": "hard" }
+  Named location example: "cafes in central London" → { "type": "location_constraint", "field": "address", "operator": "within", "value": "central London", "hardness": "hard" }
+
+  VAGUE PROXIMITY (soft, no named place):
+  "near my area" / "nearby" / "close to me" → soft proximity only, no hard location_constraint:
   Example: "near my area" → { "type": "location_constraint", "field": "location", "operator": "near", "value": "user_area", "hardness": "soft" }
+
+  RULE SUMMARY: Named town/city/area → hard "in" constraint. Vague proximity phrase → soft "near" constraint or omit entirely.
 
 MISSION MODE RULES:
 - "research_now": one-time search. Default for most queries.
@@ -364,7 +374,8 @@ CRITICAL RULES:
 - NEVER invent constraint types not in the allowed list.
 - NEVER use operators not in the allowed list for each type.
 - value must ALWAYS be the clean extracted semantic token, NEVER the user's original wrapper phrase.
-- Do NOT duplicate information already captured in entity_category or location_text as constraints.
+- Do NOT duplicate information already captured in entity_category as constraints.
+- EXCEPTION: location_text MUST always also appear as a hard location_constraint in the constraints array (see location_constraint rules above). This is the one field that intentionally appears in both places.
 
 FULL EXAMPLES:
 
@@ -374,6 +385,7 @@ Semantic input: The user wants pubs in Arundel whose business name contains "swa
   "location_text": "Arundel",
   "requested_count": null,
   "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Arundel", "hardness": "hard" },
     { "type": "text_compare", "field": "name", "operator": "contains", "value": "swan", "hardness": "hard" }
   ],
   "mission_mode": "research_now"
@@ -385,6 +397,7 @@ Semantic input: The user wants pubs in Arundel whose website text contains "live
   "location_text": "Arundel",
   "requested_count": null,
   "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Arundel", "hardness": "hard" },
     { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "live music", "hardness": "hard" }
   ],
   "mission_mode": "research_now"
@@ -396,6 +409,7 @@ Semantic input: The user wants cafes in Manchester whose website text contains "
   "location_text": "Manchester",
   "requested_count": null,
   "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Manchester", "hardness": "hard" },
     { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "vegan food", "hardness": "hard" }
   ],
   "mission_mode": "research_now"
@@ -407,6 +421,7 @@ Semantic input: The user wants breweries in Texas that opened within the last 6 
   "location_text": "Texas",
   "requested_count": null,
   "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Texas", "hardness": "hard" },
     { "type": "time_constraint", "field": "opening_date", "operator": "within_last", "value": "6 months", "hardness": "hard" }
   ],
   "mission_mode": "research_now"
@@ -430,6 +445,7 @@ Semantic input: The user wants 10 Italian restaurants in Brighton that have outd
   "location_text": "Brighton",
   "requested_count": 10,
   "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Brighton", "hardness": "hard" },
     { "type": "attribute_check", "field": "amenity", "operator": "has", "value": "outdoor seating", "hardness": "hard" },
     { "type": "numeric_range", "field": "rating", "operator": "gte", "value": 4.5, "hardness": "hard" }
   ],
@@ -442,6 +458,7 @@ Semantic input: The user wants pubs in Sussex whose business name contains "The 
   "location_text": "Sussex",
   "requested_count": null,
   "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Sussex", "hardness": "hard" },
     { "type": "text_compare", "field": "name", "operator": "contains", "value": "The Swan", "hardness": "hard" },
     { "type": "attribute_check", "field": "amenity", "operator": "has", "value": "beer garden", "hardness": "hard" }
   ],
@@ -465,6 +482,7 @@ Semantic input: The user wants 5 vets in London that extract email addresses. Th
   "location_text": "London",
   "requested_count": 5,
   "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "London", "hardness": "hard" },
     { "type": "contact_extraction", "field": "email", "operator": "extract", "value": null, "hardness": "hard" }
   ],
   "mission_mode": "research_now"
