@@ -505,6 +505,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     if (!supabase) return res.status(503).json({ ok: false, error: 'Supabase not configured' });
 
     try {
+      const queryId = (req.body?.query_id as string) || null;
+
       const { data: task, error } = await supabase
         .from('supervisor_tasks')
         .insert({
@@ -517,6 +519,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             run_id: runId,
             client_request_id: clientRequestId,
             search_query: req.body?.search_query || {},
+            ...(queryId ? { query_id: queryId } : {}),
           },
           status: 'pending',
           created_at: Date.now(),

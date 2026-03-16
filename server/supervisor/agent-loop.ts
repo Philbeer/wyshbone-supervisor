@@ -24,6 +24,7 @@ export interface TowerVerdictV1 {
   gaps: string[];
   confidence: number;
   rationale: string;
+  ground_truth_assessment?: string | null;
 }
 
 export interface AccumulatedCandidate {
@@ -45,6 +46,7 @@ export interface RunState {
   userId: string;
   conversationId?: string;
   clientRequestId?: string;
+  queryId?: string | null;
   planVersion: number;
   retryCount: number;
   lastToolArgs: Record<string, unknown>;
@@ -119,6 +121,7 @@ export function initRunState(
     originalUserGoal?: string;
     hardConstraints?: string[];
     softConstraints?: string[];
+    queryId?: string | null;
   },
 ): RunState {
   const state: RunState = {
@@ -126,6 +129,7 @@ export function initRunState(
     userId,
     conversationId,
     clientRequestId,
+    queryId: opts?.queryId ?? null,
     planVersion: 1,
     retryCount: 0,
     lastToolArgs: { ...toolArgs },
@@ -158,6 +162,7 @@ export async function callTowerJudgeV1(
   artefactPayload: Record<string, unknown>,
   runId: string,
   intent_narrative?: Record<string, unknown> | null,
+  queryId?: string | null,
 ): Promise<TowerVerdictV1> {
   if (process.env.TOWER_ARTEFACT_JUDGE_STUB === 'true') {
     const leadsCount = (artefactPayload.leads_count as number) ??
@@ -223,6 +228,7 @@ export async function callTowerJudgeV1(
         artefactType: (artefactPayload.artefact_type as string) || 'leads_list',
         run_id: runId,
         intent_narrative: intent_narrative ?? null,
+        query_id: queryId ?? null,
       }),
     });
   } finally {
@@ -247,6 +253,7 @@ export async function callTowerJudgeV1(
     gaps: raw.gaps ?? [],
     confidence: raw.confidence ?? 0,
     rationale: raw.rationale ?? raw.reason ?? `Tower verdict: ${raw.verdict}`,
+    ground_truth_assessment: raw.ground_truth_assessment ?? null,
   };
   console.log(`[TOWER_VERDICT] raw=${raw.verdict} normalized=${verdict.verdict} delivered=${verdict.delivered} requested=${verdict.requested} confidence=${verdict.confidence}`);
   console.log(`[TOWER_TELEMETRY] tower_call_finished runId=${runId} verdict=${verdict.verdict}`);
@@ -450,7 +457,7 @@ async function obtainVerdict(
   const startMs = Date.now();
 
   try {
-    const verdict = await callTowerJudgeV1(goal, successCriteria, artefactPayload, runId, null /* intent_narrative not in scope at obtainVerdict — pass null */);
+    const verdict = await callTowerJudgeV1(goal, successCriteria, artefactPayload, runId, null /* intent_narrative */, state?.queryId ?? null);
     const durationMs = Date.now() - startMs;
 
     await logAFREvent({

@@ -40,7 +40,7 @@ import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './supervisor/que
 import { recordBenchmarkRun, type BenchmarkRunInput } from './evaluator/benchmarkLogger';
 import type { RunContext, PlanHistoryEntry } from './evaluator/classifyRunFailure';
 import { readLearningStore, mergePolicyKnobs, buildPolicyAppliedPayload, emitPolicyAppliedArtefact, handleLearningUpdate, BASELINE_DEFAULTS, type FinalPolicy, type PolicyAppliedArtefact, type LearningUpdatePayload } from './supervisor/learning-store';
-import { BENCHMARK_QUERIES } from '../config/benchmarkQueries';
+import { BENCHMARK_QUERIES, getBenchmarkQueryId } from '../config/benchmarkQueries';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 
@@ -2608,6 +2608,11 @@ class SupervisorService {
       (requestData as any).google_query_mode === 'BIASED_STABLE' ? 'BIASED_STABLE' : 'TEXT_ONLY';
     console.log(`[TOWER_LOOP_CHAT] resolved_google_query_mode=${googleQueryMode} (from request_data: ${(requestData as any).google_query_mode ?? 'not set'})`);
 
+    const queryId: string | null = (requestData as any).query_id || getBenchmarkQueryId(rawMsg.trim()) || null;
+    if (queryId) {
+      console.log(`[TOWER_LOOP_CHAT] benchmark run detected — query_id=${queryId}`);
+    }
+
     const originalUserGoal = rawMsg.trim();
 
     console.log(`[STAGE] runId=${chatRunId} crid=${clientRequestId} stage=parse_goal_to_constraints`);
@@ -3408,7 +3413,7 @@ class SupervisorService {
         try {
           const obsResult = await judgeArtefact({
             artefact: towerLoopStepArtefact,
-            runId: chatRunId, goal, userId: task.user_id, conversationId,
+            runId: chatRunId, goal, userId: task.user_id, conversationId, queryId,
           });
           await createArtefact({
             runId: chatRunId,
@@ -3600,7 +3605,7 @@ class SupervisorService {
                     console.log(`[ENRICHMENT] Suppressing step-status Tower judgement for WEB_VISIT "${lead.name}" — semantic attribute verification will follow`);
                   } else {
                     try {
-                      const enrichObs = await judgeArtefact({ artefact: enrichStepArtefact, runId: chatRunId, goal, userId: task.user_id, conversationId });
+                      const enrichObs = await judgeArtefact({ artefact: enrichStepArtefact, runId: chatRunId, goal, userId: task.user_id, conversationId, queryId });
                       await createArtefact({
                         runId: chatRunId, type: 'tower_judgement',
                         title: `Tower Judgement: ${enrichObs.judgement.verdict} (${tool})`,
@@ -4955,7 +4960,7 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
         try {
           const replanObsResult = await judgeArtefact({
             artefact: replanStepArtefact,
-            runId: chatRunId, goal, userId: task.user_id, conversationId,
+            runId: chatRunId, goal, userId: task.user_id, conversationId, queryId,
           });
           await createArtefact({
             runId: chatRunId,
@@ -5740,6 +5745,7 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
         conversationId,
         successCriteria: finalSuccessCriteria,
         intent_narrative: null,
+        queryId,
       });
     } catch (towerErr: any) {
       const errMsg = towerErr.message || 'Tower call threw an exception';
@@ -5799,6 +5805,8 @@ Maximum ${maxSnippets} sentences. Empty array if nothing qualifies.`;
         stubbed: finalTowerResult.stubbed,
         plan_version: planVersion,
         phase: 'final_delivery',
+        query_id: queryId ?? null,
+        ground_truth_assessment: (finalTowerResult.judgement as any).ground_truth_assessment ?? null,
       },
       userId: task.user_id,
       conversationId,

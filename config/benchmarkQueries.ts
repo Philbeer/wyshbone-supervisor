@@ -12,3 +12,11 @@ export const BENCHMARK_QUERIES = [
   "Find breweries supplying pubs in Leeds",
   "Find pubs in Brighton that brew their own beer"
 ];
+
+const _benchmarkQueriesLower = BENCHMARK_QUERIES.map(q => q.toLowerCase().trim());
+
+export function getBenchmarkQueryId(query: string): string | null {
+  const idx = _benchmarkQueriesLower.indexOf(query.toLowerCase().trim());
+  if (idx === -1) return null;
+  return `B${String(idx + 1).padStart(2, '0')}`;
+}

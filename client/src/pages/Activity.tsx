@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmptyState } from "@/components/EmptyState";
 import {
   Dialog,
@@ -10,8 +11,24 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Play, Radio, CheckCircle, AlertTriangle, Clock, Loader2, Inbox, Eye, MapPin, Globe, Phone, Mail, Target, TrendingDown, HelpCircle, ShieldCheck, ShieldAlert, ArrowRight } from "lucide-react";
+import { Play, Radio, CheckCircle, AlertTriangle, Clock, Loader2, Inbox, Eye, MapPin, Globe, Phone, Mail, Target, TrendingDown, HelpCircle, ShieldCheck, ShieldAlert, ArrowRight, FlaskConical } from "lucide-react";
+
 import { apiRequest } from "@/lib/queryClient";
+
+const BENCHMARK_QUERIES = [
+  "Find dentists in Brighton",
+  "Find coffee roasters in Manchester",
+  "Find pubs in Arundel mentioning live music",
+  "Find cafes in Bristol that mention vegan food",
+  "Find pubs called Swan in Sussex",
+  "Find organisations that work with Blackpool council",
+  "Find companies partnered with the University of Manchester",
+  "Find pubs in York that mention quiz night",
+  "Find hotels in London mentioning rooftop bars",
+  "Find the best rated coffee shops in Cambridge",
+  "Find breweries supplying pubs in Leeds",
+  "Find pubs in Brighton that brew their own beer",
+];
 
 interface ActivityEvent {
   id: string;
@@ -75,6 +92,8 @@ interface BehaviourJudgeResult {
   delivered_count: number | null;
   requested_count: number | null;
   created_at: string | null;
+  ground_truth_assessment?: string | null;
+  query_id?: string | null;
 }
 
 function eventIcon(eventType: string, status: string) {
@@ -295,6 +314,20 @@ function BehaviourJudgeCard({ result }: { result: BehaviourJudgeResult }) {
             {result.reason}
           </p>
         )}
+        {result.ground_truth_assessment && (
+          <div className="flex items-start gap-2 text-xs p-2 rounded-md bg-primary/10 text-primary" data-testid="text-ground-truth-assessment">
+            <FlaskConical className="h-3 w-3 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-medium">Ground truth: </span>
+              {result.ground_truth_assessment}
+            </div>
+          </div>
+        )}
+        {result.query_id && (
+          <div className="text-xs text-muted-foreground" data-testid="text-benchmark-query-id">
+            Benchmark: <span className="font-mono font-medium text-foreground">{result.query_id}</span>
+          </div>
+        )}
         <div className="flex items-center gap-4 flex-wrap text-xs">
           {result.tower_verdict && (
             <div className="flex items-center gap-1.5" data-testid="badge-tower-verdict-wrapper">
@@ -316,11 +349,15 @@ function BehaviourJudgeCard({ result }: { result: BehaviourJudgeResult }) {
   );
 }
 
+const BENCHMARK_IDS = BENCHMARK_QUERIES.map((_, i) => `B${String(i + 1).padStart(2, '0')}`);
+
 export default function Activity() {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
   const [demoRunning, setDemoRunning] = useState(false);
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
+  const [selectedBenchmark, setSelectedBenchmark] = useState<string>("B06");
   const [resultsOpen, setResultsOpen] = useState(false);
   const [artefacts, setArtefacts] = useState<ArtefactData[]>([]);
   const [artefactsLoading, setArtefactsLoading] = useState(false);
@@ -405,6 +442,29 @@ export default function Activity() {
     }
   };
 
+  const handleRunBenchmark = async () => {
+    const idx = BENCHMARK_IDS.indexOf(selectedBenchmark);
+    if (idx === -1) return;
+    const query = BENCHMARK_QUERIES[idx];
+    setBenchmarkRunning(true);
+    setEvents([]);
+    try {
+      const res = await apiRequest("POST", "/api/debug/simulate-chat-task", {
+        user_message: query,
+        query_id: selectedBenchmark,
+      });
+      const data = await res.json();
+      if (data.ok && data.runId) {
+        setRunId(data.runId);
+        connectStream(data.runId);
+      }
+    } catch (err: any) {
+      console.error("Benchmark run failed:", err);
+    } finally {
+      setBenchmarkRunning(false);
+    }
+  };
+
   const handleViewResults = async (viewRunId: string) => {
     setArtefactsLoading(true);
     setArtefactsError(null);
@@ -424,7 +484,22 @@ export default function Activity() {
       setArtefacts(data);
       if (judgeRes.ok) {
         const judgeData: BehaviourJudgeResult | null = await judgeRes.json();
-        setBehaviourJudge(judgeData);
+        if (judgeData) {
+          const finalTowerArtefact = data.find(
+            (a) =>
+              a.type === 'tower_judgement' &&
+              (a.payload as any)?.phase === 'final_delivery',
+          );
+          const payloadGta = (finalTowerArtefact?.payload as any)?.ground_truth_assessment ?? null;
+          const payloadQueryId = (finalTowerArtefact?.payload as any)?.query_id ?? null;
+          setBehaviourJudge({
+            ...judgeData,
+            ground_truth_assessment: judgeData.ground_truth_assessment ?? payloadGta,
+            query_id: judgeData.query_id ?? payloadQueryId,
+          });
+        } else {
+          setBehaviourJudge(null);
+        }
       }
     } catch (err) {
       console.error("Failed to fetch artefacts:", err);
@@ -453,12 +528,39 @@ export default function Activity() {
                 Real-time Supervisor execution events
               </p>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
               <div className="flex items-center gap-2">
                 <div className={`h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-destructive"}`} />
                 <span className="text-xs text-muted-foreground">
                   {connected ? "Streaming" : "Disconnected"}
                 </span>
+              </div>
+              <div className="flex items-center gap-2" data-testid="benchmark-runner">
+                <Select value={selectedBenchmark} onValueChange={setSelectedBenchmark}>
+                  <SelectTrigger className="w-[120px] h-9" data-testid="select-benchmark">
+                    <SelectValue placeholder="Select" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {BENCHMARK_IDS.map((id, i) => (
+                      <SelectItem key={id} value={id} data-testid={`select-benchmark-${id}`}>
+                        {id}: {BENCHMARK_QUERIES[i].substring(0, 28)}…
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  onClick={handleRunBenchmark}
+                  disabled={benchmarkRunning}
+                  variant="outline"
+                  data-testid="button-run-benchmark"
+                >
+                  {benchmarkRunning ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <FlaskConical className="h-4 w-4 mr-2" />
+                  )}
+                  Run Benchmark
+                </Button>
               </div>
               <Button
                 onClick={handleRunDemo}
