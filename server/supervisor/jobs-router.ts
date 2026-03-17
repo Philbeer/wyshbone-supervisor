@@ -34,16 +34,23 @@ jobsRouter.post('/start', async (req, res) => {
       });
     }
     
+    const topLevelQueryId = (req.body as any).query_id || null;
+    const mergedPayload = {
+      ...(body.payload || {}),
+      ...(topLevelQueryId && !(body.payload as any)?.query_id ? { query_id: topLevelQueryId } : {}),
+    };
+
     console.log('[JOBS_API] Starting job:');
     console.log(`  jobType: ${body.jobType}`);
     console.log(`  requestedBy: ${body.requestedBy}`);
     console.log(`  userId: ${body.userId || 'N/A'}`);
     console.log(`  sourceRunId: ${body.sourceRunId || 'N/A'}`);
     console.log(`  clientRequestId: ${body.clientRequestId || 'N/A'}`);
+    console.log(`  query_id: ${mergedPayload.query_id || 'N/A'}`);
     
     const jobId = await startJob({
       jobType: body.jobType,
-      payload: body.payload || {},
+      payload: mergedPayload,
       requestedBy: body.requestedBy,
       sourceRunId: body.sourceRunId,
       userId: body.userId,

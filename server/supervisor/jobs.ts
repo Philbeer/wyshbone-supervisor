@@ -583,6 +583,7 @@ export async function startJob(request: StartJobRequest): Promise<string> {
           user_message: fullUserMessage,
           run_id: canonicalRunId,
           client_request_id: request.clientRequestId || null,
+          query_id: (request.payload as any)?.query_id || null,
         },
         status: 'pending',
         created_at: Date.now(),
