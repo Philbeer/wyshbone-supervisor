@@ -168,6 +168,29 @@ function buildUserPrompt(goal: string): string {
   return `Parse this goal into structured constraints:\n\n"${goal}"`;
 }
 
+async function callAnthropicForParsing(anthropicKey: string, userPrompt: string): Promise<Record<string, unknown>> {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': anthropicKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 2000,
+      temperature: 0,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userPrompt + '\n\nReturn ONLY valid JSON.' }],
+    }),
+  });
+  const data = await response.json() as any;
+  if (!response.ok) throw new Error(`Anthropic API ${response.status}: ${JSON.stringify(data).substring(0, 200)}`);
+  const text = data.content?.[0]?.text || '{}';
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  return jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+}
+
 async function callLLMForParsing(goal: string): Promise<Record<string, unknown>> {
   const openaiKey = process.env.OPENAI_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
@@ -175,42 +198,33 @@ async function callLLMForParsing(goal: string): Promise<Record<string, unknown>>
   const userPrompt = buildUserPrompt(goal);
 
   if (openaiKey) {
-    const { default: OpenAI } = await import('openai');
-    const client = new OpenAI({ apiKey: openaiKey });
-    const response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature: 0,
-      max_tokens: 2000,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userPrompt },
-      ],
-    });
-    const text = response.choices[0]?.message?.content || '{}';
-    return JSON.parse(text);
+    try {
+      const { default: OpenAI } = await import('openai');
+      const client = new OpenAI({ apiKey: openaiKey });
+      const response = await client.chat.completions.create({
+        model: 'gpt-4o-mini',
+        temperature: 0,
+        max_tokens: 2000,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+      });
+      const text = response.choices[0]?.message?.content || '{}';
+      return JSON.parse(text);
+    } catch (err: any) {
+      const is429 = err?.status === 429 || String(err?.message ?? '').includes('429');
+      if (is429 && anthropicKey) {
+        console.warn('[GOAL_PARSER] OpenAI 429 — falling back to Claude haiku');
+        return callAnthropicForParsing(anthropicKey, userPrompt);
+      }
+      throw err;
+    }
   }
 
   if (anthropicKey) {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': anthropicKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-3-5-haiku-20241022',
-        max_tokens: 2000,
-        temperature: 0,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: userPrompt + '\n\nReturn ONLY valid JSON.' }],
-      }),
-    });
-    const data = await response.json() as any;
-    const text = data.content?.[0]?.text || '{}';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    return jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+    return callAnthropicForParsing(anthropicKey, userPrompt);
   }
 
   throw new Error('No LLM API key configured');

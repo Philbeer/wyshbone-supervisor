@@ -612,7 +612,16 @@ function selectModel(): string {
 
 async function callLLM(model: string, systemPrompt: string, userPrompt: string): Promise<string> {
   if (model === 'gpt-4o-mini') {
-    return callOpenAI(systemPrompt, userPrompt);
+    try {
+      return await callOpenAI(systemPrompt, userPrompt);
+    } catch (err: any) {
+      const is429 = err?.status === 429 || String(err?.message ?? '').includes('429');
+      if (is429 && process.env.ANTHROPIC_API_KEY) {
+        console.warn('[MISSION_EXTRACTOR] OpenAI 429 — falling back to Claude haiku for routing');
+        return callAnthropic('claude-3-haiku-20240307', systemPrompt, userPrompt);
+      }
+      throw err;
+    }
   }
   if (model.startsWith('claude-')) {
     return callAnthropic(model, systemPrompt, userPrompt);
