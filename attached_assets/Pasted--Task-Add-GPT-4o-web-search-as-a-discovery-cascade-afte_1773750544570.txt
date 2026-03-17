@@ -1,0 +1,67 @@
+## Task: Add GPT-4o web search as a discovery cascade after Google Places
+
+### Context
+Google Places is fast, cheap, and gives structured data (ratings, reviews, addresses, phone numbers). It's the right starting point for consumer-facing businesses. But it misses:
+- Businesses without Google Places listings
+- Businesses that match niche constraints not captured in Places categories
+- B2B entities (suppliers, organisations, professional services)
+
+The discovery cascade runs AFTER Google Places and verification are complete. Its job is to find additional candidates that Google Places missed entirely.
+
+### When to trigger the discovery cascade
+
+After Google Places search + verification + fallback are all complete, evaluate:
+
+1. **Always cascade for these query classes:**
+   - relationship_mapping (e.g. "organisations that work with local authority")
+   - website_evidence (e.g. "pubs that mention live music on their website")
+   
+2. **Cascade for solvable queries if results are thin:**
+   - If Google Places found fewer verified results than minimumExpectedCount
+   - If Google Places found fewer than 5 verified results for an open-ended query (no specific count requested)
+
+3. **Skip cascade if:**
+   - Google Places already found 10+ verified results
+   - The query is a simple name_match class (e.g. "pubs with Swan in the name") where Google Places is comprehensive
+
+### How it works
+
+1. Build a discovery prompt from the original mission constraints:
+   - "Search the web for [entity_type] in [location] that [constraint_descriptions]. Find businesses that are NOT in this list: [list of candidates already found by Google Places]. For each new business found, provide: name, address/location, website URL, and specific evidence that it meets the criteria."
+   - Explicitly exclude already-found candidates to avoid duplicates
+
+2. Call GPT-4o with web search enabled
+
+3. Parse the structured results — new candidate names, locations, evidence
+
+4. Deduplicate against existing Google Places results (fuzzy name match)
+
+5. Feed new candidates into the SAME verification and Tower pipeline:
+   - Each new candidate gets constraint verification
+   - Each goes through Tower evaluation
+   - Source marked as "web_search_discovery"
+
+6. Log as a distinct artefact:
+   - "Discovery cascade triggered: [reason — e.g. 'website_evidence class, only 4 verified results from Google Places']"
+   - "Discovery cascade found [N] new candidates not in Google Places results"
+   - "After merge and verification: [X] total verified candidates ([Y] Google Places, [Z] cascade)"
+
+### Cost awareness
+GPT-4o web search is more expensive than Google Places. The cascade is the premium layer — it finds the long tail. The architecture is:
+- Google Places = cheap, broad, structured data (80% of results)
+- Verification fallback = medium cost, fixes bot-blocking (turns unverified → verified)
+- Discovery cascade = expensive, finds what GP missed (the remaining 20%)
+
+Only escalate when the cheaper layer falls short.
+
+### Important
+- The cascade is ADDITIVE — it supplements Google Places, does not replace it
+- Google Places remains the default starting point for consumer-facing businesses
+- All cascade results go through the same verification and Tower pipeline
+- The cascade runs AFTER the verification fallback — so some previously-unverified GP results may now be verified, which affects whether the cascade threshold is met
+
+### Test expectations
+- B06 (Arundel live music): GP finds 4 pubs, cascade should find 2-3 more by searching pub websites directly
+- B07 (Blackpool local authority): GP finds very little, cascade should find most of the results
+- B08 (NHS suppliers Leeds): GP is weak here, cascade should find suppliers via web search
+- B09 (Brighton dentists): GP finds plenty, cascade may not trigger

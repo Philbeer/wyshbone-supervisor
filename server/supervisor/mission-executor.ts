@@ -99,6 +99,7 @@ interface EvidenceResult {
   towerReasoning: string | null;
   sourceUrl: string | null;
   snippets: string[];
+  sourceTier?: 'first_party' | 'web_search_fallback' | 'snippet';
 }
 
 function buildMatchEvidence(evidenceResults: EvidenceResult[]): MatchEvidenceItem[] {
@@ -1284,6 +1285,103 @@ export async function executeMissionDrivenPlan(
       await Promise.allSettled(batch.map((lead, i) => processOneLead(lead, batchStart + i)));
     }
 
+    // ── GPT-4o web search fallback for bot-blocked / unreachable candidates ──────
+    const blockedWithNoEvidence = evidenceResults.filter(er => er.isBotBlocked && !er.evidenceFound);
+    if (blockedWithNoEvidence.length > 0 && !checkDeadline()) {
+      const openaiKey = process.env.OPENAI_API_KEY;
+      if (!openaiKey) {
+        console.warn('[GPT4O_FALLBACK] OPENAI_API_KEY not set — skipping web search fallback');
+      } else {
+        console.log(`[GPT4O_FALLBACK] Verifying ${blockedWithNoEvidence.length} blocked candidates via GPT-4o web search...`);
+        let fallbackVerified = 0;
+        let fallbackContradicted = 0;
+        let fallbackUnverified = 0;
+
+        for (const er of blockedWithNoEvidence) {
+          if (checkDeadline()) {
+            console.warn('[GPT4O_FALLBACK] Deadline exceeded — stopping fallback early');
+            break;
+          }
+          console.log(`[GPT4O_FALLBACK] Website visit failed for "${er.leadName}": bot-blocked. Queued for GPT-4o verification fallback.`);
+          try {
+            const fbPrompt = `Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following is genuinely true for this specific business: "${er.constraintValue}". Start your response with exactly one of:\n- VERIFIED: [evidence summary and source URL]\n- UNVERIFIED: [reason you could not confirm]\n- CONTRADICTED: [evidence that it is NOT true]`;
+
+            const fbResp = await fetch('https://api.openai.com/v1/responses', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${openaiKey}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                model: 'gpt-4o',
+                input: fbPrompt,
+                tools: [{ type: 'web_search' }],
+                store: false,
+              }),
+            });
+
+            if (!fbResp.ok) {
+              const errText = await fbResp.text().catch(() => '');
+              console.warn(`[GPT4O_FALLBACK] API error for "${er.leadName}": HTTP ${fbResp.status} — ${errText.substring(0, 150)}`);
+              er.sourceTier = 'web_search_fallback';
+              fallbackUnverified++;
+              continue;
+            }
+
+            const fbData = await fbResp.json();
+            let fbContent = '';
+            let fbSourceUrl = '';
+
+            if (Array.isArray(fbData.output)) {
+              for (const item of fbData.output) {
+                if (item.type === 'message' && Array.isArray(item.content)) {
+                  for (const block of item.content) {
+                    if (block.type === 'output_text') {
+                      fbContent += block.text;
+                      if (Array.isArray(block.annotations)) {
+                        for (const ann of block.annotations) {
+                          if (ann.type === 'url_citation' && ann.url && !fbSourceUrl) {
+                            fbSourceUrl = ann.url;
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            if (!fbContent && fbData.output_text) fbContent = fbData.output_text;
+
+            er.sourceTier = 'web_search_fallback';
+            const fbUpper = fbContent.trimStart().toUpperCase();
+            if (fbUpper.startsWith('VERIFIED')) {
+              er.evidenceFound = true;
+              er.evidenceStrength = 'weak';
+              er.snippets = [fbContent.substring(0, 500)];
+              if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
+              fallbackVerified++;
+              console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": verified — source=${fbSourceUrl || 'no_url'} evidence="${fbContent.substring(0, 120)}"`);
+            } else if (fbUpper.startsWith('CONTRADICTED')) {
+              fallbackContradicted++;
+              console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": contradicted — "${fbContent.substring(0, 120)}"`);
+            } else {
+              fallbackUnverified++;
+              console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": unverified — "${fbContent.substring(0, 120)}"`);
+            }
+          } catch (fbErr: any) {
+            console.warn(`[GPT4O_FALLBACK] "${er.leadName}": error — ${fbErr.message}`);
+            er.sourceTier = 'web_search_fallback';
+            fallbackUnverified++;
+          }
+        }
+
+        const directVerified = evidenceResults.filter(er => !er.isBotBlocked && er.evidenceFound).length;
+        const stillUnverified = evidenceResults.filter(er => !er.evidenceFound).length;
+        console.log(`[GPT4O_FALLBACK] Verification complete: ${directVerified} direct, ${fallbackVerified} via fallback, ${fallbackContradicted} contradicted, ${stillUnverified} still unverified`);
+      }
+    }
+    // ── end GPT-4o fallback ───────────────────────────────────────────────────
+
     const totalEvidenceFound = evidenceResults.filter(r => r.evidenceFound).length;
     const totalEvidenceChecks = evidenceResults.length;
     console.log(`[MISSION_EXEC] Evidence gathering complete: ${totalEvidenceFound}/${totalEvidenceChecks} checks found evidence`);
@@ -1298,6 +1396,8 @@ export async function executeMissionDrivenPlan(
         total_checks: totalEvidenceChecks,
         checks_with_evidence: totalEvidenceFound,
         leads_checked: enrichableLeads.length,
+        fallback_candidates: evidenceResults.filter(r => r.sourceTier === 'web_search_fallback').length,
+        fallback_verified: evidenceResults.filter(r => r.sourceTier === 'web_search_fallback' && r.evidenceFound).length,
         results: evidenceResults.map(r => ({
           lead: r.leadName,
           constraint: r.constraintValue,
@@ -1305,6 +1405,7 @@ export async function executeMissionDrivenPlan(
           found: r.evidenceFound,
           strength: r.evidenceStrength,
           tower_status: r.towerStatus,
+          source_tier: r.sourceTier ?? (r.isBotBlocked ? 'snippet' : 'first_party'),
         })),
       },
       userId,
