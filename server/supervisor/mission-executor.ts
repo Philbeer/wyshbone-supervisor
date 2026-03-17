@@ -38,7 +38,7 @@ import { detectRelationshipPredicate, type RelationshipPredicateResult } from '.
 import { RADIUS_LADDER_KM } from './agent-loop';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
-const RUN_EXECUTION_TIMEOUT_MS_DEFAULT = 120_000;
+const RUN_EXECUTION_TIMEOUT_MS_DEFAULT = 300_000;
 const MAX_TOOL_CALLS_DEFAULT = 150;
 const MAX_REPLANS_DEFAULT = 5;
 const HARD_CAP_MAX_REPLANS = 10;
@@ -1381,6 +1381,234 @@ export async function executeMissionDrivenPlan(
       }
     }
     // ── end GPT-4o fallback ───────────────────────────────────────────────────
+
+    // ── Discovery cascade: find candidates Google Places missed ──────────────
+    const cascadeConstraintTypes = evidenceConstraints.map(c => c.type);
+    const gpVerifiedPlaceIds = new Set(
+      evidenceResults.filter(er => er.evidenceFound).map(er => er.leadPlaceId)
+    );
+    const gpVerifiedCount = gpVerifiedPlaceIds.size;
+
+    const alwaysCascadeClass = cascadeConstraintTypes.some(
+      t => t === 'website_evidence' || t === 'relationship_mapping'
+    );
+    const isNameMatchOnly =
+      cascadeConstraintTypes.length > 0 &&
+      cascadeConstraintTypes.every(t => t === 'name_match' || t === 'text_compare');
+
+    const shouldRunCascade =
+      !checkDeadline() &&
+      !isNameMatchOnly &&
+      (alwaysCascadeClass || gpVerifiedCount < 5) &&
+      gpVerifiedCount < 10;
+
+    if (shouldRunCascade) {
+      const openaiKey = process.env.OPENAI_API_KEY;
+      if (!openaiKey) {
+        console.warn('[DISCOVERY_CASCADE] OPENAI_API_KEY not set — skipping cascade');
+      } else {
+        const cascadeReason = alwaysCascadeClass
+          ? `${cascadeConstraintTypes.filter(t => t === 'website_evidence' || t === 'relationship_mapping').join(', ')} class, ${gpVerifiedCount} verified results from Google Places`
+          : `thin results: only ${gpVerifiedCount} verified from Google Places`;
+        console.log(`[DISCOVERY_CASCADE] Discovery cascade triggered: ${cascadeReason}`);
+
+        const entityDescription =
+          intentNarrative?.entity_description ?? `${businessType} in ${location}`;
+        const constraintDescs = evidenceConstraints
+          .map(ec => {
+            const val = typeof ec.value === 'string' ? ec.value : String(ec.value ?? '');
+            return `${ec.type}: "${val}"`;
+          })
+          .join(', ');
+        const exclusionList = leads
+          .map(l => l.name)
+          .slice(0, 40)
+          .join('\n- ');
+
+        const cascadePrompt = [
+          `Search the web for ${entityDescription}.`,
+          constraintDescs ? `They must satisfy: ${constraintDescs}.` : '',
+          `Exclude these businesses already found via Google Places (do not include them):\n- ${exclusionList}`,
+          `For each NEW business found, return ONLY a JSON array (no other text before or after) in this exact format:`,
+          `[{"name": "business name", "address": "full address or area", "website": "https://...", "evidence": "specific text proving the constraint is met"}]`,
+          `Find up to 10 additional businesses. If you cannot find any new ones, return an empty array: []`,
+        ]
+          .filter(Boolean)
+          .join('\n\n');
+
+        try {
+          const cascadeResp = await fetch('https://api.openai.com/v1/responses', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${openaiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: 'gpt-4o',
+              input: cascadePrompt,
+              tools: [{ type: 'web_search' }],
+              store: false,
+            }),
+          });
+
+          if (!cascadeResp.ok) {
+            const errText = await cascadeResp.text().catch(() => '');
+            console.warn(
+              `[DISCOVERY_CASCADE] API error: HTTP ${cascadeResp.status} — ${errText.substring(0, 150)}`
+            );
+          } else {
+            const cascadeData = await cascadeResp.json();
+            let cascadeContent = '';
+            if (Array.isArray(cascadeData.output)) {
+              for (const item of cascadeData.output) {
+                if (item.type === 'message' && Array.isArray(item.content)) {
+                  for (const block of item.content) {
+                    if (block.type === 'output_text') cascadeContent += block.text;
+                  }
+                }
+              }
+            }
+            if (!cascadeContent && cascadeData.output_text) cascadeContent = cascadeData.output_text;
+
+            // Parse JSON — handle optional ```json ... ``` fences
+            let cascadeCandidates: Array<{
+              name: string;
+              address?: string;
+              website?: string;
+              evidence?: string;
+            }> = [];
+            try {
+              const jsonMatch = cascadeContent.match(/\[[\s\S]*\]/);
+              if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                if (Array.isArray(parsed)) cascadeCandidates = parsed;
+              }
+            } catch {
+              console.warn(
+                `[DISCOVERY_CASCADE] Could not parse JSON — raw="${cascadeContent.substring(0, 200)}"`
+              );
+            }
+
+            // Deduplicate against existing leads (fuzzy name match)
+            const normName = (s: string) =>
+              s
+                .toLowerCase()
+                .replace(/^the\s+/i, '')
+                .replace(/[^a-z0-9]/g, '');
+            const existingNormed = new Set(leads.map(l => normName(l.name)));
+
+            const newCandidates = cascadeCandidates
+              .filter(c => {
+                if (!c.name || typeof c.name !== 'string' || c.name.trim().length < 2)
+                  return false;
+                const n = normName(c.name);
+                if (existingNormed.has(n)) return false;
+                existingNormed.add(n);
+                return true;
+              })
+              .slice(0, 10);
+
+            console.log(
+              `[DISCOVERY_CASCADE] Discovery cascade found ${newCandidates.length} new candidates not in Google Places results`
+            );
+
+            if (newCandidates.length > 0) {
+              const cascadeStartIdx = leads.length;
+
+              // Add cascade candidates to the leads array
+              for (const c of newCandidates) {
+                leads.push({
+                  name: c.name.trim(),
+                  address: c.address?.trim() || `${location}, ${country}`,
+                  phone: null,
+                  website: c.website?.trim() || null,
+                  placeId: `cascade_${runId.substring(0, 8)}_${leads.length}`,
+                  source: 'web_search_discovery',
+                  lat: null,
+                  lng: null,
+                });
+              }
+
+              // Persist cascade leads to the database
+              for (let ci = cascadeStartIdx; ci < leads.length; ci++) {
+                try {
+                  const created = await storage.createSuggestedLead({
+                    userId,
+                    rationale: `Discovery cascade: ${businessType} in ${location}`,
+                    source: 'web_search_discovery',
+                    score: 0.65,
+                    lead: {
+                      name: leads[ci].name,
+                      address: leads[ci].address,
+                      place_id: leads[ci].placeId,
+                      domain: leads[ci].website || '',
+                      emailCandidates: [],
+                      tags: [businessType, 'discovery_cascade'],
+                      phone: '',
+                    },
+                  });
+                  createdLeadIds.push(created.id);
+                  placeIdToDbId.set(leads[ci].placeId, created.id);
+                } catch (persistErr: any) {
+                  console.warn(
+                    `[DISCOVERY_CASCADE] Failed to persist "${leads[ci].name}": ${persistErr.message}`
+                  );
+                }
+              }
+
+              // Run each cascade candidate through the evidence pipeline
+              let cascadeVerified = 0;
+              for (let ci = cascadeStartIdx; ci < leads.length; ci++) {
+                if (checkDeadline()) {
+                  console.warn(
+                    '[DISCOVERY_CASCADE] Deadline exceeded — stopping cascade verification early'
+                  );
+                  break;
+                }
+                const cascadeLead = { ...leads[ci], _idx: ci } as typeof enrichableLeads[0];
+                await processOneLead(cascadeLead, ci - cascadeStartIdx);
+                if (evidenceResults.some(er => er.leadIndex === ci && er.evidenceFound)) {
+                  cascadeVerified++;
+                }
+              }
+
+              const totalVerifiedAfterCascade = new Set(
+                evidenceResults.filter(er => er.evidenceFound).map(er => er.leadPlaceId)
+              ).size;
+
+              console.log(
+                `[DISCOVERY_CASCADE] After merge and verification: ${totalVerifiedAfterCascade} total verified (${gpVerifiedCount} Google Places, ${cascadeVerified} cascade)`
+              );
+
+              await createArtefact({
+                runId,
+                type: 'discovery_cascade',
+                title: `Discovery cascade: ${newCandidates.length} new candidates (${cascadeVerified} verified)`,
+                summary: `After merge and verification: ${totalVerifiedAfterCascade} total verified (${gpVerifiedCount} Google Places, ${cascadeVerified} cascade)`,
+                payload: {
+                  trigger_reason: cascadeReason,
+                  google_places_verified: gpVerifiedCount,
+                  cascade_candidates_found: newCandidates.length,
+                  cascade_candidates_verified: cascadeVerified,
+                  total_verified_after_cascade: totalVerifiedAfterCascade,
+                  candidates: newCandidates.map(c => ({
+                    name: c.name,
+                    address: c.address,
+                    website: c.website,
+                    evidence_summary: c.evidence?.substring(0, 200),
+                  })),
+                },
+                userId,
+                conversationId,
+              }).catch(() => {});
+            }
+          }
+        } catch (cascadeErr: any) {
+          console.warn(`[DISCOVERY_CASCADE] Cascade error: ${cascadeErr.message}`);
+        }
+      }
+    }
+    // ── end discovery cascade ─────────────────────────────────────────────────
 
     const totalEvidenceFound = evidenceResults.filter(r => r.evidenceFound).length;
     const totalEvidenceChecks = evidenceResults.length;
