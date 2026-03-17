@@ -44,7 +44,7 @@ const MAX_REPLANS_DEFAULT = 5;
 const HARD_CAP_MAX_REPLANS = 10;
 const DEFAULT_SEARCH_BUDGET = 20;
 const ENRICH_CONCURRENCY = 3;
-const ENRICH_BATCH_SIZE = 10;
+const ENRICH_BATCH_SIZE = 25;
 
 export interface MissionExecutionContext {
   mission: StructuredMission;
