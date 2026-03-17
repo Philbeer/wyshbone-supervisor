@@ -1285,24 +1285,28 @@ export async function executeMissionDrivenPlan(
       await Promise.allSettled(batch.map((lead, i) => processOneLead(lead, batchStart + i)));
     }
 
-    // ── GPT-4o web search fallback for bot-blocked / unreachable candidates ──────
-    const blockedWithNoEvidence = evidenceResults.filter(er => er.isBotBlocked && !er.evidenceFound);
-    if (blockedWithNoEvidence.length > 0 && !checkDeadline()) {
+    // ── GPT-4o web search fallback for any candidate with no evidence found ──────
+    const candidatesWithNoEvidence = evidenceResults.filter(er => !er.evidenceFound);
+    if (candidatesWithNoEvidence.length > 0 && !checkDeadline()) {
       const openaiKey = process.env.OPENAI_API_KEY;
       if (!openaiKey) {
         console.warn('[GPT4O_FALLBACK] OPENAI_API_KEY not set — skipping web search fallback');
       } else {
-        console.log(`[GPT4O_FALLBACK] Verifying ${blockedWithNoEvidence.length} blocked candidates via GPT-4o web search...`);
+        console.log(`[GPT4O_FALLBACK] Verifying ${candidatesWithNoEvidence.length} candidates with no evidence via GPT-4o web search...`);
         let fallbackVerified = 0;
         let fallbackContradicted = 0;
         let fallbackUnverified = 0;
 
-        for (const er of blockedWithNoEvidence) {
+        for (const er of candidatesWithNoEvidence) {
           if (checkDeadline()) {
             console.warn('[GPT4O_FALLBACK] Deadline exceeded — stopping fallback early');
             break;
           }
-          console.log(`[GPT4O_FALLBACK] Website visit failed for "${er.leadName}": bot-blocked. Queued for GPT-4o verification fallback.`);
+          if (er.isBotBlocked) {
+            console.log(`[GPT4O_FALLBACK] Website visit failed for "${er.leadName}": bot-blocked. Queued for GPT-4o verification fallback.`);
+          } else {
+            console.log(`[GPT4O_FALLBACK] Website visit succeeded for "${er.leadName}" but no evidence found. Queued for GPT-4o verification fallback.`);
+          }
           try {
             const fbPrompt = `Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following is genuinely true for this specific business: "${er.constraintValue}". Start your response with exactly one of:\n- VERIFIED: [evidence summary and source URL]\n- UNVERIFIED: [reason you could not confirm]\n- CONTRADICTED: [evidence that it is NOT true]`;
 
@@ -1375,7 +1379,7 @@ export async function executeMissionDrivenPlan(
           }
         }
 
-        const directVerified = evidenceResults.filter(er => !er.isBotBlocked && er.evidenceFound).length;
+        const directVerified = evidenceResults.filter(er => er.evidenceFound && er.sourceTier !== 'web_search_fallback').length;
         const stillUnverified = evidenceResults.filter(er => !er.evidenceFound).length;
         console.log(`[GPT4O_FALLBACK] Verification complete: ${directVerified} direct, ${fallbackVerified} via fallback, ${fallbackContradicted} contradicted, ${stillUnverified} still unverified`);
       }
