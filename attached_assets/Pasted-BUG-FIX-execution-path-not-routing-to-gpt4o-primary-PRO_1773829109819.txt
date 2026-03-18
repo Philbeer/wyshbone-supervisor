@@ -1,0 +1,34 @@
+BUG FIX — execution_path not routing to gpt4o_primary
+
+PROBLEM: The UI is sending execution_path: "gpt4o_primary" in the POST /api/chat body (confirmed — toggle is visible and selected in the UI). However, the Supervisor is still executing the discovery_then_website_evidence pipeline (Google Places → web visits → evidence extraction). The gpt4o_primary branch in mission-executor.ts is not firing.
+
+DIAGNOSTIC STEPS — do these first before changing anything:
+
+1. In routes.ts, find where execution_path is read from the request body. Add a console.log immediately after it's read:
+   console.log('[ROUTE] execution_path received:', req.body.execution_path);
+
+2. In supervisor.ts, find where executionPath is passed to the mission context. Add a console.log:
+   console.log('[SUPERVISOR] executionPath being passed to context:', executionPath);
+
+3. In mission-executor.ts, find the if (ctx.executionPath === 'gpt4o_primary') check. Add a console.log immediately before it:
+   console.log('[EXECUTOR] ctx.executionPath:', ctx.executionPath, '| checking for gpt4o_primary');
+
+4. Check the server logs after these are added. Run a test query with the GPT-4o toggle on and report what the three log lines show.
+
+LIKELY CAUSES (check in this order):
+A. The field name in the UI payload doesn't match what routes.ts reads (e.g., camelCase vs snake_case mismatch)
+B. The field is read in routes.ts but stored in request_data under a different key
+C. The field is in request_data but supervisor.ts reads it with the wrong key
+D. The field reaches supervisor.ts but isn't passed into the MissionExecutionContext object
+E. The if-check in mission-executor.ts is after the point where the old pipeline has already started executing (race condition)
+
+FIX: Once you identify which link in the chain is broken, fix it. The goal is:
+- UI sends execution_path: "gpt4o_primary" in the POST body
+- routes.ts stores it in request_data
+- supervisor.ts reads it and passes it to the mission executor context
+- mission-executor.ts checks ctx.executionPath === 'gpt4o_primary' BEFORE the existing GP pipeline code runs
+- If matched, it calls executeGpt4oPrimaryPath() and returns without running the GP pipeline
+
+Do NOT modify the gpt4o-search.ts file or any existing pipeline code. This is purely a wiring/plumbing fix.
+
+After fixing, append findings to AGENT_LOG.md documenting: what was broken, why, and what was changed.
