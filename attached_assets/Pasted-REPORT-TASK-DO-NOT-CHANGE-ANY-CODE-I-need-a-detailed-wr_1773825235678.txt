@@ -1,0 +1,47 @@
+REPORT TASK — DO NOT CHANGE ANY CODE
+
+I need a detailed written report on how the current search and discovery pipeline works. Write your findings to AGENT_LOG.md as a structured report. Examine the actual code, not just comments. Cover:
+
+1. QUERY CLASS DETERMINATION
+- How and where is query_class determined? Which file(s)?
+- What are all the possible query_class values?
+- Is query_class used to route to different execution paths, or does everything go through the same pipeline?
+
+2. PLANNER / MISSION EXECUTOR FLOW
+- What is the execution flow from query receipt to result delivery?
+- Which file orchestrates the pipeline steps?
+- What are the distinct stages/steps the pipeline runs through in order?
+
+3. GOOGLE PLACES SEARCH
+- Which file(s) call Google Places?
+- How many GP calls are typically made per query?
+- What parameters/filters are applied?
+- Is there any caching or deduplication?
+
+4. GPT-4o WEB SEARCH (FALLBACK / CASCADE)
+- Where is GPT-4o web search called? Which file(s)?
+- When is it triggered — what conditions cause fallback from GP to GPT-4o?
+- What is the "discovery cascade" and how does it work?
+- What prompt is sent to GPT-4o for web search?
+
+5. PER-CANDIDATE WEBSITE VISITS
+- Which file(s) handle website crawling/fetching?
+- How are candidate websites identified and visited?
+- What happens when a site is bot-blocked?
+
+6. PER-CANDIDATE EVIDENCE EXTRACTION
+- Which file(s) do evidence extraction?
+- How does the two-layer approach work (keyword windows → GPT-4o judge)?
+- What is the output format?
+
+7. PER-CANDIDATE TOWER VERIFICATION
+- Where are per-candidate Tower calls made?
+- What payload is sent to Tower for each candidate?
+- How are Tower responses (PASS/PARTIAL/STOP) handled per candidate?
+
+8. FINAL DELIVERY
+- How are results assembled into the final delivery package?
+- What triggers the final Tower call vs per-candidate calls?
+- What is the attribute_verification artefact structure?
+
+For each section, list the specific files and function names involved. This report will be used to plan a major architectural change.
