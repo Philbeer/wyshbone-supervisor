@@ -1147,7 +1147,26 @@ class SupervisorService {
       console.log(`[PASS3_CLARIFY] clarification_needed=true but benchmark run (query_id=${missionQueryId}) — bypassing clarification gate, forcing execution`);
     }
 
-    if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && !missionQueryId) {
+    // Deterministic searchability check: if the mission already has entity_category + location_text +
+    // at least one constraint, there is enough content to execute a search regardless of what the LLM
+    // sets for clarification_needed. The LLM flag is treated as a suggestion, not a gate, when the
+    // structured mission is actionable. This eliminates non-deterministic clarification halts.
+    const _missionHasEnoughToSearch =
+      missionResult?.ok === true &&
+      !!missionResult.mission &&
+      !!(missionResult.mission.entity_category?.trim()) &&
+      !!(missionResult.mission.location_text?.trim()) &&
+      missionResult.mission.constraints.length > 0;
+
+    if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && _missionHasEnoughToSearch && !missionQueryId) {
+      console.log(
+        `[PASS3_CLARIFY] clarification_needed=true but mission is actionable — ` +
+        `entity="${missionResult.mission!.entity_category}" location="${missionResult.mission!.location_text}" ` +
+        `constraints=${missionResult.mission!.constraints.length} — suppressing clarification gate, proceeding to search`
+      );
+    }
+
+    if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && !_missionHasEnoughToSearch && !missionQueryId) {
       const clarifyQ = missionResult.intentNarrative.clarification_question || 'Could you clarify your request a bit more?';
       console.log(`[PASS3_CLARIFY] clarification_needed=true question="${clarifyQ.substring(0, 80)}"`);
 

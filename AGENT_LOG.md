@@ -656,3 +656,53 @@ The full `deliveredLeadsWithEvidence` object additionally includes:
 7. **`run-receipt.ts` not modified**: The narrative logic in `run-receipt.ts` does not check `source_tier` strings directly (confirmed by code inspection). It generates narrative from aggregated outcome fields. No changes needed.
 
 8. **Backward compatibility**: Verified that all callers of `executeMissionDrivenPlan` pass `MissionExecutionContext`. The new `executionPath` field is optional (`?`) so all existing call sites are unaffected without changes.
+
+---
+
+## BUG FIX — Non-deterministic clarification gate (Pass 3)
+
+**Date:** 2026-03-18  
+**Issue:** Same query "Find organisations that work with the local authority in Blackpool" sometimes executed successfully (8 results) and sometimes halted at the clarification gate, producing zero results. The root cause was that `gpt-4o-mini` non-deterministically set `clarify_if_needed: true` on relationship constraints, and the gate unconditionally honoured that flag.
+
+**Root cause in code:**  
+`server/supervisor.ts` lines ~1150–1166 (pre-fix). The condition was:
+```typescript
+if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && !missionQueryId) {
+  // halt, insert clarification message, return
+}
+```
+The LLM's `clarification_needed` boolean was the **sole decision-maker** for halting execution. Because gpt-4o-mini is stochastic, identical inputs produced different routing decisions across runs.
+
+**Fix applied (`server/supervisor.ts`):**
+
+Added a deterministic `_missionHasEnoughToSearch` check immediately before the halt block:
+
+```typescript
+const _missionHasEnoughToSearch =
+  missionResult?.ok === true &&
+  !!missionResult.mission &&
+  !!(missionResult.mission.entity_category?.trim()) &&
+  !!(missionResult.mission.location_text?.trim()) &&
+  missionResult.mission.constraints.length > 0;
+```
+
+The halt block's condition is now `... && !_missionHasEnoughToSearch && !missionQueryId` — so it only halts when the structured mission genuinely lacks the minimum content needed to search (no entity category, or no location, or no constraints). When the mission IS actionable, a suppression log line is emitted and execution falls through to the GP cascade or gpt4o_primary path as normal.
+
+**Decision rules (deterministic):**
+
+| Condition | Result |
+|---|---|
+| `entity_category` non-empty AND `location_text` non-empty AND ≥1 constraint | PROCEED — suppress clarify gate |
+| Any of the above missing | HALT — allow clarification question |
+| Benchmark run (`missionQueryId` set) | PROCEED — existing bypass unchanged |
+
+**What was NOT changed:**
+- Intent extractor prompt and LLM call (`mission-extractor.ts`) — untouched
+- Pass 1, Pass 2, GP cascade, Tower calls, website visits — untouched
+- `gpt4o_primary` path — untouched
+- The clarification halt itself is preserved for genuinely vague queries
+
+**Expected log output on suppression:**
+```
+[PASS3_CLARIFY] clarification_needed=true but mission is actionable — entity="organisations" location="Blackpool" constraints=1 — suppressing clarification gate, proceeding to search
+```
