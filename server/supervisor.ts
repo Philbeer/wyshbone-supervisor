@@ -1844,6 +1844,19 @@ class SupervisorService {
           console.log(`[CONSTRAINT_GATE_OUTER] Pass 3 says clarification_needed=false — overriding clarify-only block (types: ${outerGateResult.constraints.map((c: any) => c.type).join(', ')}), proceeding to search`);
           outerGateResult = { ...outerGateResult, can_execute: true, why_blocked: null, clarify_questions: [] };
         }
+        // If the structured mission has entity + location + constraint, it is searchable regardless
+        // of what the constraint gate says about can_execute. Relationship predicates flagging
+        // can_execute=false with stop_recommended=false should never halt a search that has
+        // enough content to execute. _missionHasEnoughToSearch is evaluated earlier in this fn.
+        if (!outerGateResult.can_execute && _missionHasEnoughToSearch) {
+          console.log('[OUTER-GATE] Suppressed — mission has enough to search:', {
+            entity_category: _clarifyGateEntity,
+            location_text: _clarifyGateLocation,
+            constraintCount: _clarifyGateConstraintCount,
+            blocked_types: outerGateResult.constraints.map((c: any) => c.type),
+          });
+          outerGateResult = { ...outerGateResult, can_execute: true, why_blocked: null, clarify_questions: [] };
+        }
         if (missionQueryId && !outerGateResult.can_execute) {
           console.log(`[CONSTRAINT_GATE_OUTER] benchmark run (query_id=${missionQueryId}) — bypassing constraint gate (stop=${outerGateResult.stop_recommended}), forcing execution`);
           outerGateResult = { ...outerGateResult, can_execute: true, why_blocked: null, clarify_questions: [] };

@@ -779,3 +779,111 @@ if (missionMode === 'active' && clarification_needed && !_missionHasEnoughToSear
 ```
 
 The pipeline then continues to GP cascade / gpt4o_primary as normal.
+
+---
+
+## BUG FIX — outer_constraint_gate blocking relationship queries
+
+**Date:** 2026-03-18  
+**Issue:** After the `pass3_clarify` gate was fixed, runs were still halting intermittently with verdict `outer_constraint_gate`. The query "Find organisations that work with the local authority in Blackpool" had `stop_recommended: false` but `can_execute: false`, causing a halt before search.
+
+---
+
+### Root cause
+
+The outer constraint gate (`server/supervisor.ts` ~line 1800) builds a `constraintContract` from the raw user message. For relationship predicates like "work with the local authority", the `RelationshipPredicateConstraint` is classified as:
+
+```
+can_execute: false
+verifiability: "proxy"
+hardness: "soft"
+stop_recommended: false
+why_blocked: "Relationship constraint requires strategy selection before search can proceed"
+```
+
+There was already a bypass block at line 1840 that checks:
+1. `pass3ClearedClarification` — fires only when `intentNarrative.clarification_needed === false`
+2. `missionQueryId` — fires only for benchmark runs
+
+The gap: when `pass3_clarify` suppresses the clarification gate (because `_missionHasEnoughToSearch=true`), the `intentNarrative.clarification_needed` field remains `true` in the narrative object. So `pass3ClearedClarification` evaluates to `false`, the bypass doesn't trigger, and the outer gate halts execution.
+
+---
+
+### Fix applied (`server/supervisor.ts`, lines ~1850–1862)
+
+Added a third check inside the existing bypass block:
+
+```typescript
+// If the structured mission has entity + location + constraint, it is searchable regardless
+// of what the constraint gate says about can_execute.
+if (!outerGateResult.can_execute && _missionHasEnoughToSearch) {
+  console.log('[OUTER-GATE] Suppressed — mission has enough to search:', {
+    entity_category: _clarifyGateEntity,
+    location_text: _clarifyGateLocation,
+    constraintCount: _clarifyGateConstraintCount,
+    blocked_types: outerGateResult.constraints.map((c: any) => c.type),
+  });
+  outerGateResult = { ...outerGateResult, can_execute: true, why_blocked: null, clarify_questions: [] };
+}
+```
+
+`_missionHasEnoughToSearch`, `_clarifyGateEntity`, `_clarifyGateLocation`, and `_clarifyGateConstraintCount` are all declared earlier in the same function scope (around line 1154) and are directly reachable here.
+
+The bypass block outer condition (`!stop_recommended || missionQueryId`) already correctly scopes this to non-stop cases. A relationship predicate with `stop_recommended=false` is ALWAYS inside this block.
+
+---
+
+### Expected log on suppression
+
+```
+[OUTER-GATE] Suppressed — mission has enough to search: { entity_category: 'organisations that work with the local authority', location_text: 'Blackpool', constraintCount: 1, blocked_types: ['relationship_predicate'] }
+[CONSTRAINT_GATE_OUTER] can_execute=true stop=false constraints=1 msg="Find organisations that work with the local authority..."
+```
+
+---
+
+### Complete map of all execution-halting gates
+
+The following gates can halt a run before or during search. Listed in execution order:
+
+| Gate | Verdict emitted | Condition | Affected by fix? |
+|---|---|---|---|
+| **pass3_clarify** | `pass3_clarify` | `missionMode=active` AND `intentNarrative.clarification_needed=true` AND `!_missionHasEnoughToSearch` AND `!missionQueryId` | YES — Fixed (session 2) |
+| **preflight_clarify** | `preflight_clarify` | Fires when `evaluatePreflightClarify()` returns a result. Only triggers when: business_type is missing, location is missing, or there is an unverifiable time predicate | NOT AFFECTED — does not trigger on relationship constraints |
+| **factory_demo_stale** | `factory_demo_stale` | Session guard drops stale factory demo delivery | NOT A SEARCHABILITY GATE |
+| **constraint_gate_stop (inner)** | `constraint_gate_stop` | `pendingConstraint` exists (follow-up to earlier clarification) AND `resolvedContract.stop_recommended=true` | NOT AFFECTED — only fires on follow-up to a prior gate halt |
+| **constraint_gate_clarify (inner)** | `constraint_gate_clarify` | `pendingConstraint` exists AND `resolvedContract.can_execute=false` AND `!stop_recommended` | NOT AFFECTED — only fires on follow-up to a prior gate halt; also has auto-resolve logic for skip-like signals |
+| **outer_constraint_gate** | `outer_constraint_gate` | `outerGateResult.can_execute=false` after all bypass checks fail | YES — Fixed (this session) |
+| **session_guard_stale_run** | `session_guard_stale_run` | `guardDelivery()` returns false — fires after execution completes, not before | NOT A SEARCHABILITY GATE |
+
+---
+
+### Gates that require a strategic choice from the user (legitimate halts)
+
+These gates deliberately block when there is no reasonable default:
+
+- **`constraint_gate_stop`** — fires when `stop_recommended=true`, meaning the constraint is classified as fundamentally unsatisfiable (e.g. verifying a live event is happening right now). These are correct halts.
+- **`preflight_clarify`** on `time_predicate_unverifiable` — when the user asks for "opening dates" or "new businesses opened this month" and no proxy is available. These are correct halts.
+- **`preflight_clarify`** on `missing_business_type` or `missing_location` — the query literally has no actionable entity or location. These are correct halts.
+
+---
+
+### Summary of changes across all sessions
+
+After both fixes, the routing for "Find organisations that work with the local authority in Blackpool" is:
+
+```
+pass3_clarify gate:
+  → clarification_needed=true (LLM set it)
+  → _missionHasEnoughToSearch=true (entity + location + 1 constraint)
+  → SUPPRESSED — logs [CLARIFY-GATE] Suppressed, proceeds
+
+outer_constraint_gate:
+  → can_execute=false (relationship_predicate blocks)
+  → stop_recommended=false
+  → bypass block runs
+  → _missionHasEnoughToSearch=true
+  → SUPPRESSED — logs [OUTER-GATE] Suppressed, can_execute overridden to true
+
+Pipeline proceeds → GP cascade → results
+```

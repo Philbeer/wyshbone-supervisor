@@ -1,0 +1,38 @@
+BUG FIX — Second clarification gate (outer_constraint_gate) blocking relationship queries
+
+PROBLEM: There are TWO separate gates that can halt a query before search begins. The first gate (pass3_clarify based on clarify_if_needed from the LLM) was fixed — it now checks _missionHasEnoughToSearch and proceeds. But there is a SECOND gate called outer_constraint_gate that is ALSO blocking the same queries intermittently.
+
+The outer_constraint_gate evaluates a constraint_contract and halts when can_execute is false. For relationship constraints like "work with the local authority", the constraint contract returns:
+  - can_execute: false
+  - verifiability: "unverifiable"
+  - why_blocked: "Relationship constraint requires strategy selection before search can proceed"
+  - stop_recommended: false
+
+Note that stop_recommended is false — even the gate itself thinks we shouldn't stop! But can_execute: false causes the halt anyway.
+
+AFR evidence from a stuck run: The task_execution_completed event shows:
+  verdict: "outer_constraint_gate"
+  stop: false
+
+WHAT TO FIX:
+
+Find the outer_constraint_gate logic. This is the code that:
+1. Builds a constraint_contract from the extracted constraints
+2. Evaluates whether relationship constraints can_execute
+3. Decides to halt execution and ask for clarification (presenting A/B/C strategy options to user)
+
+Apply the SAME principle as the pass3_clarify fix: if the mission has enough to search (entity_category non-empty + location_text non-empty + at least one constraint), then PROCEED regardless of what the constraint contract says about can_execute.
+
+Specifically:
+- Find where the verdict "outer_constraint_gate" is returned or where can_execute: false causes a halt
+- Before that return/halt, check the same _missionHasEnoughToSearch condition (entity + location + constraint present)
+- If the mission has enough to search, override can_execute to true and proceed
+- Log: console.log('[OUTER-GATE] Suppressed — mission has enough to search:', { entity_category, location_text, constraintCount })
+
+The constraint_contract's clarify_questions and strategy selection (A/B/C research options) are a FUTURE feature — the system should pick a reasonable default and proceed, not block the user.
+
+ALSO: Check if there are any OTHER gates that could block execution besides pass3_clarify and outer_constraint_gate. Search for all places that return a verdict that halts execution (look for patterns like verdict containing "clarify", "gate", "blocked", or anywhere the code returns early before search begins). List them all in the AGENT_LOG so we know the full picture.
+
+DO NOT modify the pass3_clarify fix, the intent extractor, the GP search pipeline, the evidence extraction, Tower calls, or the gpt4o_primary path.
+
+After fixing, append findings to AGENT_LOG.md documenting: where the outer_constraint_gate lives, what was changed, and a complete list of ALL execution gates in the pipeline that can halt a run before search begins.
