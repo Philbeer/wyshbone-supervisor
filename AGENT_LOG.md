@@ -706,3 +706,76 @@ The halt block's condition is now `... && !_missionHasEnoughToSearch && !mission
 ```
 [PASS3_CLARIFY] clarification_needed=true but mission is actionable — entity="organisations" location="Blackpool" constraints=1 — suppressing clarification gate, proceeding to search
 ```
+
+---
+
+## VERIFICATION — Clarification gate fix persistence check
+
+**Date:** 2026-03-18  
+**Task:** Verify the `_missionHasEnoughToSearch` guard was present on disk and live in the running server, and add explicit diagnostic logging.
+
+---
+
+### Was the previous fix present?
+
+**YES — the fix was present and correctly written to disk.**
+
+On reading `server/supervisor.ts` lines 1150–1185, the `_missionHasEnoughToSearch` guard was found intact exactly as applied in the previous session. The concern that "the fix did not persist" was not accurate at the code level — the file contained the correct guard. The issue may have been that a run used a server process that started before the fix was hot-reloaded, or that a subsequent run was executed against a different environment.
+
+---
+
+### What was done
+
+1. **Read the file** — confirmed the guard was present at lines 1154–1185
+2. **Added explicit `[CLARIFY-GATE]` diagnostic logging** as requested:
+   - `[CLARIFY-GATE] Values:` — emitted whenever `clarification_needed=true`, showing the three gate inputs
+   - `[CLARIFY-GATE] _missionHasEnoughToSearch:` — emitted showing the boolean result
+   - `[CLARIFY-GATE] Suppressed — mission has enough to search:` — emitted when the gate is overridden and the run proceeds
+3. **Killed the old `tsx` process** explicitly via `pkill` (not relying on hot-reload)
+4. **Restarted the workflow** — server came up clean with no TypeScript errors
+5. **Confirmed server live** — HTTP 200 on port 5000
+
+---
+
+### Final gate logic (lines 1153–1200 after this session)
+
+```typescript
+const _clarifyGateEntity   = missionResult?.mission?.entity_category?.trim()   ?? '';
+const _clarifyGateLocation = missionResult?.mission?.location_text?.trim()       ?? '';
+const _clarifyGateConstraintCount = missionResult?.mission?.constraints?.length  ?? 0;
+
+const _missionHasEnoughToSearch =
+  missionResult?.ok === true &&
+  !!missionResult.mission &&
+  !!_clarifyGateEntity &&
+  !!_clarifyGateLocation &&
+  _clarifyGateConstraintCount > 0;
+
+// Diagnostic — emits whenever clarification_needed=true
+if (missionResult?.intentNarrative?.clarification_needed) {
+  console.log('[CLARIFY-GATE] Values:', { entity_category, location_text, constraintCount, clarify_if_needed });
+  console.log('[CLARIFY-GATE] _missionHasEnoughToSearch:', _missionHasEnoughToSearch);
+}
+
+// Suppression path — runs proceed, gate is bypassed
+if (missionMode === 'active' && clarification_needed && _missionHasEnoughToSearch && !missionQueryId) {
+  console.log('[CLARIFY-GATE] Suppressed — mission has enough to search:', { entity_category, location_text, constraintCount });
+}
+
+// Halt path — only triggers when entity/location/constraints are missing
+if (missionMode === 'active' && clarification_needed && !_missionHasEnoughToSearch && !missionQueryId) {
+  // ... halt, insert clarification message, return
+}
+```
+
+---
+
+### Expected log on next triggered suppression
+
+```
+[CLARIFY-GATE] Values: { entity_category: 'organisations that work with the local authority', location_text: 'Blackpool', constraintCount: 1, clarify_if_needed: true }
+[CLARIFY-GATE] _missionHasEnoughToSearch: true
+[CLARIFY-GATE] Suppressed — mission has enough to search: { entity_category: 'organisations that work with the local authority', location_text: 'Blackpool', constraintCount: 1 }
+```
+
+The pipeline then continues to GP cascade / gpt4o_primary as normal.

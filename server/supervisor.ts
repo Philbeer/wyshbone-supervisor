@@ -1151,19 +1151,32 @@ class SupervisorService {
     // at least one constraint, there is enough content to execute a search regardless of what the LLM
     // sets for clarification_needed. The LLM flag is treated as a suggestion, not a gate, when the
     // structured mission is actionable. This eliminates non-deterministic clarification halts.
+    const _clarifyGateEntity = missionResult?.mission?.entity_category?.trim() ?? '';
+    const _clarifyGateLocation = missionResult?.mission?.location_text?.trim() ?? '';
+    const _clarifyGateConstraintCount = missionResult?.mission?.constraints?.length ?? 0;
     const _missionHasEnoughToSearch =
       missionResult?.ok === true &&
       !!missionResult.mission &&
-      !!(missionResult.mission.entity_category?.trim()) &&
-      !!(missionResult.mission.location_text?.trim()) &&
-      missionResult.mission.constraints.length > 0;
+      !!_clarifyGateEntity &&
+      !!_clarifyGateLocation &&
+      _clarifyGateConstraintCount > 0;
+
+    if (missionResult?.intentNarrative?.clarification_needed) {
+      console.log('[CLARIFY-GATE] Values:', {
+        entity_category: _clarifyGateEntity,
+        location_text: _clarifyGateLocation,
+        constraintCount: _clarifyGateConstraintCount,
+        clarify_if_needed: missionResult.intentNarrative.clarification_needed,
+      });
+      console.log('[CLARIFY-GATE] _missionHasEnoughToSearch:', _missionHasEnoughToSearch);
+    }
 
     if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && _missionHasEnoughToSearch && !missionQueryId) {
-      console.log(
-        `[PASS3_CLARIFY] clarification_needed=true but mission is actionable — ` +
-        `entity="${missionResult.mission!.entity_category}" location="${missionResult.mission!.location_text}" ` +
-        `constraints=${missionResult.mission!.constraints.length} — suppressing clarification gate, proceeding to search`
-      );
+      console.log('[CLARIFY-GATE] Suppressed — mission has enough to search:', {
+        entity_category: _clarifyGateEntity,
+        location_text: _clarifyGateLocation,
+        constraintCount: _clarifyGateConstraintCount,
+      });
     }
 
     if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && !_missionHasEnoughToSearch && !missionQueryId) {
