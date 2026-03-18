@@ -520,6 +520,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             client_request_id: clientRequestId,
             search_query: req.body?.search_query || {},
             ...(queryId ? { query_id: queryId } : {}),
+            ...(req.body?.execution_path ? { execution_path: req.body.execution_path } : {}),
           },
           status: 'pending',
           created_at: Date.now(),

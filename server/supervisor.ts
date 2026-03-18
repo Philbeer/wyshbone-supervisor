@@ -1882,6 +1882,7 @@ class SupervisorService {
           missionTrace: missionResult!.trace,
           intentNarrative: missionResult!.intentNarrative ?? null,
           queryId: missionQueryId,
+          executionPath: (requestData as any).execution_path === 'gpt4o_primary' ? 'gpt4o_primary' : 'gp_cascade',
         };
         console.log('[QID-TRACE]', 'step2:missionCtx_built', missionCtx.queryId);
         towerResult = await executeMissionDrivenPlan(missionCtx);

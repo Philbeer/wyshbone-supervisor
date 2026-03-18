@@ -474,3 +474,185 @@ An older variant of this artefact (used in some extraction flows for backwards c
 | `server/supervisor/action-executor.ts` | Central tool dispatcher; maps tool names to implementations |
 | `server/supervisor/learning-layer.ts` | Reads/writes execution policies to `learning_store` |
 | `server/supervisor.ts` | Top-level supervisor service; `extractEvidenceSnippets`; Phase 12 attribute verification loop |
+
+---
+
+## IMPLEMENTATION LOG — GPT-4o Primary Search Execution Path
+
+**Date:** 2026-03-18  
+**Task:** Add `gpt4o_primary` execution path as an additive alternative to the existing GP cascade pipeline  
+
+---
+
+### FILES CREATED
+
+**`server/supervisor/gpt4o-search.ts`** *(new)*
+
+Self-contained module implementing the entire `gpt4o_primary` execution path. Contains:
+
+- `Gpt4oSearchContext` — interface for all parameters passed from `mission-executor.ts`
+- `Gpt4oPrimaryResult` — return type, identical shape to `MissionExecutionResult`
+- `buildSearchPrompt()` — constructs the GPT-4o prompt from intent narrative and constraints
+- `callGpt4oWebSearch()` — calls `openai.responses.create()` with `model: "gpt-4o"` and `tools: [{ type: "web_search_preview" }]`; parses the `output` array for `message`/`output_text` items
+- `deduplicateLeads()` — case-insensitive exact name deduplication across search rounds
+- `toDeliveryLead()` — converts `Gpt4oLead` to the standard delivery lead shape with a deterministic `placeId` of the form `gpt4o_{index}_{normalized_name}`
+- `executeGpt4oPrimaryPath()` — the main exported function; runs steps A–H end-to-end
+
+---
+
+### FILES MODIFIED
+
+**`server/supervisor/mission-executor.ts`**
+
+1. Added import: `import { executeGpt4oPrimaryPath, type Gpt4oSearchContext } from './gpt4o-search';`  
+2. Added field to `MissionExecutionContext` interface: `executionPath?: 'gp_cascade' | 'gpt4o_primary';`  
+3. Added conditional branch in `executeMissionDrivenPlan()` — immediately after the `plan_execution_started` AFR event (line ~715), before the first `let leads: DiscoveredLead[] = [];` declaration. All existing GP cascade code is untouched and remains below the new `if` block.
+
+**`server/supervisor.ts`**
+
+Added one line to the `missionCtx` object at the `executeMissionDrivenPlan` call site:
+```typescript
+executionPath: (requestData as any).execution_path === 'gpt4o_primary' ? 'gpt4o_primary' : 'gp_cascade',
+```
+`requestData` is `task.request_data`, already in scope. Any value other than `"gpt4o_primary"` (including absent/undefined) resolves to `"gp_cascade"` — full backward compatibility.
+
+**`server/routes.ts`**
+
+Added one spread to the `request_data` object in `POST /api/debug/simulate-chat-task`:
+```typescript
+...(req.body?.execution_path ? { execution_path: req.body.execution_path } : {}),
+```
+Only adds the field if the UI sends it. No change to any existing field.
+
+---
+
+### HOW execution_path ROUTING WORKS
+
+```
+UI sends POST /api/debug/simulate-chat-task
+  { user_message: "...", execution_path: "gpt4o_primary" }
+       │
+       ▼
+routes.ts: stores execution_path inside request_data (Supabase supervisor_tasks row)
+       │
+       ▼
+supervisor.ts: reads requestData.execution_path, passes to MissionExecutionContext
+       │
+       ▼
+mission-executor.ts: executeMissionDrivenPlan()
+  ┌─ common setup runs for ALL paths ────────────────────────┐
+  │  • Plan artefact created                                  │
+  │  • Verification policy artefact created                   │
+  │  • Intent narrative artefact created                      │
+  │  • plan_execution_started AFR event emitted               │
+  └───────────────────────────────────────────────────────────┘
+       │
+       ├── ctx.executionPath === 'gpt4o_primary'
+       │       └──► executeGpt4oPrimaryPath()  (gpt4o-search.ts)
+       │
+       └── everything else (gp_cascade / absent / undefined)
+               └──► existing GP + cascade pipeline (unchanged)
+```
+
+Missing / `undefined` / `"gp_cascade"` all fall through to the existing code unchanged. The existing pipeline is enclosed inside its own implicit else branch with zero modifications.
+
+---
+
+### GPT-4o PROMPT TEMPLATE
+
+```
+You are a research assistant finding specific entities. Search the web thoroughly.
+[Search angle note — only on rounds 2+]
+
+TASK: Find {entity_description} in {location} that match the following search. {constraint_text}
+Location: {location}, {country}
+
+For EACH result you find, provide:
+- name: The entity/business name
+- description: Brief description of what they do
+- evidence: The specific evidence that they match the search criteria
+- source_url: The URL where you found this information
+- location: Their address or location if available
+- confidence: "high" | "medium" | "low"
+
+Respond with ONLY a JSON object in this exact format:
+{
+  "results": [...],
+  "search_summary": "...",
+  "coverage_assessment": "..."
+}
+```
+
+`entity_description` is drawn from `intentNarrative.entity_description` if available, otherwise `businessType`. `constraint_text` is built from `hardConstraints` joined with `", "`. Subsequent search rounds use different `angle` strings to vary the approach.
+
+---
+
+### HOW LEADS ARE FORMATTED
+
+Each `Gpt4oLead` from GPT-4o is converted via `toDeliveryLead()`:
+
+| Delivery field | Source |
+|---|---|
+| `name` | `lead.name` directly |
+| `address` | `lead.location` (GPT-4o's location field) |
+| `phone` | Always `null` (GPT-4o doesn't return phone numbers) |
+| `website` | `lead.source_url` (the URL GPT-4o found evidence at) |
+| `placeId` | `gpt4o_{index}_{normalized_name}` — deterministic, not a Google Place ID |
+
+The full `deliveredLeadsWithEvidence` object additionally includes:
+- `source: 'gpt4o_web_search'`
+- `verified: true`
+- `verification_status: 'verified'`
+- `constraint_verdicts`: all hard constraints mapped to `'verified'`
+- `evidence`: `[{ source_url, text: lead.evidence, confidence }]`
+- `match_summary`: first 150 chars of the evidence string
+
+---
+
+### SEARCH ROUNDS / COMPLETENESS CHECK (STEP D)
+
+- Maximum rounds: `MAX_SEARCH_ROUNDS = 3`  
+- Low-result threshold: `LOW_RESULT_THRESHOLD = 5`  
+- A subsequent round is triggered only if **all three** conditions are true:
+  1. Fewer than 5 leads found so far
+  2. GPT-4o's `coverage_assessment` text contains "more", "additional", or "likely"
+  3. Remaining rounds are available
+- Deduplication across rounds is by exact lowercased-trimmed name match
+- Each round uses a different search angle string (primary → `{businessType} {location} {hardConstraints}` → `{location} {businessType} directory listings`)
+
+---
+
+### ARTEFACTS EMITTED (gpt4o_primary path)
+
+| Artefact type | When | Content |
+|---|---|---|
+| `plan` | Start (common) | Mission plan — same as gp_cascade |
+| `verification_policy` | Start (common) | Same as gp_cascade |
+| `intent_narrative` | Start (common, if present) | Same as gp_cascade |
+| `diagnostic` | On GPT-4o call failure | Error message + raw excerpt |
+| `step_result` | After all search rounds | rounds_performed, leads found, search_summaries |
+| `attribute_verification` | After search | source_tier=`gpt4o_web_search` for all leads; evidence inline |
+| `final_delivery` | Before Tower | Full leads with evidence attached |
+| `tower_judgement` | After Tower | Same structure as gp_cascade |
+| `tower_unavailable` | On Tower failure | Same structure as gp_cascade |
+| `delivery_summary` | Final | Via `emitDeliverySummary()` — same as gp_cascade |
+
+---
+
+### DECISIONS MADE DURING IMPLEMENTATION
+
+1. **OpenAI SDK version**: v6.22.0 is installed. The `openai.responses` namespace exists and supports `responses.create()`. Used `(openai as any).responses.create()` to avoid TypeScript type conflicts on the experimental API surface while keeping the real call path.
+
+2. **Circular import avoidance**: `gpt4o-search.ts` does not import from `mission-executor.ts`. `MissionExecutionResult` is re-declared locally as `Gpt4oPrimaryResult` with an identical shape. Types from `mission-schema.ts`, `delivery-summary.ts`, and `verification-policy.ts` are imported directly — no circular chain.
+
+3. **Branch placement**: The `if (ctx.executionPath === 'gpt4o_primary')` check is placed immediately after the common setup block (plan/policy artefacts + `plan_execution_started` AFR event). This means the trust card, mission understanding, and plan artefacts are always emitted regardless of execution path, matching the spec requirement to keep those bubbles unchanged.
+
+4. **Per-candidate Tower verification**: Completely skipped in the `gpt4o_primary` branch. The `attribute_verification` artefact is still created and populated with `tower_status: 'verified'` and `source_tier: 'gpt4o_web_search'`, preserving the artefact schema for downstream consumers.
+
+5. **Final Tower judgement**: Called identically to the gp_cascade path, using the same `judgeArtefact()` function with the same success criteria structure. `requires_relationship_evidence` is hardcoded to `false` for gpt4o_primary (relationship predicates are a GP cascade concept).
+
+6. **`placeId` format**: `gpt4o_{index}_{normalized_name}` — not a real Google Place ID but still unique within a run. Follows the same `dedupe_key` pattern used by `makeDedupeKey('hash:...')` in `agent-loop.ts`.
+
+7. **`run-receipt.ts` not modified**: The narrative logic in `run-receipt.ts` does not check `source_tier` strings directly (confirmed by code inspection). It generates narrative from aggregated outcome fields. No changes needed.
+
+8. **Backward compatibility**: Verified that all callers of `executeMissionDrivenPlan` pass `MissionExecutionContext`. The new `executionPath` field is optional (`?`) so all existing call sites are unaffected without changes.

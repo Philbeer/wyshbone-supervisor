@@ -36,6 +36,7 @@ import { storage } from '../storage';
 import { sanitiseLocationString, inferCountryFromLocation } from './goal-to-constraints';
 import { detectRelationshipPredicate, type RelationshipPredicateResult } from './relationship-predicate';
 import { RADIUS_LADDER_KM } from './agent-loop';
+import { executeGpt4oPrimaryPath, type Gpt4oSearchContext } from './gpt4o-search';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 const RUN_EXECUTION_TIMEOUT_MS_DEFAULT = 300_000;
@@ -57,6 +58,7 @@ export interface MissionExecutionContext {
   missionTrace: MissionExtractionTrace;
   intentNarrative: IntentNarrative | null;
   queryId?: string | null;
+  executionPath?: 'gp_cascade' | 'gpt4o_primary';
 }
 
 export interface MissionExecutionResult {
@@ -708,6 +710,30 @@ export async function executeMissionDrivenPlan(
       planArtefactId: missionPlanArtefact.id,
     },
   });
+
+  if (ctx.executionPath === 'gpt4o_primary') {
+    console.log(`[MISSION_EXEC] execution_path=gpt4o_primary — routing to GPT-4o primary search`);
+    const gpt4oCtx: Gpt4oSearchContext = {
+      runId,
+      userId,
+      conversationId,
+      clientRequestId,
+      rawUserInput,
+      normalizedGoal,
+      businessType,
+      location,
+      country,
+      requestedCount,
+      hardConstraints,
+      softConstraints,
+      structuredConstraints,
+      intentNarrative,
+      verificationPolicy: plan.verification_policy.verification_policy,
+      verificationPolicyReason: plan.verification_policy.reason,
+      queryId,
+    };
+    return await executeGpt4oPrimaryPath(gpt4oCtx);
+  }
 
   let leads: DiscoveredLead[] = [];
   let usedStub = false;
