@@ -1248,3 +1248,106 @@ No other routes in `server/` insert into `supervisor_tasks`. The audit covered: 
   `wyshbone-ui chat.tsx` → `POST /api/supervisor/jobs/start` (or simulate-chat-task) → `supervisor_tasks.request_data.execution_path` → `server/supervisor.ts:1930` → `ctx.executionPath` → `mission-executor.ts:714` → `gpt4o-search.ts`
 - Remaining gap (from previous diagnostic): the `client/src/pages/Activity.tsx` benchmark runner does not yet have a GPT-4o toggle — it sends no `execution_path`. The wyshbone-ui's chat.tsx (external repo) is the source of truth for that UI surface.
 - Once the wyshbone-ui sends `execution_path: "gpt4o_primary"`, the server-side chain is complete and the executor branch will fire.
+
+---
+
+## 2026-03-19 — GPT-4o Run Diagnostic: Log Audit for run `0e137cc6`
+
+**Trigger:** User reported a GPT-4o run submitted with `execution_path: "gpt4o_primary"` appeared stuck — 0 artefacts, no further events visible in UI after ~14:17:10.
+
+**Log file audited:** `/tmp/logs/Start_application_20260319_142026_096.log` + `/tmp/logs/Start_application_20260319_142110_867.log`
+
+---
+
+### Result: Run completed successfully — was NOT stuck
+
+The run was still in progress when the user checked. It was waiting for the external Tower judge service to respond to the `callTowerJudgeArtefact` call. The Tower responded and the run completed cleanly at **2026-03-19T14:20:29.205Z** with verdict=PASS, 5 leads delivered.
+
+---
+
+### Relevant log lines — copied verbatim
+
+**Router decision — execution_path received and branch taken correctly:**
+```
+[MISSION_EXEC] execution_path=gpt4o_primary — routing to GPT-4o primary search
+```
+*(log line 831, `mission-executor.ts`)*
+
+**GPT-4o search started and executed:**
+```
+[GPT4O_SEARCH] ===== GPT-4o primary execution starting =====
+[GPT4O_SEARCH] runId=0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5 entity="organisations" location="Blackpool"
+[AFR_LOGGER] Logged: gpt4o_search_started - pending
+[GPT4O_SEARCH] Round 1: calling GPT-4o web search (angle="primary")
+[GPT4O_SEARCH] Round 1: 5 results, 5 new after dedup. Total: 5
+[AFR_LOGGER] Logged: gpt4o_search_round_complete - success
+```
+*(log lines 832–837, `gpt4o-search.ts`)*
+
+**Artefacts created by GPT-4o path:**
+```
+[Storage] Created artefact 'Step 1: GPT4O_WEB_SEARCH — 5 results (1 round)' (type=step_result) for run 0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5
+[Storage] Created artefact 'Evidence verification: 5/5 checks (GPT-4o web search)' (type=attribute_verification) for run 0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5
+[Storage] Created artefact 'Final delivery: 5 leads (GPT-4o web search)' (type=final_delivery) for run 0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5
+```
+*(log lines 838, 841, 844)*
+
+**Tower judge called — log cut off here (run in-progress at time of first snapshot):**
+```
+[AFR_LOGGER] Logged: tower_evaluation_started - pending
+[DEBUG_TOWER_PAYLOAD] Outbound judge-artefact request: {
+  "runId": "0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5",
+  "artefactId": "7ab612a3-ef0e-4a86-943f-4aacf9d5be36",
+  "artefactType": "final_delivery",
+  ...
+}
+```
+*(log lines 847–862 — this was the last-visible line when user observed "stuck")*
+
+**Tower judge response arrived — run completed (from second log snapshot):**
+```
+[Storage] Created tower judgement (verdict=pass, action=continue) for run 0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5
+[TOWER_JUDGE] Verdict: pass | Action: continue | Artefact: 7ab612a3-ef0e-4a86-943f-4aacf9d5be36
+[GPT4O_SEARCH] Tower final verdict=pass action=continue stubbed=false
+[Storage] Created artefact 'Tower Judgement (final_delivery): pass' (type=tower_judgement) for run 0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5
+[Storage] Created artefact 'Delivery Summary: PASS — 5 delivered' (type=delivery_summary) for run 0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5
+[DELIVERY_SUMMARY] runId=0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5 status=PASS exact=5 closest=0 total=5 tower=PASS
+[AFR_LOGGER] Logged: run_completed - success
+[GPT4O_SEARCH] ===== GPT-4o primary execution complete =====
+[GPT4O_SEARCH] runId=0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5 leads=5 verdict=pass rounds=1
+[FINAL_MESSAGE] final_message_created run_id=0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5 ... task_status=completed status=OK
+[BENCHMARK] {"run_id":"0e137cc6-4b3e-4c45-bdbd-2ac114f5b0a5","query":"Find organisations that work with the local authority in Blackpool","requested_count":10,"delivered_count":5,"verified_count":5,"tower_verdict":"pass","replans_triggered":0,...,"timestamp":"2026-03-19T14:20:29.205Z"}
+```
+
+---
+
+### Checklist — all items from the brief
+
+| Question | Answer |
+|----------|--------|
+| Any errors, exceptions, or stack traces after router decision? | **None** — zero error lines for this run ID |
+| Any log lines containing `gpt4o` or `execution_path` or `gpt4o_primary`? | **Yes** — see above. All fire correctly and in the right order |
+| Which branch was taken (GP vs GPT-4o)? | **GPT-4o** — `[MISSION_EXEC] execution_path=gpt4o_primary — routing to GPT-4o primary search` |
+| Did `gpt4o-search.ts` start executing? | **Yes** — `[GPT4O_SEARCH] ===== GPT-4o primary execution starting =====` |
+| Any timeout or OpenAI/GPT-4o API failures? | **None** — `Round 1: 5 results`, no error lines |
+
+---
+
+### Root cause of "stuck" appearance
+
+The UI was observed at a moment between the `callTowerJudgeArtefact` call being sent (logged) and the Tower's response arriving. During this window the run is live but producing no new artefacts — it appears idle to the UI. This is expected behaviour for the Tower judge latency. The run was not hung. Total elapsed time from task claim to benchmark log: **~3 minutes** (normal for a GPT-4o + Tower judge run).
+
+---
+
+### GP Cascade vs GPT-4o comparison (same query, back-to-back runs)
+
+| Metric | GP Cascade (run `4f505925`) | GPT-4o Primary (run `0e137cc6`) |
+|--------|-----------------------------|---------------------------------|
+| Leads delivered | 11 | 5 |
+| Verified (exact) | 3 | 5 |
+| Tower verdict | pass | pass |
+| Rounds | multiple (SEARCH_PLACES → WEB_VISIT → EVIDENCE_EXTRACT) | 1 (GPT4O_WEB_SEARCH) |
+| GPT-4o fallback used? | Yes (8 candidates via `[GPT4O_FALLBACK]`) | No (GPT-4o was the primary) |
+| Benchmark timestamp | 14:19:51 | 14:20:29 |
+
+Both runs passed. The GPT-4o path delivered fewer total leads but 100% verified (exact=5/5 vs 3/11). The GP cascade path delivers more raw leads with lower per-lead verification rate.
