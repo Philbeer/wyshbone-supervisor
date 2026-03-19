@@ -1,0 +1,367 @@
+import { randomUUID } from 'crypto';
+import type { StructuredMission, MissionExtractionTrace, IntentNarrative } from '../mission-schema';
+import type { MissionPlan } from '../mission-planner';
+import type { MissionExecutionResult } from '../mission-executor';
+import {
+  deriveSearchParams,
+  buildHardConstraintLabels,
+  buildSoftConstraintLabels,
+  buildStructuredConstraints,
+} from '../mission-executor';
+import { createArtefact } from '../artefacts';
+import { logAFREvent } from '../afr-logger';
+import { supabase } from '../../supabase';
+import { getExecutor, getAvailableExecutors } from './executor-registry';
+import { plan as plannerPlan } from './planner';
+import { evaluate as judgeEvaluate } from './judge-adapter';
+import { decide as gateDecide } from './gate';
+import type { ExecutorInput, ExecutorEntity, LoopRecord, GateDecision } from './types';
+
+function normaliseEntityName(name: string): string {
+  return name.toLowerCase().replace(/^the\s+/i, '').trim();
+}
+
+export async function runReloop(params: {
+  runId: string;
+  userId: string;
+  conversationId?: string;
+  clientRequestId?: string;
+  rawUserInput: string;
+  mission: StructuredMission;
+  plan: MissionPlan;
+  missionTrace: MissionExtractionTrace;
+  intentNarrative: IntentNarrative | null;
+  queryId?: string | null;
+  executionPath?: 'gp_cascade' | 'gpt4o_primary';
+}): Promise<MissionExecutionResult> {
+  const {
+    runId, userId, conversationId, clientRequestId, rawUserInput,
+    mission, plan, missionTrace, intentNarrative, queryId, executionPath,
+  } = params;
+
+  const chainId = randomUUID();
+  const availableExecutors = getAvailableExecutors();
+
+  console.log(`[RELOOP_SKELETON] Starting re-loop chain. runId=${runId} chainId=${chainId} executors=${availableExecutors.join(',')}`);
+
+  const { businessType, location, country, requestedCount } = deriveSearchParams(mission);
+  const hardConstraints = buildHardConstraintLabels(mission);
+  const softConstraints = buildSoftConstraintLabels(mission);
+  const structuredConstraints = buildStructuredConstraints(mission);
+  const normalizedGoal = `Find ${requestedCount ? requestedCount + ' ' : ''}${businessType} in ${location}`;
+
+  const missionContext: Record<string, unknown> = {
+    mission,
+    plan,
+    missionTrace,
+    intentNarrative,
+    runId,
+    userId,
+    conversationId,
+    clientRequestId,
+    queryId,
+    rawUserInput,
+    normalizedGoal,
+    hardConstraints,
+    softConstraints,
+    structuredConstraints,
+  };
+
+  const baseExecutorInput: ExecutorInput = {
+    executorType: '',
+    mission: {
+      queryText: normalizedGoal,
+      rawUserInput,
+      businessType,
+      location,
+      country,
+      requestedCount,
+    },
+    constraints: {
+      hardConstraints,
+      softConstraints,
+      structuredConstraints: structuredConstraints as unknown as Record<string, unknown>[],
+    },
+    knownEntities: [],
+    budget: {
+      maxApiCalls: 50,
+      maxTimeMs: 300_000,
+    },
+    missionContext,
+  };
+
+  const loopHistory: LoopRecord[] = [];
+  const accumulatedEntityMap = new Map<string, ExecutorEntity>();
+  const executorsTriedSoFar: string[] = [];
+  let loopNumber = 0;
+  let finalRawResult: Record<string, unknown> = {};
+  let lastGateDecision: GateDecision | null = null;
+
+  const MAX_LOOPS_DEFAULT = 3;
+  const maxLoops = (() => {
+    const env = process.env.RELOOP_MAX_LOOPS;
+    if (env) {
+      const parsed = parseInt(env, 10);
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+    }
+    return MAX_LOOPS_DEFAULT;
+  })();
+
+  while (true) {
+    loopNumber++;
+    const loopStartedAt = new Date().toISOString();
+    const loopStartMs = Date.now();
+
+    const circuitBreaker = loopNumber > maxLoops;
+
+    console.log(`[RELOOP_SKELETON] ── Loop ${loopNumber} start ── chainId=${chainId} circuitBreaker=${circuitBreaker}`);
+
+    const plannerDecision = plannerPlan({
+      loopNumber,
+      loopHistory,
+      executionPath,
+      availableExecutors,
+      circuitBreaker,
+    });
+
+    const executorFn = getExecutor(plannerDecision.executorType);
+    if (!executorFn) {
+      console.error(`[RELOOP_SKELETON] No executor found for type "${plannerDecision.executorType}". Breaking.`);
+      break;
+    }
+
+    const knownEntityNames = Array.from(accumulatedEntityMap.keys());
+    const executorInput: ExecutorInput = {
+      ...baseExecutorInput,
+      executorType: plannerDecision.executorType,
+      knownEntities: knownEntityNames,
+    };
+
+    console.log(`[RELOOP_SKELETON] Loop ${loopNumber}: running executor "${plannerDecision.executorType}" knownEntities=${knownEntityNames.length}`);
+
+    let executorOutput;
+    try {
+      executorOutput = await executorFn(executorInput);
+    } catch (execErr: any) {
+      console.error(`[RELOOP_SKELETON] Loop ${loopNumber}: executor "${plannerDecision.executorType}" threw: ${execErr.message}`);
+      executorOutput = {
+        executorType: plannerDecision.executorType,
+        entities: [],
+        entitiesAttempted: 0,
+        executionMetadata: {
+          toolsUsed: [],
+          apiCallsMade: 0,
+          timeMs: Date.now() - loopStartMs,
+          errorsEncountered: [execErr.message ?? String(execErr)],
+          rateLimitsHit: false,
+        },
+        coverageSignals: {
+          maxResultsHit: false,
+          searchQueriesExhausted: false,
+          estimatedUniverseSize: null,
+        },
+        rawResult: {},
+      };
+    }
+
+    if (Object.keys(executorOutput.rawResult).length > 0) {
+      finalRawResult = executorOutput.rawResult;
+    }
+
+    executorsTriedSoFar.push(plannerDecision.executorType);
+
+    const judgeVerdict = judgeEvaluate({
+      executorOutput,
+      requestedCount,
+      knownEntityNames,
+      availableExecutors,
+      executorsTriedSoFar,
+    });
+
+    const gateDecision = gateDecide({
+      loopNumber,
+      judgeVerdict,
+      accumulatedEntities: Array.from(accumulatedEntityMap.values()),
+      currentLoopEntities: executorOutput.entities,
+      loopHistory,
+      availableExecutors,
+      executorsTriedSoFar,
+    });
+
+    lastGateDecision = gateDecision;
+
+    for (const entity of gateDecision.contextForward.accumulatedEntities) {
+      const key = normaliseEntityName(entity.name);
+      accumulatedEntityMap.set(key, entity);
+    }
+
+    const loopCompletedAt = new Date().toISOString();
+    const loopDurationMs = Date.now() - loopStartMs;
+
+    const loopRecord: LoopRecord = {
+      loopNumber,
+      plannerDecision,
+      executorOutput,
+      judgeVerdict,
+      gateDecision,
+      startedAt: loopStartedAt,
+      completedAt: loopCompletedAt,
+      durationMs: loopDurationMs,
+    };
+    loopHistory.push(loopRecord);
+
+    const isLastLoop = gateDecision.decision === 'stop_deliver' || circuitBreaker;
+    const loopStatus: 'active' | 'delivered' | 'circuit_broken' = isLastLoop
+      ? (gateDecision.circuitBreaker ? 'circuit_broken' : 'delivered')
+      : 'active';
+
+    const executorOutputSummary = {
+      executorType: executorOutput.executorType,
+      entitiesFound: executorOutput.entities.length,
+      entitiesAttempted: executorOutput.entitiesAttempted,
+      timeMs: executorOutput.executionMetadata.timeMs,
+      apiCallsMade: executorOutput.executionMetadata.apiCallsMade,
+      errorsEncountered: executorOutput.executionMetadata.errorsEncountered,
+      rateLimitsHit: executorOutput.executionMetadata.rateLimitsHit,
+      coverageSignals: executorOutput.coverageSignals,
+    };
+
+    if (supabase) {
+      try {
+        const { error } = await supabase.from('loop_state').insert({
+          chain_id: chainId,
+          run_id: runId,
+          user_id: userId,
+          loop_number: loopNumber,
+          executor_type: plannerDecision.executorType,
+          planner_decision: plannerDecision as unknown as Record<string, unknown>,
+          executor_output_summary: executorOutputSummary,
+          judge_verdict: judgeVerdict as unknown as Record<string, unknown>,
+          gate_decision: {
+            decision: gateDecision.decision,
+            loopNumber: gateDecision.loopNumber,
+            circuitBreaker: gateDecision.circuitBreaker,
+            failureContext: gateDecision.contextForward.failureContext,
+            suggestedNextExecutor: gateDecision.contextForward.suggestedNextExecutor,
+          },
+          entities_found_this_loop: executorOutput.entities.length,
+          entities_accumulated_total: accumulatedEntityMap.size,
+          status: loopStatus,
+          created_at: loopStartedAt,
+          completed_at: loopCompletedAt,
+        });
+        if (error) {
+          console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} Supabase insert failed: ${error.message}`);
+        } else {
+          console.log(`[RELOOP_PERSIST] Loop ${loopNumber} persisted to loop_state. chainId=${chainId} status=${loopStatus}`);
+        }
+      } catch (persistErr: any) {
+        console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} Supabase insert threw: ${persistErr.message}`);
+      }
+    } else {
+      console.warn(`[RELOOP_PERSIST] Supabase not configured — skipping loop_state persistence for loop ${loopNumber}`);
+    }
+
+    await createArtefact({
+      runId,
+      type: 'reloop_iteration',
+      title: `Re-loop iteration ${loopNumber}: ${plannerDecision.executorType} → ${judgeVerdict.verdict}`,
+      summary: `Loop ${loopNumber} | executor=${plannerDecision.executorType} | verdict=${judgeVerdict.verdict} | entities=${executorOutput.entities.length} | gate=${gateDecision.decision}`,
+      payload: {
+        chain_id: chainId,
+        loop_number: loopNumber,
+        executor_type: plannerDecision.executorType,
+        planner_decision: plannerDecision,
+        executor_output_summary: executorOutputSummary,
+        judge_verdict: judgeVerdict,
+        gate_decision: {
+          decision: gateDecision.decision,
+          loopNumber: gateDecision.loopNumber,
+          circuitBreaker: gateDecision.circuitBreaker,
+          failureContext: gateDecision.contextForward.failureContext,
+          suggestedNextExecutor: gateDecision.contextForward.suggestedNextExecutor,
+        },
+        accumulated_count: accumulatedEntityMap.size,
+        duration_ms: loopDurationMs,
+      },
+      userId,
+      conversationId,
+    }).catch(e => console.warn(`[RELOOP_SKELETON] artefact creation failed (non-fatal): ${e.message}`));
+
+    await logAFREvent({
+      userId, runId, conversationId, clientRequestId,
+      actionTaken: 'reloop_iteration',
+      status: judgeVerdict.verdict === 'EXECUTION_FAIL' ? 'failed' : 'success',
+      taskGenerated: `Re-loop ${loopNumber}: ${plannerDecision.executorType} → ${judgeVerdict.verdict} → ${gateDecision.decision} (accumulated=${accumulatedEntityMap.size})`,
+      runType: 'plan',
+      metadata: {
+        chain_id: chainId,
+        loop_number: loopNumber,
+        executor_type: plannerDecision.executorType,
+        verdict: judgeVerdict.verdict,
+        gate_decision: gateDecision.decision,
+        entities_found: executorOutput.entities.length,
+        accumulated_total: accumulatedEntityMap.size,
+        circuit_breaker: gateDecision.circuitBreaker,
+      },
+    }).catch(e => console.warn(`[RELOOP_SKELETON] AFR event failed (non-fatal): ${e.message}`));
+
+    if (gateDecision.circuitBreaker) {
+      await createArtefact({
+        runId,
+        type: 'diagnostic',
+        title: `Re-loop circuit breaker fired at loop ${loopNumber}`,
+        summary: `Max loops (${maxLoops}) reached. Forcing delivery with ${accumulatedEntityMap.size} accumulated entities.`,
+        payload: {
+          chain_id: chainId,
+          max_loops: maxLoops,
+          loop_number: loopNumber,
+          accumulated_entities: accumulatedEntityMap.size,
+          failure_context: gateDecision.contextForward.failureContext,
+        },
+        userId,
+        conversationId,
+      }).catch(e => console.warn(`[RELOOP_SKELETON] circuit breaker artefact failed (non-fatal): ${e.message}`));
+    }
+
+    if (gateDecision.decision === 'stop_deliver' || circuitBreaker) {
+      console.log(`[RELOOP_SKELETON] Loop ${loopNumber}: gate decided stop_deliver. Breaking loop.`);
+      break;
+    }
+
+    console.log(`[RELOOP_SKELETON] Loop ${loopNumber}: gate decided re_loop. Continuing to loop ${loopNumber + 1}.`);
+  }
+
+  const totalEntities = accumulatedEntityMap.size;
+  const totalLoops = loopHistory.length;
+
+  await createArtefact({
+    runId,
+    type: 'reloop_chain_summary',
+    title: `Re-loop complete: ${totalLoops} loop${totalLoops === 1 ? '' : 's'}, ${totalEntities} entities`,
+    summary: `Re-loop chain finished. chainId=${chainId} loops=${totalLoops} accumulated=${totalEntities} final_gate=${lastGateDecision?.decision ?? 'unknown'}`,
+    payload: {
+      chain_id: chainId,
+      total_loops: totalLoops,
+      total_entities: totalEntities,
+      executors_tried: executorsTriedSoFar,
+      final_gate_decision: lastGateDecision?.decision ?? null,
+      circuit_breaker_fired: lastGateDecision?.circuitBreaker ?? false,
+      loop_history: loopHistory.map(r => ({
+        loop_number: r.loopNumber,
+        executor_type: r.plannerDecision.executorType,
+        verdict: r.judgeVerdict.verdict,
+        gate_decision: r.gateDecision.decision,
+        entities_found: r.executorOutput.entities.length,
+        duration_ms: r.durationMs,
+      })),
+    },
+    userId,
+    conversationId,
+  }).catch(e => console.warn(`[RELOOP_SKELETON] chain summary artefact failed (non-fatal): ${e.message}`));
+
+  console.log(`[RELOOP_SKELETON] Chain complete. chainId=${chainId} loops=${totalLoops} accumulated=${totalEntities}`);
+
+  const finalResult = finalRawResult as unknown as MissionExecutionResult;
+  return finalResult;
+}

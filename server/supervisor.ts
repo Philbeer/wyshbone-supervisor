@@ -30,7 +30,7 @@ import { extractStructuredMission, getMissionExtractorMode } from './supervisor/
 import { checkMissionCompleteness, logCompletenessToAFR, type CompletenessCheckResult } from './supervisor/mission-completeness-check';
 import { logMissionShadow, buildMissionDiagnosticPayload, missionToParsedGoal, buildHandoffDiagnostic, type HandoffDiagnostic } from './supervisor/mission-bridge';
 import { buildMissionPlan, logMissionPlan, persistMissionPlan, type MissionPlan } from './supervisor/mission-planner';
-import { executeMissionDrivenPlan, type MissionExecutionContext, type MissionExecutionResult } from './supervisor/mission-executor';
+import { executeMissionDrivenPlan, executeMissionWithReloop, type MissionExecutionContext, type MissionExecutionResult } from './supervisor/mission-executor';
 import { buildConversationContextString, canonicalIntentToPreviewFields, canonicalIntentToParsedGoal } from './supervisor/intent-bridge';
 import { preExecutionConstraintGate, preExecutionConstraintGateFromIntent, resolveFollowUp, storePendingContract, getPendingContract, clearPendingContract, buildConstraintGateMessage, detectNoProxySignal, detectMustBeCertain, applyCertaintyGate, generateKeywordVariants, type ConstraintContract, type AttributeClassification } from './supervisor/constraint-gate';
 import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQuestion, buildTimePredicateContract } from './supervisor/time-predicate';
@@ -1915,7 +1915,7 @@ class SupervisorService {
     let failureReason = '';
     try {
       if (executionSource === 'mission') {
-        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=executeMissionDrivenPlan strategy=${activeMissionPlan!.strategy}`);
+        console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=executeMissionWithReloop strategy=${activeMissionPlan!.strategy}`);
         const missionCtx: MissionExecutionContext = {
           mission: missionResult!.mission!,
           plan: activeMissionPlan!,
@@ -1930,7 +1930,7 @@ class SupervisorService {
           executionPath: (requestData as any).execution_path === 'gpt4o_primary' ? 'gpt4o_primary' : 'gp_cascade',
         };
         console.log('[QID-TRACE]', 'step2:missionCtx_built', missionCtx.queryId);
-        towerResult = await executeMissionDrivenPlan(missionCtx);
+        towerResult = await executeMissionWithReloop(missionCtx);
       } else {
         console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=executeTowerLoopChat (legacy fallback)`);
         towerResult = await this.executeTowerLoopChat(task, userContext, jobId, clientRequestId, earlyParsedGoal, canonicalIntent);

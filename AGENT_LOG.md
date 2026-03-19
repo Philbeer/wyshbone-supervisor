@@ -1351,3 +1351,62 @@ The UI was observed at a moment between the `callTowerJudgeArtefact` call being 
 | Benchmark timestamp | 14:19:51 | 14:20:29 |
 
 Both runs passed. The GPT-4o path delivered fewer total leads but 100% verified (exact=5/5 vs 3/11). The GP cascade path delivers more raw leads with lower per-lead verification rate.
+
+---
+
+## Session: 2026-03-19 — Universal Re-Loop Architecture (Post-CC)
+
+### What changed
+
+**New files created** (`server/supervisor/reloop/`):
+
+| File | Purpose |
+|------|---------|
+| `types.ts` | Core type contracts: `ExecutorInput`, `ExecutorOutput`, `ExecutorEntity`, `JudgeVerdict`, `VariableState`, `GateDecision`, `PlannerDecision`, `LoopRecord`, `LoopStateRow` |
+| `executor-registry.ts` | Pluggable executor map — `registerExecutor`, `getExecutor`, `getAvailableExecutors` |
+| `gp-cascade-adapter.ts` | Thin adapter wrapping `executeMissionDrivenPlan` → `ExecutorOutput`. Registered as `'gp_cascade'` |
+| `gpt4o-adapter.ts` | Thin adapter wrapping `executeGpt4oPrimaryPath` → `ExecutorOutput`. Registered as `'gpt4o_search'` |
+| `planner.ts` | Rules-based planner v1: GP cascade first → GPT-4o fallback → signal deliver. Respects `gpt4o_primary` explicit path |
+| `judge-adapter.ts` | Translates `ExecutorOutput` → `JudgeVerdict` + `VariableState` analysis (resultCount, toolExhaustion, coverageGap, evidenceQuality, duplicateRate) |
+| `gate.ts` | Rules-based gate v1: PASS+confidence>0.6=deliver; CAPABILITY_FAIL+untried executor=re_loop; PARTIAL+coverage<60%=re_loop; EXECUTION_FAIL=retry once; circuit breaker at MAX_LOOPS |
+| `loop-skeleton.ts` | Main orchestrator — `runReloop()`. Generates chain_id, loops planner→executor→judge→gate, deduplicates entities across loops, persists to Supabase `loop_state`, creates `reloop_iteration` and `reloop_chain_summary` artefacts, logs AFR events |
+| `index.ts` | Barrel export + executor registration on import |
+
+**New files created** (migrations):
+
+| File | Purpose |
+|------|---------|
+| `migrations/reloop-loop-state.sql` | DDL for `loop_state` table with indexes on `chain_id`, `run_id`, `user_id` |
+| `server/migrations/run-reloop-migration.ts` | Migration runner script following existing pattern in `migrate-supabase.ts` |
+
+**Modified files:**
+
+| File | Change |
+|------|--------|
+| `server/supervisor/mission-executor.ts` | Added `export` to `deriveSearchParams`, `buildHardConstraintLabels`, `buildSoftConstraintLabels`, `buildStructuredConstraints`. Added `executeMissionWithReloop` — the new loop-aware entry point with `RELOOP_ENABLED` feature flag |
+| `server/supervisor.ts` | Updated import to include `executeMissionWithReloop`. Changed dispatch call from `executeMissionDrivenPlan(missionCtx)` to `executeMissionWithReloop(missionCtx)` |
+
+### Decisions made
+
+- **No modification to `gpt4o-search.ts` or the internal logic of `executeMissionDrivenPlan`** — both are wrapped only, not touched
+- **Dynamic import** (`await import('./reloop/index')`) used in `executeMissionWithReloop` to avoid circular dependency between `mission-executor.ts` and the reloop adapters which import from it
+- **`RELOOP_ENABLED` feature flag** (env var, default `'true'`) allows instant rollback to linear path without code change
+- **MAX_LOOPS** configurable via `RELOOP_MAX_LOOPS` env var (default 3)
+- **Supabase `loop_state` table** uses raw Supabase client (not Drizzle) — matches the brief's instruction; gracefully skips if Supabase not configured
+- **Two Tower calls per first loop** — expected and accepted per brief: the executor's internal Tower call is preserved; the loop skeleton makes a separate judge evaluation on accumulated results
+- **Deduplication** keyed on normalised name (lowercase, strip "The " prefix) using a `Map<string, ExecutorEntity>`
+
+### TypeScript status
+
+- Zero new errors introduced in new files
+- Pre-existing errors in the codebase remain unchanged (unrelated to this implementation)
+- Server starts cleanly: verified via workflow logs post-restart
+
+### What's next
+
+- Run the `loop_state` migration against production Supabase: `npx tsx server/migrations/run-reloop-migration.ts`
+- Smoke test with `RELOOP_ENABLED=true` (default) — should see `[RELOOP_SKELETON]`, `[RELOOP_PLANNER]`, `[RELOOP_JUDGE]`, `[RELOOP_GATE]` log prefixes
+- Smoke test with `RELOOP_ENABLED=false` — should fall back to `[MISSION_EXEC]` linear path
+- Future: LLM-based planner to replace the rules-based v1 planner
+- Future: `sleep_wake` gate decision for deferred re-loops
+- Future: Register additional executor types (e.g. DataLedger API) via `registerExecutor`

@@ -243,7 +243,7 @@ function buildMatchSummary(
   return `Included because ${reasons.join('; ')}.`;
 }
 
-function deriveSearchParams(mission: StructuredMission): {
+export function deriveSearchParams(mission: StructuredMission): {
   businessType: string;
   location: string;
   country: string;
@@ -365,7 +365,7 @@ function applyFieldFilters(
   return filtered;
 }
 
-function buildHardConstraintLabels(mission: StructuredMission): string[] {
+export function buildHardConstraintLabels(mission: StructuredMission): string[] {
   return mission.constraints
     .filter(c => c.hardness === 'hard')
     .map(c => {
@@ -375,7 +375,7 @@ function buildHardConstraintLabels(mission: StructuredMission): string[] {
     });
 }
 
-function buildSoftConstraintLabels(mission: StructuredMission): string[] {
+export function buildSoftConstraintLabels(mission: StructuredMission): string[] {
   return mission.constraints
     .filter(c => c.hardness === 'soft')
     .map(c => c.type);
@@ -392,7 +392,7 @@ export interface StructuredConstraintPayload {
   label: string;
 }
 
-function buildStructuredConstraints(mission: StructuredMission): StructuredConstraintPayload[] {
+export function buildStructuredConstraints(mission: StructuredMission): StructuredConstraintPayload[] {
   return mission.constraints.map((c, idx) => {
     const evReq = c.evidence_requirement ?? defaultEvidenceRequirement(c.type as any, c.operator);
     const label = c.type === 'text_compare'
@@ -556,6 +556,32 @@ Respond with a JSON array only, no markdown fences:
 
   console.log(`[EXCL_FILTER] Complete — kept=${kept.length} excluded=${excluded.length} from ${leads.length} candidates`);
   return { kept, excluded };
+}
+
+export async function executeMissionWithReloop(
+  ctx: MissionExecutionContext,
+): Promise<MissionExecutionResult> {
+  const reloopEnabled = (process.env.RELOOP_ENABLED || 'true').toLowerCase() === 'true';
+
+  if (!reloopEnabled) {
+    return executeMissionDrivenPlan(ctx);
+  }
+
+  const { runReloop } = await import('./reloop/index');
+
+  return runReloop({
+    runId: ctx.runId,
+    userId: ctx.userId,
+    conversationId: ctx.conversationId,
+    clientRequestId: ctx.clientRequestId,
+    rawUserInput: ctx.rawUserInput,
+    mission: ctx.mission,
+    plan: ctx.plan,
+    missionTrace: ctx.missionTrace,
+    intentNarrative: ctx.intentNarrative,
+    queryId: ctx.queryId,
+    executionPath: ctx.executionPath,
+  });
 }
 
 export async function executeMissionDrivenPlan(
