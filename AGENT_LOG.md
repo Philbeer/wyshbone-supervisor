@@ -1410,3 +1410,14 @@ Both runs passed. The GPT-4o path delivered fewer total leads but 100% verified 
 - Future: LLM-based planner to replace the rules-based v1 planner
 - Future: `sleep_wake` gate decision for deferred re-loops
 - Future: Register additional executor types (e.g. DataLedger API) via `registerExecutor`
+
+---
+
+## Session: 2026-03-19 — Supabase loop_state Migration
+
+Migration complete: loop_state table created in Supabase. Confirmed via select query.
+
+- Runner: `npx tsx server/migrations/run-reloop-migration.ts`
+- Result: `All migrations applied successfully`
+- Verification: `supabase.from('loop_state').select('id').limit(1)` → 0 rows, no error
+- Table uses `CREATE TABLE IF NOT EXISTS` — safe to re-run
