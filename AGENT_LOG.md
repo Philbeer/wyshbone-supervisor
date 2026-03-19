@@ -1536,3 +1536,54 @@ The Replit preview proxy routes external browser traffic into the container. Alt
 2. **Secondary fix (Vite `/src/main.tsx`):** Investigate why Vite's module resolution fails for `main.tsx` during the `node dist/index.js` path (likely irrelevant if dev mode is the target — `npm run dev` uses `tsx` + Vite together, so `main.tsx` resolution works differently there).
 3. **Optional:** Fix the BigInt supervisor poll error (UUID signal IDs being coerced to BigInt) — non-fatal but noisy.
 4. **Optional:** Fix the 156 TypeScript compilation errors so `npx tsc` passes cleanly.
+
+---
+
+## Session: 2026-03-19 — Fix Preview: Bind Server to 0.0.0.0
+
+**Task:** Apply the one-line fix identified in the previous session.
+**Scope:** Single line change in `server/index.ts`. No other files touched.
+
+### Change Made
+
+**File:** `server/index.ts`, line 179 (now line 181)
+
+Before:
+```ts
+// Use 127.0.0.1 for Windows dev (0.0.0.0 causes ENOTSUP), 0.0.0.0 for production
+const host = process.env.HOST || (isDevelopment ? '127.0.0.1' : '0.0.0.0');
+```
+
+After:
+```ts
+const host = process.env.HOST || '0.0.0.0';
+```
+
+The old comment and conditional were removed. `HOST` env var override is preserved for flexibility.
+
+### Verification
+
+Startup log after restart confirms the fix:
+```
+4:09:38 PM [express] serving on http://0.0.0.0:5000
+```
+
+The Replit preview proxy immediately began routing traffic — CORS logs show the `.janeway.replit.dev` origin being accepted, and real API calls are being served:
+```
+4:09:51 PM [express] GET /api/leads 304 in 306ms
+4:09:51 PM [express] GET /api/user/context 304 in 767ms
+```
+
+Browser console shows `[vite] connected.` with no persistent disconnects. Server is stable and running.
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/index.ts` | Line 179: removed dev/prod host conditional; always bind to `0.0.0.0` (or `HOST` env override) |
+
+### What's Next
+
+- **BigInt supervisor poll error** — non-fatal but logs on every tick; UUID signal IDs being cast to BigInt in `SupervisorService.processNewSignals`. Candidate for next fix.
+- **156 TypeScript errors** — `npx tsc` still exits 1; does not affect runtime (tsx transpiles directly) but blocks clean production builds via `npm run build`.
+- **Vite `/src/main.tsx` not found** — only affects `node dist/index.js` path; irrelevant now that dev mode works correctly.
