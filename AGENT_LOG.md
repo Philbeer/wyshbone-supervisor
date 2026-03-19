@@ -1203,3 +1203,48 @@ No backend changes are required — `/api/debug/simulate-chat-task` already acce
 | `server/supervisor/jobs-router.ts` | ✅ Now wired (previous fix) — but unused by UI |
 | `server/supervisor/jobs.ts` | ✅ Now wired (previous fix) — but unused by UI |
 | `client/src/pages/Activity.tsx` | ❌ Missing: GPT-4o toggle + `execution_path` in submit call |
+
+---
+
+## Change Log — 2026-03-19: Wire execution_path through all supervisor task creation routes
+
+### What Changed
+A systematic audit of every Express route handler in `server/` that accepts a user chat message and inserts a row into `supervisor_tasks`. Three routes were found. Two were already correct; one was missing `execution_path` handling and was fixed.
+
+---
+
+### All supervisor_tasks creation routes — full inventory
+
+| Route | File | Line | execution_path before | execution_path after |
+|-------|------|------|-----------------------|----------------------|
+| `POST /api/debug/simulate-chat-task` | server/routes.ts | 498 | ✅ Already handled (line 525) | ✅ Log line added |
+| `POST /api/supervisor/jobs/start` | jobs-router.ts → jobs.ts | 573 | ✅ Fixed in previous task | ✅ Log line added to jobs.ts |
+| `POST /api/test/supervisor-task` | server/routes.ts | 593 | ❌ Not handled | ✅ Fixed |
+
+No other routes in `server/` insert into `supervisor_tasks`. The audit covered: all files in `server/routes.ts`, `server/supervisor/`, `server/actions/`, `server/services/`, `server/api/`, and `server/cron/`. No Supabase realtime listeners or webhooks exist — the supervisor polls for pending tasks on a timer.
+
+---
+
+### Files Modified
+
+**`server/routes.ts`**
+- `POST /api/debug/simulate-chat-task` (line 508): Added log line `console.log('[/api/debug/simulate-chat-task] execution_path:', ...)` for observability. No logic change — this route already correctly writes `execution_path` into `request_data`.
+- `POST /api/test/supervisor-task` (line 594–616): Added `const executionPath = req.body?.execution_path || undefined;`, a log line, and a conditional spread `...(executionPath ? { execution_path: executionPath } : {})` inside `request_data` — matching the pattern from `simulate-chat-task`.
+
+**`server/supervisor/jobs.ts`**
+- Added log line `console.log('[/api/supervisor/jobs/start] execution_path:', request.executionPath || 'default (gp_cascade)');` at line 574, inside the `deep_research` branch just before the Supabase insert. No logic change — this route was already fixed in the previous task.
+
+---
+
+### Decisions Made
+- The pattern used in all three routes is identical: a conditional spread `...(value ? { execution_path: value } : {})`. This avoids writing an explicit `null` into `request_data` when the caller doesn't send `execution_path`, keeping rows clean for tasks that use the default GP cascade path.
+- Log line format is consistent: `'[route-name] execution_path:', value || 'default (gp_cascade)'` — this makes it easy to grep server logs to confirm the field arrived.
+- `POST /api/test/supervisor-task` was treated as a real route despite its "test" prefix, since it creates live `supervisor_tasks` rows that the supervisor picks up and executes.
+
+---
+
+### What's Next
+- The entire backend chain is now fully wired for all three task-creation routes:
+  `wyshbone-ui chat.tsx` → `POST /api/supervisor/jobs/start` (or simulate-chat-task) → `supervisor_tasks.request_data.execution_path` → `server/supervisor.ts:1930` → `ctx.executionPath` → `mission-executor.ts:714` → `gpt4o-search.ts`
+- Remaining gap (from previous diagnostic): the `client/src/pages/Activity.tsx` benchmark runner does not yet have a GPT-4o toggle — it sends no `execution_path`. The wyshbone-ui's chat.tsx (external repo) is the source of truth for that UI surface.
+- Once the wyshbone-ui sends `execution_path: "gpt4o_primary"`, the server-side chain is complete and the executor branch will fire.

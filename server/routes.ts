@@ -502,6 +502,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const runId = req.body?.run_id || randomUUID();
     const clientRequestId = req.body?.client_request_id || randomUUID();
 
+    console.log('[/api/debug/simulate-chat-task] execution_path:', req.body?.execution_path || 'default (gp_cascade)');
+
     if (!supabase) return res.status(503).json({ ok: false, error: 'Supabase not configured' });
 
     try {
@@ -589,6 +591,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Test endpoint - create supervisor chat task
   app.post("/api/test/supervisor-task", async (req, res) => {
     const { userId, conversationId, taskType, searchQuery } = req.body;
+    const executionPath = req.body?.execution_path || undefined;
+
+    console.log('[/api/test/supervisor-task] execution_path:', executionPath || 'default (gp_cascade)');
 
     if (!userId || !conversationId || !taskType) {
       return res.status(400).json({ 
@@ -606,7 +611,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           task_type: taskType,
           request_data: {
             user_message: searchQuery?.message || 'Find leads',
-            search_query: searchQuery || {}
+            search_query: searchQuery || {},
+            ...(executionPath ? { execution_path: executionPath } : {}),
           },
           status: 'pending',
           created_at: Date.now()

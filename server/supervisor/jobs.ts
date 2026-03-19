@@ -568,6 +568,7 @@ export async function startJob(request: StartJobRequest): Promise<string> {
     const userId = request.userId || 'system';
 
     console.log(`[SUPERVISOR_REDIRECT] deep_research → supervisor_task — jobId=${jobId} text="${userText.substring(0, 80)}"`);
+    console.log('[/api/supervisor/jobs/start] execution_path:', request.executionPath || 'default (gp_cascade)');
 
     if (supabase) {
       const taskId = randomUUID();
