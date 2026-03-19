@@ -887,3 +887,194 @@ outer_constraint_gate:
 
 Pipeline proceeds → GP cascade → results
 ```
+
+---
+
+## REPORT — GPT-only Agent Run: Current State
+
+**Date:** 2026-03-18  
+**Type:** Read-only investigation — no code changes made  
+
+---
+
+### 1. What exists now
+
+#### Server side — FULLY IMPLEMENTED
+
+**`server/supervisor/gpt4o-search.ts`** (572 lines) — **Complete, production-ready**
+
+The core execution module. Exports `executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext)`. It:
+- Calls `openai.responses.create({ model: 'gpt-4o', tools: [{ type: 'web_search_preview' }] })` via the Responses API
+- Runs up to 3 search rounds with varied angle prompts; stops early if ≥5 leads found and coverage_assessment doesn't suggest more
+- Deduplicates across rounds by lowercased name
+- Creates artefacts: `step_result`, `attribute_verification`, `final_delivery`, `tower_judgement`/`tower_unavailable`, `delivery_summary`
+- Calls Tower (`judgeArtefact()`) identically to the GP cascade
+- Returns `{ response, leadIds, deliverySummary, towerVerdict, leads }` — same shape as `MissionExecutionResult`
+- All leads get synthetic `placeId` of the form `gpt4o_{index}_{normalized_name}` (no Google Place IDs)
+- `phone` is always `null` (web search doesn't return phone numbers)
+- `website` is set to the GPT-4o source URL
+
+**`server/supervisor/mission-executor.ts`** — **Wired, complete**
+
+- Line 39: `import { executeGpt4oPrimaryPath, type Gpt4oSearchContext } from './gpt4o-search'`
+- Line 61: `MissionExecutionContext` has `executionPath?: 'gp_cascade' | 'gpt4o_primary'`
+- Lines 714–735: Branch immediately after common setup (plan/policy artefacts):
+  ```typescript
+  if (ctx.executionPath === 'gpt4o_primary') {
+    return await executeGpt4oPrimaryPath(gpt4oCtx);
+  }
+  // ...GP cascade continues below
+  ```
+- The `Gpt4oSearchContext` is fully populated from the same `missionResult` fields used by the GP cascade
+
+**`server/supervisor.ts`** — **Wired, one line**
+
+- Line 1930: `executionPath: (requestData as any).execution_path === 'gpt4o_primary' ? 'gpt4o_primary' : 'gp_cascade'`
+- Reads from `task.request_data.execution_path` (stored in Supabase `supervisor_tasks` row)
+- Missing/undefined/any other value → `gp_cascade` (safe default)
+
+**`server/routes.ts`** — **Wired, one line**
+
+- Line 523: `...(req.body?.execution_path ? { execution_path: req.body.execution_path } : {})`
+- The `POST /api/debug/simulate-chat-task` endpoint passes `execution_path` through into `request_data`
+- No other endpoint (`/api/supervisor/jobs/start`, `/api/supervisor/execute-plan`) has this passthrough
+
+---
+
+#### Client side — NOT IMPLEMENTED
+
+**No frontend toggle exists.** Confirmed by exhaustive search of all `.tsx` and `.ts` files under `client/src/`:
+
+- No references to `execution_path`, `gpt4o`, `gpt-4o`, `search_mode`, or `agent_mode` in any component or page file
+- `client/src/pages/Activity.tsx` — the benchmark runner at line 452 sends only `{ user_message, query_id }` with no `execution_path` field
+- There is no radio button, toggle, dropdown, or any UI state tracking which agent mode is selected
+
+**The only way to trigger the GPT-4o path today is via curl/Postman:**
+```bash
+curl -X POST http://localhost:5000/api/debug/simulate-chat-task \
+  -H "Content-Type: application/json" \
+  -d '{ "user_message": "Find pubs in Brighton", "execution_path": "gpt4o_primary" }'
+```
+
+---
+
+### 2. What's wired vs stubbed
+
+| Component | Status | Notes |
+|---|---|---|
+| `gpt4o-search.ts` | **Fully implemented** | Complete multi-round search, dedup, artefacts, Tower, delivery summary |
+| `mission-executor.ts` branch | **Fully wired** | Routing logic, context building, return value |
+| `supervisor.ts` passthrough | **Fully wired** | Reads `execution_path` from Supabase `request_data` |
+| `routes.ts` passthrough | **Partially wired** | Only `simulate-chat-task` passes it through; `jobs/start` and `execute-plan` do not |
+| UI toggle | **Not built** | No frontend component selects GPT-4o mode |
+| `jobs/start` endpoint | **Missing passthrough** | Would need `execution_path` added same as `simulate-chat-task` |
+| Phone numbers in results | **Known gap** | GPT-4o path always returns `phone: null`; GP cascade returns phone from Places API |
+
+---
+
+### 3. What's missing for a working UI flow
+
+To have a user toggle GPT-4o in the UI, run a query, and get back a set of verified leads:
+
+**A. UI toggle (required)**
+
+In `client/src/pages/Activity.tsx`:
+- Add state: `const [agentMode, setAgentMode] = useState<'gp_cascade' | 'gpt4o_primary'>('gp_cascade')`
+- Add a toggle/radio before the benchmark run button
+- Pass `execution_path: agentMode` in the `simulate-chat-task` POST body at line 452:
+  ```typescript
+  const res = await apiRequest("POST", "/api/debug/simulate-chat-task", {
+    user_message: query,
+    query_id: selectedBenchmark,
+    execution_path: agentMode,    // ADD THIS
+  });
+  ```
+
+**B. `jobs/start` passthrough (if that endpoint is used by the production chat path)**
+
+`POST /api/supervisor/jobs/start` currently does not forward `execution_path` into `request_data`. The same one-line spread used in `simulate-chat-task` would be needed.
+
+**C. Nothing else on the server side is missing.** The GPT-4o path is complete:
+- Intent extraction (Passes 1/2/3) runs identically for both paths
+- All three clarification gates run identically (including the fixes applied this session)
+- The branch in `mission-executor.ts` fires before the GP cascade and returns the same result shape
+- Tower verification, delivery summary, and AFR logging are all functional
+
+---
+
+### 4. How the GP cascade currently flows
+
+Tracing from user query to results — names in order:
+
+```
+1. Entry point
+   POST /api/debug/simulate-chat-task  (server/routes.ts line 495)
+   → Inserts row into supabase `supervisor_tasks` with status='pending'
+   → Inserts row into `agent_runs`
+
+2. Supervisor polling loop
+   SupervisorService.pollPendingTasks()  (server/supervisor.ts ~line 820)
+   → Supabase realtime or 5s polling picks up pending task
+   → Calls this.runTask(task)
+
+3. Intent extraction — Passes 1, 2, 3
+   runMissionExtraction()  (server/supervisor/mission-extractor.ts)
+   → Pass 1: Semantic interpretation + constraint checklist (gpt-4o-mini)
+   → Pass 2: Structured mission JSON — entity_category, location_text, constraints[]
+   → Pass 3: Intent narrative — entity_description, clarification_needed, scarcity_expectation
+   → Returns MissionExtractionResult { ok, mission, intentNarrative, trace }
+
+4. Clarification gates (server/supervisor.ts)
+   → pass3_clarify gate (line ~1182): halts if clarification_needed=true AND !_missionHasEnoughToSearch
+   → preflight_clarify gate (line ~1495): halts if business_type or location missing, or unverifiable time predicate
+   → outer_constraint_gate (line ~1855): halts if can_execute=false AND !_missionHasEnoughToSearch
+
+5. Mission planning
+   buildMissionPlan()  (server/supervisor/mission-planner.ts)
+   → Selects strategy: 'discovery_then_website_evidence' | 'direct_attribute_search' | etc.
+   → Builds tool_sequence, constraint_mappings, verification_policy, candidate_pool
+
+6. Execution dispatch
+   executeMissionDrivenPlan(missionCtx)  (server/supervisor/mission-executor.ts ~line 550)
+   → Emits plan/policy artefacts
+   → Branches: if executionPath === 'gpt4o_primary' → executeGpt4oPrimaryPath() (see above)
+   → Otherwise: GP cascade begins
+
+7. GP cascade — Discovery
+   executeAction({ type: 'SEARCH_PLACES' })  (server/supervisor/action-executor.ts)
+   → Calls searchGooglePlaces() which wraps the Google Places API
+   → Returns list of DiscoveredLead[] (name, address, phone, website, placeId)
+   → Typically fetches 20–30 candidates per query
+
+8. GP cascade — Enrichment / Website visits
+   executeAction({ type: 'WEB_VISIT' }) per candidate  (action-executor.ts)
+   → Fetches up to 5 pages per domain (with Playwright fallback on bot-block)
+   → Stores crawled text in WebVisitPages artefacts
+
+9. GP cascade — Evidence extraction
+   extractConstraintLedEvidence()  (server/supervisor/constraint-led-extractor.ts)
+   → L1: keyword window scan on crawled pages
+   → L2: GPT-4o sentence judge on matched windows
+   → If no website evidence: GPT-4o web search fallback (gpt4o_fallback path in agent-loop.ts)
+   → Returns EvidenceItem[] with source_url, strength, matched_text
+
+10. GP cascade — Tower verification
+    judgeArtefact()  (server/supervisor/tower-artefact-judge.ts)
+    → Sends final_delivery artefact to external Tower API (TOWER_URL env var)
+    → Tower returns verdict: 'pass' | 'fail' and action: 'accept' | 'change_plan' | 'stop'
+    → On 'fail' + 'change_plan': may trigger replan (up to MAX_REPLANS_DEFAULT=5)
+
+11. Delivery
+    emitDeliverySummary()  (server/supervisor/delivery-summary.ts)
+    → Builds DeliverySummaryPayload
+    → Writes delivery_summary artefact
+    → AFR run_completed event emitted
+    → supervisor_tasks row updated to status='completed'
+    → Final message written to supabase `messages` table
+```
+
+**Key files in order:**
+`routes.ts` → `supervisor.ts` → `mission-extractor.ts` → `mission-planner.ts` → `mission-executor.ts` → `action-executor.ts` → `constraint-led-extractor.ts` → `tower-artefact-judge.ts` → `delivery-summary.ts`
+
+For the GPT-4o path, steps 7–9 are replaced entirely by `gpt4o-search.ts`, with steps 10–11 (Tower + delivery summary) running identically.
+
