@@ -33,12 +33,27 @@ export async function setupVite(app: Express, server: Server) {
       ...viteLogger,
       error: (msg, options) => {
         viteLogger.error(msg, options);
-        process.exit(1);
+        // Only exit for truly fatal Vite errors (e.g. can't start server),
+        // not for TypeScript/transform errors which should be non-fatal.
+        if (msg.includes("The server is unable to start") || msg.includes("EADDRINUSE")) {
+          process.exit(1);
+        }
       },
     },
     server: serverOptions,
     appType: "custom",
   });
+
+  // Replit's proxy closes idle WebSockets after ~17 s.
+  // Send a custom keepalive frame every 10 s so the connection stays open.
+  const hmrKeepalive = setInterval(() => {
+    try {
+      vite.ws.send({ type: "custom", event: "keepalive", data: {} });
+    } catch (_) {
+      // No clients connected — harmless
+    }
+  }, 10_000);
+  server.on("close", () => clearInterval(hmrKeepalive));
 
   app.use(vite.middlewares);
   app.get("*", async (req, res, next) => {

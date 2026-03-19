@@ -1,6 +1,14 @@
 // CRITICAL: Load environment variables FIRST (from repo root .env.local)
 import './env.js';
 
+// Prevent silent process death — log and survive unhandled errors
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT_EXCEPTION]', err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[UNHANDLED_REJECTION]', err);
+});
+
 import express, { type Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { registerRoutes } from "./routes";

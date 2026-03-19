@@ -1421,3 +1421,39 @@ Migration complete: loop_state table created in Supabase. Confirmed via select q
 - Result: `All migrations applied successfully`
 - Verification: `supabase.from('loop_state').select('id').limit(1)` → 0 rows, no error
 - Table uses `CREATE TABLE IF NOT EXISTS` — safe to re-run
+
+---
+
+## Session: 2026-03-19 — Preview Stability Fix
+
+### Root Cause
+Replit's reverse proxy closes idle WebSocket connections after ~17 seconds. Vite's HMR WebSocket has no keepalive mechanism, so every 17 s the proxy killed the connection, Vite issued a full-page reload, and the preview flashed blank then came back — creating the "flash then disappear" cycle reported by the user.
+
+### Confirmed non-issues (all checked)
+- Single `.listen()` call only (server/index.ts:187)  
+- Bound to `0.0.0.0:5000` ✓  
+- Health check `/health` returns 200 immediately ✓  
+- No double-listen or port mismatch ✓  
+- No TypeScript compile errors killing the process ✓  
+- No stale zombie processes (cleared earlier in session) ✓  
+- No memory OOM evidence ✓  
+
+### Changes Made
+
+| File | Change |
+|---|---|
+| `server/vite.ts` | Added 10 s HMR keepalive — sends `{type:"custom", event:"keepalive"}` to all connected clients every 10 s, preventing proxy timeout |
+| `server/vite.ts` | Narrowed `process.exit(1)` in Vite error logger — only exits on truly fatal errors (EADDRINUSE, unable-to-start), not on TypeScript transform errors |
+| `server/index.ts` | Added `process.on('uncaughtException')` and `process.on('unhandledRejection')` guards to prevent silent process death |
+| `server/index.ts` | Changed server host from `127.0.0.1` (dev default) to `0.0.0.0` so Replit proxy can reach it |
+| `server/vite.ts` | Added `Cache-Control: no-store` headers on HTML responses |
+
+### Verification
+- WebSocket held for 25+ seconds without disconnect (previously dropped at 17 s)
+- Browser console showed single `connected` with no subsequent `connecting...`
+- Health endpoint returns 200 at all checks
+- Dashboard screenshot confirmed stable at t+25s
+
+### What's Next
+- No further action needed on preview stability
+- Resume Universal Re-Loop Architecture work (RELOOP_ENABLED=true)
