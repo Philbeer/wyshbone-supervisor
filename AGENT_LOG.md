@@ -1078,3 +1078,34 @@ Tracing from user query to results — names in order:
 
 For the GPT-4o path, steps 7–9 are replaced entirely by `gpt4o-search.ts`, with steps 10–11 (Tower + delivery summary) running identically.
 
+
+---
+
+## Change Log — 2026-03-19: Wire execution_path through /api/supervisor/jobs/start
+
+### What Changed
+The `execution_path` field sent by the UI in the request body to `POST /api/supervisor/jobs/start` was not being forwarded into the `supervisor_tasks` row created in Supabase. This meant the branch at `mission-executor.ts:714` that routes to the GPT-4o search executor (`gpt4o-search.ts`) could never be reached via the main job start route — only via the `simulate-chat-task` endpoint.
+
+### Files Modified
+
+**`server/supervisor/jobs.ts`**
+- Added `executionPath?: string` field to the `StartJobRequest` interface.
+- In the Supabase `supervisor_tasks` insert (inside the `deep_research` branch), added a conditional spread into `request_data`: `...(request.executionPath ? { execution_path: request.executionPath } : {})`. This mirrors the same pattern already used in `server/routes.ts` for the simulate-chat-task route.
+
+**`server/supervisor/jobs-router.ts`**
+- Extracted `execution_path` from the raw request body: `const executionPath = (req.body as any).execution_path || undefined;`
+- Passed it into the `startJob(...)` call as `executionPath`.
+- Added a log line: `execution_path: ${executionPath || 'N/A'}` for observability.
+
+### Files Not Modified (by design)
+- `server/supervisor/gpt4o-search.ts` — already works; no changes needed.
+- `server/supervisor/mission-executor.ts` — already reads `ctx.executionPath` correctly; no changes needed.
+- `server/supervisor.ts` — already maps `requestData.execution_path` → `ctx.executionPath`; no changes needed.
+
+### Decisions Made
+- `execution_path` is stored only inside `request_data` (the JSON column), not as a top-level column on `supervisor_tasks`. This is consistent with how `server/routes.ts:523` handles it in the simulate-chat-task path, and is where `server/supervisor.ts:1930` reads it from.
+- Used a conditional spread `...(value ? { key: value } : {})` rather than `execution_path: value || null` to avoid writing an explicit `null` into `request_data` when the field is absent — keeps task rows clean for callers that don't set it.
+
+### What's Next
+- The full path `UI → /api/supervisor/jobs/start → supervisor_tasks.request_data.execution_path → mission-executor.ts:714 → gpt4o-search.ts` is now wired end-to-end.
+- Optional: consider validating that `execution_path` is one of `'gp_cascade' | 'gpt4o_primary'` in the router before forwarding, to surface bad values early.

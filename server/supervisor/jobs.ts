@@ -51,6 +51,7 @@ export interface StartJobRequest {
   sourceRunId?: string;
   userId?: string;
   clientRequestId?: string;
+  executionPath?: string;
 }
 
 export interface JobStatusResponse {
@@ -584,6 +585,7 @@ export async function startJob(request: StartJobRequest): Promise<string> {
           run_id: canonicalRunId,
           client_request_id: request.clientRequestId || null,
           query_id: (request.payload as any)?.query_id || null,
+          ...(request.executionPath ? { execution_path: request.executionPath } : {}),
         },
         status: 'pending',
         created_at: Date.now(),

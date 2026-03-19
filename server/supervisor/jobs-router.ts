@@ -40,6 +40,8 @@ jobsRouter.post('/start', async (req, res) => {
       ...(topLevelQueryId && !(body.payload as any)?.query_id ? { query_id: topLevelQueryId } : {}),
     };
 
+    const executionPath = (req.body as any).execution_path || undefined;
+
     console.log('[JOBS_API] Starting job:');
     console.log(`  jobType: ${body.jobType}`);
     console.log(`  requestedBy: ${body.requestedBy}`);
@@ -47,6 +49,7 @@ jobsRouter.post('/start', async (req, res) => {
     console.log(`  sourceRunId: ${body.sourceRunId || 'N/A'}`);
     console.log(`  clientRequestId: ${body.clientRequestId || 'N/A'}`);
     console.log(`  query_id: ${mergedPayload.query_id || 'N/A'}`);
+    console.log(`  execution_path: ${executionPath || 'N/A'}`);
     
     const jobId = await startJob({
       jobType: body.jobType,
@@ -54,7 +57,8 @@ jobsRouter.post('/start', async (req, res) => {
       requestedBy: body.requestedBy,
       sourceRunId: body.sourceRunId,
       userId: body.userId,
-      clientRequestId: body.clientRequestId
+      clientRequestId: body.clientRequestId,
+      executionPath,
     });
     
     console.log(`[JOBS_API] Job started - jobId: ${jobId}`);
