@@ -1109,3 +1109,97 @@ The `execution_path` field sent by the UI in the request body to `POST /api/supe
 ### What's Next
 - The full path `UI → /api/supervisor/jobs/start → supervisor_tasks.request_data.execution_path → mission-executor.ts:714 → gpt4o-search.ts` is now wired end-to-end.
 - Optional: consider validating that `execution_path` is one of `'gp_cascade' | 'gpt4o_primary'` in the router before forwarding, to surface bad values early.
+
+---
+
+## Diagnostic — 2026-03-19: Trace of execution_path through actual chat route
+
+### Question being answered
+When a user submits a query via the chat interface, `execution_path` is not reaching the executor despite the GPT-4o toggle being selected. Where is the break?
+
+---
+
+### Finding 1 — The UI has NO GPT-4o toggle and sends NO execution_path
+
+A full search across every file in `client/src` (pages, components, hooks, lib) reveals:
+- Zero occurrences of `execution_path`
+- Zero occurrences of `gpt4o` or `gpt4o_primary`
+- No toggle, switch, or checkbox for executor selection
+
+**The GPT-4o toggle described in the prompt does not yet exist in the frontend.** This is almost certainly the root cause of the end-to-end failure: the field is never emitted by the UI regardless of which route is used.
+
+---
+
+### Finding 2 — The UI's "chat submission" actually calls /api/debug/simulate-chat-task, NOT /api/supervisor/jobs/start
+
+The only interactive query submission in the current UI is in `client/src/pages/Activity.tsx`:
+
+| Button | Function | Route called |
+|--------|----------|-------------|
+| "Run Benchmark" | `handleRunBenchmark()` (line 445) | `POST /api/debug/simulate-chat-task` |
+| "Run Supervisor Demo" | `handleRunDemo()` (line 428) | `POST /api/debug/demo-plan-run` |
+
+Neither calls `/api/supervisor/jobs/start`.
+
+The benchmark submission at line 452 sends only:
+```json
+{ "user_message": "<query>", "query_id": "<benchmark_id>" }
+```
+No `execution_path` field is included.
+
+---
+
+### Finding 3 — /api/debug/simulate-chat-task already handles execution_path correctly
+
+The route handler at `server/routes.ts` line 495 already contains:
+```typescript
+...(req.body?.execution_path ? { execution_path: req.body.execution_path } : {}),
+```
+(line 523). It correctly writes `execution_path` into `request_data` — exactly where `server/supervisor.ts` line 1930 reads it.
+
+So the route is already wired. The field just never arrives because the UI doesn't send it.
+
+---
+
+### Finding 4 — /api/supervisor/jobs/start is never called by the UI
+
+No file in `client/src` references `/api/supervisor/jobs/start`, `/api/supervisor/jobs`, or `startJob`. The previous fix (wiring `execution_path` through `jobs-router.ts` → `jobs.ts`) was architecturally correct for that route, but the route is unused by the current frontend for query submission.
+
+---
+
+### Root cause
+
+The break is not in any backend route handler. It is in the frontend: **the Activity page's benchmark runner omits `execution_path`, and no GPT-4o toggle UI exists** to let users set it.
+
+---
+
+### Where the fix needs to go
+
+**File:** `client/src/pages/Activity.tsx`
+
+**What's needed:**
+1. Add a boolean state variable (e.g. `useGpt4o: boolean`) — toggled by a Switch/Toggle UI element labelled "GPT-4o Search"
+2. In `handleRunBenchmark()` (line 452), include `execution_path` in the request body when the toggle is on:
+   ```typescript
+   const res = await apiRequest("POST", "/api/debug/simulate-chat-task", {
+     user_message: query,
+     query_id: selectedBenchmark,
+     ...(useGpt4o ? { execution_path: "gpt4o_primary" } : {}),
+   });
+   ```
+
+No backend changes are required — `/api/debug/simulate-chat-task` already accepts and forwards `execution_path` into `request_data`, and `server/supervisor.ts` line 1930 already reads it and passes it to the executor context.
+
+---
+
+### Summary of all files and their status
+
+| File | Status |
+|------|--------|
+| `server/routes.ts` line 523 | ✅ Already passes `execution_path` into `request_data` |
+| `server/supervisor.ts` line 1930 | ✅ Already reads it and sets `ctx.executionPath` |
+| `server/supervisor/mission-executor.ts` line 714 | ✅ Already branches on `ctx.executionPath === 'gpt4o_primary'` |
+| `server/supervisor/gpt4o-search.ts` | ✅ Already works when reached |
+| `server/supervisor/jobs-router.ts` | ✅ Now wired (previous fix) — but unused by UI |
+| `server/supervisor/jobs.ts` | ✅ Now wired (previous fix) — but unused by UI |
+| `client/src/pages/Activity.tsx` | ❌ Missing: GPT-4o toggle + `execution_path` in submit call |
