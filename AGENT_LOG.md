@@ -1421,3 +1421,118 @@ Migration complete: loop_state table created in Supabase. Confirmed via select q
 - Result: `All migrations applied successfully`
 - Verification: `supabase.from('loop_state').select('id').limit(1)` → 0 rows, no error
 - Table uses `CREATE TABLE IF NOT EXISTS` — safe to re-run
+
+---
+
+## Session: 2026-03-19 — Preview Failure Diagnosis (Investigation Only — No Files Changed)
+
+**Task:** Diagnose why the Supervisor preview shows "Hmm... We couldn't reach this app."
+**Scope:** Read-only investigation. Zero files modified.
+
+### Step 1 — TypeScript Compilation (`npx tsc`)
+
+**Result: FAILED — 156 errors across 34 files.**
+
+Representative errors (not exhaustive):
+- `server/scripts/reset-db.ts:48` — Top-level `await` not allowed under current `module`/`target` settings
+- `server/scripts/seed.ts:11` — Cannot find module `better-sqlite3`
+- `server/services/memory-integration.ts:14` — `UserGoalsContext` not exported from `../autonomous-agent`
+- `server/storage.ts:93` — Multiple type mismatches (17 errors)
+- `server/supervisor/constraint-gate.ts:268` — 17 errors
+- `server/routes.ts:237` — 16 errors
+- `server/services/memory-integration.ts:14` — 15 errors
+
+**TSC exit code: 1. Build does NOT produce a clean compile.**
+
+### Step 2 — Manual Start: `node dist/index.js`
+
+`dist/index.js` exists (built 2026-02-05). Server starts and outputs:
+
+```
+[DB] Connected to PostgreSQL
+[CLAUDE_API] Initialized successfully
+[express] serving on http://127.0.0.1:5000        ← KEY: bound to loopback only
+🤖 Supervisor service started
+...
+Error in supervisor poll: SyntaxError: Cannot convert 5c4300dd-68e1-4bc6-b58f-66bd27a1ac87 to a BigInt
+```
+
+Server stays alive (error is non-fatal, repeating), but logs a recurring BigInt conversion error in supervisor poll because signal IDs are UUIDs, not integers.
+
+### Step 3 — curl Tests
+
+| Command | Result |
+|---|---|
+| `curl 0.0.0.0:5000/` | **200** (success — from same container, 0.0.0.0 routes to loopback) |
+| `curl localhost:5000/` | **000** (connection refused — timing: server had been killed by `kill %1` by then) |
+| `curl -v 0.0.0.0:5000/` (verbose) | **Connection refused** (same timing issue, after kill) |
+
+**Note:** The Vite pre-transform error appeared during the 200 response:
+`Failed to load url /src/main.tsx — Does the file exist?`
+This means the HTML shell served (200) but Vite couldn't load the main frontend module — the frontend would be blank/broken even when the server answers.
+
+### Step 4 — `.replit` Contents
+
+```toml
+run = "npm run dev"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+exposeLocalhost = true    ← intended to expose 127.0.0.1 through proxy
+
+[deployment]
+build = ["npm", "run", "build"]
+run = ["npm", "run", "start"]
+
+[workflows.workflow]  # "Start application"
+task = "shell.exec"
+args = "npm run dev"
+waitForPort = 5000
+```
+
+Port mapping is correct (5000 → 80). `exposeLocalhost = true` is set. Entry points match existing files.
+
+### Step 5 — Port Conflicts
+
+`lsof` not available in this environment. `ss -tlnp | grep 5000` returned nothing (no orphaned process on port 5000 at time of check). No port conflict detected.
+
+### Step 6 — Run Button / Workflow
+
+Workflow `Start application` runs `npm run dev` (uses `tsx`, not `dist/`). Dev server starts successfully and logs `serving on http://127.0.0.1:5000`. Vite hot-reload connects. Browser console shows `[vite] connected.` — then periodically `[vite] server connection lost. Polling for restart...` due to server restarts.
+
+### ROOT CAUSE — Exact Finding
+
+**File:** `server/index.ts`, **line 179**
+
+```ts
+const host = process.env.HOST || (isDevelopment ? '127.0.0.1' : '0.0.0.0');
+```
+
+In development mode (`NODE_ENV=development`, set by `npm run dev`), the Express server **binds exclusively to `127.0.0.1`** (loopback), not `0.0.0.0` (all interfaces).
+
+The Replit preview proxy routes external browser traffic into the container. Although `.replit` sets `exposeLocalhost = true`, this is not reliably bridging the `127.0.0.1`-bound server to the external proxy in this environment. The proxy appears to require `0.0.0.0` binding to deliver traffic.
+
+**Secondary issue:** Even when port 5000 answers (200 on the HTML shell), Vite cannot find `/src/main.tsx` — meaning the frontend module graph is broken and the app would render blank.
+
+### Step 7 — Summary Answers
+
+| Question | Answer |
+|---|---|
+| Does `npx tsc` succeed? | **NO** — 156 errors in 34 files, exit code 1 |
+| Does `node dist/index.js` start and stay running? | **YES** — starts, stays up, but logs recurring BigInt error in supervisor poll |
+| Does curl get a 200 from port 5000? | **YES from within the container** (`curl 0.0.0.0:5000` → 200), but Vite then throws `/src/main.tsx` not found |
+| Does `.replit` point to the right thing? | **YES** — port, entry point, and run command are all correctly configured |
+| Does the Run button do something different from manual start? | **No material difference** — both bind to `127.0.0.1:5000` in dev mode; both show the same Vite server connection drops |
+| What is the EXACT reason the preview fails? | **`server/index.ts` line 179 binds to `127.0.0.1` in `NODE_ENV=development`** — the Replit preview proxy cannot route external traffic to a loopback-only socket. Fix: set `HOST=0.0.0.0` in the dev environment, or change the fallback for development to `0.0.0.0`. |
+
+### What Changed / Files Modified
+
+**None.** This was a read-only investigation session.
+
+### What's Next (for the human to decide)
+
+1. **Primary fix (server bind):** Change `server/index.ts` line 179 so dev mode binds to `0.0.0.0`, or add `HOST=0.0.0.0` to the `npm run dev` script / `.replit` `[env]` section.
+2. **Secondary fix (Vite `/src/main.tsx`):** Investigate why Vite's module resolution fails for `main.tsx` during the `node dist/index.js` path (likely irrelevant if dev mode is the target — `npm run dev` uses `tsx` + Vite together, so `main.tsx` resolution works differently there).
+3. **Optional:** Fix the BigInt supervisor poll error (UUID signal IDs being coerced to BigInt) — non-fatal but noisy.
+4. **Optional:** Fix the 156 TypeScript compilation errors so `npx tsc` passes cleanly.
