@@ -443,6 +443,19 @@ export async function runReloop(params: {
     ? combinedLeads.slice(0, requestedCount)
     : combinedLeads;
 
+  logRunEvent(runId, {
+    stage: 'combined_delivery_start',
+    level: 'info',
+    message: `Building combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loops (accumulated=${allEntities.length})`,
+    queryText: rawUserInput,
+    metadata: {
+      chain_id: chainId,
+      delivered_count: deliveredLeads.length,
+      accumulated_total: allEntities.length,
+      total_loops: totalLoops,
+    },
+  });
+
   // Judge the combined delivery — this is the final verdict for the whole run
   try {
     const combinedArtefact = await createArtefact({
@@ -490,7 +503,20 @@ export async function runReloop(params: {
 
     console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} delivered=${deliveredLeads.length}`);
   } catch (judgeErr: any) {
-    console.error(`[RELOOP_SKELETON] Combined delivery judgement failed (non-fatal): ${judgeErr.message}`, judgeErr.stack);
+    const errMsg = judgeErr?.message ?? String(judgeErr);
+    const errStack = judgeErr?.stack ?? '';
+    console.error(`[RELOOP_SKELETON] Combined delivery judgement failed (non-fatal): ${errMsg}`, errStack);
+    logRunEvent(runId, {
+      stage: 'combined_delivery_error',
+      level: 'error',
+      message: `Combined delivery failed: ${errMsg}`,
+      queryText: rawUserInput,
+      metadata: {
+        chain_id: chainId,
+        error: errMsg,
+        stack: errStack.substring(0, 500),
+      },
+    });
   }
 
   // Build the MissionExecutionResult from combined entities

@@ -2175,3 +2175,36 @@ The old `.catch()`-chained fire-and-forget call and its standalone `console.log`
 
 - Monitor logs on the next live run to confirm the catch block now surfaces full stack traces if it fires.
 - Consider whether `params.mission.requested_count` and `deriveSearchParams(mission).requestedCount` are ever meaningfully different — if they can diverge, the business logic should explicitly decide which to prefer.
+
+---
+
+## Session — 2026-03-20 (follow-up)
+
+### What Changed
+
+1. **Added `logRunEvent` call before the combined delivery `try` block.**  
+   - Stage: `combined_delivery_start`, level: `info`.  
+   - Logs `deliveredLeads.length`, `allEntities.length` (accumulated total), `totalLoops`, and `chainId` so we can confirm delivery counts in the run log before the Tower judgement fires.  
+   - Inserted immediately after `const deliveredLeads = ...`, before `// Judge the combined delivery`.
+
+2. **Expanded the catch block to also log a `logRunEvent`.**  
+   - `errMsg` and `errStack` are extracted via optional chaining (`?? String(judgeErr)` / `?? ''`) for safety if the thrown value is not a proper `Error` object.  
+   - `console.error` now uses the extracted variables (same output as before, but safe for non-Error throws).  
+   - A `logRunEvent` with stage `combined_delivery_error` and level `error` is emitted, including the first 500 characters of the stack trace so it fits in structured metadata without ballooning the run log record.
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/supervisor/reloop/loop-skeleton.ts` | Added `logRunEvent` pre-try block; expanded catch to extract `errMsg`/`errStack` and emit a second `logRunEvent` at `combined_delivery_error` |
+
+### Decisions Made
+
+- Stack is truncated to 500 chars in the metadata field to avoid oversized JSON payloads in the run log store; the full stack still appears in `console.error`.
+- No new imports required — `logRunEvent` was already imported at the top of the file.
+- No logic outside the combined delivery section was touched.
+
+### What's Next
+
+- Trigger a live run and inspect the run log for `combined_delivery_start` to confirm delivery counts are as expected.
+- If the catch fires, `combined_delivery_error` will now appear in the run log with the error message and partial stack — use those to identify the root cause.
