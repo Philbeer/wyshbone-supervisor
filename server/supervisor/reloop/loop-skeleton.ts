@@ -149,6 +149,9 @@ export async function runReloop(params: {
         entityExclusions: intentNarrative.entity_exclusions,
         suggestedApproaches: intentNarrative.suggested_approaches,
       } : null,
+      runId,
+      userId,
+      conversationId,
     });
 
     const executorFn = getExecutor(plannerDecision.executorType);

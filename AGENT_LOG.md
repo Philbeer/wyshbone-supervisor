@@ -2024,3 +2024,52 @@ None.
 ## Session: 2026-03-20 — LLM_PLANNER_ENABLED Removal Verification (3rd check)
 
 Same request received a third time. Ran `grep -n "LLM_PLANNER_ENABLED\|llmEnabled" planner.ts` → exit code 1 (zero matches). File is correct. No change made.
+
+---
+
+## Session: 2026-03-20 — Pass runId/userId/conversationId to Planner Context
+
+### Objective
+
+Make the LLM planner observable by passing run-level identity fields through the planner context, removing the need for `(context as any).runId` casts in `llm-planner.ts`.
+
+### What Changed
+
+#### `server/supervisor/reloop/planner.ts`
+
+Added three optional fields to the `PlannerContext` interface:
+
+```typescript
+runId?: string;
+userId?: string;
+conversationId?: string;
+```
+
+#### `server/supervisor/reloop/loop-skeleton.ts`
+
+Added three fields to the `plannerPlan({...})` call (line 155–157):
+
+```typescript
+runId,
+userId,
+conversationId,
+```
+
+These variables are already in scope at the call site — they're destructured from `params` at the top of `runReloop()`.
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/supervisor/reloop/planner.ts` | Added `runId?`, `userId?`, `conversationId?` to `PlannerContext` |
+| `server/supervisor/reloop/loop-skeleton.ts` | Pass `runId`, `userId`, `conversationId` into `plannerPlan()` call |
+
+### Decisions Made
+
+- All three fields are `optional` (`?`) — `rulesPlan` ignores them, so existing callers and the fallback path are unaffected.
+- `llm-planner.ts` already reads these fields; this change makes the type contract explicit rather than relying on `(context as any)` casts.
+- No changes to `llm-planner.ts` or `rulesPlan()`.
+
+### What's Next
+
+- With `runId` now properly typed on the context, `llm-planner.ts` can log or tag its GPT calls against the run for observability.

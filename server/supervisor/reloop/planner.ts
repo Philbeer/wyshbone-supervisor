@@ -26,6 +26,9 @@ export interface PlannerContext {
     entityExclusions: string[];
     suggestedApproaches: string[];
   } | null;
+  runId?: string;
+  userId?: string;
+  conversationId?: string;
 }
 
 export function rulesPlan(context: PlannerContext): PlannerDecision {
