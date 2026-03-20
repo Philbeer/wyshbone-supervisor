@@ -1774,3 +1774,67 @@ Wrong or missing key on either method still returns 401.
 
 - Run `migrations/run-logs.sql` in the Supabase SQL editor to create the `run_logs` table (prerequisite for any data to appear in the endpoints).
 - Claude can now read logs directly via `web_fetch` using the query param form: `GET /api/logs?key=wyshbone-logs-2026`.
+
+---
+
+## Session: 2026-03-20 — Run Logger Diagnostics + Reloop Instrumentation
+
+### Objective
+
+Two targeted changes: (1) add diagnostic console.logs to `run-logger.ts` so we can confirm whether inserts are firing and whether the Supabase client is available, and (2) wire `logRunEvent` into the reloop path at three stage boundaries (`reloop_start`, `reloop_iteration_N`, `reloop_complete`).
+
+### What Changed
+
+#### `server/supervisor/run-logger.ts`
+
+Added two console.log calls inside `_insert`:
+
+1. **Before the insert** (fires even if supabase is null):
+   ```
+   [RUN_LOGGER] Inserting: runId=... stage=... level=... supabase_available=true/false
+   ```
+2. **After a successful insert** (inside the `if (!error)` branch):
+   ```
+   [RUN_LOGGER] Insert OK: runId=... stage=...
+   ```
+
+The `if (!supabase) return` guard is now **after** the first log, so it's always visible in the Console tab.
+
+#### `server/supervisor/reloop/loop-skeleton.ts`
+
+- Added `import { logRunEvent } from '../run-logger';` at the top.
+- Moved the `MAX_LOOPS_DEFAULT` / `maxLoops` IIFE declaration earlier in the function (before the `missionContext` block) so it's in scope at the `reloop_start` call site.
+- Added three `logRunEvent` calls (all fire-and-forget — no `await`):
+
+| Stage | Location |
+|---|---|
+| `reloop_start` | After `normalizedGoal` is computed, before `missionContext` |
+| `reloop_iteration_N` | After the `logAFREvent` `.catch()` at the end of each loop |
+| `reloop_complete` | After the "Chain complete" `console.log`, before `return` |
+
+### Supabase Client Consistency
+
+- `run-logger.ts` → `import { supabase } from '../supabase'` (resolves to `server/supabase.ts`)
+- `routes.ts` → `import { supabase } from './supabase'` (same file)
+
+Same singleton client. No alignment needed.
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/supervisor/run-logger.ts` | Diagnostic console.logs before and after Supabase insert |
+| `server/supervisor/reloop/loop-skeleton.ts` | Import + 3× `logRunEvent` calls; `maxLoops` moved up |
+
+### Decisions Made
+
+- The pre-insert log fires **before** the `if (!supabase) return` guard so that we can see `supabase_available=false` in the Console — which would explain missing inserts without the table even being involved.
+- `maxLoops` move was purely mechanical — no behavioural change; it was an IIFE so its computed value is identical wherever it sits.
+- All three reloop calls remain fire-and-forget (no `await`), consistent with the existing logging discipline.
+
+### What's Next
+
+- Trigger a real reloop run and watch the Console tab for `[RUN_LOGGER] Inserting:` lines.
+  - If `supabase_available=false` → check `SUPABASE_URL` / `SUPABASE_ANON_KEY` env vars.
+  - If `supabase_available=true` but no `Insert OK` → the `run_logs` table is missing (apply `migrations/run-logs.sql` in Supabase SQL editor).
+  - If `Insert OK` appears but rows aren't visible in the dashboard → check RLS policies on `run_logs`.

@@ -10,6 +10,7 @@ import {
 } from '../mission-executor';
 import { createArtefact } from '../artefacts';
 import { logAFREvent } from '../afr-logger';
+import { logRunEvent } from '../run-logger';
 import { supabase } from '../../supabase';
 import { getExecutor, getAvailableExecutors } from './executor-registry';
 import { plan as plannerPlan } from './planner';
@@ -49,6 +50,29 @@ export async function runReloop(params: {
   const softConstraints = buildSoftConstraintLabels(mission);
   const structuredConstraints = buildStructuredConstraints(mission);
   const normalizedGoal = `Find ${requestedCount ? requestedCount + ' ' : ''}${businessType} in ${location}`;
+
+  const MAX_LOOPS_DEFAULT = 3;
+  const maxLoops = (() => {
+    const env = process.env.RELOOP_MAX_LOOPS;
+    if (env) {
+      const parsed = parseInt(env, 10);
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+    }
+    return MAX_LOOPS_DEFAULT;
+  })();
+
+  logRunEvent(runId, {
+    stage: 'reloop_start',
+    level: 'info',
+    message: `Reloop chain started: ${normalizedGoal}`,
+    queryText: rawUserInput,
+    metadata: {
+      chain_id: chainId,
+      max_loops: maxLoops,
+      available_executors: availableExecutors,
+      execution_path: executionPath ?? 'gp_cascade',
+    },
+  });
 
   const missionContext: Record<string, unknown> = {
     mission,
@@ -96,16 +120,6 @@ export async function runReloop(params: {
   let loopNumber = 0;
   let finalRawResult: Record<string, unknown> = {};
   let lastGateDecision: GateDecision | null = null;
-
-  const MAX_LOOPS_DEFAULT = 3;
-  const maxLoops = (() => {
-    const env = process.env.RELOOP_MAX_LOOPS;
-    if (env) {
-      const parsed = parseInt(env, 10);
-      if (!isNaN(parsed) && parsed > 0) return parsed;
-    }
-    return MAX_LOOPS_DEFAULT;
-  })();
 
   while (true) {
     loopNumber++;
@@ -319,6 +333,22 @@ export async function runReloop(params: {
       },
     }).catch(e => console.warn(`[RELOOP_SKELETON] AFR event failed (non-fatal): ${e.message}`));
 
+    logRunEvent(runId, {
+      stage: `reloop_iteration_${loopNumber}`,
+      level: 'info',
+      message: `Loop ${loopNumber}: ${plannerDecision.executorType} → ${judgeVerdict.verdict} → ${gateDecision.decision} (${accumulatedEntityMap.size} accumulated)`,
+      queryText: rawUserInput,
+      metadata: {
+        chain_id: chainId,
+        loop_number: loopNumber,
+        executor_type: plannerDecision.executorType,
+        verdict: judgeVerdict.verdict,
+        gate_decision: gateDecision.decision,
+        entities_found: executorOutput.entities.length,
+        accumulated_total: accumulatedEntityMap.size,
+      },
+    });
+
     if (gateDecision.circuitBreaker) {
       await createArtefact({
         runId,
@@ -374,6 +404,20 @@ export async function runReloop(params: {
   }).catch(e => console.warn(`[RELOOP_SKELETON] chain summary artefact failed (non-fatal): ${e.message}`));
 
   console.log(`[RELOOP_SKELETON] Chain complete. chainId=${chainId} loops=${totalLoops} accumulated=${totalEntities}`);
+
+  logRunEvent(runId, {
+    stage: 'reloop_complete',
+    level: 'info',
+    message: `Reloop chain complete: ${totalLoops} loops, ${totalEntities} entities`,
+    queryText: rawUserInput,
+    metadata: {
+      chain_id: chainId,
+      total_loops: totalLoops,
+      total_entities: totalEntities,
+      executors_tried: executorsTriedSoFar,
+      final_gate: lastGateDecision?.decision ?? null,
+    },
+  });
 
   const finalResult = finalRawResult as unknown as MissionExecutionResult;
   return finalResult;

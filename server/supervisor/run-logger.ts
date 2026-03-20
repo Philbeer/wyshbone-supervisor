@@ -18,6 +18,8 @@ export interface RunLogParams {
 }
 
 async function _insert(runId: string, params: RunLogParams): Promise<void> {
+  console.log(`[RUN_LOGGER] Inserting: runId=${runId} stage=${params.stage} level=${params.level ?? 'info'} supabase_available=${!!supabase}`);
+
   if (!supabase) return;
 
   try {
@@ -31,6 +33,8 @@ async function _insert(runId: string, params: RunLogParams): Promise<void> {
     });
     if (error) {
       console.warn(`[RUN_LOGGER] Supabase insert failed (non-fatal): ${error.message}`);
+    } else {
+      console.log(`[RUN_LOGGER] Insert OK: runId=${runId} stage=${params.stage}`);
     }
   } catch (err: any) {
     console.warn(`[RUN_LOGGER] Exception (non-fatal): ${err.message}`);
