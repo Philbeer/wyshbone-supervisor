@@ -17,6 +17,7 @@ import { plan as plannerPlan } from './planner';
 import { evaluate as judgeEvaluate } from './judge-adapter';
 import { decide as gateDecide } from './gate';
 import type { ExecutorInput, ExecutorEntity, LoopRecord, GateDecision } from './types';
+import { reviewStrategy } from './strategy-reviewer';
 
 function normaliseEntityName(name: string): string {
   return name.toLowerCase().replace(/^the\s+/i, '').trim();
@@ -74,9 +75,24 @@ export async function runReloop(params: {
     },
   });
 
+  // LLM strategy review — can override the mission planner's tool sequence
+  const reviewResult = await reviewStrategy({
+    plan,
+    rawUserInput,
+    intentNarrative,
+    runId,
+    userId,
+    conversationId,
+  });
+
+  const activePlan = reviewResult.plan;
+  if (reviewResult.overridden) {
+    console.log(`[RELOOP_SKELETON] Strategy overridden by LLM: ${plan.strategy} → ${activePlan.strategy}`);
+  }
+
   const missionContext: Record<string, unknown> = {
     mission,
-    plan,
+    plan: activePlan,
     missionTrace,
     intentNarrative,
     runId,
