@@ -32,6 +32,7 @@ import {
   type SupportingEvidenceItem,
 } from './delivery-summary';
 import { logAFREvent } from './afr-logger';
+import { logRunEvent } from './run-logger';
 import { storage } from '../storage';
 import { sanitiseLocationString, inferCountryFromLocation } from './goal-to-constraints';
 import { detectRelationshipPredicate, type RelationshipPredicateResult } from './relationship-predicate';
@@ -561,27 +562,72 @@ Respond with a JSON array only, no markdown fences:
 export async function executeMissionWithReloop(
   ctx: MissionExecutionContext,
 ): Promise<MissionExecutionResult> {
+  const { runId, rawUserInput, userId } = ctx;
+  const { businessType, location, requestedCount } = deriveSearchParams(ctx.mission);
   const reloopEnabled = (process.env.RELOOP_ENABLED || 'true').toLowerCase() === 'true';
+  const queryText = `Find ${requestedCount ? requestedCount + ' ' : ''}${businessType} in ${location}`;
 
-  if (!reloopEnabled) {
-    return executeMissionDrivenPlan(ctx);
-  }
-
-  const { runReloop } = await import('./reloop/index');
-
-  return runReloop({
-    runId: ctx.runId,
-    userId: ctx.userId,
-    conversationId: ctx.conversationId,
-    clientRequestId: ctx.clientRequestId,
-    rawUserInput: ctx.rawUserInput,
-    mission: ctx.mission,
-    plan: ctx.plan,
-    missionTrace: ctx.missionTrace,
-    intentNarrative: ctx.intentNarrative,
-    queryId: ctx.queryId,
-    executionPath: ctx.executionPath,
+  logRunEvent(runId, {
+    stage: 'run_start',
+    level: 'info',
+    message: `Run started: ${queryText}`,
+    queryText: rawUserInput,
+    metadata: {
+      reloop_enabled: reloopEnabled,
+      execution_path: ctx.executionPath ?? 'gp_cascade',
+      strategy: ctx.plan.strategy,
+      requested_count: requestedCount,
+      business_type: businessType,
+      location,
+      user_id: userId,
+    },
   });
+
+  try {
+    let result: MissionExecutionResult;
+
+    if (!reloopEnabled) {
+      result = await executeMissionDrivenPlan(ctx);
+    } else {
+      const { runReloop } = await import('./reloop/index');
+      result = await runReloop({
+        runId: ctx.runId,
+        userId: ctx.userId,
+        conversationId: ctx.conversationId,
+        clientRequestId: ctx.clientRequestId,
+        rawUserInput: ctx.rawUserInput,
+        mission: ctx.mission,
+        plan: ctx.plan,
+        missionTrace: ctx.missionTrace,
+        intentNarrative: ctx.intentNarrative,
+        queryId: ctx.queryId,
+        executionPath: ctx.executionPath,
+      });
+    }
+
+    logRunEvent(runId, {
+      stage: 'run_complete',
+      level: 'info',
+      message: `Run complete: ${result.leads.length} leads delivered`,
+      queryText: rawUserInput,
+      metadata: {
+        leads_count: result.leads.length,
+        tower_verdict: result.towerVerdict ?? null,
+        reloop_enabled: reloopEnabled,
+      },
+    });
+
+    return result;
+  } catch (err: any) {
+    logRunEvent(runId, {
+      stage: 'run_error',
+      level: 'error',
+      message: `Run failed: ${err.message}`,
+      queryText: rawUserInput,
+      metadata: { error: err.message },
+    });
+    throw err;
+  }
 }
 
 export async function executeMissionDrivenPlan(
@@ -945,6 +991,13 @@ export async function executeMissionDrivenPlan(
 
   candidateCountFromGoogle = leads.length;
   console.log(`[PLACES] After dedup: ${placeMatchCount.size} unique candidates | after cap (${websiteVisitCap}): ${leads.length} → proceeding to exclusion filter`);
+  logRunEvent(runId, {
+    stage: 'discovery_complete',
+    level: 'info',
+    message: `Discovery complete: ${leads.length} candidates found`,
+    queryText: rawUserInput,
+    metadata: { candidate_count: leads.length, business_type: businessType, location },
+  });
 
   const searchStepEnd = Date.now();
   await createArtefact({
@@ -1669,6 +1722,17 @@ export async function executeMissionDrivenPlan(
     const totalEvidenceFound = evidenceResults.filter(r => r.evidenceFound).length;
     const totalEvidenceChecks = evidenceResults.length;
     console.log(`[MISSION_EXEC] Evidence gathering complete: ${totalEvidenceFound}/${totalEvidenceChecks} checks found evidence`);
+    logRunEvent(runId, {
+      stage: 'evidence_complete',
+      level: 'info',
+      message: `Evidence gathering complete: ${totalEvidenceFound}/${totalEvidenceChecks} checks found evidence`,
+      queryText: rawUserInput,
+      metadata: {
+        evidence_found: totalEvidenceFound,
+        evidence_checks: totalEvidenceChecks,
+        leads_enriched: enrichableLeads.length,
+      },
+    });
 
     await createArtefact({
       runId,
@@ -2404,6 +2468,18 @@ export async function executeMissionDrivenPlan(
 
   console.log(`[MISSION_EXEC] ===== Mission-driven execution complete =====`);
   console.log(`[MISSION_EXEC] runId=${runId} leads=${finalLeads.length} verdict=${finalVerdict} strategy=${plan.strategy} replans=${replansUsed}`);
+  logRunEvent(runId, {
+    stage: 'run_complete',
+    level: 'info',
+    message: `Mission-driven execution complete: ${finalLeads.length} leads, verdict=${finalVerdict}`,
+    queryText: rawUserInput,
+    metadata: {
+      leads_count: finalLeads.length,
+      tower_verdict: finalVerdict,
+      strategy: plan.strategy,
+      replans_used: replansUsed,
+    },
+  });
 
   return {
     response: chatResponse,

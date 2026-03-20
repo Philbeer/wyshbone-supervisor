@@ -1655,3 +1655,76 @@ Core of the change. Exports `llmPlan(context: PlannerContext): Promise<PlannerDe
 - **Token budget monitoring** — The system prompt + context should stay under 2000 input tokens. If context grows large (many re-loops, long narratives), consider trimming loop history to the last N records only.
 - **`AbortController` upgrade** — If the OpenAI SDK version is upgraded, replace the `Promise.race` timeout with a native `AbortSignal` for cleaner cancellation.
 - **Evaluate planner quality** — After a few production runs with `LLM_PLANNER_ENABLED=true`, review the `reloop_planner_decision` artefacts to assess whether the LLM is making meaningfully better choices than the rules-based planner for non-commercial entity queries.
+
+---
+
+## Session: 2026-03-20 — Structured Run Logging
+
+### Objective
+
+Add a structured, per-run logging system that persists pipeline stage events to a `run_logs` Supabase table and exposes them via authenticated HTTP endpoints. Enables direct log inspection without needing to download or paste console output.
+
+### What Changed
+
+#### 1. `migrations/run-logs.sql` *(new file)*
+
+DDL for the `run_logs` table:
+- `id` (uuid PK), `run_id` (text, indexed), `timestamp` (timestamptz, indexed DESC), `query_text` (text), `stage` (text), `level` (text, default `'info'`), `message` (text), `metadata` (jsonb).
+- Two indexes: `idx_run_logs_run_id` and `idx_run_logs_timestamp`.
+- **Must be run manually in the Supabase SQL editor** — `exec_sql` RPC is not enabled in this Supabase instance.
+
+#### 2. `server/migrations/run-run-logs-migration.ts` *(new file)*
+
+Script that attempts to run the migration via `supabase.rpc('exec_sql', ...)`. Can be invoked with `npx tsx server/migrations/run-run-logs-migration.ts`. If the RPC is not available (as is the case here), it outputs instructions to run the SQL manually.
+
+#### 3. `server/supervisor/run-logger.ts` *(new file)*
+
+Exports `logRunEvent(runId, params)`:
+- Inserts a single row into `run_logs` via the existing shared Supabase client.
+- Fire-and-forget — calls `_insert(...).catch(() => {})` so logging never blocks the pipeline.
+- Wraps everything in try/catch; logs a non-fatal warning if Supabase is unavailable.
+- Gracefully no-ops if `supabase` is null.
+
+#### 4. `server/supervisor/mission-executor.ts`
+
+Added `import { logRunEvent } from './run-logger'` at top.
+
+Instrumented four pipeline stage boundaries in `executeMissionWithReloop` and `executeMissionDrivenPlan`:
+
+| Stage | Location | Metadata logged |
+|---|---|---|
+| `run_start` | Entry of `executeMissionWithReloop` | reloop_enabled, execution_path, strategy, requested_count, business_type, location, user_id |
+| `discovery_complete` | After Google Places dedup in `executeMissionDrivenPlan` | candidate_count, business_type, location |
+| `evidence_complete` | After evidence gathering loop in `executeMissionDrivenPlan` | evidence_found, evidence_checks, leads_enriched |
+| `run_complete` | Before return in `executeMissionWithReloop` (both paths) and at end of `executeMissionDrivenPlan` | leads_count, tower_verdict, reloop_enabled / replans_used, strategy |
+
+Also added `run_error` on the catch path in `executeMissionWithReloop` with `level: 'error'` and the error message.
+
+`executeMissionWithReloop` was refactored from a simple pass-through to a try/catch wrapper that calls either `executeMissionDrivenPlan` or `runReloop` and logs the outcome regardless of path.
+
+#### 5. `server/routes.ts`
+
+Added two authenticated endpoints near the bottom of `registerRoutes`:
+
+- **`GET /api/logs`** — Returns the most recent N runs as summaries (run_id, query_text, started_at, ended_at, has_error). Groups rows by run_id in memory. Accepts `?limit=N` (default 20, cap 100).
+- **`GET /api/logs/:runId`** — Returns all log entries for a run ordered by timestamp ascending.
+
+Both require `x-api-key` header matching `LOGS_API_KEY`. Returns 401 if missing/wrong, 503 if Supabase not configured.
+
+#### 6. `LOGS_API_KEY` environment variable
+
+Set as a shared env var with value `wyshbone-logs-2026`. Phil can change it in the Secrets tab at any time.
+
+### Decisions Made
+
+- **Fire-and-forget pattern**: `logRunEvent` never `await`s in the caller — uses `.catch(() => {})`. A slow or down Supabase never adds latency to a run.
+- **In-memory grouping for `GET /api/logs`**: The `run_logs` table has no `GROUP BY` or window-function support via the Supabase JS client's PostgREST query builder, so grouping is done in application memory on the fetched rows (fetching `limit × 20` rows as a reasonable upper bound).
+- **`run_complete` logged twice on non-reloop path**: The non-reloop path logs `run_complete` both in `executeMissionDrivenPlan` (with strategy/replans detail) and in the `executeMissionWithReloop` wrapper (with tower verdict). This is intentional — both events are useful and have different metadata.
+- **`exec_sql` RPC absent**: The Supabase instance doesn't expose `exec_sql`, so the migration script can't auto-create the table. The SQL is in `migrations/run-logs.sql` for manual execution in the Supabase dashboard.
+
+### What's Next
+
+- **Run the migration**: Phil must run `migrations/run-logs.sql` in the Supabase SQL editor to create the `run_logs` table before logging will persist.
+- **Verify endpoint**: After the table is created, test `GET /api/logs` with `x-api-key: wyshbone-logs-2026`.
+- **Reloop path instrumentation**: The reloop path (`loop-skeleton.ts`) already logs per-iteration detail to `loop_state`. If per-loop `run_logs` entries are wanted (e.g., `reloop_iteration` stage events), they can be added to `loop-skeleton.ts` by calling `logRunEvent`.
+- **Token count in query_text**: Consider storing the normalised query (entity + location) in `query_text` rather than raw user input for cleaner display in `GET /api/logs`.

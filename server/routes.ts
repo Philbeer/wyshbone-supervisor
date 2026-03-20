@@ -2834,6 +2834,98 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   registerQaMetricsRoutes(app, supabase);
 
+  // ── Run Logs API ──────────────────────────────────────────────────────────
+
+  function checkLogsApiKey(req: any, res: any): boolean {
+    const expectedKey = process.env.LOGS_API_KEY;
+    if (!expectedKey) {
+      res.status(503).json({ error: 'LOGS_API_KEY not configured on server' });
+      return false;
+    }
+    const provided = req.headers['x-api-key'];
+    if (!provided || provided !== expectedKey) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return false;
+    }
+    return true;
+  }
+
+  app.get('/api/logs', async (req, res) => {
+    if (!checkLogsApiKey(req, res)) return;
+    if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+    const limit = Math.min(parseInt((req.query.limit as string) || '20', 10), 100);
+
+    try {
+      const { data, error } = await supabase
+        .from('run_logs')
+        .select('run_id, stage, level, message, query_text, timestamp')
+        .order('timestamp', { ascending: false })
+        .limit(limit * 20);
+
+      if (error) return res.status(500).json({ error: error.message });
+
+      const runMap = new Map<string, {
+        run_id: string;
+        query_text: string | null;
+        started_at: string;
+        ended_at: string;
+        has_error: boolean;
+      }>();
+
+      for (const row of (data ?? [])) {
+        const existing = runMap.get(row.run_id);
+        if (!existing) {
+          runMap.set(row.run_id, {
+            run_id: row.run_id,
+            query_text: row.stage === 'run_start' ? (row.query_text ?? null) : null,
+            started_at: row.timestamp,
+            ended_at: row.timestamp,
+            has_error: row.level === 'error',
+          });
+        } else {
+          if (row.timestamp < existing.started_at) existing.started_at = row.timestamp;
+          if (row.timestamp > existing.ended_at) existing.ended_at = row.timestamp;
+          if (row.level === 'error') existing.has_error = true;
+          if (row.stage === 'run_start' && row.query_text) existing.query_text = row.query_text;
+        }
+      }
+
+      const runs = Array.from(runMap.values())
+        .sort((a, b) => b.started_at.localeCompare(a.started_at))
+        .slice(0, limit);
+
+      return res.json(runs);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  console.log('[DEBUG] Registered: GET /api/logs');
+
+  app.get('/api/logs/:runId', async (req, res) => {
+    if (!checkLogsApiKey(req, res)) return;
+    if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+    const { runId } = req.params;
+
+    try {
+      const { data, error } = await supabase
+        .from('run_logs')
+        .select('id, run_id, timestamp, query_text, stage, level, message, metadata')
+        .eq('run_id', runId)
+        .order('timestamp', { ascending: true });
+
+      if (error) return res.status(500).json({ error: error.message });
+
+      return res.json(data ?? []);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  console.log('[DEBUG] Registered: GET /api/logs/:runId');
+
   const httpServer = createServer(app);
   return httpServer;
 }
