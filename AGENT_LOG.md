@@ -2144,3 +2144,34 @@ The old `.catch()`-chained fire-and-forget call and its standalone `console.log`
 
 - Confirm in a live run that the Tower verdict appears in the run logs and that the `combined_delivery` artefact is not duplicated.
 - Consider surfacing `towerResult.judgement.action` in the `combinedResult.towerVerdict` field so callers downstream can act on it.
+
+---
+
+## Session — 2026-03-20
+
+### What Changed
+
+1. **Removed redundant `requestedCount` redeclaration** in the combined delivery section of `runReloop`.  
+   - The line `const requestedCount = params.mission.requested_count;` (formerly ~line 442) was deleted.  
+   - `requestedCount` is already destructured from `deriveSearchParams(mission)` at line 49 and was in scope throughout the function. The redeclaration shadowed that binding with a potentially different value and could have caused silent `undefined` in TypeScript strict mode depending on the shape of `params.mission`.
+
+2. **Upgraded catch-block log from `console.warn` to `console.error` with full stack trace** in the combined delivery `try/catch`.  
+   - Old: `console.warn(\`...: \${judgeErr.message}\`)`  
+   - New: `console.error(\`...: \${judgeErr.message}\`, judgeErr.stack)`  
+   - This ensures the full stack trace is captured in logs if the combined delivery judgement fails, making future debugging significantly easier.
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/supervisor/reloop/loop-skeleton.ts` | Deleted duplicate `const requestedCount` declaration; changed `console.warn` to `console.error` with `judgeErr.stack` in catch block |
+
+### Decisions Made
+
+- No logic was altered — only the shadowing declaration was removed. The variable's value and all downstream uses remain identical.
+- `console.error` (not `console.warn`) is appropriate here because a stack trace is needed for diagnosing failures; the "non-fatal" qualifier in the message text already communicates that execution continues.
+
+### What's Next
+
+- Monitor logs on the next live run to confirm the catch block now surfaces full stack traces if it fires.
+- Consider whether `params.mission.requested_count` and `deriveSearchParams(mission).requestedCount` are ever meaningfully different — if they can diverge, the business logic should explicitly decide which to prefer.

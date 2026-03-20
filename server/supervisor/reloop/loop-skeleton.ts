@@ -439,7 +439,6 @@ export async function runReloop(params: {
   }));
 
   // Trim to requested count if specified
-  const requestedCount = params.mission.requested_count;
   const deliveredLeads = requestedCount
     ? combinedLeads.slice(0, requestedCount)
     : combinedLeads;
@@ -491,7 +490,7 @@ export async function runReloop(params: {
 
     console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} delivered=${deliveredLeads.length}`);
   } catch (judgeErr: any) {
-    console.warn(`[RELOOP_SKELETON] Combined delivery judgement failed (non-fatal): ${judgeErr.message}`);
+    console.error(`[RELOOP_SKELETON] Combined delivery judgement failed (non-fatal): ${judgeErr.message}`, judgeErr.stack);
   }
 
   // Build the MissionExecutionResult from combined entities
