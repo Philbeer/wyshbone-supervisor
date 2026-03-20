@@ -422,6 +422,69 @@ export async function runReloop(params: {
     },
   });
 
-  const finalResult = finalRawResult as unknown as MissionExecutionResult;
-  return finalResult;
+  // ── Combined delivery: merge all entities from all loops ──
+  const allEntities = Array.from(accumulatedEntityMap.values());
+
+  // Build combined leads array with source tagging
+  const combinedLeads = allEntities.map(entity => ({
+    name: entity.name,
+    address: entity.address,
+    phone: entity.phone,
+    website: entity.website,
+    placeId: entity.placeId,
+    source: entity.source,
+    verified: entity.verified,
+    verificationStatus: entity.verificationStatus,
+  }));
+
+  // Trim to requested count if specified
+  const requestedCount = params.mission.requested_count;
+  const deliveredLeads = requestedCount
+    ? combinedLeads.slice(0, requestedCount)
+    : combinedLeads;
+
+  // Create combined_delivery artefact
+  await createArtefact({
+    runId,
+    type: 'combined_delivery',
+    title: `Combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loop${totalLoops === 1 ? '' : 's'}`,
+    summary: `${deliveredLeads.length} leads delivered | loops=${totalLoops} | executors=${executorsTriedSoFar.join(',')} | requested=${requestedCount ?? 'any'}`,
+    payload: {
+      chain_id: chainId,
+      total_loops: totalLoops,
+      executors_tried: executorsTriedSoFar,
+      requested_count: requestedCount,
+      delivered_count: deliveredLeads.length,
+      accumulated_total: allEntities.length,
+      leads: deliveredLeads,
+      per_loop_counts: loopHistory.map(r => ({
+        loop: r.loopNumber,
+        executor: r.plannerDecision.executorType,
+        found: r.executorOutput.entities.length,
+      })),
+    },
+    userId,
+    conversationId,
+  }).catch(e => console.warn(`[RELOOP_SKELETON] combined_delivery artefact failed (non-fatal): ${e.message}`));
+
+  console.log(`[RELOOP_SKELETON] Combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loops (accumulated=${allEntities.length})`);
+
+  // Build the MissionExecutionResult from combined entities
+  // Use the last loop's raw result as the base, then override leads
+  const lastRawResult = finalRawResult as Record<string, unknown>;
+  const combinedResult: MissionExecutionResult = {
+    response: (lastRawResult.response as string) ?? 'Run complete. Results are available.',
+    leadIds: (lastRawResult.leadIds as string[]) ?? [],
+    deliverySummary: (lastRawResult.deliverySummary as any) ?? null,
+    towerVerdict: (lastRawResult.towerVerdict as string) ?? null,
+    leads: deliveredLeads.map(l => ({
+      name: l.name,
+      address: l.address,
+      phone: l.phone,
+      website: l.website,
+      placeId: l.placeId,
+    })),
+  };
+
+  return combinedResult;
 }

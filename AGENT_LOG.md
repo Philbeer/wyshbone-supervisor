@@ -2073,3 +2073,38 @@ These variables are already in scope at the call site — they're destructured f
 ### What's Next
 
 - With `runId` now properly typed on the context, `llm-planner.ts` can log or tag its GPT calls against the run for observability.
+
+---
+
+## 2026-03-20 — Multi-loop result merging in runReloop()
+
+### What Changed
+
+Replaced the two-line terminal block at the end of `runReloop()` (in `server/supervisor/reloop/loop-skeleton.ts`) that simply cast `finalRawResult` and returned it, with a full combined-delivery block that:
+
+1. Drains `accumulatedEntityMap` (which already contains every entity from every loop) into `allEntities`.
+2. Maps those entities into a `combinedLeads` array with source-tagging fields preserved.
+3. Trims to `params.mission.requested_count` if a count was requested.
+4. Creates a `combined_delivery` artefact recording per-loop counts, executor names, and the full lead payload.
+5. Constructs a typed `MissionExecutionResult` (`combinedResult`) using the last loop's raw result as the base for text fields (`response`, `leadIds`, `deliverySummary`, `towerVerdict`) but overriding `leads` with the merged set.
+6. Returns `combinedResult` instead of the old cast.
+
+No changes were made to the loop body, the entity accumulation logic, the gate, or the judge.
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/supervisor/reloop/loop-skeleton.ts` | Replaced 2-line terminal return with combined-delivery merge block (~65 lines) |
+
+### Decisions Made
+
+- `accumulatedEntityMap` was already correct — entities from every loop are merged into it via `gateDecision.contextForward.accumulatedEntities` during each iteration. The only bug was that the final return ignored the map and re-cast only the last executor's `rawResult`.
+- Used `params.mission.requested_count` (already in scope from the outer function signature) for trimming — avoids re-deriving from `deriveSearchParams`.
+- The `combined_delivery` artefact failure is non-fatal (`.catch` logged as warning) to match the pattern used by all other artefact calls in this file.
+- Text fields (`response`, `leadIds`, `deliverySummary`, `towerVerdict`) fall back to sensible defaults if the last loop's raw result doesn't carry them.
+
+### What's Next
+
+- Verify in a live run with 2+ loops that the returned `leads` array contains entities from all loops and that the `combined_delivery` artefact appears in the run's artefact list with correct `per_loop_counts`.
+- Consider surfacing `accumulated_total` vs `delivered_count` discrepancy in the UI if trimming occurs.
