@@ -1838,3 +1838,50 @@ Same singleton client. No alignment needed.
   - If `supabase_available=false` → check `SUPABASE_URL` / `SUPABASE_ANON_KEY` env vars.
   - If `supabase_available=true` but no `Insert OK` → the `run_logs` table is missing (apply `migrations/run-logs.sql` in Supabase SQL editor).
   - If `Insert OK` appears but rows aren't visible in the dashboard → check RLS policies on `run_logs`.
+
+---
+
+## Session: 2026-03-20 — Fix GET /api/logs Returning Empty Array
+
+### Objective
+
+`GET /api/logs` was returning `[]` even though the `run_logs` table had data. The old implementation was a grouping query that fetched `limit * 20` rows and aggregated them into per-run summaries in application code. The query was returning no raw rows (possibly a column selection issue or the ordering/limit combination excluded available data).
+
+### Root Cause
+
+The old handler selected a subset of columns (`run_id, stage, level, message, query_text, timestamp`) and applied a complex in-memory grouping step. The `limit * 20` pre-fetch combined with a client-side `slice(0, limit)` on the aggregated result meant that a sparsely populated table could appear empty even with data present.
+
+### What Changed
+
+#### `server/routes.ts` — both `/api/logs` and `/api/logs/:runId`
+
+Replaced both handlers with the implementations provided. Key differences:
+
+| | Old | New |
+|---|---|---|
+| Auth | `checkLogsApiKey()` helper | Inline `req.query.key \|\| req.headers['x-api-key']` check |
+| `/api/logs` select | 6 named columns + client-side grouping | `select('*')` — all columns, raw rows |
+| `/api/logs` limit | `limit * 20` pre-fetch, then `slice(0, limit)` | Direct `.limit(limit)` on the query |
+| Error logging | Silent (no console.error) | `console.error('[LOGS_API] Query error:', ...)` |
+| Success logging | None | `console.log('[LOGS_API] GET /api/logs returning N rows')` |
+| `/api/logs/:runId` select | 8 named columns | `select('*')` |
+
+The `checkLogsApiKey()` helper function remains in the file (it's still referenced by nothing now, but removal was out of scope for this targeted fix).
+
+Registration `console.log` lines (`[DEBUG] Registered: GET /api/logs`) are unchanged.
+
+### Verified
+
+After restart, `GET /api/logs?key=wyshbone-logs-2026` returned real rows including a `reloop_complete` event from a live run — confirming the table has data and the query now reaches it.
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/routes.ts` | Replaced both `/api/logs` and `/api/logs/:runId` handlers |
+
+### What's Next
+
+- The `/api/logs` response is now raw rows (flat list), not grouped run summaries. If Claude or any consumer expected the grouped format, query results will need to be interpreted differently.
+- `checkLogsApiKey()` is now unused — can be removed in a cleanup pass if desired.
+- The reloop instrumentation from the previous session is confirmed working end-to-end: `reloop_start`, `reloop_iteration_N`, and `reloop_complete` events are visible in the table.

@@ -2850,53 +2850,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return true;
   }
 
+  // ========================================
+  // RUN LOGS API
+  // ========================================
   app.get('/api/logs', async (req, res) => {
-    if (!checkLogsApiKey(req, res)) return;
-    if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
-
-    const limit = Math.min(parseInt((req.query.limit as string) || '20', 10), 100);
-
+    const key = req.query.key || req.headers['x-api-key'];
+    if (key !== process.env.LOGS_API_KEY) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
     try {
+      if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
       const { data, error } = await supabase
         .from('run_logs')
-        .select('run_id, stage, level, message, query_text, timestamp')
+        .select('*')
         .order('timestamp', { ascending: false })
-        .limit(limit * 20);
-
-      if (error) return res.status(500).json({ error: error.message });
-
-      const runMap = new Map<string, {
-        run_id: string;
-        query_text: string | null;
-        started_at: string;
-        ended_at: string;
-        has_error: boolean;
-      }>();
-
-      for (const row of (data ?? [])) {
-        const existing = runMap.get(row.run_id);
-        if (!existing) {
-          runMap.set(row.run_id, {
-            run_id: row.run_id,
-            query_text: row.stage === 'run_start' ? (row.query_text ?? null) : null,
-            started_at: row.timestamp,
-            ended_at: row.timestamp,
-            has_error: row.level === 'error',
-          });
-        } else {
-          if (row.timestamp < existing.started_at) existing.started_at = row.timestamp;
-          if (row.timestamp > existing.ended_at) existing.ended_at = row.timestamp;
-          if (row.level === 'error') existing.has_error = true;
-          if (row.stage === 'run_start' && row.query_text) existing.query_text = row.query_text;
-        }
+        .limit(limit);
+      if (error) {
+        console.error('[LOGS_API] Query error:', error.message);
+        return res.status(500).json({ error: error.message });
       }
-
-      const runs = Array.from(runMap.values())
-        .sort((a, b) => b.started_at.localeCompare(a.started_at))
-        .slice(0, limit);
-
-      return res.json(runs);
+      console.log(`[LOGS_API] GET /api/logs returning ${data?.length ?? 0} rows`);
+      return res.json(data || []);
     } catch (err: any) {
+      console.error('[LOGS_API] Error:', err.message);
       return res.status(500).json({ error: err.message });
     }
   });
@@ -2904,22 +2881,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
   console.log('[DEBUG] Registered: GET /api/logs');
 
   app.get('/api/logs/:runId', async (req, res) => {
-    if (!checkLogsApiKey(req, res)) return;
-    if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
-
+    const key = req.query.key || req.headers['x-api-key'];
+    if (key !== process.env.LOGS_API_KEY) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     const { runId } = req.params;
-
     try {
+      if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
       const { data, error } = await supabase
         .from('run_logs')
-        .select('id, run_id, timestamp, query_text, stage, level, message, metadata')
+        .select('*')
         .eq('run_id', runId)
         .order('timestamp', { ascending: true });
-
-      if (error) return res.status(500).json({ error: error.message });
-
-      return res.json(data ?? []);
+      if (error) {
+        console.error('[LOGS_API] Query error:', error.message);
+        return res.status(500).json({ error: error.message });
+      }
+      console.log(`[LOGS_API] GET /api/logs/${runId} returning ${data?.length ?? 0} rows`);
+      return res.json(data || []);
     } catch (err: any) {
+      console.error('[LOGS_API] Error:', err.message);
       return res.status(500).json({ error: err.message });
     }
   });
