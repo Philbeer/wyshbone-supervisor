@@ -1,0 +1,55 @@
+Change: After creating the combined_delivery artefact in the loop skeleton, send it to Tower for judgement. This is the final judgement for the entire run — it sees all leads from all loops.
+In server/supervisor/reloop/loop-skeleton.ts, add this import at the top alongside the existing imports:
+typescriptimport { judgeArtefact } from '../tower-artefact-judge';
+Then find the combined_delivery artefact creation block (near the end of the file, after the reloop_complete logRunEvent). After the console.log line that says Combined delivery:, add:
+typescript// Judge the combined delivery — this is the final verdict for the whole run
+try {
+  const combinedArtefact = await createArtefact({
+    runId,
+    type: 'combined_delivery',
+    title: `Combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loop${totalLoops === 1 ? '' : 's'}`,
+    summary: `${deliveredLeads.length} leads delivered | loops=${totalLoops} | executors=${executorsTriedSoFar.join(',')} | requested=${requestedCount ?? 'any'}`,
+    payload: {
+      chain_id: chainId,
+      total_loops: totalLoops,
+      executors_tried: executorsTriedSoFar,
+      requested_count: requestedCount,
+      delivered_count: deliveredLeads.length,
+      accumulated_total: allEntities.length,
+      leads: deliveredLeads,
+      per_loop_counts: loopHistory.map(r => ({
+        loop: r.loopNumber,
+        executor: r.plannerDecision.executorType,
+        found: r.executorOutput.entities.length,
+      })),
+    },
+    userId,
+    conversationId,
+  });
+
+  const towerResult = await judgeArtefact({
+    artefact: combinedArtefact,
+    runId,
+    goal: normalizedGoal,
+    userId,
+    conversationId,
+    successCriteria: {
+      mission_type: 'leadgen',
+      target_count: requestedCount ?? 20,
+      requested_count_user: requestedCount !== null ? 'explicit' : 'implicit',
+      requested_count_value: requestedCount,
+      hard_constraints: hardConstraints,
+      soft_constraints: softConstraints,
+      structured_constraints: structuredConstraints,
+      intent_narrative: intentNarrative ?? null,
+    },
+    intent_narrative: intentNarrative ?? null,
+    queryId: queryId ?? null,
+  });
+
+  console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} delivered=${deliveredLeads.length}`);
+} catch (judgeErr: any) {
+  console.warn(`[RELOOP_SKELETON] Combined delivery judgement failed (non-fatal): ${judgeErr.message}`);
+}
+IMPORTANT: This replaces the existing combined_delivery artefact creation block. Remove the old createArtefact call for combined_delivery and the old console.log for "Combined delivery" since they're now inside this new block. Don't create the artefact twice.
+Work on the main branch only — do not create or switch branches. After completing this task, append a structured summary to AGENT_LOG.md (what changed, files modified, decisions made, what's next).

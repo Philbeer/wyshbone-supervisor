@@ -2108,3 +2108,39 @@ No changes were made to the loop body, the entity accumulation logic, the gate, 
 
 - Verify in a live run with 2+ loops that the returned `leads` array contains entities from all loops and that the `combined_delivery` artefact appears in the run's artefact list with correct `per_loop_counts`.
 - Consider surfacing `accumulated_total` vs `delivered_count` discrepancy in the UI if trimming occurs.
+
+---
+
+## 2026-03-20 — Tower judgement wired to combined_delivery artefact
+
+### What Changed
+
+Two edits to `server/supervisor/reloop/loop-skeleton.ts`:
+
+1. **New import** — added `import { judgeArtefact } from '../tower-artefact-judge';` alongside the existing imports.
+
+2. **Replaced the fire-and-forget `combined_delivery` artefact creation** with a `try/catch` block that:
+   - Awaits `createArtefact(...)` and captures the returned artefact object as `combinedArtefact`.
+   - Immediately passes it to `judgeArtefact(...)` with full mission context (`goal`, `successCriteria`, `hardConstraints`, `softConstraints`, `structuredConstraints`, `intentNarrative`, `queryId`).
+   - Logs the Tower verdict (`verdict`, `action`, `delivered` count) on success.
+   - Catches any error and logs a non-fatal warning, so a Tower failure never blocks delivery.
+
+The old `.catch()`-chained fire-and-forget call and its standalone `console.log` were removed; the new block replaces them entirely, so the artefact is created exactly once.
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/supervisor/reloop/loop-skeleton.ts` | Added `judgeArtefact` import; replaced combined_delivery fire-and-forget with try/catch block that awaits artefact creation then calls Tower |
+
+### Decisions Made
+
+- The entire block is wrapped in `try/catch` rather than `.catch()` chaining so that both `createArtefact` and `judgeArtefact` failures are caught in one place.
+- `requested_count_user` is set to `'explicit'` when `requestedCount !== null` and `'implicit'` otherwise, matching the Tower contract.
+- `target_count` defaults to `20` when no count was requested, consistent with the rest of the codebase.
+- Failure is non-fatal: a warn log is emitted and execution continues to build and return `combinedResult`.
+
+### What's Next
+
+- Confirm in a live run that the Tower verdict appears in the run logs and that the `combined_delivery` artefact is not duplicated.
+- Consider surfacing `towerResult.judgement.action` in the `combinedResult.towerVerdict` field so callers downstream can act on it.

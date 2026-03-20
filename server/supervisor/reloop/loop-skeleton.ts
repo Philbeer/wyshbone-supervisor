@@ -17,6 +17,7 @@ import { plan as plannerPlan } from './planner';
 import { evaluate as judgeEvaluate } from './judge-adapter';
 import { decide as gateDecide } from './gate';
 import type { ExecutorInput, ExecutorEntity, LoopRecord, GateDecision } from './types';
+import { judgeArtefact } from '../tower-artefact-judge';
 
 function normaliseEntityName(name: string): string {
   return name.toLowerCase().replace(/^the\s+/i, '').trim();
@@ -443,31 +444,55 @@ export async function runReloop(params: {
     ? combinedLeads.slice(0, requestedCount)
     : combinedLeads;
 
-  // Create combined_delivery artefact
-  await createArtefact({
-    runId,
-    type: 'combined_delivery',
-    title: `Combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loop${totalLoops === 1 ? '' : 's'}`,
-    summary: `${deliveredLeads.length} leads delivered | loops=${totalLoops} | executors=${executorsTriedSoFar.join(',')} | requested=${requestedCount ?? 'any'}`,
-    payload: {
-      chain_id: chainId,
-      total_loops: totalLoops,
-      executors_tried: executorsTriedSoFar,
-      requested_count: requestedCount,
-      delivered_count: deliveredLeads.length,
-      accumulated_total: allEntities.length,
-      leads: deliveredLeads,
-      per_loop_counts: loopHistory.map(r => ({
-        loop: r.loopNumber,
-        executor: r.plannerDecision.executorType,
-        found: r.executorOutput.entities.length,
-      })),
-    },
-    userId,
-    conversationId,
-  }).catch(e => console.warn(`[RELOOP_SKELETON] combined_delivery artefact failed (non-fatal): ${e.message}`));
+  // Judge the combined delivery — this is the final verdict for the whole run
+  try {
+    const combinedArtefact = await createArtefact({
+      runId,
+      type: 'combined_delivery',
+      title: `Combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loop${totalLoops === 1 ? '' : 's'}`,
+      summary: `${deliveredLeads.length} leads delivered | loops=${totalLoops} | executors=${executorsTriedSoFar.join(',')} | requested=${requestedCount ?? 'any'}`,
+      payload: {
+        chain_id: chainId,
+        total_loops: totalLoops,
+        executors_tried: executorsTriedSoFar,
+        requested_count: requestedCount,
+        delivered_count: deliveredLeads.length,
+        accumulated_total: allEntities.length,
+        leads: deliveredLeads,
+        per_loop_counts: loopHistory.map(r => ({
+          loop: r.loopNumber,
+          executor: r.plannerDecision.executorType,
+          found: r.executorOutput.entities.length,
+        })),
+      },
+      userId,
+      conversationId,
+    });
 
-  console.log(`[RELOOP_SKELETON] Combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loops (accumulated=${allEntities.length})`);
+    const towerResult = await judgeArtefact({
+      artefact: combinedArtefact,
+      runId,
+      goal: normalizedGoal,
+      userId,
+      conversationId,
+      successCriteria: {
+        mission_type: 'leadgen',
+        target_count: requestedCount ?? 20,
+        requested_count_user: requestedCount !== null ? 'explicit' : 'implicit',
+        requested_count_value: requestedCount,
+        hard_constraints: hardConstraints,
+        soft_constraints: softConstraints,
+        structured_constraints: structuredConstraints,
+        intent_narrative: intentNarrative ?? null,
+      },
+      intent_narrative: intentNarrative ?? null,
+      queryId: queryId ?? null,
+    });
+
+    console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} delivered=${deliveredLeads.length}`);
+  } catch (judgeErr: any) {
+    console.warn(`[RELOOP_SKELETON] Combined delivery judgement failed (non-fatal): ${judgeErr.message}`);
+  }
 
   // Build the MissionExecutionResult from combined entities
   // Use the last loop's raw result as the base, then override leads
