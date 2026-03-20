@@ -80,12 +80,6 @@ export function rulesPlan(context: PlannerContext): PlannerDecision {
 }
 
 export async function plan(context: PlannerContext): Promise<PlannerDecision> {
-  const llmEnabled = (process.env.LLM_PLANNER_ENABLED || 'false').toLowerCase() === 'true';
-
-  if (!llmEnabled) {
-    return rulesPlan(context);
-  }
-
   try {
     const { llmPlan } = await import('./llm-planner');
     const result = await llmPlan(context);

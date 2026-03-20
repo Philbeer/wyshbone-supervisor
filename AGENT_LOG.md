@@ -1921,3 +1921,69 @@ None — no code change required.
 
 - `checkLogsApiKey()` helper at line 2839 is now dead code; can be removed in a cleanup pass.
 - 14 rows visible across 2 run_ids confirms the full pipeline is instrumented end-to-end: `run_start` → `discovery_complete` → `evidence_complete` → `reloop_start` → `reloop_iteration_N` → `reloop_complete` → `run_complete`.
+
+---
+
+## Session: 2026-03-20 — Remove LLM_PLANNER_ENABLED Feature Flag
+
+### Objective
+
+The `plan()` function in `planner.ts` was gated behind an `LLM_PLANNER_ENABLED` env var that defaulted to `false`, meaning the LLM planner was never active unless explicitly enabled. The change makes the LLM planner the unconditional default, with `rulesPlan` as the error fallback only.
+
+### What Changed
+
+#### `server/supervisor/reloop/planner.ts`
+
+Deleted two lines from `plan()`:
+
+```
+// Removed:
+const llmEnabled = (process.env.LLM_PLANNER_ENABLED || 'false').toLowerCase() === 'true';
+if (!llmEnabled) { return rulesPlan(context); }
+```
+
+The function now always attempts `llmPlan()` first. The `catch` block that falls back to `rulesPlan()` on any LLM failure is unchanged.
+
+**Before:**
+```typescript
+export async function plan(context: PlannerContext): Promise<PlannerDecision> {
+  const llmEnabled = (process.env.LLM_PLANNER_ENABLED || 'false').toLowerCase() === 'true';
+  if (!llmEnabled) { return rulesPlan(context); }
+  try {
+    const { llmPlan } = await import('./llm-planner');
+    ...
+  } catch (err: any) {
+    ...fallback...
+  }
+}
+```
+
+**After:**
+```typescript
+export async function plan(context: PlannerContext): Promise<PlannerDecision> {
+  try {
+    const { llmPlan } = await import('./llm-planner');
+    ...
+  } catch (err: any) {
+    ...fallback...
+  }
+}
+```
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/supervisor/reloop/planner.ts` | Removed `LLM_PLANNER_ENABLED` check from `plan()` |
+
+### Decisions Made
+
+- `rulesPlan` and `PlannerContext` are untouched — rules-based planner remains fully functional as the fallback.
+- `LLM_PLANNER_ENABLED` env var is now unused and can be removed from configuration at any time (no code references it).
+- The LLM planner has a 10s timeout baked into `llm-planner.ts` — any timeout will trigger the `catch` and fall back gracefully.
+
+### What's Next
+
+- Every reloop chain will now call GPT-4o-mini for executor selection. Monitor cost and latency.
+- If the LLM planner consistently fails (bad OpenAI key, quota, etc.), the fallback will silently kick in — watch for `[RELOOP_PLANNER] LLM planner failed:` warnings in the console.
+- `LLM_PLANNER_ENABLED` env var can be deleted from Replit configuration as it's no longer referenced.
