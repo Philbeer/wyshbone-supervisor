@@ -1,0 +1,243 @@
+Prompt for: wyshbone-supervisor-Post-CC
+Overview
+We are adding an LLM-based planner to the re-loop architecture. The current rules-based planner in server/supervisor/reloop/planner.ts always follows the same pattern: GP first, GPT second. The LLM planner will reason about the query and context to make smarter decisions — for example, skipping GP entirely for queries it knows GP can't handle, or choosing to re-run the same executor with different parameters instead of switching.
+The rules-based planner becomes the fallback for when the LLM is unavailable or returns invalid output. This matches the addendum spec exactly.
+CRITICAL RULES
+
+The rules-based planner function must remain intact and working — it becomes the fallback
+The LLM planner is controlled by env var LLM_PLANNER_ENABLED (default 'false' — we'll flip it to true once we verify it works)
+Use gpt-4o-mini for the planner call (cheap, fast, ~£0.01 per call, 1-2s latency)
+Use the existing OpenAI import pattern: const { default: OpenAI } = await import('openai'); const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+Use response_format: { type: 'json_object' } for structured output
+If the LLM call fails (API error, timeout, invalid JSON, executor not in available list), log the failure and fall back to the rules-based planner silently
+
+Files to modify
+1. server/supervisor/reloop/executor-registry.ts
+Add metadata support to the registry so the LLM planner can build its executor catalogue dynamically.
+Add a new interface and update the registration:
+typescriptexport interface ExecutorMeta {
+  description: string;
+  strengths: string;
+  limitations: string;
+  typicalUse: string;
+  costTier: 'cheap' | 'moderate' | 'expensive';
+}
+
+// Add a metadata map alongside the existing function registry
+const metaRegistry = new Map<string, ExecutorMeta>();
+
+export function registerExecutor(executorType: string, fn: ExecutorFn, meta?: ExecutorMeta): void {
+  registry.set(executorType, fn);
+  if (meta) metaRegistry.set(executorType, meta);
+  console.log(`[EXECUTOR_REGISTRY] Registered executor: ${executorType}${meta ? ' (with metadata)' : ''}`);
+}
+
+export function getExecutorMeta(executorType: string): ExecutorMeta | undefined {
+  return metaRegistry.get(executorType);
+}
+
+export function getAllExecutorMeta(): Map<string, ExecutorMeta> {
+  return new Map(metaRegistry);
+}
+Keep getExecutor, getAvailableExecutors unchanged.
+2. server/supervisor/reloop/index.ts
+Update the executor registrations to include metadata:
+typescriptregisterExecutor('gp_cascade', gpCascadeAdapter, {
+  description: 'Google Places discovery with website verification cascade. Finds businesses via structured Google Places data, visits their websites to verify constraints, falls back to GPT-4o web search for bot-blocked sites.',
+  strengths: 'Excellent for location-based business discovery. Returns structured data (address, phone, website). Cheap and fast. Good coverage for common business types (shops, restaurants, services).',
+  limitations: 'Limited to what Google Places indexes. Misses niche/specialist entities, non-commercial organisations, charities, government bodies, and anything without a Google Business listing. Max ~20 results per query.',
+  typicalUse: 'First choice for standard business discovery queries. Best when the entity type maps well to Google Places categories.',
+  costTier: 'cheap',
+});
+
+registerExecutor('gpt4o_search', gpt4oAdapter, {
+  description: 'GPT-4o web search discovery. Uses OpenAI GPT-4o with web search to find entities across the open web, including directories, council websites, NHS listings, charity registers, and specialist databases.',
+  strengths: 'Finds entities that Google Places misses — charities, CICs, housing associations, niche manufacturers, specialist service providers. Can reason about what to search for. Finds entities on council and government websites.',
+  limitations: 'More expensive than GP cascade. Slower (multiple search rounds). No structured place data (no phone numbers, no verified addresses). Results depend on web search quality.',
+  typicalUse: 'Second choice after GP cascade when coverage is thin. First choice for queries about non-commercial entities, organisations, or niche sectors that Google Places does not index well.',
+  costTier: 'moderate',
+});
+3. server/supervisor/reloop/planner.ts
+Restructure this file. Rename the current plan function to rulesPlan (the fallback). Add a new plan function that checks the feature flag and dispatches to either the LLM planner or the rules-based planner.
+The planner context interface needs to be expanded to include the mission information the LLM needs:
+typescriptexport interface PlannerContext {
+  loopNumber: number;
+  loopHistory: LoopRecord[];
+  executionPath?: 'gp_cascade' | 'gpt4o_primary';
+  availableExecutors: string[];
+  circuitBreaker: boolean;
+  // New fields for LLM planner:
+  mission?: {
+    queryText: string;
+    rawUserInput: string;
+    businessType: string;
+    location: string;
+    country: string;
+    requestedCount: number | null;
+  };
+  constraints?: {
+    hardConstraints: string[];
+    softConstraints: string[];
+  };
+  intentNarrative?: {
+    entityDescription: string;
+    keyDiscriminator: string;
+    findability: string;
+    scarcityExpectation: string;
+    entityExclusions: string[];
+    suggestedApproaches: string[];
+  } | null;
+}
+The new plan function:
+typescriptexport async function plan(context: PlannerContext): Promise<PlannerDecision> {
+  const llmEnabled = (process.env.LLM_PLANNER_ENABLED || 'false').toLowerCase() === 'true';
+  
+  if (!llmEnabled) {
+    return rulesPlan(context);
+  }
+  
+  try {
+    const { llmPlan } = await import('./llm-planner');
+    const result = await llmPlan(context);
+    return result;
+  } catch (err: any) {
+    console.warn(`[RELOOP_PLANNER] LLM planner failed: ${err.message} — falling back to rules-based planner`);
+    return rulesPlan(context);
+  }
+}
+```
+
+**Important:** The `plan` function becomes `async` because the LLM call is async. This means `loop-skeleton.ts` must `await` the planner call.
+
+Keep `rulesPlan` as-is (the existing logic) but export it so `llm-planner.ts` can use it as fallback.
+
+### 4. `server/supervisor/reloop/llm-planner.ts` (NEW FILE)
+
+This is the core of the change. A GPT-4o-mini call with a structured system prompt.
+
+**System prompt structure** (4 sections, assembled dynamically):
+
+**Section 1 — Role and principles (fixed text):**
+```
+You are the Wyshbone planner. Your job is to decide which search executor to use for the next loop iteration.
+
+Principles:
+- Pick the executor best suited to the query type, not just the cheapest
+- On re-loops, learn from what the previous loop found (or didn't find) and change strategy
+- Never pass expected outcomes downstream — executors discover, they don't confirm
+- If the circuit breaker is active, pick the fastest executor for a final attempt
+- Your reasoning field is logged for debugging — be specific about WHY you chose this executor
+```
+
+**Section 2 — Executor catalogue (built dynamically from registry metadata):**
+Build this by iterating `getAllExecutorMeta()`. For each executor, include: id, description, strengths, limitations, typical use, cost tier. Only include executors that are in `availableExecutors`.
+
+**Section 3 — Variable definitions (semi-fixed):**
+```
+Re-loop variables that indicate whether previous loops succeeded or failed:
+- resultCount: how many entities were found vs how many were requested. Concern if found < 70% of expected.
+- toolExhaustion: whether the previous executor hit its result cap. If true, the same executor will likely return similar results.
+- coverageGap: percentage of requested count actually found. Below 50% is a significant gap.
+- evidenceQuality: what proportion of found entities have verified evidence. Below 50% is a concern.
+- duplicateRate: if re-running the same executor, how many results overlap with what we already have. High duplication (>50%) means that executor has been exhausted.
+
+Key thresholds:
+- Coverage below 50%: strong signal to switch tools
+- Coverage 50-70%: consider switching if another tool is well-suited
+- Coverage above 70%: likely sufficient, deliver unless evidence quality is poor
+- Tool exhaustion + low coverage: MUST switch to a different executor
+```
+
+**Section 4 — Session context (dynamic, built per call):**
+Include:
+- Loop number
+- The user's raw input
+- The entity type, location, requested count
+- Hard and soft constraints
+- Intent narrative fields (entity description, findability, scarcity, exclusions) if available
+- For each previous loop in history: which executor ran, how many entities found, the judge verdict, the gate decision, the failure context string
+- Which executors have already been tried
+- Whether the circuit breaker is active
+
+**User message:** 
+```
+Based on the context above, which executor should run for loop {N}? Respond with JSON only:
+{
+  "executor_type": "one of the available executor IDs",
+  "reasoning": "2-3 sentences explaining your choice"
+}
+Implementation details:
+
+Call client.chat.completions.create({ model: 'gpt-4o-mini', messages: [...], temperature: 0.2, max_tokens: 256, response_format: { type: 'json_object' } })
+Parse the JSON response
+Validate that executor_type is in availableExecutors — if not, log a warning and fall back to rules-based
+Validate that reasoning is a non-empty string
+On any failure (API error, JSON parse error, invalid executor), catch and re-throw so the caller in planner.ts falls back to rulesPlan
+Log: [RELOOP_LLM_PLANNER] Loop {n}: chose {executor} because {reasoning} (latency={ms}ms)
+Create an artefact (optional but useful for debugging): type: 'reloop_planner_decision' with the full prompt, raw response, and parsed decision
+
+Timeout: 10 seconds. If GPT-4o-mini doesn't respond in 10s, abort and fall back.
+Cost control: The system prompt + context should stay under 2000 tokens input, 256 tokens output. That's roughly £0.001 per planner call. Log the token usage from the API response for monitoring.
+5. server/supervisor/reloop/loop-skeleton.ts
+Two changes:
+a) Make the planner call async:
+Change this line:
+typescriptconst plannerDecision = plannerPlan({
+to:
+typescriptconst plannerDecision = await plannerPlan({
+b) Pass mission context to the planner:
+Expand the planner call to include the new fields:
+typescriptconst plannerDecision = await plannerPlan({
+  loopNumber,
+  loopHistory,
+  executionPath,
+  availableExecutors,
+  circuitBreaker,
+  mission: baseExecutorInput.mission,
+  constraints: {
+    hardConstraints,
+    softConstraints,
+  },
+  intentNarrative: intentNarrative ? {
+    entityDescription: intentNarrative.entity_description,
+    keyDiscriminator: intentNarrative.key_discriminator,
+    findability: intentNarrative.findability,
+    scarcityExpectation: intentNarrative.scarcity_expectation,
+    entityExclusions: intentNarrative.entity_exclusions,
+    suggestedApproaches: intentNarrative.suggested_approaches,
+  } : null,
+});
+Also update the import — plan is now imported as an async function (the import itself doesn't change, but the call site adds await).
+What NOT to change
+
+gate.ts — unchanged
+judge-adapter.ts — unchanged
+gp-cascade-adapter.ts — unchanged
+gpt4o-adapter.ts — unchanged
+types.ts — the PlannerDecision type already has executorType, reasoning, and optional adjustedMission which is sufficient
+mission-executor.ts — unchanged
+Any files outside the reloop/ directory
+
+Expected behaviour
+With LLM_PLANNER_ENABLED=false (default): Everything works exactly as before. Rules-based planner. No LLM calls. No change to any run.
+With LLM_PLANNER_ENABLED=true:
+
+Loop 1: LLM planner sees the query and picks the best starting executor. For "Find pubs in Brighton" it might pick GP. For "Find charities that work with homeless people in Blackpool" it might skip GP entirely and go straight to GPT.
+Loop 2+ (re-loops): LLM planner sees the full loop history — what was tried, what was found, why the gate re-looped — and picks the next executor intelligently.
+If the LLM call fails for any reason, the rules-based planner takes over silently.
+
+Logging
+All LLM planner logs use [RELOOP_LLM_PLANNER] prefix:
+
+[RELOOP_LLM_PLANNER] Loop {n}: LLM planner invoked (executors={list})
+[RELOOP_LLM_PLANNER] Loop {n}: chose {executor} because {reasoning} (latency={ms}ms, tokens={in}/{out})
+[RELOOP_LLM_PLANNER] Loop {n}: LLM planner failed: {error} — falling back to rules
+
+Testing after implementation
+
+Verify TypeScript compiles clean
+Verify server starts with LLM_PLANNER_ENABLED=false — runs should work identically to before
+Verify server starts with LLM_PLANNER_ENABLED=true — runs should show [RELOOP_LLM_PLANNER] in logs
+Check that the planner artefact appears in Supabase artefacts for the run
+
+Work on the main branch only — do not create or switch branches. After completing this task, append a structured summary to AGENT_LOG.md (what changed, files modified, decisions made, what's next).
