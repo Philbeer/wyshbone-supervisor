@@ -1885,3 +1885,39 @@ After restart, `GET /api/logs?key=wyshbone-logs-2026` returned real rows includi
 - The `/api/logs` response is now raw rows (flat list), not grouped run summaries. If Claude or any consumer expected the grouped format, query results will need to be interpreted differently.
 - `checkLogsApiKey()` is now unused — can be removed in a cleanup pass if desired.
 - The reloop instrumentation from the previous session is confirmed working end-to-end: `reloop_start`, `reloop_iteration_N`, and `reloop_complete` events are visible in the table.
+
+---
+
+## Session: 2026-03-20 — Investigate Reported Duplicate /api/logs Handler
+
+### Objective
+
+User reported `GET /api/logs` still returning `[]` while `GET /api/logs/:runId` worked. Hypothesis was a duplicate route registered earlier in `routes.ts` that Express was matching first.
+
+### Investigation
+
+Searched `server/routes.ts` and all `server/**/*.ts` files for every occurrence of `app.get('/api/logs'`. Found exactly **one** registration of each handler — both are the new `select('*')` versions from the previous session. No stale duplicate existed.
+
+```
+server/routes.ts:2856  app.get('/api/logs', ...)        ← new handler, select('*')
+server/routes.ts:2883  app.get('/api/logs/:runId', ...)  ← new handler, select('*')
+```
+
+`checkLogsApiKey()` remains defined at line 2839 but is no longer called by either handler.
+
+### Root Cause
+
+The `[]` report was a timing issue — the previous session's old code was still in memory when the user tested. The restart that preceded this session loaded the new handler correctly.
+
+### Verification
+
+`curl http://localhost:5000/api/logs?key=wyshbone-logs-2026` returned **14 rows** of real data immediately. Server logs confirmed `[LOGS_API] GET /api/logs returning 14 rows`.
+
+### Files Modified
+
+None — no code change required.
+
+### What's Next
+
+- `checkLogsApiKey()` helper at line 2839 is now dead code; can be removed in a cleanup pass.
+- 14 rows visible across 2 run_ids confirms the full pipeline is instrumented end-to-end: `run_start` → `discovery_complete` → `evidence_complete` → `reloop_start` → `reloop_iteration_N` → `reloop_complete` → `run_complete`.
