@@ -456,6 +456,8 @@ export async function runReloop(params: {
     },
   });
 
+  let combinedTowerVerdict: string | null = null;
+
   // Judge the combined delivery — this is the final verdict for the whole run
   try {
     const combinedArtefact = await createArtefact({
@@ -502,6 +504,7 @@ export async function runReloop(params: {
     });
 
     console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} delivered=${deliveredLeads.length}`);
+    combinedTowerVerdict = towerResult.judgement.verdict;
   } catch (judgeErr: any) {
     const errMsg = judgeErr?.message ?? String(judgeErr);
     const errStack = judgeErr?.stack ?? '';
@@ -526,7 +529,7 @@ export async function runReloop(params: {
     response: (lastRawResult.response as string) ?? 'Run complete. Results are available.',
     leadIds: (lastRawResult.leadIds as string[]) ?? [],
     deliverySummary: (lastRawResult.deliverySummary as any) ?? null,
-    towerVerdict: (lastRawResult.towerVerdict as string) ?? null,
+    towerVerdict: combinedTowerVerdict ?? (lastRawResult.towerVerdict as string) ?? null,
     leads: deliveredLeads.map(l => ({
       name: l.name,
       address: l.address,

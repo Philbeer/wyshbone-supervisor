@@ -2208,3 +2208,44 @@ The old `.catch()`-chained fire-and-forget call and its standalone `console.log`
 
 - Trigger a live run and inspect the run log for `combined_delivery_start` to confirm delivery counts are as expected.
 - If the catch fires, `combined_delivery_error` will now appear in the run log with the error message and partial stack — use those to identify the root cause.
+
+---
+
+## Session — 2026-03-20: Capture combined Tower verdict into combinedResult
+
+### What Changed
+
+The combined delivery try/catch block in `runReloop` now captures the Tower judgement verdict and surfaces it through the function's return value.
+
+**Three targeted edits to `server/supervisor/reloop/loop-skeleton.ts`:**
+
+1. **Variable declaration** — `let combinedTowerVerdict: string | null = null;` added immediately after the `combined_delivery_start` `logRunEvent` call and before the try block. This gives the verdict a place to live that is accessible outside the try scope.
+
+2. **Capture assignment** — `combinedTowerVerdict = towerResult.judgement.verdict;` added inside the try block, directly after the existing `console.log` that prints the Tower verdict. This runs only when `judgeArtefact` succeeds; on failure the variable stays `null`.
+
+3. **Result wiring** — In `combinedResult`, the `towerVerdict` field changed from:
+   ```ts
+   towerVerdict: (lastRawResult.towerVerdict as string) ?? null,
+   ```
+   to:
+   ```ts
+   towerVerdict: combinedTowerVerdict ?? (lastRawResult.towerVerdict as string) ?? null,
+   ```
+   The combined-delivery verdict is now preferred; the last loop's raw result verdict is the fallback; `null` is the final fallback if both are absent.
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/supervisor/reloop/loop-skeleton.ts` | Added `combinedTowerVerdict` variable; captured verdict after Tower call; wired it into `combinedResult.towerVerdict` with fallback chain |
+
+### Decisions Made
+
+- Fallback chain (`combinedTowerVerdict ?? lastRawResult.towerVerdict ?? null`) preserves backward compatibility — if the Tower call fails for any reason, the UI still gets whatever the last executor loop produced, rather than a hard `null`.
+- No new imports required; no other logic or files touched.
+- The `combinedTowerVerdict` variable is scoped to the function body, so there is no cross-run state leak.
+
+### What's Next
+
+- Trigger a live run and confirm the UI receives a non-null `towerVerdict` for combined-delivery runs.
+- If the Tower call fails mid-run, verify the fallback (`lastRawResult.towerVerdict`) is still surfaced correctly.
