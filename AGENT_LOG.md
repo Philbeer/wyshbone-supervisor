@@ -1987,3 +1987,34 @@ export async function plan(context: PlannerContext): Promise<PlannerDecision> {
 - Every reloop chain will now call GPT-4o-mini for executor selection. Monitor cost and latency.
 - If the LLM planner consistently fails (bad OpenAI key, quota, etc.), the fallback will silently kick in — watch for `[RELOOP_PLANNER] LLM planner failed:` warnings in the console.
 - `LLM_PLANNER_ENABLED` env var can be deleted from Replit configuration as it's no longer referenced.
+
+---
+
+## Session: 2026-03-20 — Verify LLM_PLANNER_ENABLED Removal (No-op)
+
+### Objective
+
+Confirm deletion of `LLM_PLANNER_ENABLED` flag from `plan()` in `planner.ts`.
+
+### Finding
+
+Change was already applied in the previous session (commit `8151c09`). The `plan()` function (lines 82–91) reads:
+
+```typescript
+export async function plan(context: PlannerContext): Promise<PlannerDecision> {
+  try {
+    const { llmPlan } = await import('./llm-planner');
+    const result = await llmPlan(context);
+    return result;
+  } catch (err: any) {
+    console.warn(`[RELOOP_PLANNER] LLM planner failed: ${err.message} — falling back to rules-based planner`);
+    return rulesPlan(context);
+  }
+}
+```
+
+`grep LLM_PLANNER_ENABLED planner.ts` → 0 matches. No code change required.
+
+### Files Modified
+
+None.
