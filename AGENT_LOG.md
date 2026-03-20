@@ -2018,3 +2018,9 @@ export async function plan(context: PlannerContext): Promise<PlannerDecision> {
 ### Files Modified
 
 None.
+
+---
+
+## Session: 2026-03-20 — LLM_PLANNER_ENABLED Removal Verification (3rd check)
+
+Same request received a third time. Ran `grep -n "LLM_PLANNER_ENABLED\|llmEnabled" planner.ts` → exit code 1 (zero matches). File is correct. No change made.
