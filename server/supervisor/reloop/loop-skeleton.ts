@@ -116,12 +116,25 @@ export async function runReloop(params: {
 
     console.log(`[RELOOP_SKELETON] ── Loop ${loopNumber} start ── chainId=${chainId} circuitBreaker=${circuitBreaker}`);
 
-    const plannerDecision = plannerPlan({
+    const plannerDecision = await plannerPlan({
       loopNumber,
       loopHistory,
       executionPath,
       availableExecutors,
       circuitBreaker,
+      mission: baseExecutorInput.mission,
+      constraints: {
+        hardConstraints,
+        softConstraints,
+      },
+      intentNarrative: intentNarrative ? {
+        entityDescription: intentNarrative.entity_description,
+        keyDiscriminator: intentNarrative.key_discriminator,
+        findability: intentNarrative.findability,
+        scarcityExpectation: intentNarrative.scarcity_expectation,
+        entityExclusions: intentNarrative.entity_exclusions,
+        suggestedApproaches: intentNarrative.suggested_approaches,
+      } : null,
     });
 
     const executorFn = getExecutor(plannerDecision.executorType);

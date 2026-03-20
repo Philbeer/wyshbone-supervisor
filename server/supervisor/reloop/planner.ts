@@ -1,12 +1,34 @@
 import type { LoopRecord, PlannerDecision } from './types';
 
-export function plan(context: {
+export interface PlannerContext {
   loopNumber: number;
   loopHistory: LoopRecord[];
   executionPath?: 'gp_cascade' | 'gpt4o_primary';
   availableExecutors: string[];
   circuitBreaker: boolean;
-}): PlannerDecision {
+  mission?: {
+    queryText: string;
+    rawUserInput: string;
+    businessType: string;
+    location: string;
+    country: string;
+    requestedCount: number | null;
+  };
+  constraints?: {
+    hardConstraints: string[];
+    softConstraints: string[];
+  };
+  intentNarrative?: {
+    entityDescription: string;
+    keyDiscriminator: string;
+    findability: string;
+    scarcityExpectation: string;
+    entityExclusions: string[];
+    suggestedApproaches: string[];
+  } | null;
+}
+
+export function rulesPlan(context: PlannerContext): PlannerDecision {
   const { loopNumber, loopHistory, executionPath, availableExecutors, circuitBreaker } = context;
 
   const executorsTriedSoFar = new Set(loopHistory.map(r => r.plannerDecision.executorType));
@@ -55,4 +77,21 @@ export function plan(context: {
   const reason = `No untried executors remain — retrying ${fallback} as last resort.`;
   console.log(`[RELOOP_PLANNER] Loop ${loopNumber}: chose ${fallback} because ${reason}`);
   return { executorType: fallback, reasoning: reason };
+}
+
+export async function plan(context: PlannerContext): Promise<PlannerDecision> {
+  const llmEnabled = (process.env.LLM_PLANNER_ENABLED || 'false').toLowerCase() === 'true';
+
+  if (!llmEnabled) {
+    return rulesPlan(context);
+  }
+
+  try {
+    const { llmPlan } = await import('./llm-planner');
+    const result = await llmPlan(context);
+    return result;
+  } catch (err: any) {
+    console.warn(`[RELOOP_PLANNER] LLM planner failed: ${err.message} — falling back to rules-based planner`);
+    return rulesPlan(context);
+  }
 }
