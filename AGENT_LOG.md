@@ -1587,3 +1587,71 @@ Browser console shows `[vite] connected.` with no persistent disconnects. Server
 - **BigInt supervisor poll error** — non-fatal but logs on every tick; UUID signal IDs being cast to BigInt in `SupervisorService.processNewSignals`. Candidate for next fix.
 - **156 TypeScript errors** — `npx tsc` still exits 1; does not affect runtime (tsx transpiles directly) but blocks clean production builds via `npm run build`.
 - **Vite `/src/main.tsx` not found** — only affects `node dist/index.js` path; irrelevant now that dev mode works correctly.
+
+---
+
+## Session: 2026-03-20 — LLM Planner
+
+### Objective
+
+Add an LLM-based planner to the re-loop architecture. The existing rules-based planner becomes the fallback. The LLM planner uses `gpt-4o-mini` to reason about query type and loop history to make smarter executor-selection decisions. Controlled by `LLM_PLANNER_ENABLED` env var (default `false`).
+
+### What Changed
+
+#### 1. `server/supervisor/reloop/executor-registry.ts`
+
+Added `ExecutorMeta` interface (description, strengths, limitations, typicalUse, costTier). Added a `metaRegistry` map alongside the existing function registry. Updated `registerExecutor` signature to accept an optional `meta` argument. Added two new exports: `getExecutorMeta(executorType)` and `getAllExecutorMeta()`.
+
+#### 2. `server/supervisor/reloop/index.ts`
+
+Updated both `registerExecutor` calls (`gp_cascade`, `gpt4o_search`) to include full `ExecutorMeta` objects. No other changes.
+
+#### 3. `server/supervisor/reloop/planner.ts`
+
+- Renamed the original `plan` function to `rulesPlan` (exported, used as fallback).
+- Added `PlannerContext` interface with the expanded fields: `mission`, `constraints`, `intentNarrative` (in addition to the original fields).
+- Added a new async `plan` function that checks `process.env.LLM_PLANNER_ENABLED`. If `true`, dynamically imports and calls `llmPlan` from `./llm-planner`. On any failure, logs a warning and falls back to `rulesPlan` silently.
+
+#### 4. `server/supervisor/reloop/llm-planner.ts` *(new file)*
+
+Core of the change. Exports `llmPlan(context: PlannerContext): Promise<PlannerDecision>`.
+
+- Builds a 4-section system prompt dynamically:
+  - **Section 1** — Fixed role/principles text.
+  - **Section 2** — Executor catalogue built from `getAllExecutorMeta()`, filtered to `availableExecutors` only.
+  - **Section 3** — Fixed variable definitions and threshold guidance.
+  - **Section 4** — Dynamic session context: loop number, circuit breaker state, raw user input, entity type, location, requested count, hard/soft constraints, intent narrative fields, full loop history with judge/gate verdicts and variable states.
+- Calls `gpt-4o-mini` with `temperature: 0.2`, `max_tokens: 256`, `response_format: { type: 'json_object' }`.
+- Enforces a 10-second timeout via `Promise.race` with a reject timer.
+- Validates `executor_type` is in `availableExecutors` and `reasoning` is a non-empty string; throws on invalid output so the caller falls back to rules.
+- Logs with `[RELOOP_LLM_PLANNER]` prefix including latency and token counts.
+- Creates a `reloop_planner_decision` artefact (non-fatal, optional) for debugging — includes full prompt, raw response, parsed decision, latency, and token counts.
+
+#### 5. `server/supervisor/reloop/loop-skeleton.ts`
+
+- Changed `plannerPlan({...})` to `await plannerPlan({...})` (plan is now async).
+- Added three new fields to the planner call: `mission: baseExecutorInput.mission`, `constraints: { hardConstraints, softConstraints }`, and `intentNarrative` (mapped from the `IntentNarrative` shape to the `PlannerContext` shape using snake_case → camelCase field mapping).
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/supervisor/reloop/executor-registry.ts` | Added `ExecutorMeta` interface, `metaRegistry`, updated `registerExecutor`, added `getExecutorMeta` / `getAllExecutorMeta` |
+| `server/supervisor/reloop/index.ts` | Added metadata objects to both `registerExecutor` calls |
+| `server/supervisor/reloop/planner.ts` | Renamed `plan` → `rulesPlan`, added `PlannerContext` interface, added async `plan` dispatcher |
+| `server/supervisor/reloop/llm-planner.ts` | **New file** — GPT-4o-mini planner with dynamic prompt, timeout, validation, artefact creation |
+| `server/supervisor/reloop/loop-skeleton.ts` | `await` planner call, pass `mission` / `constraints` / `intentNarrative` to planner |
+
+### Decisions Made
+
+- Used `Promise.race` for the 10-second timeout rather than `AbortController`, since the OpenAI Node SDK doesn't expose a straightforward abort signal on the streaming API at this version.
+- `rulesPlan` is exported from `planner.ts` so `llm-planner.ts` can import and call it as a last-resort fallback within the LLM planner module itself without a circular dependency.
+- The `reloop_planner_decision` artefact creation is fire-and-forget (`.catch` swallowed) to avoid blocking the planner response on Supabase availability.
+- TypeScript errors in `executor-registry.ts` and related reloop files: zero. All pre-existing errors in the project are in unrelated files.
+
+### What's Next
+
+- **Enable and test** — Set `LLM_PLANNER_ENABLED=true` in the environment, run a real mission, and verify `[RELOOP_LLM_PLANNER]` log lines appear with correct executor choices and latency.
+- **Token budget monitoring** — The system prompt + context should stay under 2000 input tokens. If context grows large (many re-loops, long narratives), consider trimming loop history to the last N records only.
+- **`AbortController` upgrade** — If the OpenAI SDK version is upgraded, replace the `Promise.race` timeout with a native `AbortSignal` for cleaner cancellation.
+- **Evaluate planner quality** — After a few production runs with `LLM_PLANNER_ENABLED=true`, review the `reloop_planner_decision` artefacts to assess whether the LLM is making meaningfully better choices than the rules-based planner for non-commercial entity queries.
