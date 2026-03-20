@@ -1728,3 +1728,49 @@ Set as a shared env var with value `wyshbone-logs-2026`. Phil can change it in t
 - **Verify endpoint**: After the table is created, test `GET /api/logs` with `x-api-key: wyshbone-logs-2026`.
 - **Reloop path instrumentation**: The reloop path (`loop-skeleton.ts`) already logs per-iteration detail to `loop_state`. If per-loop `run_logs` entries are wanted (e.g., `reloop_iteration` stage events), they can be added to `loop-skeleton.ts` by calling `logRunEvent`.
 - **Token count in query_text**: Consider storing the normalised query (entity + location) in `query_text` rather than raw user input for cleaner display in `GET /api/logs`.
+
+---
+
+## Session: 2026-03-20 — Logs API Auth: Query Param Support
+
+### Objective
+
+Claude's `web_fetch` tool cannot send custom headers, so the `x-api-key` header-only auth on `/api/logs` and `/api/logs/:runId` was inaccessible to it. Update the auth check to also accept the API key as a `?key=` query parameter.
+
+### What Changed
+
+#### `server/routes.ts`
+
+One-line change in the `checkLogsApiKey` helper function (shared by both endpoints):
+
+```
+// Before
+const provided = req.headers['x-api-key'];
+
+// After
+const provided = req.headers['x-api-key'] || req.query['key'];
+```
+
+Both of these now work:
+- `GET /api/logs` with header `x-api-key: wyshbone-logs-2026`
+- `GET /api/logs?key=wyshbone-logs-2026`
+- `GET /api/logs/:runId` with header `x-api-key: wyshbone-logs-2026`
+- `GET /api/logs/:runId?key=wyshbone-logs-2026`
+
+Wrong or missing key on either method still returns 401.
+
+### Files Modified
+
+| File | Change |
+|---|---|
+| `server/routes.ts` | `checkLogsApiKey`: also read `req.query['key']` alongside `req.headers['x-api-key']` |
+
+### Decisions Made
+
+- Single `||` expression — if both header and query param are present, header takes precedence (since it's evaluated first). Either way, both are checked against the same `LOGS_API_KEY` secret.
+- No change to security posture for header-based callers — existing integrations unaffected.
+
+### What's Next
+
+- Run `migrations/run-logs.sql` in the Supabase SQL editor to create the `run_logs` table (prerequisite for any data to appear in the endpoints).
+- Claude can now read logs directly via `web_fetch` using the query param form: `GET /api/logs?key=wyshbone-logs-2026`.

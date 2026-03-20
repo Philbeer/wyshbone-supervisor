@@ -2842,7 +2842,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(503).json({ error: 'LOGS_API_KEY not configured on server' });
       return false;
     }
-    const provided = req.headers['x-api-key'];
+    const provided = req.headers['x-api-key'] || req.query['key'];
     if (!provided || provided !== expectedKey) {
       res.status(401).json({ error: 'Unauthorized' });
       return false;
