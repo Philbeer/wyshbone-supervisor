@@ -2299,3 +2299,33 @@ The following imports were **kept** because they are used outside `executeTowerL
 
 - Verify the app builds cleanly (TypeScript compilation) with no unused-import errors.
 - Run a test chat request that would previously have fallen through to the legacy path and confirm it returns the new honest error message instead of degraded results.
+
+---
+
+## PROMPT 2 — Clean up dead files
+
+**Date:** 2026-03-21
+
+### What Changed
+
+**Files created:**
+- `server/supervisor/shared-constants.ts` — new home for `AccumulatedCandidate` interface, `RADIUS_LADDER_KM` constant, `makeDedupeKey` function, and `mergeCandidate` function, copied verbatim from `agent-loop.ts`. No imports required (pure types and primitives).
+
+**Files modified:**
+- `server/supervisor.ts` — updated import of `RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, AccumulatedCandidate` from `./supervisor/agent-loop` → `./supervisor/shared-constants`
+- `server/supervisor/mission-executor.ts` — updated import of `RADIUS_LADDER_KM` from `./agent-loop` → `./shared-constants`
+- `server/routes.ts` — replaced the `/api/debug/agent-loop-states` endpoint (which called `getAllRunStates` via dynamic import from the now-deleted `agent-loop`) with a static stub returning `{ ok: true, count: 0, states: [], note: 'Legacy agent-loop removed — all execution uses reloop system' }`
+
+**Files deleted:**
+- `server/supervisor/agent-loop.ts` — entire file removed; the 4 shared symbols were migrated to `shared-constants.ts`, and all other exports (`initRunState`, `handleTowerVerdict`, `getRunState`, `getAllRunStates`, `TowerVerdictV1`, `RunState`, etc.) were exclusively used by the now-removed `executeTowerLoopChat`
+- `server/supervisor/replan-policy.ts` — entire file removed; it was only consumed by `executeTowerLoopChat` and is now fully dead code
+
+### Decisions Made
+
+- `replan-policy.ts` imported `RADIUS_LADDER_KM` from `agent-loop.ts` but since `replan-policy.ts` itself is dead, no re-pointing was needed there.
+- The debug endpoint was stubbed rather than deleted outright, preserving the route URL shape in case it is called by external tooling or tests.
+
+### What's Next
+
+- Verify the `shared-constants.ts` symbols are correctly re-exported to any other consumers that may appear in future files.
+- Confirm no TypeScript strict-mode errors surface in CI.

@@ -729,22 +729,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     });
 
-    // Debug endpoint - list all active agent loop run states
-    app.get("/api/debug/agent-loop-states", async (_req, res) => {
-      const { getAllRunStates } = await import('./supervisor/agent-loop');
-
-      const states = getAllRunStates().map(s => ({
-        runId: s.runId,
-        userId: s.userId,
-        status: s.status,
-        planVersion: s.planVersion,
-        retryCount: s.retryCount,
-        lastToolArgs: s.lastToolArgs,
-        lastVerdict: s.lastVerdict,
-        createdAt: new Date(s.createdAt).toISOString(),
-      }));
-
-      return res.json({ ok: true, count: states.length, states });
+    // Debug endpoint - agent loop states (legacy agent-loop removed)
+    app.get("/api/debug/agent-loop-states", (_req, res) => {
+      return res.json({ ok: true, count: 0, states: [], note: 'Legacy agent-loop removed — all execution uses reloop system' });
     });
 
     // Debug endpoint - demo tool-registry-aware plan run

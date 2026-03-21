@@ -36,7 +36,7 @@ import { logRunEvent } from './run-logger';
 import { storage } from '../storage';
 import { sanitiseLocationString, inferCountryFromLocation } from './goal-to-constraints';
 import { detectRelationshipPredicate, type RelationshipPredicateResult } from './relationship-predicate';
-import { RADIUS_LADDER_KM } from './agent-loop';
+import { RADIUS_LADDER_KM } from './shared-constants';
 import { executeGpt4oPrimaryPath, type Gpt4oSearchContext } from './gpt4o-search';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';

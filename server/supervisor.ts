@@ -12,7 +12,7 @@ import { generateJobId } from './supervisor/jobs';
 import { redactRecord, safeOutputsRaw, compactInputs } from './supervisor/plan-executor';
 import { judgeArtefact } from './supervisor/tower-artefact-judge';
 import { parseGoalToConstraints, buildRequestedCount, DEFAULT_LEADS_TARGET, sanitiseLocationString, type ParsedGoal, type StructuredConstraint, type RequestedCountCanonical } from './supervisor/goal-to-constraints';
-import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/agent-loop';
+import { RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, type AccumulatedCandidate } from './supervisor/shared-constants';
 import { emitDeliverySummary, type PlanVersionEntry, type SoftRelaxation, type DeliverySummaryPayload, type MatchEvidenceItem, type MatchBasisItem, type SupportingEvidenceItem } from './supervisor/delivery-summary';
 import { executeFactoryDemo } from './supervisor/factory-demo';
 import { normalizeSensorScript } from './supervisor/factory-sim';
