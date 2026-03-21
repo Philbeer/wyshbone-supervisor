@@ -1,0 +1,45 @@
+PROMPT 2 — Clean up dead files (Supervisor repo)
+## Task: Clean up legacy execution files after removing executeTowerLoopChat
+
+The `executeTowerLoopChat` method was removed from `server/supervisor.ts` in the previous task. Several files that only existed to support it are now dead code. Clean them up.
+
+### Step 1: Create shared constants file
+
+Create a new file `server/supervisor/shared-constants.ts` containing ONLY these exports, copied from `server/supervisor/agent-loop.ts`:
+
+- `RADIUS_LADDER_KM` constant (the array of radius values)
+- `makeDedupeKey` function
+- `mergeCandidate` function  
+- `AccumulatedCandidate` interface
+
+Keep the implementations exactly as they are in agent-loop.ts. This file should have no other imports except basic types it needs.
+
+### Step 2: Update imports across the codebase
+
+Find every file that imports `RADIUS_LADDER_KM`, `makeDedupeKey`, `mergeCandidate`, or `AccumulatedCandidate` from `./agent-loop` or `../supervisor/agent-loop` and change them to import from `./shared-constants` or `../supervisor/shared-constants` instead.
+
+Files to check (at minimum):
+- `server/supervisor.ts` — update the RADIUS_LADDER_KM/makeDedupeKey/mergeCandidate import line
+- `server/supervisor/mission-executor.ts` — imports RADIUS_LADDER_KM from agent-loop
+
+### Step 3: Delete `server/supervisor/agent-loop.ts`
+
+The entire file is now dead. Everything still needed has been moved to shared-constants.ts.
+
+### Step 4: Delete `server/supervisor/replan-policy.ts`
+
+This file is now fully dead — it was only used by `executeTowerLoopChat` which has been removed.
+
+### Step 5: Update debug endpoint in `server/routes.ts`
+
+Find the debug endpoint `/api/debug/agent-loop-states` which imports `getAllRunStates` from `./supervisor/agent-loop`. Either:
+- Remove the endpoint entirely (it showed in-memory state from the old agent loop which no longer exists), OR
+- Replace it with a stub that returns `{ ok: true, count: 0, states: [], note: 'Legacy agent-loop removed — all execution uses reloop system' }`
+
+Make sure to remove the import of `getAllRunStates` from the imports at the top of routes.ts too.
+
+### Step 6: Verify no broken imports
+
+After making all changes, check that no file still imports from `agent-loop` or `replan-policy`. If any do, update them appropriately.
+
+Work on the main branch only — do not create or switch branches. After completing this task, append a structured summary to AGENT_LOG.md (what changed, files modified, decisions made, what's next).

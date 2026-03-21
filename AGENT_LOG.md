@@ -2249,3 +2249,53 @@ The combined delivery try/catch block in `runReloop` now captures the Tower judg
 
 - Trigger a live run and confirm the UI receives a non-null `towerVerdict` for combined-delivery runs.
 - If the Tower call fails mid-run, verify the fallback (`lastRawResult.towerVerdict`) is still surfaced correctly.
+
+---
+
+## PROMPT 1 — Kill the legacy fallback
+
+**Date:** 2026-03-21
+
+### What Changed
+
+**File modified:** `server/supervisor.ts`
+
+**Step 1 — Replaced legacy fallback else-branch:**
+In `processChatTask`, the `else` branch that called `this.executeTowerLoopChat(...)` was replaced with an honest error throw using the existing `legacyFallbackReason` variable. The error is caught by the existing `catch (execErr)` block, which already handles execution failures gracefully (marks the run failed, emits a diagnostic artefact, returns a user-facing message).
+
+**Step 2 — Deleted `executeTowerLoopChat` method:**
+The entire `private async executeTowerLoopChat(...)` method (~3,630 lines, originally lines 2656–6287) was removed from the `SupervisorService` class. The file reduced from ~6,703 lines to ~3,072 lines.
+
+**Steps 3 & 4 — Removed unused imports:**
+The following import lines were removed entirely (all usages were exclusively inside `executeTowerLoopChat`):
+- `initRunState, handleTowerVerdict, getRunState` from `./supervisor/agent-loop`
+- `buildToolPlan, persistToolPlanExplainer, getOrderedToolNames, LeadContext, ToolStepId, ToolPlanExplainer` from `./supervisor/tool-planning-policy`
+- `buildShortfallDirective, applyLeadgenReplanPolicy, constraintsAreIdentical, buildProgressSummary, PlanV2Constraints` from `./supervisor/replan-policy`
+- `emitSearchQueryCompiled, SearchQueryCompiledPayload` from `./supervisor/search-query-compiled`
+- `emitRunReceipt` from `./supervisor/run-receipt`
+- `writeBeliefs` from `./supervisor/belief-writer`
+- `detectRelationshipPredicate, buildRelationshipSummary, sanitizeRelationshipMessage, RelationshipPredicateResult, RelationshipEvidenceSummary` from `./supervisor/relationship-predicate`
+- `deriveVerificationPolicyFromLegacyConstraints, emitVerificationPolicyArtefact, VerificationPolicyResult` from `./supervisor/verification-policy`
+- `requestSemanticVerification, towerStatusToVerdict, TowerSemanticRequest, TowerSemanticStatus, TowerSemanticResponse, SemanticVerifyResult` from `./supervisor/tower-semantic-verify`
+- `applyPolicy, persistPolicyApplication, writeDecisionLog, writeOutcomeLog, writeOutcomePolicyVersion, buildApplicationSnapshot, deriveExecutionParams, GLOBAL_DEFAULT_BUNDLE, canonicaliseBusinessType, PolicyApplicationResult, PolicyBundleV1, RunOverrides` from `./supervisor/learning-layer`
+- `computeQueryShapeKey, deriveQueryShapeFromGoal` from `./supervisor/query-shape-key`
+- `readLearningStore, mergePolicyKnobs, buildPolicyAppliedPayload, emitPolicyAppliedArtefact, handleLearningUpdate, BASELINE_DEFAULTS, FinalPolicy, PolicyAppliedArtefact, LearningUpdatePayload` from `./supervisor/learning-store`
+
+The following imports were **modified** (some symbols removed, others kept):
+- `./supervisor/goal-to-constraints`: Removed `checkHardConstraintsSatisfied, filterLeadsByNameConstraint, detectExactnessMode, detectDoNotStop, isAttributeLikeConstraint, ExactnessMode`; kept `parseGoalToConstraints, buildRequestedCount, DEFAULT_LEADS_TARGET, sanitiseLocationString, ParsedGoal, StructuredConstraint, RequestedCountCanonical`
+- `./supervisor/cvl`: Removed `verifyLeads, VerifiableLead, CvlVerificationOutput, AttributeEvidenceMap`; kept `buildConstraintsExtractedPayload, buildCapabilityCheck`
+- `./supervisor/constraint-gate`: Removed `generateKeywordVariants`; all other symbols kept
+
+The following imports were **kept** because they are used outside `executeTowerLoopChat`:
+- `detectTimePredicate, buildTimePredicateClarifyQuestion, buildTimePredicateContract` from `./supervisor/time-predicate` (used in the pre-execution time predicate gate in `processChatTask`)
+- `RADIUS_LADDER_KM, makeDedupeKey, mergeCandidate, AccumulatedCandidate` from `./supervisor/agent-loop` (used by mission-executor re-export path per instructions)
+
+### Decisions Made
+
+- The two remaining string-literal references to `executeTowerLoopChat` (one `console.warn` log at line 1312 and one code comment at line 1785) were left in place — they are harmless documentation artifacts.
+- `emitVerificationPolicyArtefact` and `VerificationPolicyResult` were also removed from the `verification-policy` import because, like `deriveVerificationPolicyFromLegacyConstraints`, they had no usages outside the deleted method.
+
+### What's Next
+
+- Verify the app builds cleanly (TypeScript compilation) with no unused-import errors.
+- Run a test chat request that would previously have fallen through to the legacy path and confirm it returns the new honest error message instead of degraded results.
