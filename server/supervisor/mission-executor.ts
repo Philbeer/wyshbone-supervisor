@@ -2208,11 +2208,15 @@ IMPORTANT:
     const isBotBlocked = leadEvidence.some(e => e.isBotBlocked);
 
     // Single verdict per lead: best verdict across all constraints
-    const bestVerdict = leadEvidence.reduce<'verified' | 'plausible' | 'no_evidence'>((best, er) => {
-      if (er.verdict === 'verified') return 'verified';
-      if (er.verdict === 'plausible' && best !== 'verified') return 'plausible';
-      return best;
-    }, 'no_evidence');
+    // For discovery-only runs (no evidence constraints), leads have no evidence records
+    // and should default to 'plausible' — they passed discovery + exclusion filter
+    const bestVerdict = leadEvidence.length === 0
+      ? 'plausible' as const
+      : leadEvidence.reduce<'verified' | 'plausible' | 'no_evidence'>((best, er) => {
+          if (er.verdict === 'verified') return 'verified';
+          if (er.verdict === 'plausible' && best !== 'verified') return 'plausible';
+          return best;
+        }, 'no_evidence');
 
     const evidenceAttachment = leadEvidence.map(e => ({
       constraint_field: e.constraintField,

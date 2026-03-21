@@ -372,3 +372,33 @@ The old `combinedResult.deliverySummary` simply forwarded `lastRawResult.deliver
 
 - On a multi-loop run, confirm the `[RELOOP_SKELETON] Combined delivery: X accumulated → Y verified → Z delivered` log line appears with the correct counts.
 - Prompt 3: Update `delivery-summary.ts` to use `verdict`.
+
+---
+
+## Fix discovery-only runs showing 0 delivered in delivery summary
+
+**Date:** 2026-03-21
+
+### What Changed
+
+Single targeted change in `server/supervisor/mission-executor.ts` inside the `deliveredLeadsWithEvidence` mapping, in the `bestVerdict` computation (line ~2216).
+
+**Before:** `bestVerdict` always ran the `reduce` over `leadEvidence`, which initialised with `'no_evidence'`. For discovery-only runs (no evidence constraints), `leadEvidence` is empty, so the reduce returned `'no_evidence'` immediately → `match_valid = false` → leads were excluded from the delivery summary.
+
+**After:** An explicit `leadEvidence.length === 0` guard returns `'plausible' as const` before the reduce runs. Leads with no evidence records at all (discovery-only) now get `bestVerdict = 'plausible'` → `match_valid = true` → count as `delivered_exact`.
+
+The biodegradable packaging protection is preserved: a lead that HAS evidence records but they are all `verdict = 'no_evidence'` still reduces to `'no_evidence'` and is excluded.
+
+### Files Modified
+
+- `server/supervisor/mission-executor.ts` — three lines changed inside the `bestVerdict` block
+
+### Decisions Made
+
+- `'plausible'` (not `'verified'`) is the correct default for discovery-only leads — they passed discovery and exclusion filtering but haven't been Tower-verified. Using `'verified'` would misrepresent the confidence level.
+- The guard is on `leadEvidence.length === 0`, not on any strategy flag, so it applies correctly regardless of which strategy produced the run.
+
+### What's Next
+
+- Confirm discovery-only runs (e.g. "find restaurants in X") now show a non-zero `delivered_exact_count` in the delivery summary.
+- Prompt 3: Update `delivery-summary.ts` to use `verdict`.
