@@ -336,6 +336,59 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     conversationId,
   }).catch(() => {});
 
+  // Emit per-lead evidence artefacts matching GP cascade format for UI dropdowns
+  for (const lead of allLeads) {
+    const constraintValue = hardConstraints.join(', ') || 'general search';
+    await createArtefact({
+      runId,
+      type: 'constraint_led_evidence',
+      title: `Evidence: "${lead.name}" — ${constraintValue}`,
+      summary: lead.evidence
+        ? `Evidence found for "${constraintValue}" on "${lead.name}" via GPT-4o web search`
+        : `No evidence found for "${constraintValue}" on "${lead.name}"`,
+      payload: {
+        lead_name: lead.name,
+        lead_place_id: `gpt4o_${allLeads.indexOf(lead)}_${lead.name.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 30)}`,
+        constraint: {
+          type: 'attribute_check',
+          field: 'web_search',
+          operator: 'verified_by',
+          value: constraintValue,
+          hardness: 'hard',
+        },
+        pages_scanned: 0,
+        extraction_method: 'gpt4o_web_search',
+        no_evidence: !lead.evidence,
+        phrase_targets: [],
+        fallback_used: false,
+        evidence_items: lead.evidence ? [{
+          quote: lead.evidence.substring(0, 300),
+          url: lead.source_url || null,
+          page_title: null,
+          match_reason: `GPT-4o web search found evidence (confidence: ${lead.confidence})`,
+          confidence: lead.confidence === 'high' ? 0.85 : lead.confidence === 'medium' ? 0.65 : 0.4,
+          keyword_matched: true,
+          source_url: lead.source_url || null,
+          constraint_type: 'attribute_check',
+          constraint_value: constraintValue,
+          matched_phrase: constraintValue,
+          direct_quote: lead.evidence.substring(0, 300),
+          context_snippet: lead.description || null,
+          constraint_match_reason: `Verified via GPT-4o web search: ${lead.evidence.substring(0, 150)}`,
+          source_type: 'gpt4o_web_search',
+          source_tier: 'gpt4o_web_search',
+          confidence_score: lead.confidence === 'high' ? 0.85 : lead.confidence === 'medium' ? 0.65 : 0.4,
+        }] : [],
+        tower_status: lead.confidence === 'high' ? 'verified' : lead.confidence === 'medium' ? 'weak_match' : null,
+        tower_confidence: lead.confidence === 'high' ? 0.85 : lead.confidence === 'medium' ? 0.65 : null,
+      },
+      userId,
+      conversationId,
+    }).catch((e: any) => console.warn(`[GPT4O_SEARCH] Per-lead evidence artefact failed for "${lead.name}" (non-fatal): ${e.message}`));
+  }
+
+  console.log(`[GPT4O_SEARCH] Emitted ${allLeads.length} per-lead evidence artefacts for UI dropdowns`);
+
   const deliveryLeads = allLeads.map((lead, i) => toDeliveryLead(lead, i));
   const cappedLeads = requestedCount !== null ? deliveryLeads.slice(0, requestedCount) : deliveryLeads;
   const cappedGpt4oLeads = requestedCount !== null ? allLeads.slice(0, requestedCount) : allLeads;

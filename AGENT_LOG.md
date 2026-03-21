@@ -402,3 +402,38 @@ The biodegradable packaging protection is preserved: a lead that HAS evidence re
 
 - Confirm discovery-only runs (e.g. "find restaurants in X") now show a non-zero `delivered_exact_count` in the delivery summary.
 - Prompt 3: Update `delivery-summary.ts` to use `verdict`.
+
+---
+
+## Emit per-lead evidence artefacts from GPT-4o primary search path
+
+**Date:** 2026-03-21
+
+### What Changed
+
+New block added in `server/supervisor/gpt4o-search.ts` immediately after the `attribute_verification` artefact creation (after line 340) and before `const deliveryLeads = ...`.
+
+The block iterates over `allLeads` and calls `createArtefact` once per lead with `type: 'constraint_led_evidence'` — the same artefact type the GP cascade path emits. Each artefact is built to match the field structure the UI expects for evidence dropdowns:
+- `evidence_items` array (populated if `lead.evidence` exists, empty otherwise)
+- `tower_status` and `tower_confidence` derived from `lead.confidence`
+- `lead_place_id` is a synthetic key (`gpt4o_{index}_{sanitised_name}`) since GPT-4o results don't have Google Place IDs
+- `extraction_method: 'gpt4o_web_search'` distinguishes these from GP cascade artefacts
+- Each `.catch()` is non-fatal so a single failed write does not abort delivery
+
+A summary log line `[GPT4O_SEARCH] Emitted N per-lead evidence artefacts for UI dropdowns` is emitted after the loop.
+
+### Files Modified
+
+- `server/supervisor/gpt4o-search.ts` — one block added (~52 lines)
+
+### Decisions Made
+
+- The existing `attribute_verification` and `final_delivery` artefacts are untouched — they serve aggregate/summary purposes.
+- `lead_place_id` uses a synthetic index-based key rather than a real Place ID. If the UI performs placeId-based lookups, this may need to be updated once real Place IDs are available in the GPT-4o path.
+- Confidence mapping: `high → 0.85 / tower_status=verified`, `medium → 0.65 / tower_status=weak_match`, `low/null → 0.4 / tower_status=null`.
+- The workflow was restarted to load the new backend code.
+
+### What's Next
+
+- On a GPT-4o primary path run, check the artefact list for `constraint_led_evidence` entries per lead and confirm the UI dropdowns populate.
+- If `lead_place_id` lookups fail, consider whether the UI falls back gracefully or needs a real Place ID mapping.
