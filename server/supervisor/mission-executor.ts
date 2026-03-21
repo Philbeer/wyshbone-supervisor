@@ -1482,7 +1482,10 @@ export async function executeMissionDrivenPlan(
                 console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": VERIFIED prefix but contradiction detected — treating as unverified. "${fbContent.substring(0, 150)}"`);
               } else {
                 er.evidenceFound = true;
-                er.evidenceStrength = 'weak';
+                er.evidenceStrength = 'strong';
+                er.towerStatus = 'verified' as any;
+                er.towerConfidence = 0.75;
+                er.towerReasoning = 'Verified via GPT-4o web search fallback (website was bot-blocked or had no extractable evidence)';
                 er.snippets = [fbContent.substring(0, 500)];
                 if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
                 fallbackVerified++;

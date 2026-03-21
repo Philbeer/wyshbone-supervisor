@@ -95,3 +95,51 @@ Leads where Layer 1 found keyword matches (`evidence_items.length > 0`) were not
 
 - On the next live run, expect more Tower calls per run for leads that previously slipped through with keyword evidence but short structured text.
 - Monitor whether Tower PASS rate changes significantly — a large drop would indicate the previous threshold was quietly masking low-quality keyword matches.
+
+---
+
+## Treat GPT-4o fallback VERIFIED results as Tower-verified
+
+**Date:** 2026-03-21
+
+### What Changed
+
+In `server/supervisor/mission-executor.ts`, inside the `GPT4O_FALLBACK` section, the block that processes a successful VERIFIED result (the `else` branch after the contradiction check, around line 1486) was updated.
+
+**Before:**
+```typescript
+er.evidenceFound = true;
+er.evidenceStrength = 'weak';
+er.snippets = [fbContent.substring(0, 500)];
+if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
+fallbackVerified++;
+```
+
+**After:**
+```typescript
+er.evidenceFound = true;
+er.evidenceStrength = 'strong';
+er.towerStatus = 'verified' as any;
+er.towerConfidence = 0.75;
+er.towerReasoning = 'Verified via GPT-4o web search fallback (website was bot-blocked or had no extractable evidence)';
+er.snippets = [fbContent.substring(0, 500)];
+if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
+fallbackVerified++;
+```
+
+### Files Modified
+
+- `server/supervisor/mission-executor.ts` — single block change, ~5 lines
+
+### Decisions Made
+
+- `evidenceStrength` upgraded from `'weak'` to `'strong'`: GPT-4o web search with cited sources is at least as reliable as Tower for constraint verification purposes.
+- `towerStatus` set to `'verified'`: eliminates the misleading "unverified" UI state for leads where GPT-4o already confirmed the constraint with real web sources.
+- `towerConfidence` set to `0.75` and `towerReasoning` populated: preserves a clear audit trail explaining that verification came from the GPT-4o fallback path, not Tower itself.
+- No other code paths were changed. Contradicted results, unverified results, and error paths are unchanged.
+
+### What's Next
+
+- On the next live run, bot-blocked leads (e.g. The White Swan) where GPT-4o found confirming evidence will now show as "verified" in the UI.
+- Monitor fallback-verified leads in the AFR audit trail to confirm `towerReasoning` is surfacing correctly.
+- Consider whether `towerConfidence` of 0.75 is the right calibration after observing a batch of fallback-verified results.
