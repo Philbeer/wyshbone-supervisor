@@ -1,0 +1,109 @@
+## Task: Replace hard evidence filter and match_valid with single verdict field
+
+This is Part 2 of the verdict simplification. The verdict field is now set on every EvidenceResult. This prompt makes the downstream code use it instead of recalculating from evidenceStrength/strongCount/weakCount.
+
+### Change 1 — Replace applyHardEvidenceFilter call with verdict-based filter
+
+In server/supervisor/mission-executor.ts, find the section after the replan loop that starts with:
+const hardEvidenceConstraints = [...evidenceConstraints, ...relationshipConstraints].filter(c => c.hardness === 'hard');
+let filteredLeads = leads;
+if (hardEvidenceConstraints.length > 0) {
+filteredLeads = applyHardEvidenceFilter(leads, evidenceResults, hardEvidenceConstraints);
+
+Replace that entire block (from `const hardEvidenceConstraints` through the closing `}` of the if block, including the log lines about dropped leads) with:
+```typescript
+  // ── Verdict-based filter: drop leads with no evidence ──
+  let filteredLeads = leads;
+  const hasEvidenceConstraintsForFilter = evidenceConstraints.length > 0 || relationshipConstraints.length > 0;
+
+  if (hasEvidenceConstraintsForFilter && evidenceResults.length > 0) {
+    const beforeFilter = leads.length;
+    filteredLeads = leads.filter((_, i) => {
+      const leadEvidence = evidenceResults.filter(er => er.leadIndex === i);
+      if (leadEvidence.length === 0) return false;
+      // Keep if ANY constraint has a verdict that isn't no_evidence
+      return leadEvidence.some(er => er.verdict !== 'no_evidence');
+    });
+    if (filteredLeads.length < beforeFilter) {
+      const droppedNames = leads
+        .filter((_, i) => !filteredLeads.some(fl => fl === leads[i]))
+        .map(l => l.name)
+        .slice(0, 10);
+      console.log(`[MISSION_EXEC] Verdict filter: ${beforeFilter} → ${filteredLeads.length} (dropped ${beforeFilter - filteredLeads.length}: ${droppedNames.join(', ')})`);
+    }
+  }
+```
+
+### Change 2 — Simplify deliveredLeadsWithEvidence to use verdict
+
+Find the `deliveredLeadsWithEvidence` mapping block (the `finalLeads.map(l => {` block). Replace the entire mapping function with:
+```typescript
+  const deliveredLeadsWithEvidence = finalLeads.map(l => {
+    const leadEvidence = evidenceByPlaceId.get(l.placeId) || [];
+    const isBotBlocked = leadEvidence.some(e => e.isBotBlocked);
+
+    // Single verdict per lead: best verdict across all constraints
+    const bestVerdict = leadEvidence.reduce<'verified' | 'plausible' | 'no_evidence'>((best, er) => {
+      if (er.verdict === 'verified') return 'verified';
+      if (er.verdict === 'plausible' && best !== 'verified') return 'plausible';
+      return best;
+    }, 'no_evidence');
+
+    const evidenceAttachment = leadEvidence.map(e => ({
+      constraint_field: e.constraintField,
+      constraint_value: e.constraintValue,
+      constraint_type: e.constraintType,
+      evidence_found: e.evidenceFound,
+      evidence_strength: e.evidenceStrength,
+      source_url: e.sourceUrl,
+      snippets: e.snippets,
+      tower_status: e.towerStatus,
+      tower_confidence: e.towerConfidence,
+      verdict: e.verdict,
+    }));
+
+    const matchEvidence = buildMatchEvidence(leadEvidence);
+    const matchSummary = buildMatchSummary(l.name, matchEvidence, leadEvidence);
+    const matchBasis = buildMatchBasis(l.name, leadEvidence);
+    const supportingEvidence = buildSupportingEvidence(l.name, leadEvidence);
+
+    // match_valid now simply reflects verdict — every surviving lead has evidence
+    const matchValid = bestVerdict !== 'no_evidence';
+
+    const constraintVerdicts = leadEvidence.map(er => ({
+      constraint: er.constraintValue,
+      verdict: er.verdict,
+    }));
+
+    return {
+      name: l.name,
+      address: l.address,
+      phone: l.phone,
+      website: l.website,
+      placeId: l.placeId,
+      source: l.source,
+      verified: bestVerdict === 'verified',
+      verification_status: bestVerdict,
+      constraint_verdicts: constraintVerdicts,
+      evidence: evidenceAttachment,
+      match_valid: matchValid,
+      match_summary: matchSummary,
+      match_basis: matchBasis,
+      supporting_evidence: supportingEvidence,
+      match_evidence: matchEvidence,
+    };
+  });
+```
+
+### What this achieves
+
+Before: evidenceStrength → hardEvidenceFilter → strongCount/weakCount → match_valid → verified → verification_status (5 recalculations)
+After: verdict → filter → bestVerdict → done (1 calculation, used directly)
+
+The `verified` field now means what it says: Tower or GPT-4o confirmed. The `verification_status` is just the verdict string. And `match_valid` is always true for surviving leads because the filter already removed no_evidence leads.
+
+### What NOT to change
+
+Do NOT remove the applyHardEvidenceFilter function definition or its interfaces yet — they may be imported elsewhere. We clean those up in a separate prompt after confirming this works. Do NOT change delivery-summary.ts yet — that's Prompt 3.
+
+Work on the main branch only — do not create or switch branches. After completing this task, append a structured summary to AGENT_LOG.md (what changed, files modified, decisions made, what's next).

@@ -2066,21 +2066,24 @@ export async function executeMissionDrivenPlan(
     }
   }
 
-  const hardEvidenceConstraints = [...evidenceConstraints, ...relationshipConstraints].filter(c => c.hardness === 'hard');
+  // ── Verdict-based filter: drop leads with no evidence ──
   let filteredLeads = leads;
+  const hasEvidenceConstraintsForFilter = evidenceConstraints.length > 0 || relationshipConstraints.length > 0;
 
-  if (hardEvidenceConstraints.length > 0) {
-    filteredLeads = applyHardEvidenceFilter(leads, evidenceResults, hardEvidenceConstraints);
-
-    if (filteredLeads.length < leads.length) {
-      console.log(`[MISSION_EXEC] Hard evidence filter: ${leads.length} → ${filteredLeads.length} (removed ${leads.length - filteredLeads.length} leads without evidence for hard constraints)`);
-      const droppedLeadNames = leads
-        .filter((l, i) => !filteredLeads.includes(l))
-        .map(l => (l as any).name)
+  if (hasEvidenceConstraintsForFilter && evidenceResults.length > 0) {
+    const beforeFilter = leads.length;
+    filteredLeads = leads.filter((_, i) => {
+      const leadEvidence = evidenceResults.filter(er => er.leadIndex === i);
+      if (leadEvidence.length === 0) return false;
+      // Keep if ANY constraint has a verdict that isn't no_evidence
+      return leadEvidence.some(er => er.verdict !== 'no_evidence');
+    });
+    if (filteredLeads.length < beforeFilter) {
+      const droppedNames = leads
+        .filter((_, i) => !filteredLeads.some(fl => fl === leads[i]))
+        .map(l => l.name)
         .slice(0, 10);
-      if (droppedLeadNames.length > 0) {
-        console.log(`[MISSION_EXEC] Hard evidence filter dropped: ${droppedLeadNames.join(', ')} (Tower did not verify hard constraint)`);
-      }
+      console.log(`[MISSION_EXEC] Verdict filter: ${beforeFilter} → ${filteredLeads.length} (dropped ${beforeFilter - filteredLeads.length}: ${droppedNames.join(', ')})`);
     }
   }
 
@@ -2184,10 +2187,14 @@ export async function executeMissionDrivenPlan(
 
   const deliveredLeadsWithEvidence = finalLeads.map(l => {
     const leadEvidence = evidenceByPlaceId.get(l.placeId) || [];
-    const hasAnyEvidence = leadEvidence.some(e => e.evidenceFound);
-    const strongCount = leadEvidence.filter(e => e.evidenceStrength === 'strong').length;
-    const weakCount = leadEvidence.filter(e => e.evidenceStrength === 'weak').length;
     const isBotBlocked = leadEvidence.some(e => e.isBotBlocked);
+
+    // Single verdict per lead: best verdict across all constraints
+    const bestVerdict = leadEvidence.reduce<'verified' | 'plausible' | 'no_evidence'>((best, er) => {
+      if (er.verdict === 'verified') return 'verified';
+      if (er.verdict === 'plausible' && best !== 'verified') return 'plausible';
+      return best;
+    }, 'no_evidence');
 
     const evidenceAttachment = leadEvidence.map(e => ({
       constraint_field: e.constraintField,
@@ -2199,22 +2206,20 @@ export async function executeMissionDrivenPlan(
       snippets: e.snippets,
       tower_status: e.towerStatus,
       tower_confidence: e.towerConfidence,
+      verdict: e.verdict,
     }));
 
     const matchEvidence = buildMatchEvidence(leadEvidence);
     const matchSummary = buildMatchSummary(l.name, matchEvidence, leadEvidence);
     const matchBasis = buildMatchBasis(l.name, leadEvidence);
     const supportingEvidence = buildSupportingEvidence(l.name, leadEvidence);
-    const matchValid = evidenceWasAttempted
-      ? (strongCount > 0 || weakCount > 0)
-      : (isRankingOnly || isFieldFilterOnly ? true : true);
+
+    // match_valid now simply reflects verdict — every surviving lead has evidence
+    const matchValid = bestVerdict !== 'no_evidence';
 
     const constraintVerdicts = leadEvidence.map(er => ({
       constraint: er.constraintValue,
-      verdict: er.towerStatus === 'verified' ? 'verified' as const
-        : er.towerStatus === 'weak_match' ? 'weak_match' as const
-        : er.isBotBlocked ? 'unreachable' as const
-        : 'unverified' as const,
+      verdict: er.verdict,
     }));
 
     return {
@@ -2224,10 +2229,8 @@ export async function executeMissionDrivenPlan(
       website: l.website,
       placeId: l.placeId,
       source: l.source,
-      verified: evidenceWasAttempted ? hasAnyEvidence : (isRankingOnly ? false : undefined),
-      verification_status: evidenceWasAttempted
-        ? (strongCount > 0 ? 'verified' as const : weakCount > 0 ? 'weak_match' as const : isBotBlocked ? 'unreachable' as const : 'no_evidence' as const)
-        : (isRankingOnly ? 'ranking_only' as const : (isFieldFilterOnly ? 'field_filter_only' as const : 'not_attempted' as const)),
+      verified: bestVerdict === 'verified',
+      verification_status: bestVerdict,
       constraint_verdicts: constraintVerdicts,
       evidence: evidenceAttachment,
       match_valid: matchValid,

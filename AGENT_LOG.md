@@ -212,3 +212,43 @@ In `server/supervisor/mission-executor.ts`, inside the replan `while` loop's FIL
 ### What's Next
 
 - EvidenceResult.verdict is now fully populated at every push site. Part 2 (replacing hard evidence filter and match_valid checks with verdict) can proceed.
+
+---
+
+## Replace hard evidence filter and match_valid with single verdict field (Part 2)
+
+**Date:** 2026-03-21
+
+### What Changed
+
+Two blocks replaced in `server/supervisor/mission-executor.ts`.
+
+**Change 1 — Hard evidence filter → Verdict-based filter** (line ~2072):
+
+The `hardEvidenceConstraints` / `applyHardEvidenceFilter` block was replaced with a verdict-based filter. The new filter keeps any lead that has at least one `EvidenceResult` with `verdict !== 'no_evidence'`. The condition is gated on `hasEvidenceConstraintsForFilter && evidenceResults.length > 0` (equivalent semantics to the old `hardEvidenceConstraints.length > 0` gate). The log line now reads `[MISSION_EXEC] Verdict filter:` instead of `Hard evidence filter:`.
+
+**Change 2 — deliveredLeadsWithEvidence mapping** (line ~2191):
+
+The old mapping computed `hasAnyEvidence`, `strongCount`, and `weakCount` and then derived `verified`, `verification_status`, `match_valid`, and `constraintVerdicts` from those counts. The new mapping:
+- Computes `bestVerdict` via a single reduce over `leadEvidence[].verdict`
+- Sets `verified = bestVerdict === 'verified'`
+- Sets `verification_status = bestVerdict` (the three-value string directly)
+- Sets `match_valid = bestVerdict !== 'no_evidence'`
+- Sets `constraintVerdicts` from `er.verdict` directly (no more towerStatus re-derivation)
+- Adds `verdict: e.verdict` to the `evidenceAttachment` items so it is visible in the payload
+- Removes the five separate recalculation paths for `verification_status` (evidenceWasAttempted / isRankingOnly / isFieldFilterOnly branches)
+
+### Files Modified
+
+- `server/supervisor/mission-executor.ts` — two blocks replaced
+
+### Decisions Made
+
+- `applyHardEvidenceFilter` function definition was NOT removed — it may be referenced elsewhere. Cleanup deferred to a later prompt as instructed.
+- `isRankingOnly`, `isFieldFilterOnly`, and `evidenceWasAttempted` variables are still declared above the mapping and referenced in the diagnostic artefact payload below it — they were not touched.
+- The workflow was restarted after the edit so the new backend code is live for the next run.
+
+### What's Next
+
+- Prompt 3: Update `delivery-summary.ts` to use `verdict` instead of the old status strings.
+- Separately: remove the now-unused `applyHardEvidenceFilter` function and its supporting interfaces after confirming end-to-end correctness.
