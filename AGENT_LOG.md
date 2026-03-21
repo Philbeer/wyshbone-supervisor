@@ -2451,3 +2451,50 @@ const matchValid = evidenceWasAttempted
 
 - The three-change sequence (evidence strength ordering, hard filter bar, match_valid) should now correctly handle: Tower-rejected leads (blocked), keyword-only leads (pass), and Tower-verified leads (pass).
 - Monitor live runs with attribute constraints to confirm delivery counts align between the evidence layer and combined Tower verdict.
+
+---
+
+## Prompt 2 — Fix GPT-4o search path auto-verifying everything
+
+**Date:** 2026-03-21
+
+### What Changed
+
+**File modified:** `server/supervisor/gpt4o-search.ts`
+
+In the `deliveredLeadsWithEvidence` mapping (inside the `cappedLeads.map` block), three fields were changed from blanket-`'verified'` values to confidence-driven values:
+
+Before:
+```typescript
+verified: true,
+verification_status: 'verified' as const,
+constraint_verdicts: hardConstraints.map(c => ({ constraint: c, verdict: 'verified' as const })),
+```
+After:
+```typescript
+verified: gLead?.confidence === 'high' || gLead?.confidence === 'medium',
+verification_status: gLead?.confidence === 'high' ? 'verified' as const
+  : gLead?.confidence === 'medium' ? 'weak_match' as const
+  : 'no_evidence' as const,
+constraint_verdicts: hardConstraints.map(c => ({
+  constraint: c,
+  verdict: gLead?.confidence === 'high' ? 'verified' as const
+    : gLead?.confidence === 'medium' ? 'weak_match' as const
+    : 'unverified' as const,
+})),
+```
+
+### Problem
+
+Every GPT-4o result was stamped `verified: true` and `verification_status: 'verified'` regardless of its actual confidence level. Low-confidence results bypassed all quality controls and were delivered as if Tower-verified.
+
+### Decision
+
+Used `gLead?.confidence` (optional chaining) since `gLead` can be `undefined` when the GPT-4o lead list doesn't align with the capped leads list — defaulting to `'no_evidence'` / `'unverified'` in that case is the safe choice.
+
+The mapping now aligns with the GP cascade evidence system: `high` → strong evidence, `medium` → weak evidence, `low` → no evidence. Low-confidence GPT-4o results will now fail the hard evidence filter (evidenceStrength none → meetsHardBar false).
+
+### What's Next
+
+- Monitor GPT-4o runs to confirm low-confidence leads are being filtered and the delivery count reflects only high/medium results.
+- Consider whether `match_valid: true` (unchanged) should also be gated on confidence for GPT-4o leads.

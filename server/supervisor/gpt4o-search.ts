@@ -345,9 +345,16 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     return {
       ...l,
       source: 'gpt4o_web_search',
-      verified: true,
-      verification_status: 'verified' as const,
-      constraint_verdicts: hardConstraints.map(c => ({ constraint: c, verdict: 'verified' as const })),
+      verified: gLead?.confidence === 'high' || gLead?.confidence === 'medium',
+      verification_status: gLead?.confidence === 'high' ? 'verified' as const
+        : gLead?.confidence === 'medium' ? 'weak_match' as const
+        : 'no_evidence' as const,
+      constraint_verdicts: hardConstraints.map(c => ({
+        constraint: c,
+        verdict: gLead?.confidence === 'high' ? 'verified' as const
+          : gLead?.confidence === 'medium' ? 'weak_match' as const
+          : 'unverified' as const,
+      })),
       evidence: gLead ? [{ source_url: gLead.source_url, text: gLead.evidence, confidence: gLead.confidence }] : [],
       match_valid: true,
       match_summary: gLead
