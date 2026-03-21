@@ -1229,7 +1229,7 @@ export async function executeMissionDrivenPlan(
           lead.name,
         );
 
-        const extractedQuotes = extraction.evidence_items.map(e => e.direct_quote);
+        const extractedQuotes = [...new Set(extraction.evidence_items.map(e => e.direct_quote))];
         const keywordFound = extraction.evidence_items.length > 0;
 
         if (extraction.evidence_items.length > 0) {

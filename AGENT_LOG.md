@@ -466,3 +466,30 @@ The `dsLeads` mapping's `supporting_evidence` line already used `snippet` correc
 
 - On the next GPT-4o primary path run, confirm evidence text appears in chat bubble dropdowns.
 - No further changes needed for this path.
+
+---
+
+## Deduplicate extracted quotes in evidence results
+
+**Date:** 2026-03-21
+
+### What Changed
+
+One line changed in `server/supervisor/mission-executor.ts` inside `processOneLead` (line ~1235).
+
+**Before:** `extraction.evidence_items.map(e => e.direct_quote)` — duplicates included when the same text appeared in multiple evidence items (e.g. confirmed by both Layer 1 keyword extraction and Layer 2 LLM judgement).
+
+**After:** `[...new Set(extraction.evidence_items.map(e => e.direct_quote))]` — Set deduplication removes identical strings before the array is stored in `extractedQuotes`, which then populates `er.snippets`.
+
+### Files Modified
+
+- `server/supervisor/mission-executor.ts` — one line
+
+### Decisions Made
+
+- `Set` deduplication is on the full `direct_quote` string, so near-duplicates (same sentence with minor whitespace differences) are not collapsed — only exact matches. This is the right conservative level for quote dedup.
+- `keywordFound` (the line immediately after) still reads from `extraction.evidence_items.length` not from `extractedQuotes.length`, so deduplication has no effect on the evidence gate.
+
+### What's Next
+
+- No follow-up required. This is a cosmetic quality improvement to the snippets array.
