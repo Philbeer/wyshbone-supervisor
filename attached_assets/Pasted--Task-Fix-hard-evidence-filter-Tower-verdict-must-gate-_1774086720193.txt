@@ -1,0 +1,106 @@
+## Task: Fix hard evidence filter — Tower verdict must gate hard constraint delivery
+
+There is a bug where leads with only keyword matches (but no Tower verification) pass the hard evidence filter and get delivered to users as "unverified" results. They should be filtered OUT, not shown with a warning label.
+
+### The problem
+
+In `server/supervisor/mission-executor.ts`, the evidence strength logic at approximately line 870 (inside `processOneLead`) says:
+```typescript
+const evidenceStrength: 'strong' | 'weak' | 'none' =
+  towerStatus === 'verified' ? 'strong' :
+  towerStatus === 'weak_match' || keywordFound ? 'weak' :
+  'none';
+```
+
+When Tower is called and returns `no_evidence` or `insufficient_evidence`, but Layer 1 found keyword matches (`keywordFound = true`), the evidence gets classified as `weak` instead of `none`. Tower explicitly said "this isn't evidence" but the keyword match overrides that.
+
+Then `applyHardEvidenceFilter` (around line 310) only checks `evidenceFound` (which is `evidenceStrength !== 'none'`), so `weak` evidence passes the hard constraint filter.
+
+### Fix 1 — Evidence strength must respect Tower rejection
+
+In the `processOneLead` function, find the `evidenceStrength` assignment and replace it with:
+```typescript
+const evidenceStrength: 'strong' | 'weak' | 'none' =
+  towerStatus === 'verified' ? 'strong' :
+  towerStatus === 'weak_match' ? 'weak' :
+  (towerStatus === 'no_evidence' || towerStatus === 'insufficient_evidence') ? 'none' :
+  keywordFound ? 'weak' :
+  'none';
+```
+
+The key change: if Tower was called and explicitly returned `no_evidence` or `insufficient_evidence`, the result is `none` — keyword matches cannot override a Tower rejection. The `keywordFound` fallback only applies when Tower was NOT called (towerStatus is null).
+
+### Fix 2 — Hard evidence filter must require strong evidence
+
+Find the `applyHardEvidenceFilter` function (exported, around line 310). Currently it says:
+```typescript
+if (er.evidenceFound && hardEvidenceConstraints.some(c => c.field === er.constraintField || String(c.value) === er.constraintValue)) {
+  leadsWithEvidence.add(er.leadIndex);
+}
+```
+
+Change the condition to also check that evidence is not weak-only. The simplest way: add an `evidenceStrength` field to the `HardEvidenceFilterInput` interface and use it in the filter.
+
+Step 2a: Add `evidenceStrength` to the `HardEvidenceFilterInput` interface:
+```typescript
+export interface HardEvidenceFilterInput {
+  leadIndex: number;
+  constraintField: string;
+  constraintValue: string;
+  evidenceFound: boolean;
+  evidenceStrength?: 'strong' | 'weak' | 'none';  // ADD THIS
+  isBotBlocked?: boolean;
+}
+```
+
+Step 2b: Update the filter logic inside `applyHardEvidenceFilter`:
+```typescript
+const leadsWithEvidence = new Set<number>();
+for (const er of evidenceResults) {
+  // For hard constraints, require strong evidence (Tower verified).
+  // Weak evidence (keyword-only or Tower weak_match) is not sufficient.
+  const meetsHardBar = er.evidenceStrength === 'strong' || (!er.evidenceStrength && er.evidenceFound);
+  if (meetsHardBar && hardEvidenceConstraints.some(c => c.field === er.constraintField || String(c.value) === er.constraintValue)) {
+    leadsWithEvidence.add(er.leadIndex);
+  }
+}
+```
+
+The fallback `(!er.evidenceStrength && er.evidenceFound)` preserves backward compatibility for any caller that doesn't pass `evidenceStrength`.
+
+Step 2c: Find where `applyHardEvidenceFilter` is called (in the same file, after evidence gathering). The call currently passes `evidenceResults` mapped to `HardEvidenceFilterInput`. Add `evidenceStrength` to the mapping. Find the section that looks like:
+```typescript
+if (hardEvidenceConstraints.length > 0) {
+  filteredLeads = applyHardEvidenceFilter(leads, evidenceResults, hardEvidenceConstraints);
+```
+
+The `evidenceResults` array already has `evidenceStrength` on each item (it's the same `EvidenceResult[]` that was built during evidence gathering), so it should already satisfy the updated interface. Verify the types align — `EvidenceResult` has `evidenceStrength: 'strong' | 'weak' | 'none'` which matches the new optional field on `HardEvidenceFilterInput`.
+
+### Fix 3 — Add a log line when the filter drops leads
+
+After the `applyHardEvidenceFilter` call, there's already a log line:
+```typescript
+if (filteredLeads.length < leads.length) {
+  console.log(`[MISSION_EXEC] Hard evidence filter: ${leads.length} → ${filteredLeads.length} ...`);
+}
+```
+
+Add detail about WHY leads were dropped. After this existing log, add:
+```typescript
+const droppedLeadNames = leads
+  .filter((l, i) => !filteredLeads.includes(l))
+  .map(l => l.name)
+  .slice(0, 10);
+if (droppedLeadNames.length > 0) {
+  console.log(`[MISSION_EXEC] Hard evidence filter dropped: ${droppedLeadNames.join(', ')} (Tower did not verify hard constraint)`);
+}
+```
+
+### What this fixes
+
+Before: keyword match on "packaging" → evidenceFound=true → passes hard filter → user sees "unverified" lead
+After: keyword match on "packaging" + Tower says no_evidence → evidenceStrength=none → fails hard filter → lead not delivered
+
+Leads where Tower returned `verified` or `weak_match` are unaffected. Leads where Tower was not called (towerStatus=null) but keywords were found still get `weak` — but now `weak` doesn't pass the hard filter.
+
+Work on the main branch only — do not create or switch branches. After completing this task, append a structured summary to AGENT_LOG.md (what changed, files modified, decisions made, what's next).

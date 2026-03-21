@@ -2329,3 +2329,53 @@ The following imports were **kept** because they are used outside `executeTowerL
 
 - Verify the `shared-constants.ts` symbols are correctly re-exported to any other consumers that may appear in future files.
 - Confirm no TypeScript strict-mode errors surface in CI.
+
+---
+
+## Task: Fix hard evidence filter — Tower verdict must gate hard constraint delivery
+
+**Date:** 2026-03-21
+
+### What Changed
+
+**File modified:** `server/supervisor/mission-executor.ts`
+
+**Fix 1 — Evidence strength respects Tower rejection (line ~1286):**
+The `evidenceStrength` ternary chain inside `processOneLead` was updated so that `towerStatus === 'no_evidence'` or `towerStatus === 'insufficient_evidence'` resolves to `'none'` rather than falling through to the `keywordFound` check. The `keywordFound ? 'weak'` fallback now only fires when Tower was NOT called (i.e., `towerStatus` is `null`).
+
+Before:
+```
+towerStatus === 'verified' ? 'strong' :
+towerStatus === 'weak_match' || keywordFound ? 'weak' :
+'none'
+```
+After:
+```
+towerStatus === 'verified' ? 'strong' :
+towerStatus === 'weak_match' ? 'weak' :
+(towerStatus === 'no_evidence' || towerStatus === 'insufficient_evidence') ? 'none' :
+keywordFound ? 'weak' :
+'none'
+```
+
+**Fix 2a — `HardEvidenceFilterInput` interface extended:**
+Added optional `evidenceStrength?: 'strong' | 'weak' | 'none'` field to the `HardEvidenceFilterInput` interface. Optional for backward compatibility with any caller that doesn't supply it.
+
+**Fix 2b — Hard filter now requires strong evidence:**
+`applyHardEvidenceFilter` previously let any `evidenceFound=true` result pass. Now it checks `meetsHardBar = er.evidenceStrength === 'strong' || (!er.evidenceStrength && er.evidenceFound)`. This means weak evidence (Tower `weak_match`, keyword-only, or no `evidenceStrength` supplied by legacy callers) no longer passes the hard constraint gate.
+
+**Fix 2c — Call site automatically satisfied:**
+`EvidenceResult` already carries `evidenceStrength: 'strong' | 'weak' | 'none'`, so no change was needed at the `applyHardEvidenceFilter(leads, evidenceResults, ...)` call site.
+
+**Fix 3 — Dropped leads logged with names:**
+After the existing count log, a new log line lists up to 10 names of leads that were dropped by the hard evidence filter, with the note `(Tower did not verify hard constraint)`.
+
+### Decisions Made
+
+- The `(l as any).name` cast was used in the drop-names log since `T` is generic — the alternative of constraining `T` to `{ name: string }` would have been a larger interface change.
+- Backward compatibility was preserved: callers that don't populate `evidenceStrength` (e.g., the `isBotBlocked` pathway that manually pushes `evidenceFound: true`) still pass through via the `!er.evidenceStrength && er.evidenceFound` fallback.
+
+### What's Next
+
+- Monitor live runs where a query with a hard attribute constraint (e.g. "packaging suppliers") hits Tower and returns `no_evidence` — confirm those leads are now filtered rather than surfaced with a warning label.
+- Consider tightening the backward-compat fallback in a future pass once all callers are confirmed to supply `evidenceStrength`.

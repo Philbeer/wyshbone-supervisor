@@ -294,6 +294,7 @@ export interface HardEvidenceFilterInput {
   constraintField: string;
   constraintValue: string;
   evidenceFound: boolean;
+  evidenceStrength?: 'strong' | 'weak' | 'none';
   isBotBlocked?: boolean;
 }
 
@@ -309,7 +310,8 @@ export function applyHardEvidenceFilter<T>(
 ): T[] {
   const leadsWithEvidence = new Set<number>();
   for (const er of evidenceResults) {
-    if (er.evidenceFound && hardEvidenceConstraints.some(c => c.field === er.constraintField || String(c.value) === er.constraintValue)) {
+    const meetsHardBar = er.evidenceStrength === 'strong' || (!er.evidenceStrength && er.evidenceFound);
+    if (meetsHardBar && hardEvidenceConstraints.some(c => c.field === er.constraintField || String(c.value) === er.constraintValue)) {
       leadsWithEvidence.add(er.leadIndex);
     }
   }
@@ -1282,7 +1284,9 @@ export async function executeMissionDrivenPlan(
 
         const evidenceStrength: 'strong' | 'weak' | 'none' =
           towerStatus === 'verified' ? 'strong' :
-          towerStatus === 'weak_match' || keywordFound ? 'weak' :
+          towerStatus === 'weak_match' ? 'weak' :
+          (towerStatus === 'no_evidence' || towerStatus === 'insufficient_evidence') ? 'none' :
+          keywordFound ? 'weak' :
           'none';
 
         const pagesWithContent = pages.filter(p => (p.text_clean || p.text || '').trim().length > 50);
@@ -2036,6 +2040,13 @@ export async function executeMissionDrivenPlan(
 
     if (filteredLeads.length < leads.length) {
       console.log(`[MISSION_EXEC] Hard evidence filter: ${leads.length} → ${filteredLeads.length} (removed ${leads.length - filteredLeads.length} leads without evidence for hard constraints)`);
+      const droppedLeadNames = leads
+        .filter((l, i) => !filteredLeads.includes(l))
+        .map(l => (l as any).name)
+        .slice(0, 10);
+      if (droppedLeadNames.length > 0) {
+        console.log(`[MISSION_EXEC] Hard evidence filter dropped: ${droppedLeadNames.join(', ')} (Tower did not verify hard constraint)`);
+      }
     }
   }
 
