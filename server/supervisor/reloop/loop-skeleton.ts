@@ -483,28 +483,39 @@ export async function runReloop(params: {
       conversationId,
     });
 
-    const towerResult = await judgeArtefact({
-      artefact: combinedArtefact,
-      runId,
-      goal: normalizedGoal,
-      userId,
-      conversationId,
-      successCriteria: {
-        mission_type: 'leadgen',
-        target_count: requestedCount ?? 20,
-        requested_count_user: requestedCount !== null ? 'explicit' : 'implicit',
-        requested_count_value: requestedCount,
-        hard_constraints: hardConstraints,
-        soft_constraints: softConstraints,
-        structured_constraints: structuredConstraints,
-        intent_narrative: intentNarrative ?? null,
-      },
-      intent_narrative: intentNarrative ?? null,
-      queryId: queryId ?? null,
-    });
+    // Check if the per-loop Tower already passed for a single-loop run.
+    // If so, skip the combined Tower call — the combined delivery is identical
+    // to the per-loop delivery and re-judging it risks a contradictory verdict.
+    const perLoopTowerVerdict = (finalRawResult as any)?.towerVerdict ?? null;
+    const skipCombinedTower = totalLoops === 1 && perLoopTowerVerdict === 'pass';
 
-    console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} delivered=${deliveredLeads.length}`);
-    combinedTowerVerdict = towerResult.judgement.verdict;
+    if (skipCombinedTower) {
+      console.log(`[RELOOP_SKELETON] Single loop with per-loop Tower PASS — skipping combined Tower call. Using per-loop verdict.`);
+      combinedTowerVerdict = 'pass';
+    } else {
+      const towerResult = await judgeArtefact({
+        artefact: combinedArtefact,
+        runId,
+        goal: normalizedGoal,
+        userId,
+        conversationId,
+        successCriteria: {
+          mission_type: 'leadgen',
+          target_count: requestedCount ?? 20,
+          requested_count_user: requestedCount !== null ? 'explicit' : 'implicit',
+          requested_count_value: requestedCount,
+          hard_constraints: hardConstraints,
+          soft_constraints: softConstraints,
+          structured_constraints: structuredConstraints,
+          intent_narrative: intentNarrative ?? null,
+        },
+        intent_narrative: intentNarrative ?? null,
+        queryId: queryId ?? null,
+      });
+
+      console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} delivered=${deliveredLeads.length}`);
+      combinedTowerVerdict = towerResult.judgement.verdict;
+    }
   } catch (judgeErr: any) {
     const errMsg = judgeErr?.message ?? String(judgeErr);
     const errStack = judgeErr?.stack ?? '';
