@@ -438,10 +438,13 @@ export async function runReloop(params: {
     verificationStatus: entity.verificationStatus,
   }));
 
-  // Trim to requested count if specified
+  // Only deliver entities that were actually verified by evidence
+  const verifiedLeads = combinedLeads.filter(l => l.verified === true);
   const deliveredLeads = requestedCount
-    ? combinedLeads.slice(0, requestedCount)
-    : combinedLeads;
+    ? verifiedLeads.slice(0, requestedCount)
+    : verifiedLeads;
+
+  console.log(`[RELOOP_SKELETON] Combined delivery: ${combinedLeads.length} accumulated → ${verifiedLeads.length} verified → ${deliveredLeads.length} delivered`);
 
   logRunEvent(runId, {
     stage: 'combined_delivery_start',
@@ -536,10 +539,48 @@ export async function runReloop(params: {
   // Build the MissionExecutionResult from combined entities
   // Use the last loop's raw result as the base, then override leads
   const lastRawResult = finalRawResult as Record<string, unknown>;
+
+  // Merge delivery summaries from all loops
+  const allDeliverySummaries = loopHistory
+    .map(r => (r.executorOutput.rawResult as any)?.deliverySummary)
+    .filter(Boolean);
+
+  // Build merged delivered_exact from all loops' delivery summaries
+  const mergedExact: any[] = [];
+  const mergedClosest: any[] = [];
+  const seenNames = new Set<string>();
+  for (const ds of allDeliverySummaries) {
+    for (const lead of (ds.delivered_exact || [])) {
+      const key = (lead.name || '').toLowerCase().trim();
+      if (key && !seenNames.has(key)) {
+        seenNames.add(key);
+        mergedExact.push(lead);
+      }
+    }
+    for (const lead of (ds.delivered_closest || [])) {
+      const key = (lead.name || '').toLowerCase().trim();
+      if (key && !seenNames.has(key)) {
+        seenNames.add(key);
+        mergedClosest.push(lead);
+      }
+    }
+  }
+
+  const lastDs = allDeliverySummaries[allDeliverySummaries.length - 1];
+  const mergedDeliverySummary = lastDs ? {
+    ...lastDs,
+    delivered_exact: mergedExact,
+    delivered_closest: mergedClosest,
+    delivered_exact_count: mergedExact.length,
+    delivered_total_count: mergedExact.length + mergedClosest.length,
+    shortfall: requestedCount ? Math.max(0, requestedCount - mergedExact.length) : 0,
+    tower_verdict: combinedTowerVerdict,
+  } : null;
+
   const combinedResult: MissionExecutionResult = {
     response: (lastRawResult.response as string) ?? 'Run complete. Results are available.',
     leadIds: (lastRawResult.leadIds as string[]) ?? [],
-    deliverySummary: (lastRawResult.deliverySummary as any) ?? null,
+    deliverySummary: mergedDeliverySummary,
     towerVerdict: combinedTowerVerdict ?? (lastRawResult.towerVerdict as string) ?? null,
     leads: deliveredLeads.map(l => ({
       name: l.name,

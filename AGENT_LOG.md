@@ -335,3 +335,40 @@ The `contradictionSignals` array and `hasNegatedConstraint` check from the previ
 - Observe next fallback run logs for `CONSTRAINT MET` / `CONSTRAINT NOT MET` / `unparseable response` log lines to confirm JSON parsing is working.
 - Prompt 3: Update `delivery-summary.ts` to use `verdict`.
 - Future cleanup: remove the now-redundant `contradictionSignals` array and `hasNegatedConstraint` from the legacy catch block.
+
+---
+
+## Fix combined delivery to only include verified entities and build proper delivery summary
+
+**Date:** 2026-03-21
+
+### What Changed
+
+Two changes in `server/supervisor/reloop/loop-skeleton.ts`.
+
+**Change 1 — Verified-only filter on combined delivery** (line ~444):
+
+The old trim-to-count logic (`combinedLeads.slice(0, requestedCount)`) was replaced with a two-step filter. First, `combinedLeads` is filtered to only leads where `l.verified === true`, producing `verifiedLeads`. Then the count cap is applied to `verifiedLeads`. A log line records the three counts: accumulated → verified → delivered. This ensures unverified candidates (e.g. those that failed GPT-4o fallback with `constraint_met=false`) are dropped at the reloop level, not just per-loop.
+
+**Change 2 — Merged delivery summary** (lines ~546–595):
+
+The old `combinedResult.deliverySummary` simply forwarded `lastRawResult.deliverySummary` — the last loop's summary only. The new block:
+1. Collects all loops' `deliverySummary` objects from `loopHistory`.
+2. Merges `delivered_exact` and `delivered_closest` across all loops, deduplicating by name (case-insensitive).
+3. Builds `mergedDeliverySummary` by spreading the last loop's summary and overriding the exact/closest arrays with the merged versions, plus recalculating `delivered_exact_count`, `delivered_total_count`, `shortfall`, and `tower_verdict`.
+4. Passes `mergedDeliverySummary` into `combinedResult` instead of the per-loop summary.
+
+### Files Modified
+
+- `server/supervisor/reloop/loop-skeleton.ts` — two locations
+
+### Decisions Made
+
+- The filter uses strict `=== true` so leads with `verified: false`, `verified: undefined`, or missing the field are excluded. Leads from ranking-only or field-filter-only strategies (which previously had `verified: false`) will be excluded from multi-loop combined delivery. This is intentional — if a strategy produced no verified leads in any loop, the combined delivery should reflect that.
+- Deduplication in the delivery summary merge is by lowercased name, consistent with other dedup logic in the codebase.
+- The workflow was restarted to load the new backend code.
+
+### What's Next
+
+- On a multi-loop run, confirm the `[RELOOP_SKELETON] Combined delivery: X accumulated → Y verified → Z delivered` log line appears with the correct counts.
+- Prompt 3: Update `delivery-summary.ts` to use `verdict`.
