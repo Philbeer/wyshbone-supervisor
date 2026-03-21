@@ -189,3 +189,26 @@ Added `verdict: 'plausible' as const` to the ranking evidence push.
 ### What's Next
 
 - Part 2: Replace the hard evidence filter, `match_valid`, and `verification_status` derivation logic downstream to use `verdict` directly, removing the redundant overlapping checks.
+
+---
+
+## Add missing verdict to replan FILTER_FIELDS evidence push
+
+**Date:** 2026-03-21
+
+### What Changed
+
+In `server/supervisor/mission-executor.ts`, inside the replan `while` loop's FILTER_FIELDS block (line ~1987), the `evidenceResults.push` call was missing `verdict`. Added `verdict: 'verified' as const,` after the `snippets` line, matching the identical fix already applied to the main FILTER_FIELDS block in the previous task.
+
+### Files Modified
+
+- `server/supervisor/mission-executor.ts` — one line added inside the replan FILTER_FIELDS push
+
+### Decisions Made
+
+- This was the replan block that the previous task brief flagged as a possible second location. It was not found by grep at that time (grep searched for "Field match:" but this block uses "Field match (replan v${planVersion}):"). Now corrected.
+- No other changes needed — the fix is identical to the main block.
+
+### What's Next
+
+- EvidenceResult.verdict is now fully populated at every push site. Part 2 (replacing hard evidence filter and match_valid checks with verdict) can proceed.

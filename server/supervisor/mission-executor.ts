@@ -1981,6 +1981,7 @@ export async function executeMissionDrivenPlan(
                   towerReasoning: null,
                   sourceUrl: null,
                   snippets: [`Field match (replan v${planVersion}): ${fc.field} ${fc.operator} "${filterValue}" → matched "${leads[i].name}"`],
+                  verdict: 'verified' as const,
                 });
               }
             }
