@@ -143,3 +143,49 @@ fallbackVerified++;
 - On the next live run, bot-blocked leads (e.g. The White Swan) where GPT-4o found confirming evidence will now show as "verified" in the UI.
 - Monitor fallback-verified leads in the AFR audit trail to confirm `towerReasoning` is surfacing correctly.
 - Consider whether `towerConfidence` of 0.75 is the right calibration after observing a batch of fallback-verified results.
+
+---
+
+## Add single verdict field to EvidenceResult (Part 1 of verdict simplification)
+
+**Date:** 2026-03-21
+
+### What Changed
+
+Six targeted changes in `server/supervisor/mission-executor.ts` to introduce a `verdict` field on `EvidenceResult` that is set exactly once at each evidence-gathering site.
+
+**Change 1 — EvidenceResult interface** (line ~109):
+Added `verdict: 'verified' | 'plausible' | 'no_evidence'` as the final field.
+
+**Change 2 — processOneLead verdict derivation** (after evidenceStrength, line ~1296):
+Added a `verdict` constant immediately after `evidenceStrength` using the same tower status / keywordFound logic but mapping to the new three-value enum. Also added `verdict,` to the `evidenceResults.push` call so the field is populated on all processOneLead results.
+
+**Change 3 — GPT-4o fallback verified path** (line ~1504):
+Added `er.verdict = 'verified'` inside the `if (!hasContradiction)` block, after the other `er.*` assignments.
+
+**Change 4 — GPT-4o fallback non-verified paths** (lines ~1493, ~1509, ~1513, ~1520):
+- `if (hasContradiction)` block → `er.verdict = 'no_evidence'`
+- `else if CONTRADICTED` block → `er.verdict = 'no_evidence'`
+- final `else` (unverified) block → `er.verdict = 'no_evidence'`
+- `catch` block → `er.verdict = 'no_evidence'`
+
+**Change 5 — FILTER_FIELDS push** (line ~1097):
+Added `verdict: 'verified' as const` to the field-match evidence push. Only one FILTER_FIELDS block exists (the task brief mentioned a possible replan block, but it does not exist in this file).
+
+**Change 6 — RANK_SCORE push** (line ~1832):
+Added `verdict: 'plausible' as const` to the ranking evidence push.
+
+### Files Modified
+
+- `server/supervisor/mission-executor.ts` — six locations, additive changes only
+
+### Decisions Made
+
+- No existing fields were removed or changed — this is a purely additive pass as specified. `evidenceStrength`, `evidenceFound`, `match_valid`, and all other existing fields remain untouched.
+- The three-value enum (`verified` / `plausible` / `no_evidence`) maps directly from the existing tower status and keyword evidence signals, so downstream logic in the next prompt can switch on `verdict` without any semantic loss.
+- The task brief mentioned a second (replan) FILTER_FIELDS block — it does not exist in the current file. Only one FILTER_FIELDS push was found and updated.
+- TypeScript compiled cleanly; no runtime errors observed in workflow logs.
+
+### What's Next
+
+- Part 2: Replace the hard evidence filter, `match_valid`, and `verification_status` derivation logic downstream to use `verdict` directly, removing the redundant overlapping checks.

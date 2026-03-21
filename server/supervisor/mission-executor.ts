@@ -103,6 +103,7 @@ interface EvidenceResult {
   sourceUrl: string | null;
   snippets: string[];
   sourceTier?: 'first_party' | 'web_search_fallback' | 'snippet';
+  verdict: 'verified' | 'plausible' | 'no_evidence';
 }
 
 function buildMatchEvidence(evidenceResults: EvidenceResult[]): MatchEvidenceItem[] {
@@ -1090,6 +1091,7 @@ export async function executeMissionDrivenPlan(
           towerReasoning: null,
           sourceUrl: null,
           snippets: [`Field match: ${fc.field} ${fc.operator} "${filterValue}" → matched "${leads[i].name}"`],
+          verdict: 'verified' as const,
         });
       }
     }
@@ -1289,6 +1291,13 @@ export async function executeMissionDrivenPlan(
           keywordFound ? 'weak' :
           'none';
 
+        const verdict: 'verified' | 'plausible' | 'no_evidence' =
+          towerStatus === 'verified' ? 'verified' :
+          towerStatus === 'weak_match' ? 'plausible' :
+          (towerStatus === 'no_evidence' || towerStatus === 'insufficient_evidence') ? 'no_evidence' :
+          keywordFound ? 'plausible' :
+          'no_evidence';
+
         const pagesWithContent = pages.filter(p => (p.text_clean || p.text || '').trim().length > 50);
         const isBotBlocked = pagesWithContent.length === 0 && !!lead.website;
 
@@ -1307,6 +1316,7 @@ export async function executeMissionDrivenPlan(
           towerReasoning,
           sourceUrl: lead.website || null,
           snippets: extractedQuotes,
+          verdict,
         });
 
         await createArtefact({
@@ -1478,6 +1488,7 @@ export async function executeMissionDrivenPlan(
               const hasContradiction = contradictionSignals.some(sig => lowerContent.includes(sig));
 
               if (hasContradiction) {
+                er.verdict = 'no_evidence';
                 fallbackUnverified++;
                 console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": VERIFIED prefix but contradiction detected — treating as unverified. "${fbContent.substring(0, 150)}"`);
               } else {
@@ -1488,19 +1499,23 @@ export async function executeMissionDrivenPlan(
                 er.towerReasoning = 'Verified via GPT-4o web search fallback (website was bot-blocked or had no extractable evidence)';
                 er.snippets = [fbContent.substring(0, 500)];
                 if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
+                er.verdict = 'verified';
                 fallbackVerified++;
                 console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": verified — source=${fbSourceUrl || 'no_url'} evidence="${fbContent.substring(0, 120)}"`);
               }
             } else if (fbUpper.startsWith('CONTRADICTED')) {
+              er.verdict = 'no_evidence';
               fallbackContradicted++;
               console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": contradicted — "${fbContent.substring(0, 120)}"`);
             } else {
+              er.verdict = 'no_evidence';
               fallbackUnverified++;
               console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": unverified — "${fbContent.substring(0, 120)}"`);
             }
           } catch (fbErr: any) {
             console.warn(`[GPT4O_FALLBACK] "${er.leadName}": error — ${fbErr.message}`);
             er.sourceTier = 'web_search_fallback';
+            er.verdict = 'no_evidence';
             fallbackUnverified++;
           }
         }
@@ -1811,6 +1826,7 @@ export async function executeMissionDrivenPlan(
             towerReasoning: null,
             sourceUrl: null,
             snippets: [`Ranked by Google Places relevance for "${rankValue}" in position ${i + 1}/${leads.length}`],
+            verdict: 'plausible' as const,
           });
         }
         console.log(`[MISSION_EXEC] RANK_SCORE: generated ${leads.length} ranking source evidence items (no prior evidence to score by)`);
