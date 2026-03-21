@@ -1,0 +1,45 @@
+Prompt 3 — Fix GPT-4o fallback VERIFIED parser (run AFTER Prompt 1, parallel with Prompt 2)
+## Task: Fix GPT-4o fallback naive VERIFIED prefix parser
+
+In server/supervisor/mission-executor.ts, the GPT-4o web search fallback section (search for GPT4O_FALLBACK in the file) checks if the GPT-4o response starts with "VERIFIED" to decide if evidence was confirmed. The problem: GPT-4o sometimes writes "VERIFIED: [business name] exists in [location]" and then explains that the constraint is NOT actually met. The naive prefix check sees "VERIFIED" and marks it as confirmed.
+
+### The fix
+
+Find the section that checks the GPT-4o fallback response (look for "const fbUpper = fbContent.trimStart().toUpperCase()"). The current logic is:
+
+if (fbUpper.startsWith('VERIFIED')) {
+  er.evidenceFound = true;
+  er.evidenceStrength = 'weak';
+  ...
+}
+
+Add a secondary check: after confirming it starts with VERIFIED, scan the full response for contradiction signals. Replace the VERIFIED block with:
+
+if (fbUpper.startsWith('VERIFIED')) {
+  // Guard against GPT-4o confirming existence but denying the constraint
+  const contradictionSignals = [
+    'no mention of', 'no evidence of', 'does not', 'do not', 'cannot be confirmed',
+    'could not confirm', 'not confirmed', 'no indication', 'there is no',
+    'cannot be verified', 'could not be verified', 'not verified',
+    'this assertion cannot', 'unable to confirm', 'unable to verify'
+  ];
+  const lowerContent = fbContent.toLowerCase();
+  const hasContradiction = contradictionSignals.some(sig => lowerContent.includes(sig));
+
+  if (hasContradiction) {
+    // GPT-4o confirmed the business exists but denied the constraint
+    fallbackUnverified++;
+    console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": VERIFIED prefix but contradiction detected — treating as unverified. "${fbContent.substring(0, 150)}"`);
+  } else {
+    er.evidenceFound = true;
+    er.evidenceStrength = 'weak';
+    er.snippets = [fbContent.substring(0, 500)];
+    if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
+    fallbackVerified++;
+    console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": verified — source=${fbSourceUrl || 'no_url'} evidence="${fbContent.substring(0, 120)}"`);
+  }
+}
+
+This catches the VMS Solutions case where GPT-4o said "VERIFIED: VMS Solutions is in Blackpool... but there is no mention of manufacturing biodegradable packaging."
+
+Work on the main branch only — do not create or switch branches. After completing this task, append a structured summary to AGENT_LOG.md (what changed, files modified, decisions made, what's next).

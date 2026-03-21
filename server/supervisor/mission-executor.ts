@@ -2172,7 +2172,7 @@ export async function executeMissionDrivenPlan(
     const matchBasis = buildMatchBasis(l.name, leadEvidence);
     const supportingEvidence = buildSupportingEvidence(l.name, leadEvidence);
     const matchValid = evidenceWasAttempted
-      ? strongCount > 0
+      ? (strongCount > 0 || weakCount > 0)
       : (isRankingOnly || isFieldFilterOnly ? true : true);
 
     const constraintVerdicts = leadEvidence.map(er => ({

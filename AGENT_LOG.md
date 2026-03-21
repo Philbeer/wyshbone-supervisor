@@ -2413,3 +2413,41 @@ Because `evidenceStrength` is now always populated by `processOneLead` before be
 
 - The Tower-rejection path (packaging suppliers → `no_evidence` → `none` → blocked) remains intact from the previous fix.
 - The keyword-only path (live music → Tower not called → `null` towerStatus → `weak` → passes) is now restored.
+
+---
+
+## Prompt 1 — Fix match_valid (live music query fix)
+
+**Date:** 2026-03-21
+
+### What Changed
+
+**File modified:** `server/supervisor/mission-executor.ts`
+
+Single-line change in the `deliveredLeadsWithEvidence` mapping block:
+
+Before:
+```typescript
+const matchValid = evidenceWasAttempted
+  ? strongCount > 0
+  : (isRankingOnly || isFieldFilterOnly ? true : true);
+```
+After:
+```typescript
+const matchValid = evidenceWasAttempted
+  ? (strongCount > 0 || weakCount > 0)
+  : (isRankingOnly || isFieldFilterOnly ? true : true);
+```
+
+### Problem
+
+`match_valid` was set to `false` for any lead where Tower was not called but keyword evidence existed (`evidenceStrength === 'weak'`). The delivery summary then counted those leads as undelivered, causing a mismatch that failed the entire run — even when 10 valid results were found.
+
+### Decision
+
+`weakCount > 0` now satisfies `match_valid`. The Tower-rejection protection is preserved because leads where Tower returned `no_evidence`/`insufficient_evidence` have `evidenceStrength === 'none'`, so both `strongCount` and `weakCount` remain 0, and `match_valid` stays false for those.
+
+### What's Next
+
+- The three-change sequence (evidence strength ordering, hard filter bar, match_valid) should now correctly handle: Tower-rejected leads (blocked), keyword-only leads (pass), and Tower-verified leads (pass).
+- Monitor live runs with attribute constraints to confirm delivery counts align between the evidence layer and combined Tower verdict.
