@@ -2379,3 +2379,37 @@ After the existing count log, a new log line lists up to 10 names of leads that 
 
 - Monitor live runs where a query with a hard attribute constraint (e.g. "packaging suppliers") hits Tower and returns `no_evidence` — confirm those leads are now filtered rather than surfaced with a warning label.
 - Consider tightening the backward-compat fallback in a future pass once all callers are confirmed to supply `evidenceStrength`.
+
+---
+
+## Fix: Revert overly aggressive hard evidence filter
+
+**Date:** 2026-03-21
+
+### What Changed
+
+**File modified:** `server/supervisor/mission-executor.ts`
+
+Single-line change in `applyHardEvidenceFilter`:
+
+Before:
+```typescript
+const meetsHardBar = er.evidenceStrength === 'strong' || (!er.evidenceStrength && er.evidenceFound);
+```
+After:
+```typescript
+const meetsHardBar = er.evidenceStrength !== 'none' && er.evidenceStrength !== undefined;
+```
+
+### Decision
+
+The previous fix required `evidenceStrength === 'strong'` (Tower verified) to pass the hard filter. This was too strict — it blocked leads where Tower was never called but keyword evidence existed (e.g. "live music venue" where Tower isn't invoked but keywords are found on the website). Those should pass since there's no Tower rejection to override.
+
+The corrected logic lets `'strong'` and `'weak'` both pass, and blocks only `'none'` (Tower explicitly rejected OR no evidence at all) and `undefined` (no evidence data present).
+
+Because `evidenceStrength` is now always populated by `processOneLead` before being pushed into `evidenceResults`, `undefined` only occurs for legacy/external callers that don't supply the field — treating those as blocked is the safe default.
+
+### What's Next
+
+- The Tower-rejection path (packaging suppliers → `no_evidence` → `none` → blocked) remains intact from the previous fix.
+- The keyword-only path (live music → Tower not called → `null` towerStatus → `weak` → passes) is now restored.

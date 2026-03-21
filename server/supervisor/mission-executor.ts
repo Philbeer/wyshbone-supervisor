@@ -310,7 +310,7 @@ export function applyHardEvidenceFilter<T>(
 ): T[] {
   const leadsWithEvidence = new Set<number>();
   for (const er of evidenceResults) {
-    const meetsHardBar = er.evidenceStrength === 'strong' || (!er.evidenceStrength && er.evidenceFound);
+    const meetsHardBar = er.evidenceStrength !== 'none' && er.evidenceStrength !== undefined;
     if (meetsHardBar && hardEvidenceConstraints.some(c => c.field === er.constraintField || String(c.value) === er.constraintValue)) {
       leadsWithEvidence.add(er.leadIndex);
     }
