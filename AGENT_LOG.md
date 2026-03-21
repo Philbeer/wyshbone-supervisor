@@ -60,3 +60,38 @@ The skip condition is deliberately conservative: both guards must be true (`tota
 
 - Monitor `[RELOOP_SKELETON] Single loop with per-loop Tower PASS — skipping combined Tower call` log entries to confirm the path fires correctly on real runs.
 - Consider whether the same logic should be applied to multi-loop runs where every per-loop Tower returned `'pass'` — currently not done to keep the change minimal.
+
+---
+
+## Lower hasSubstantialEvidence threshold to include keyword evidence
+
+**Date:** 2026-03-21
+
+### What Changed
+
+**File modified:** `server/supervisor/mission-executor.ts` (line 1252)
+
+**Before:**
+```typescript
+const hasSubstantialEvidence = structuredEvidenceText.length > 30 || extractedQuotes.length > 0;
+```
+
+**After:**
+```typescript
+const hasSubstantialEvidence = structuredEvidenceText.length > 30 || extractedQuotes.length > 0 || keywordFound;
+```
+
+`keywordFound` is already defined in the same scope as `const keywordFound = extraction.evidence_items.length > 0`.
+
+### Problem
+
+Leads where Layer 1 found keyword matches (`evidence_items.length > 0`) were not reaching Tower if `structuredEvidenceText` was short (≤30 chars) and `direct_quote` fields were empty strings. This is common — many evidence items have a source URL and context snippet but no literal `direct_quote`. The 30-char threshold was silently skipping Tower for an entire class of leads that had real keyword evidence.
+
+### Decision
+
+`keywordFound` is the most semantically correct gate: if Layer 1 found any evidence at all, Tower should rule on it. Tower is the authority on whether keyword matches constitute genuine constraint satisfaction — the character count was a poor proxy for "has evidence". The addition is purely additive (OR), so all leads that previously reached Tower still do.
+
+### What's Next
+
+- On the next live run, expect more Tower calls per run for leads that previously slipped through with keyword evidence but short structured text.
+- Monitor whether Tower PASS rate changes significantly — a large drop would indicate the previous threshold was quietly masking low-quality keyword matches.

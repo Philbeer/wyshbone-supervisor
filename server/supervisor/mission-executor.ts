@@ -1246,7 +1246,7 @@ export async function executeMissionDrivenPlan(
             ).join('\n')
           : '';
 
-        const hasSubstantialEvidence = structuredEvidenceText.length > 30 || extractedQuotes.length > 0;
+        const hasSubstantialEvidence = structuredEvidenceText.length > 30 || extractedQuotes.length > 0 || keywordFound;
 
         if (requiresTowerJudge(plan) && hasSubstantialEvidence) {
           const bestEvidence = extraction.evidence_items[0];
