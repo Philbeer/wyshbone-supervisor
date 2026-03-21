@@ -1,0 +1,40 @@
+## Task: Fix GPT-4o fallback prompt ambiguity and strengthen contradiction detector
+
+In server/supervisor/mission-executor.ts, find the GPT-4o fallback section (search for GPT4O_FALLBACK).
+
+### Change 1 — Fix the prompt so VERIFIED means "constraint is true"
+
+Find the fbPrompt assignment. It currently reads:
+
+const fbPrompt = `Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following is genuinely true for this specific business: "${er.constraintValue}". Start your response with exactly one of:\n- VERIFIED: [evidence summary and source URL]\n- UNVERIFIED: [reason you could not confirm]\n- CONTRADICTED: [evidence that it is NOT true]`;
+
+Replace with:
+
+const fbPrompt = `Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${er.constraintValue}".\n\nIMPORTANT: Only use VERIFIED if the constraint IS true for this business. If the business exists but does NOT match the constraint, use CONTRADICTED.\n\nStart your response with exactly one of:\n- VERIFIED: [evidence that the constraint IS true, with source URL]\n- UNVERIFIED: [reason you could not confirm either way]\n- CONTRADICTED: [evidence that the business does NOT match the constraint]`;
+
+### Change 2 — Add missing contradiction signals
+
+Find the contradictionSignals array. Add these entries to the end of the array:
+
+'not a ', 'not an ', 'is not ', 'are not ', 'isn\'t ', 'aren\'t ', 'rather than ', 'instead of '
+
+### Change 3 — Add constraint-specific negation check
+
+Immediately after the line:
+const hasContradiction = contradictionSignals.some(sig => lowerContent.includes(sig));
+
+Add:
+
+const constraintLower = er.constraintValue.toLowerCase();
+const constraintWords = constraintLower.split(/\s+/).filter(w => w.length > 3);
+const hasNegatedConstraint = lowerContent.includes('not a ' + constraintLower) || lowerContent.includes('not ' + constraintLower) || lowerContent.includes('no ' + constraintLower) || constraintWords.some(w => lowerContent.includes('not a ' + w) || lowerContent.includes('not ' + w + ' '));
+
+Then change:
+if (hasContradiction) {
+
+To:
+if (hasContradiction || hasNegatedConstraint) {
+
+This catches the VMS Solutions pattern: GPT-4o says "VERIFIED:" but then writes "not a biodegradable packaging manufacturer" — the negation of the exact constraint value.
+
+Work on the main branch only — do not create or switch branches. After completing this task, append a structured summary to AGENT_LOG.md (what changed, files modified, decisions made, what's next).

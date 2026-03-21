@@ -1427,7 +1427,7 @@ export async function executeMissionDrivenPlan(
             console.log(`[GPT4O_FALLBACK] Website visit succeeded for "${er.leadName}" but no evidence found. Queued for GPT-4o verification fallback.`);
           }
           try {
-            const fbPrompt = `Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following is genuinely true for this specific business: "${er.constraintValue}". Start your response with exactly one of:\n- VERIFIED: [evidence summary and source URL]\n- UNVERIFIED: [reason you could not confirm]\n- CONTRADICTED: [evidence that it is NOT true]`;
+            const fbPrompt = `Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${er.constraintValue}".\n\nIMPORTANT: Only use VERIFIED if the constraint IS true for this business. If the business exists but does NOT match the constraint, use CONTRADICTED.\n\nStart your response with exactly one of:\n- VERIFIED: [evidence that the constraint IS true, with source URL]\n- UNVERIFIED: [reason you could not confirm]\n- CONTRADICTED: [evidence that it is NOT true]`;
 
             const fbResp = await fetch('https://api.openai.com/v1/responses', {
               method: 'POST',
@@ -1483,11 +1483,16 @@ export async function executeMissionDrivenPlan(
                 'could not confirm', 'not confirmed', 'no indication', 'there is no',
                 'cannot be verified', 'could not be verified', 'not verified',
                 'this assertion cannot', 'unable to confirm', 'unable to verify',
+                'not a ', 'not an ', 'is not ', 'are not ', 'isn\'t ', 'aren\'t ', 'rather than ', 'instead of ',
               ];
               const lowerContent = fbContent.toLowerCase();
               const hasContradiction = contradictionSignals.some(sig => lowerContent.includes(sig));
 
-              if (hasContradiction) {
+              const constraintLower = er.constraintValue.toLowerCase();
+              const constraintWords = constraintLower.split(/\s+/).filter(w => w.length > 3);
+              const hasNegatedConstraint = lowerContent.includes('not a ' + constraintLower) || lowerContent.includes('not ' + constraintLower) || lowerContent.includes('no ' + constraintLower) || constraintWords.some(w => lowerContent.includes('not a ' + w) || lowerContent.includes('not ' + w + ' '));
+
+              if (hasContradiction || hasNegatedConstraint) {
                 er.verdict = 'no_evidence';
                 fallbackUnverified++;
                 console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": VERIFIED prefix but contradiction detected — treating as unverified. "${fbContent.substring(0, 150)}"`);

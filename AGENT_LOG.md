@@ -252,3 +252,43 @@ The old mapping computed `hasAnyEvidence`, `strongCount`, and `weakCount` and th
 
 - Prompt 3: Update `delivery-summary.ts` to use `verdict` instead of the old status strings.
 - Separately: remove the now-unused `applyHardEvidenceFilter` function and its supporting interfaces after confirming end-to-end correctness.
+
+---
+
+## Fix GPT-4o fallback prompt ambiguity and strengthen contradiction detector
+
+**Date:** 2026-03-21
+
+### What Changed
+
+Three changes in `server/supervisor/mission-executor.ts` inside the GPT-4o fallback section.
+
+**Change 1 — Prompt clarification** (line ~1433):
+
+The `fbPrompt` wording was made unambiguous about what VERIFIED means. Old text: *"Determine whether the following is genuinely true..."* — GPT-4o was sometimes using VERIFIED as "I found the business" rather than "the constraint is true". New text: *"Determine whether the following constraint is genuinely true..."* with an explicit IMPORTANT block: *"Only use VERIFIED if the constraint IS true for this business. If the business exists but does NOT match the constraint, use CONTRADICTED."* The VERIFIED response format now also reads *"evidence that the constraint IS true, with source URL"* to reinforce the distinction.
+
+Note: the task brief prompt text was truncated at `[evidence that the constraint IS true, wit ...[Truncated]`. The completion `with source URL]` was inferred from the original prompt pattern — the most natural and consistent completion.
+
+**Change 2 — Additional contradiction signals** (line ~1489):
+
+Eight new signals added to the `contradictionSignals` array:
+`'not a '`, `'not an '`, `'is not '`, `'are not '`, `'isn\'t '`, `'aren\'t '`, `'rather than '`, `'instead of '`
+
+**Change 3 — Constraint-specific negation check** (lines ~1494–1498):
+
+After `hasContradiction` is computed, three new lines derive `hasNegatedConstraint` by checking whether the lowercased response contains the constraint value (or its individual words >3 chars) negated with `'not a '`, `'not '`, or `'no '`. The `if` gate was widened from `if (hasContradiction)` to `if (hasContradiction || hasNegatedConstraint)` to catch the VMS Solutions pattern: GPT-4o returning VERIFIED but then writing "not a [constraint value]".
+
+### Files Modified
+
+- `server/supervisor/mission-executor.ts` — three locations in the GPT4O_FALLBACK section
+
+### Decisions Made
+
+- The truncated prompt ending was completed as `with source URL]` — the only sensible reading consistent with the original prompt structure.
+- The new broad signals (`'not a '`, `'is not '`, etc.) include a trailing space to reduce false positives on tokens like "isn't" within compound words.
+- The constraint-specific check is deliberately additive (OR), so the existing broad check still applies independently.
+
+### What's Next
+
+- Monitor fallback runs to confirm VMS-style false-positives are caught without over-filtering legitimate VERIFIED responses.
+- Prompt 3: Update `delivery-summary.ts`.
