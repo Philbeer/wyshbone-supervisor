@@ -408,7 +408,7 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
           : gLead?.confidence === 'medium' ? 'weak_match' as const
           : 'unverified' as const,
       })),
-      evidence: gLead ? [{ source_url: gLead.source_url, text: gLead.evidence, confidence: gLead.confidence }] : [],
+      evidence: gLead ? [{ source_url: gLead.source_url, text: gLead.evidence, snippet: gLead.evidence, quote: gLead.evidence, confidence: gLead.confidence }] : [],
       match_valid: true,
       match_summary: gLead
         ? `Found via GPT-4o web search: ${gLead.evidence.substring(0, 150)}`

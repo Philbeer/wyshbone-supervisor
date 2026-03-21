@@ -437,3 +437,32 @@ A summary log line `[GPT4O_SEARCH] Emitted N per-lead evidence artefacts for UI 
 
 - On a GPT-4o primary path run, check the artefact list for `constraint_led_evidence` entries per lead and confirm the UI dropdowns populate.
 - If `lead_place_id` lookups fail, consider whether the UI falls back gracefully or needs a real Place ID mapping.
+
+---
+
+## Add snippet and quote aliases to GPT-4o primary path delivery leads
+
+**Date:** 2026-03-21
+
+### What Changed
+
+One line changed in `server/supervisor/gpt4o-search.ts` inside the `deliveredLeadsWithEvidence` mapping (line ~414).
+
+The `evidence` array entry previously only had `text: gLead.evidence`. Added `snippet: gLead.evidence` and `quote: gLead.evidence` as aliases on the same object. The chat bubble's LeadRow component reads `evidence[0].snippet` or `evidence[0].quote` — not `text` — so GPT-4o primary path results were silently showing no evidence text in the dropdown.
+
+The `dsLeads` mapping's `supporting_evidence` line already used `snippet` correctly and was confirmed unchanged.
+
+### Files Modified
+
+- `server/supervisor/gpt4o-search.ts` — one line, two fields added
+
+### Decisions Made
+
+- Both `snippet` and `quote` were added as aliases so the UI works regardless of which field it tries first.
+- The `text` field was kept so any other consumer that reads `text` is not broken.
+- The `dsLeads` / `supporting_evidence` path already used `snippet` correctly — no change needed there.
+
+### What's Next
+
+- On the next GPT-4o primary path run, confirm evidence text appears in chat bubble dropdowns.
+- No further changes needed for this path.
