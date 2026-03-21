@@ -1427,7 +1427,22 @@ export async function executeMissionDrivenPlan(
             console.log(`[GPT4O_FALLBACK] Website visit succeeded for "${er.leadName}" but no evidence found. Queued for GPT-4o verification fallback.`);
           }
           try {
-            const fbPrompt = `Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${er.constraintValue}".\n\nIMPORTANT: Only use VERIFIED if the constraint IS true for this business. If the business exists but does NOT match the constraint, use CONTRADICTED.\n\nStart your response with exactly one of:\n- VERIFIED: [evidence that the constraint IS true, with source URL]\n- UNVERIFIED: [reason you could not confirm]\n- CONTRADICTED: [evidence that it is NOT true]`;
+            const fbPrompt = `Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${er.constraintValue}".
+
+Respond with JSON only, no markdown fences, no other text:
+{
+  "business_found": true or false,
+  "constraint_met": true or false,
+  "confidence": "high" or "medium" or "low",
+  "reasoning": "one sentence explaining why the constraint is or is not met",
+  "source_url": "the URL you found evidence on, or null"
+}
+
+IMPORTANT:
+- business_found means you found information about this specific business
+- constraint_met means the constraint "${er.constraintValue}" IS genuinely true for this business
+- If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false
+- A business that merely MENTIONS or USES something is NOT the same as a business that MANUFACTURES or PROVIDES it`;
 
             const fbResp = await fetch('https://api.openai.com/v1/responses', {
               method: 'POST',
@@ -1476,46 +1491,44 @@ export async function executeMissionDrivenPlan(
             if (!fbContent && fbData.output_text) fbContent = fbData.output_text;
 
             er.sourceTier = 'web_search_fallback';
-            const fbUpper = fbContent.trimStart().toUpperCase();
-            if (fbUpper.startsWith('VERIFIED')) {
-              const contradictionSignals = [
-                'no mention of', 'no evidence of', 'does not', 'do not', 'cannot be confirmed',
-                'could not confirm', 'not confirmed', 'no indication', 'there is no',
-                'cannot be verified', 'could not be verified', 'not verified',
-                'this assertion cannot', 'unable to confirm', 'unable to verify',
-                'not a ', 'not an ', 'is not ', 'are not ', 'isn\'t ', 'aren\'t ', 'rather than ', 'instead of ',
-              ];
-              const lowerContent = fbContent.toLowerCase();
-              const hasContradiction = contradictionSignals.some(sig => lowerContent.includes(sig));
 
-              const constraintLower = er.constraintValue.toLowerCase();
-              const constraintWords = constraintLower.split(/\s+/).filter(w => w.length > 3);
-              const hasNegatedConstraint = lowerContent.includes('not a ' + constraintLower) || lowerContent.includes('not ' + constraintLower) || lowerContent.includes('no ' + constraintLower) || constraintWords.some(w => lowerContent.includes('not a ' + w) || lowerContent.includes('not ' + w + ' '));
-
-              if (hasContradiction || hasNegatedConstraint) {
-                er.verdict = 'no_evidence';
-                fallbackUnverified++;
-                console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": VERIFIED prefix but contradiction detected — treating as unverified. "${fbContent.substring(0, 150)}"`);
-              } else {
-                er.evidenceFound = true;
-                er.evidenceStrength = 'strong';
-                er.towerStatus = 'verified' as any;
-                er.towerConfidence = 0.75;
-                er.towerReasoning = 'Verified via GPT-4o web search fallback (website was bot-blocked or had no extractable evidence)';
-                er.snippets = [fbContent.substring(0, 500)];
-                if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
-                er.verdict = 'verified';
-                fallbackVerified++;
-                console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": verified — source=${fbSourceUrl || 'no_url'} evidence="${fbContent.substring(0, 120)}"`);
+            // Parse structured JSON response
+            let fbParsed: { business_found?: boolean; constraint_met?: boolean; confidence?: string; reasoning?: string; source_url?: string | null } | null = null;
+            try {
+              const jsonMatch = fbContent.match(/\{[\s\S]*\}/);
+              if (jsonMatch) {
+                fbParsed = JSON.parse(jsonMatch[0]);
               }
-            } else if (fbUpper.startsWith('CONTRADICTED')) {
+            } catch {
+              // If JSON parse fails, try legacy prefix detection as fallback
+              const cleanContent = fbContent.toLowerCase().replace(/\*\*/g, '').replace(/\*/g, '');
+              if (cleanContent.trimStart().startsWith('verified') && !cleanContent.includes('not a ') && !cleanContent.includes('is not ') && !cleanContent.includes('does not ')) {
+                fbParsed = { business_found: true, constraint_met: true, confidence: 'medium', reasoning: fbContent.substring(0, 300), source_url: fbSourceUrl || null };
+              } else if (cleanContent.trimStart().startsWith('contradicted')) {
+                fbParsed = { business_found: true, constraint_met: false, confidence: 'high', reasoning: fbContent.substring(0, 300), source_url: null };
+              }
+            }
+
+            if (fbParsed && fbParsed.business_found && fbParsed.constraint_met) {
+              er.evidenceFound = true;
+              er.evidenceStrength = 'strong';
+              er.towerStatus = 'verified' as any;
+              er.towerConfidence = fbParsed.confidence === 'high' ? 0.85 : fbParsed.confidence === 'medium' ? 0.65 : 0.45;
+              er.towerReasoning = fbParsed.reasoning || 'Verified via GPT-4o web search fallback';
+              er.snippets = [fbParsed.reasoning || fbContent.substring(0, 500)];
+              if (fbParsed.source_url) er.sourceUrl = fbParsed.source_url;
+              else if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
+              er.verdict = 'verified';
+              fallbackVerified++;
+              console.log(`[GPT4O_FALLBACK] GPT-4o fallback for "${er.leadName}": CONSTRAINT MET (confidence=${fbParsed.confidence}) — ${(fbParsed.reasoning || '').substring(0, 120)}`);
+            } else if (fbParsed && fbParsed.business_found && !fbParsed.constraint_met) {
               er.verdict = 'no_evidence';
               fallbackContradicted++;
-              console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": contradicted — "${fbContent.substring(0, 120)}"`);
+              console.log(`[GPT4O_FALLBACK] GPT-4o fallback for "${er.leadName}": CONSTRAINT NOT MET — ${(fbParsed.reasoning || '').substring(0, 120)}`);
             } else {
               er.verdict = 'no_evidence';
               fallbackUnverified++;
-              console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": unverified — "${fbContent.substring(0, 120)}"`);
+              console.log(`[GPT4O_FALLBACK] GPT-4o fallback for "${er.leadName}": ${fbParsed ? 'business not found' : 'unparseable response'} — "${fbContent.substring(0, 120)}"`);
             }
           } catch (fbErr: any) {
             console.warn(`[GPT4O_FALLBACK] "${er.leadName}": error — ${fbErr.message}`);

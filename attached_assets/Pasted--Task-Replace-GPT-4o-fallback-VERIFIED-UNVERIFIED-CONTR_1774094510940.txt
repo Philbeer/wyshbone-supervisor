@@ -1,0 +1,92 @@
+## Task: Replace GPT-4o fallback VERIFIED/UNVERIFIED/CONTRADICTED prefix parsing with structured JSON output
+
+The current GPT-4o fallback asks the LLM to start with VERIFIED/UNVERIFIED/CONTRADICTED, but GPT-4o interprets "VERIFIED" as "I verified the facts" not "the constraint is true." This causes false positives no matter how many contradiction detectors we add. The fix: ask for structured JSON with separate fields for "did you find the business" and "does it match the constraint."
+
+In server/supervisor/mission-executor.ts, find the GPT-4o fallback section (search for GPT4O_FALLBACK).
+
+### Change 1 — Replace the prompt
+
+Find the fbPrompt assignment. Replace the entire line with:
+```typescript
+            const fbPrompt = `Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${er.constraintValue}".
+
+Respond with JSON only, no markdown fences, no other text:
+{
+  "business_found": true or false,
+  "constraint_met": true or false,
+  "confidence": "high" or "medium" or "low",
+  "reasoning": "one sentence explaining why the constraint is or is not met",
+  "source_url": "the URL you found evidence on, or null"
+}
+
+IMPORTANT:
+- business_found means you found information about this specific business
+- constraint_met means the constraint "${er.constraintValue}" IS genuinely true for this business
+- If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false
+- A business that merely MENTIONS or USES something is NOT the same as a business that MANUFACTURES or PROVIDES it`;
+```
+
+### Change 2 — Replace the response parsing
+
+Find the entire block that parses the response — starting from:
+er.sourceTier = 'web_search_fallback';
+const fbUpper = fbContent.trimStart().toUpperCase();
+if (fbUpper.startsWith('VERIFIED')) {
+
+Through to the end of the final `else` block (the one that sets `fallbackUnverified++`). Replace that entire block (from `er.sourceTier = 'web_search_fallback';` through the last `fallbackUnverified++;` and its closing `}`) with:
+```typescript
+            er.sourceTier = 'web_search_fallback';
+
+            // Parse structured JSON response
+            let fbParsed: { business_found?: boolean; constraint_met?: boolean; confidence?: string; reasoning?: string; source_url?: string | null } | null = null;
+            try {
+              const jsonMatch = fbContent.match(/\{[\s\S]*\}/);
+              if (jsonMatch) {
+                fbParsed = JSON.parse(jsonMatch[0]);
+              }
+            } catch {
+              // If JSON parse fails, try legacy prefix detection as fallback
+              const cleanContent = fbContent.toLowerCase().replace(/\*\*/g, '').replace(/\*/g, '');
+              if (cleanContent.trimStart().startsWith('verified') && !cleanContent.includes('not a ') && !cleanContent.includes('is not ') && !cleanContent.includes('does not ')) {
+                fbParsed = { business_found: true, constraint_met: true, confidence: 'medium', reasoning: fbContent.substring(0, 300), source_url: fbSourceUrl || null };
+              } else if (cleanContent.trimStart().startsWith('contradicted')) {
+                fbParsed = { business_found: true, constraint_met: false, confidence: 'high', reasoning: fbContent.substring(0, 300), source_url: null };
+              }
+            }
+
+            if (fbParsed && fbParsed.business_found && fbParsed.constraint_met) {
+              er.evidenceFound = true;
+              er.evidenceStrength = 'strong';
+              er.towerStatus = 'verified' as any;
+              er.towerConfidence = fbParsed.confidence === 'high' ? 0.85 : fbParsed.confidence === 'medium' ? 0.65 : 0.45;
+              er.towerReasoning = fbParsed.reasoning || 'Verified via GPT-4o web search fallback';
+              er.snippets = [fbParsed.reasoning || fbContent.substring(0, 500)];
+              if (fbParsed.source_url) er.sourceUrl = fbParsed.source_url;
+              else if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
+              er.verdict = 'verified';
+              fallbackVerified++;
+              console.log(`[GPT4O_FALLBACK] GPT-4o fallback for "${er.leadName}": CONSTRAINT MET (confidence=${fbParsed.confidence}) — ${(fbParsed.reasoning || '').substring(0, 120)}`);
+            } else if (fbParsed && fbParsed.business_found && !fbParsed.constraint_met) {
+              er.verdict = 'no_evidence';
+              fallbackContradicted++;
+              console.log(`[GPT4O_FALLBACK] GPT-4o fallback for "${er.leadName}": CONSTRAINT NOT MET — ${(fbParsed.reasoning || '').substring(0, 120)}`);
+            } else {
+              er.verdict = 'no_evidence';
+              fallbackUnverified++;
+              console.log(`[GPT4O_FALLBACK] GPT-4o fallback for "${er.leadName}": ${fbParsed ? 'business not found' : 'unparseable response'} — "${fbContent.substring(0, 120)}"`);
+            }
+```
+
+### What this achieves
+
+Before: "Start with VERIFIED/UNVERIFIED/CONTRADICTED" → GPT-4o confuses "I verified the info" with "the constraint is true" → regex contradiction detectors as safety nets → still fails on markdown formatting
+
+After: "Return JSON with business_found and constraint_met as separate fields" → GPT-4o correctly sets business_found=true, constraint_met=false for Two Fifteen → no ambiguity, no regex needed
+
+The legacy prefix parsing is kept as a fallback only if JSON parsing fails, which handles any edge case where GPT-4o ignores the JSON instruction.
+
+### What gets removed
+
+The contradictionSignals array and hasNegatedConstraint check are no longer needed for the main path — they only exist in the legacy fallback now. They can be cleaned up in a future prompt but are harmless to leave.
+
+Work on the main branch only — do not create or switch branches. After completing this task, append a structured summary to AGENT_LOG.md (what changed, files modified, decisions made, what's next).

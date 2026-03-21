@@ -292,3 +292,46 @@ After `hasContradiction` is computed, three new lines derive `hasNegatedConstrai
 
 - Monitor fallback runs to confirm VMS-style false-positives are caught without over-filtering legitimate VERIFIED responses.
 - Prompt 3: Update `delivery-summary.ts`.
+
+---
+
+## Replace GPT-4o fallback prefix parsing with structured JSON output
+
+**Date:** 2026-03-21
+
+### What Changed
+
+Two changes in `server/supervisor/mission-executor.ts` inside the GPT4O_FALLBACK section.
+
+**Change 1 — Prompt replaced** (line ~1433):
+
+The old prefix-based prompt (`Start your response with exactly one of: VERIFIED / UNVERIFIED / CONTRADICTED`) was replaced with a JSON-output prompt. GPT-4o is now asked to return a JSON object with five fields: `business_found`, `constraint_met`, `confidence`, `reasoning`, `source_url`. The IMPORTANT block makes the semantic distinction explicit: `business_found` = found info about the business; `constraint_met` = the constraint itself is genuinely true. The fourth bullet explicitly prevents the "mentions/uses ≠ manufactures/provides" confusion (VMS Solutions pattern).
+
+**Change 2 — Response parsing replaced** (lines ~1496–1535):
+
+The old block (`fbUpper.startsWith('VERIFIED')` → contradictionSignals array → hasNegatedConstraint check) was replaced with:
+
+1. JSON extraction via `fbContent.match(/\{[\s\S]*\}/)` and `JSON.parse`.
+2. A legacy prefix fallback inside the `catch` block: if JSON parse fails, falls back to the old VERIFIED/CONTRADICTED prefix check (with the stricter negation guards) — handles edge cases where GPT-4o ignores the JSON instruction.
+3. Three outcome branches on the parsed object:
+   - `business_found && constraint_met` → `verdict = 'verified'`, `towerConfidence` derived from `confidence` field (high=0.85, medium=0.65, low=0.45), `towerReasoning` from `reasoning` field
+   - `business_found && !constraint_met` → `verdict = 'no_evidence'`, `fallbackContradicted++`
+   - everything else (business not found, unparseable) → `verdict = 'no_evidence'`, `fallbackUnverified++`
+
+The `contradictionSignals` array and `hasNegatedConstraint` check from the previous task now only exist inside the legacy `catch` fallback. They are harmless and will be cleaned up in a future prompt.
+
+### Files Modified
+
+- `server/supervisor/mission-executor.ts` — two locations in the GPT4O_FALLBACK section
+
+### Decisions Made
+
+- The legacy prefix fallback is inside the `catch` block (JSON parse failure), not in the main path. This means the new JSON path is the only path for well-formed GPT-4o responses.
+- `towerConfidence` is now dynamic (0.85 / 0.65 / 0.45) rather than a fixed 0.75, giving the AFR audit trail a calibrated confidence signal.
+- The workflow was restarted to load the new backend code.
+
+### What's Next
+
+- Observe next fallback run logs for `CONSTRAINT MET` / `CONSTRAINT NOT MET` / `unparseable response` log lines to confirm JSON parsing is working.
+- Prompt 3: Update `delivery-summary.ts` to use `verdict`.
+- Future cleanup: remove the now-redundant `contradictionSignals` array and `hasNegatedConstraint` from the legacy catch block.
