@@ -2498,3 +2498,32 @@ The mapping now aligns with the GP cascade evidence system: `high` → strong ev
 
 - Monitor GPT-4o runs to confirm low-confidence leads are being filtered and the delivery count reflects only high/medium results.
 - Consider whether `match_valid: true` (unchanged) should also be gated on confidence for GPT-4o leads.
+
+---
+
+## Prompt 3 — Fix GPT-4o fallback VERIFIED parser
+
+**Date:** 2026-03-21
+
+### What Changed
+
+**File modified:** `server/supervisor/mission-executor.ts`
+
+Inside the `GPT4O_FALLBACK` block, the `if (fbUpper.startsWith('VERIFIED'))` branch was extended with a contradiction-signal check before marking the lead as verified.
+
+Before: any response starting with "VERIFIED" unconditionally set `evidenceFound = true` and `evidenceStrength = 'weak'`.
+
+After: the full response is scanned for 13 contradiction phrases (`'no mention of'`, `'does not'`, `'cannot be confirmed'`, etc.). If any are found, the lead is counted as `fallbackUnverified` and a log entry explains why. Only responses with no contradiction signals proceed to set `evidenceFound = true`.
+
+### Problem
+
+GPT-4o sometimes formats a response as `"VERIFIED: [business] is in [location]… but there is no mention of [constraint]."` The naive prefix check saw `"VERIFIED"` and accepted it as positive evidence, bypassing the hard evidence filter. The VMS Solutions / biodegradable packaging case was the concrete example.
+
+### Decision
+
+Contradiction scanning runs only inside the `VERIFIED` branch — `CONTRADICTED` and the fallthrough (unverified) paths are unchanged. The signal list covers the most common GPT-4o negation patterns without being so aggressive that it would accidentally flag genuine verifications. False negatives (genuine verification accidentally caught by contradiction scan) are lower risk than false positives (junk results passed as evidence).
+
+### What's Next
+
+- Monitor `[GPT4O_FALLBACK] VERIFIED prefix but contradiction detected` log entries in live runs to measure how often this path fires and whether the signal list needs expansion.
+- Consider whether `fbUpper.startsWith('CONTRADICTED')` should also be subjected to a secondary check (a `CONTRADICTED` response with no actual contradiction language).

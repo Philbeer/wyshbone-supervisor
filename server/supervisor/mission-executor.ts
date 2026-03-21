@@ -1468,12 +1468,26 @@ export async function executeMissionDrivenPlan(
             er.sourceTier = 'web_search_fallback';
             const fbUpper = fbContent.trimStart().toUpperCase();
             if (fbUpper.startsWith('VERIFIED')) {
-              er.evidenceFound = true;
-              er.evidenceStrength = 'weak';
-              er.snippets = [fbContent.substring(0, 500)];
-              if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
-              fallbackVerified++;
-              console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": verified — source=${fbSourceUrl || 'no_url'} evidence="${fbContent.substring(0, 120)}"`);
+              const contradictionSignals = [
+                'no mention of', 'no evidence of', 'does not', 'do not', 'cannot be confirmed',
+                'could not confirm', 'not confirmed', 'no indication', 'there is no',
+                'cannot be verified', 'could not be verified', 'not verified',
+                'this assertion cannot', 'unable to confirm', 'unable to verify',
+              ];
+              const lowerContent = fbContent.toLowerCase();
+              const hasContradiction = contradictionSignals.some(sig => lowerContent.includes(sig));
+
+              if (hasContradiction) {
+                fallbackUnverified++;
+                console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": VERIFIED prefix but contradiction detected — treating as unverified. "${fbContent.substring(0, 150)}"`);
+              } else {
+                er.evidenceFound = true;
+                er.evidenceStrength = 'weak';
+                er.snippets = [fbContent.substring(0, 500)];
+                if (fbSourceUrl) er.sourceUrl = fbSourceUrl;
+                fallbackVerified++;
+                console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": verified — source=${fbSourceUrl || 'no_url'} evidence="${fbContent.substring(0, 120)}"`);
+              }
             } else if (fbUpper.startsWith('CONTRADICTED')) {
               fallbackContradicted++;
               console.log(`[GPT4O_FALLBACK] GPT-4o fallback result for "${er.leadName}": contradicted — "${fbContent.substring(0, 120)}"`);
