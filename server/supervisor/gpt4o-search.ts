@@ -124,8 +124,10 @@ async function callGpt4oWebSearch(
     const { default: OpenAI } = await import('openai');
     const openai = new OpenAI({ apiKey: openaiKey });
 
+    const primaryModel = process.env.GPT4O_PRIMARY_MODEL ?? 'gpt-4o';
+    console.log(`[GPT4O_SEARCH] Using model: ${primaryModel}`);
     const response = await (openai as any).responses.create({
-      model: 'gpt-4o',
+      model: primaryModel,
       tools: [{ type: 'web_search_preview' }],
       input: prompt,
     });

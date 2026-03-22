@@ -1444,6 +1444,8 @@ IMPORTANT:
 - If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false
 - A business that merely MENTIONS or USES something is NOT the same as a business that MANUFACTURES or PROVIDES it`;
 
+            const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
+            console.log(`[GPT4O_FALLBACK] Using model: ${fallbackModel}`);
             const fbResp = await fetch('https://api.openai.com/v1/responses', {
               method: 'POST',
               headers: {
@@ -1451,7 +1453,7 @@ IMPORTANT:
                 'Content-Type': 'application/json',
               },
               body: JSON.stringify({
-                model: 'gpt-4o',
+                model: fallbackModel,
                 input: fbPrompt,
                 tools: [{ type: 'web_search' }],
                 store: false,
@@ -1600,6 +1602,8 @@ IMPORTANT:
           .join('\n\n');
 
         try {
+          const cascadeModel = process.env.GPT4O_CASCADE_MODEL ?? 'gpt-4o-mini';
+          console.log(`[DISCOVERY_CASCADE] Using model: ${cascadeModel}`);
           const cascadeResp = await fetch('https://api.openai.com/v1/responses', {
             method: 'POST',
             headers: {
@@ -1607,7 +1611,7 @@ IMPORTANT:
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              model: 'gpt-4o',
+              model: cascadeModel,
               input: cascadePrompt,
               tools: [{ type: 'web_search' }],
               store: false,
