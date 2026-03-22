@@ -917,7 +917,7 @@ export async function extractConstraintLedEvidence(
       console.log(`[EVIDENCE_EXTRACT_LLM] sending ${extracts.length} windows to gpt-4o for "${leadName}"`);
 
       const llmCallPromise = client.chat.completions.create({
-        model: 'gpt-4o',
+        model: process.env.EVIDENCE_JUDGE_MODEL ?? 'gpt-4o-mini',
         temperature: 0.1,
         max_tokens: 200,
         response_format: { type: 'json_object' },

@@ -493,3 +493,30 @@ One line changed in `server/supervisor/mission-executor.ts` inside `processOneLe
 ### What's Next
 
 - No follow-up required. This is a cosmetic quality improvement to the snippets array.
+
+---
+
+## Make Layer 2 evidence-judge model configurable via env var
+
+**Date:** 2026-03-22
+
+### What Changed
+
+- `server/supervisor/constraint-led-extractor.ts` — inside `extractConstraintLedEvidence()`, the `client.chat.completions.create` call that performs Layer 2 LLM judgement (does this extract prove the constraint?) had `model: 'gpt-4o'` hardcoded. Changed to `model: process.env.EVIDENCE_JUDGE_MODEL ?? 'gpt-4o-mini'`.
+
+### Files Modified
+
+- `server/supervisor/constraint-led-extractor.ts` — one line (model string on the Layer 2 LLM call)
+
+### Decisions Made
+
+- Default fallback is `gpt-4o-mini` (not `gpt-4o`) so that if the secret is ever missing the cheaper model runs rather than silently upgrading cost.
+- No other parameters were touched: system prompt, temperature (0.1), max_tokens (200), and response_format remain unchanged.
+- `EVIDENCE_JUDGE_MODEL` already existed as a Replit Secret; no new secret creation was needed.
+- The Layer 1 keyword-scan path is unaffected — only the LLM judge call reads from this variable.
+
+### What's Next
+
+- Run a test query with an attribute constraint (e.g. "pubs in Arundel with a beer garden") to confirm `gpt-4o-mini` evidence quality is acceptable.
+- If evidence quality drops noticeably, set `EVIDENCE_JUDGE_MODEL=gpt-4o` in the Secrets tab — no code change or redeploy required.
+- The task (classifying 5 short text windows against a single yes/no criterion) is well within mini's capability; the expectation is no regression.
