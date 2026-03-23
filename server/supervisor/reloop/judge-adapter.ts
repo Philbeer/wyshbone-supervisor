@@ -7,6 +7,14 @@ export function evaluate(params: {
   availableExecutors: string[];
   executorsTriedSoFar: string[];
 }): JudgeVerdict {
+  const RESULT_CONCERN_RATIO = parseFloat(process.env.RELOOP_RESULT_CONCERN_RATIO ?? '0.7');
+  const COVERAGE_CONCERN_PCT = parseInt(process.env.RELOOP_COVERAGE_CONCERN_PCT ?? '70', 10);
+  const EVIDENCE_QUALITY_RATIO = parseFloat(process.env.RELOOP_EVIDENCE_QUALITY_RATIO ?? '0.5');
+  const CAPABILITY_FAIL_PCT = parseInt(process.env.RELOOP_CAPABILITY_FAIL_PCT ?? '50', 10);
+  const PARTIAL_RELOOP_PCT = parseInt(process.env.RELOOP_PARTIAL_RELOOP_PCT ?? '60', 10);
+
+  console.log(`[RELOOP_JUDGE] Thresholds: RESULT_CONCERN_RATIO=${RESULT_CONCERN_RATIO} COVERAGE_CONCERN_PCT=${COVERAGE_CONCERN_PCT} EVIDENCE_QUALITY_RATIO=${EVIDENCE_QUALITY_RATIO} CAPABILITY_FAIL_PCT=${CAPABILITY_FAIL_PCT} PARTIAL_RELOOP_PCT=${PARTIAL_RELOOP_PCT}`);
+
   const { executorOutput, requestedCount, knownEntityNames, availableExecutors, executorsTriedSoFar } = params;
 
   const entities = executorOutput.entities;
@@ -31,7 +39,7 @@ export function evaluate(params: {
     resultCount: {
       found,
       expected,
-      concern: expected !== null ? found < expected * 0.7 : found === 0,
+      concern: expected !== null ? found < expected * RESULT_CONCERN_RATIO : found === 0,
     },
     toolExhaustion: {
       exhausted: toolExhausted,
@@ -40,12 +48,12 @@ export function evaluate(params: {
     },
     coverageGap: {
       percentage: coveragePercent,
-      concern: coveragePercent !== null ? coveragePercent < 70 : false,
+      concern: coveragePercent !== null ? coveragePercent < COVERAGE_CONCERN_PCT : false,
     },
     evidenceQuality: {
       verifiedCount,
       totalCount,
-      concern: totalCount > 0 ? verifiedCount / totalCount < 0.5 : false,
+      concern: totalCount > 0 ? verifiedCount / totalCount < EVIDENCE_QUALITY_RATIO : false,
     },
     duplicateRate: {
       rate: duplicateRate,
@@ -59,7 +67,7 @@ export function evaluate(params: {
   const hasErrors = errors.length > 0 || rateLimitsHit;
   const hasCoverage = !variableState.resultCount.concern;
   const toolMaxed = variableState.toolExhaustion.concern;
-  const significantCoverageGap = variableState.coverageGap.concern && (coveragePercent !== null && coveragePercent < 50);
+  const significantCoverageGap = variableState.coverageGap.concern && (coveragePercent !== null && coveragePercent < CAPABILITY_FAIL_PCT);
 
   let verdict: JudgeVerdict['verdict'];
   let confidence: number;
@@ -86,7 +94,7 @@ export function evaluate(params: {
     verdict = 'PARTIAL';
     confidence = 0.6;
     const untriedExecutors = availableExecutors.filter(e => !executorsTriedSoFar.includes(e));
-    recommendation = (untriedExecutors.length > 0 && coveragePercent !== null && coveragePercent < 60)
+    recommendation = (untriedExecutors.length > 0 && coveragePercent !== null && coveragePercent < PARTIAL_RELOOP_PCT)
       ? 're_loop'
       : 'deliver';
     recommendationReason = `Partial results (${found}${expected !== null ? '/' + expected : ''}). Coverage at ${coveragePercent ?? '?'}%.`;

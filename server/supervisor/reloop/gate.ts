@@ -45,6 +45,11 @@ export function decide(params: {
     executorsTriedSoFar,
   } = params;
 
+  const PARTIAL_RELOOP_PCT = parseInt(process.env.RELOOP_PARTIAL_RELOOP_PCT ?? '60', 10);
+  const PASS_CONFIDENCE = parseFloat(process.env.RELOOP_PASS_CONFIDENCE ?? '0.6');
+
+  console.log(`[RELOOP_GATE] Thresholds: PARTIAL_RELOOP_PCT=${PARTIAL_RELOOP_PCT} PASS_CONFIDENCE=${PASS_CONFIDENCE}`);
+
   const MAX_LOOPS = getMaxLoops();
 
   const newAccumulated = deduplicateEntities([...accumulatedEntities, ...currentLoopEntities]);
@@ -92,7 +97,7 @@ export function decide(params: {
 
   const { verdict, confidence, recommendation, recommendationReason } = judgeVerdict;
 
-  if (verdict === 'PASS' && confidence > 0.6) {
+  if (verdict === 'PASS' && confidence > PASS_CONFIDENCE) {
     const reason = `Verdict PASS with confidence ${confidence.toFixed(2)}. Delivering results.`;
     console.log(`[RELOOP_GATE] Loop ${loopNumber}: decision=stop_deliver reason=${reason} accumulated=${newAccumulated.length} circuitBreaker=false`);
     return {
@@ -147,7 +152,7 @@ export function decide(params: {
   if (verdict === 'PARTIAL') {
     const untriedExecutors = availableExecutors.filter(e => !executorsTriedSoFar.includes(e));
     const coveragePercent = judgeVerdict.variableState.coverageGap.percentage;
-    const shouldReloop = untriedExecutors.length > 0 && (coveragePercent === null || coveragePercent < 60);
+    const shouldReloop = untriedExecutors.length > 0 && (coveragePercent === null || coveragePercent < PARTIAL_RELOOP_PCT);
     if (shouldReloop) {
       const nextExecutor = untriedExecutors[0];
       const reason = `PARTIAL results (coverage=${coveragePercent ?? '?'}%) — re-looping with ${nextExecutor} to improve coverage. ${recommendationReason}`;
