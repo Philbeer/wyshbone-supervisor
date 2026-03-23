@@ -1,0 +1,79 @@
+Supervisor Repo: Intent Narrative Artefact Payload Investigation
+Context
+The UI needs to display a 🧠 intent bubble in the chat when a run starts. It reads artefacts via /api/afr/artefacts and looks for entity_description in the payload to render the bubble.
+The UI currently checks these paths to find entity_description:
+javascriptpayload.entity_description
+payload.entityDescription
+payload.intent?.entity_description
+payload.narrative?.entity_description
+The Problem
+The intent_extracted_shadow artefact (created in server/supervisor/intent-shadow.ts) has entity_description nested under extracted_intent:
+javascriptpayload: {
+  input_message: userMessage,
+  extracted_intent: {   // ← entity_description is IN HERE
+    entity_description: "...",
+    entity_exclusions: [...],
+    ...
+  },
+  validation_ok: true,
+  ...
+}
+NONE of the UI's extraction paths reach payload.extracted_intent.entity_description.
+Task: INVESTIGATION ONLY — Report what artefact payloads look like
+Search the codebase for ALL places that create artefacts with types containing "intent" or "narrative". For each one, report:
+
+The file and function name
+The artefact type string
+The exact payload object structure (what are the top-level keys?)
+Where entity_description lives in that payload (if at all)
+
+Files to check:
+
+server/supervisor/intent-shadow.ts — creates intent_extracted_shadow
+
+We already know: entity_description is at payload.extracted_intent.entity_description
+
+
+server/supervisor/mission-executor.ts or wherever Pass 3 intent_narrative artefact is persisted
+
+Find where createArtefact({ type: 'intent_narrative', ... }) is called
+Report the payload structure
+
+
+Any other file that calls createArtefact with a type containing "intent" or "narrative"
+
+Recommended Fix (if you agree with the assessment)
+The simplest fix is to add a top-level entity_description field to the intent_extracted_shadow payload in intent-shadow.ts, so the UI can find it without changing its extraction logic.
+In server/supervisor/intent-shadow.ts, find the createArtefact call:
+javascript      payload: {
+        input_message: userMessage,
+        extracted_intent: validationOk ? extraction!.validation.intent : null,
+        validation_ok: validationOk,
+        validation_errors: validationErrors,
+        model,
+        duration_ms: durationMs,
+      },
+Change it to:
+javascript      payload: {
+        input_message: userMessage,
+        extracted_intent: validationOk ? extraction!.validation.intent : null,
+        // Surface entity_description at top level so the UI can find it
+        entity_description: validationOk ? (extraction!.validation.intent as any)?.entity_description ?? null : null,
+        entity_exclusions: validationOk ? (extraction!.validation.intent as any)?.entity_exclusions ?? null : null,
+        commercial_context: validationOk ? (extraction!.validation.intent as any)?.commercial_context ?? null : null,
+        key_discriminator: validationOk ? (extraction!.validation.intent as any)?.key_discriminator ?? null : null,
+        findability: validationOk ? (extraction!.validation.intent as any)?.findability ?? null : null,
+        scarcity_expectation: validationOk ? (extraction!.validation.intent as any)?.scarcity_expectation ?? null : null,
+        clarification_needed: validationOk ? (extraction!.validation.intent as any)?.clarification_needed ?? null : null,
+        clarification_question: validationOk ? (extraction!.validation.intent as any)?.clarification_question ?? null : null,
+        validation_ok: validationOk,
+        validation_errors: validationErrors,
+        model,
+        duration_ms: durationMs,
+      },
+BUT FIRST: check what fields the extraction.validation.intent object actually has. If it doesn't have entity_description (because that comes from Pass 3, not the shadow extractor), then this fix won't work and we need a different approach.
+Report back:
+
+Does extraction.validation.intent (the CanonicalIntent type) contain entity_description? Or is that only in the Pass 3 IntentNarrative?
+Where exactly is the Pass 3 intent_narrative artefact created? What is its payload structure?
+Can we surface entity_description at the top level of intent_extracted_shadow payload?
