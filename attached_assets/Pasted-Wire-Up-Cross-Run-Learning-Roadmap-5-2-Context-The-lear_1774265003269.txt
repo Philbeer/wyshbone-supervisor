@@ -1,0 +1,261 @@
+Wire Up Cross-Run Learning (Roadmap 5.2)
+Context
+The learning layer infrastructure exists but is dead code — nothing calls it during actual runs. The Tower already generates learning_update in its judge-artefact response (confirmed in routes-judge-artefact.ts), but the Supervisor ignores it. The learning store tables exist in Supabase (migration 005). The query shape key functions exist (query-shape-key.ts). The learning store read/write functions exist (learning-store.ts). None of them are called.
+This task wires everything together so the system actually learns from past runs.
+What "learning" means concretely
+After each run, the system records: "For queries shaped like find_venues::pubs::GB::attr:live_music, Google Places found 3 results and GPT-4o found 8. Next time, skip GP and start with GPT-4o."
+Before each run, the planner checks: "Have I seen this query shape before? What worked last time?" and adjusts accordingly.
+Changes needed — ALL in the Supervisor repo
+Change 1: Compute query shape key early in the run
+In server/supervisor/mission-executor.ts, in the executeMissionDrivenPlan function, after deriveSearchParams and before the plan artefact:
+typescriptimport { computeQueryShapeKey, deriveQueryShapeFromGoal } from './query-shape-key';
+
+// ... inside executeMissionDrivenPlan, after deriveSearchParams:
+const queryShapeInput = deriveQueryShapeFromGoal({
+  business_type: businessType,
+  location,
+  country,
+  attribute_filter: null,
+  constraints: mission.constraints.map(c => ({
+    type: c.type,
+    field: c.field,
+    hard: c.hardness === 'hard',
+    value: typeof c.value === 'string' ? c.value : String(c.value ?? ''),
+  })),
+});
+const queryShapeKey = computeQueryShapeKey(queryShapeInput);
+console.log(`[LEARNING] queryShapeKey=${queryShapeKey} for runId=${runId}`);
+Also do the same in executeMissionWithReloop — compute it early and pass it through to the reloop context.
+Change 2: Send query_shape_key to Tower in judge-artefact calls
+In server/supervisor/tower-artefact-judge.ts, add query_shape_key to the ArtefactJudgementRequest interface:
+typescriptexport interface ArtefactJudgementRequest {
+  runId: string;
+  artefactId: string;
+  goal: string;
+  successCriteria?: Record<string, unknown>;
+  artefactType: string;
+  intent_narrative?: Record<string, unknown> | null;
+  query_id?: string | null;
+  query_shape_key?: string | null;  // ADD THIS
+}
+Then in judgeArtefact(), accept queryShapeKey as a parameter and include it in the request:
+typescriptexport async function judgeArtefact(params: {
+  artefact: Artefact;
+  runId: string;
+  goal: string;
+  userId: string;
+  conversationId?: string;
+  successCriteria?: Record<string, unknown>;
+  stepIndex?: number;
+  planVersion?: number;
+  intent_narrative?: Record<string, unknown> | null;
+  queryId?: string | null;
+  queryShapeKey?: string | null;  // ADD THIS
+}): Promise<JudgeArtefactResult> {
+And include it in the request object:
+typescriptconst request: ArtefactJudgementRequest = {
+  runId,
+  artefactId: artefact.id,
+  goal,
+  successCriteria,
+  artefactType: artefact.type,
+  intent_narrative,
+  query_id: queryId ?? null,
+  query_shape_key: queryShapeKey ?? null,  // ADD THIS
+};
+Change 3: Persist learning_update from Tower response
+In server/supervisor/tower-artefact-judge.ts, after persisting the judgement, check for and persist learning updates:
+typescriptimport { handleLearningUpdate, type LearningUpdatePayload } from './learning-store';
+
+// ... after the existing storage.createTowerJudgement call:
+
+// Persist learning update if Tower returned one
+if (judgement.learning_update && judgement.learning_update.query_shape_key) {
+  const lu = judgement.learning_update;
+  const updates: Record<string, unknown> = {};
+  if (Array.isArray(lu.changed_fields)) {
+    for (const change of lu.changed_fields) {
+      if (change.field && change.after !== undefined && change.after !== null) {
+        updates[change.field] = change.after;
+      }
+    }
+  } else if (lu.updates && typeof lu.updates === 'object') {
+    Object.assign(updates, lu.updates);
+  }
+
+  if (Object.keys(updates).length > 0) {
+    handleLearningUpdate({
+      query_shape_key: lu.query_shape_key,
+      run_id: runId,
+      updates: updates as any,
+    }).then(() => {
+      console.log(`[LEARNING] Persisted learning_update for shape=${lu.query_shape_key} fields=[${Object.keys(updates).join(',')}]`);
+    }).catch((err: any) => {
+      console.warn(`[LEARNING] Failed to persist learning_update (non-fatal): ${err.message}`);
+    });
+  }
+}
+Change 4: Pass queryShapeKey through all judgeArtefact call sites
+In server/supervisor/mission-executor.ts, find the judgeArtefact call (near the end of executeMissionDrivenPlan):
+typescriptconst towerResult = await judgeArtefact({
+  artefact: finalDeliveryArtefact,
+  runId,
+  goal: normalizedGoal,
+  userId,
+  conversationId,
+  successCriteria: finalSuccessCriteria,
+  intent_narrative: intentNarrative ?? null,
+  queryId: queryId ?? null,
+  queryShapeKey: queryShapeKey,  // ADD THIS
+});
+In server/supervisor/reloop/loop-skeleton.ts, find the judgeArtefact call for combined delivery:
+typescriptconst towerResult = await judgeArtefact({
+  artefact: combinedArtefact,
+  runId,
+  goal: normalizedGoal,
+  userId,
+  conversationId,
+  successCriteria: { ... },
+  intent_narrative: intentNarrative ?? null,
+  queryId: queryId ?? null,
+  queryShapeKey: queryShapeKey,  // ADD THIS — need to compute or pass through
+});
+For loop-skeleton, compute the queryShapeKey at the top of runReloop:
+typescriptimport { computeQueryShapeKey, deriveQueryShapeFromGoal } from '../query-shape-key';
+
+// inside runReloop, after deriveSearchParams:
+const queryShapeInput = deriveQueryShapeFromGoal({
+  business_type: businessType,
+  location,
+  country,
+  constraints: mission.constraints.map(c => ({
+    type: c.type,
+    field: c.field,
+    hard: c.hardness === 'hard',
+    value: typeof c.value === 'string' ? c.value : String(c.value ?? ''),
+  })),
+});
+const queryShapeKey = computeQueryShapeKey(queryShapeInput);
+Change 5: Record per-executor outcomes for future planner use
+After each loop in loop-skeleton.ts, record which executor found how many results. This data goes into the reloop_iteration artefact payload (already created). But ALSO write it to the learning store:
+After the loop completes (after the while loop ends), add:
+typescriptimport { handleLearningUpdate } from '../learning-store';
+
+// After the while loop, before building combinedResult:
+// Record executor performance for this query shape
+try {
+  const executorPerformance: Record<string, number> = {};
+  for (const record of loopHistory) {
+    const exec = record.plannerDecision.executorType;
+    const found = record.executorOutput.entities.length;
+    executorPerformance[exec] = (executorPerformance[exec] || 0) + found;
+  }
+
+  // Find the best executor for this query shape
+  const bestExecutor = Object.entries(executorPerformance)
+    .sort(([, a], [, b]) => b - a)[0]?.[0] ?? 'gp_cascade';
+
+  await handleLearningUpdate({
+    query_shape_key: queryShapeKey,
+    run_id: runId,
+    updates: {
+      // Store the best executor as a custom field
+      // The learning store will persist this per query shape
+      search_budget_pages: totalLoops,  // how many loops it took
+      default_result_count: totalEntities,  // how many we found
+    },
+  });
+  console.log(`[LEARNING] Recorded outcome: shape=${queryShapeKey} bestExecutor=${bestExecutor} performance=${JSON.stringify(executorPerformance)}`);
+} catch (learnErr: any) {
+  console.warn(`[LEARNING] Failed to record executor performance (non-fatal): ${learnErr.message}`);
+}
+Change 6: Planner reads learning store before choosing executor
+In server/supervisor/reloop/planner.ts, modify rulesPlan to check learned data:
+typescriptimport { readLearningStore } from '../learning-store';
+import { computeQueryShapeKey, deriveQueryShapeFromGoal } from '../query-shape-key';
+
+export async function rulesPlan(context: PlannerContext): Promise<PlannerDecision> {
+  const { loopNumber, loopHistory, executionPath, availableExecutors, circuitBreaker } = context;
+  const executorsTriedSoFar = new Set(loopHistory.map(r => r.plannerDecision.executorType));
+
+  if (circuitBreaker) {
+    const fastest = availableExecutors[0] ?? 'gp_cascade';
+    return { executorType: fastest, reasoning: `Circuit breaker active — using ${fastest}.` };
+  }
+
+  // On first loop, check learning store for this query shape
+  if (loopNumber === 1 && context.mission) {
+    if (executionPath === 'gpt4o_primary') {
+      return { executorType: 'gpt4o_search', reasoning: 'User explicitly requested GPT-4o primary path.' };
+    }
+
+    try {
+      const shapeInput = deriveQueryShapeFromGoal({
+        business_type: context.mission.businessType,
+        location: context.mission.location,
+        country: context.mission.country,
+        constraints: context.constraints?.hardConstraints?.map(h => ({
+          type: h, field: h, hard: true,
+        })),
+      });
+      const shapeKey = computeQueryShapeKey(shapeInput);
+      const learned = await readLearningStore(shapeKey);
+
+      if (learned.exists) {
+        // If previous runs for this shape needed multiple loops,
+        // skip GP and go straight to GPT-4o
+        if (learned.knobs.search_budget_pages >= 2 && availableExecutors.includes('gpt4o_search')) {
+          const reason = `Learning store: previous runs for shape "${shapeKey}" needed ${learned.knobs.search_budget_pages} loops — skipping GP cascade, starting with GPT-4o.`;
+          console.log(`[RELOOP_PLANNER] Loop ${loopNumber}: ${reason}`);
+          return { executorType: 'gpt4o_search', reasoning: reason };
+        }
+        console.log(`[RELOOP_PLANNER] Loop ${loopNumber}: learned data for shape "${shapeKey}" — search_budget_pages=${learned.knobs.search_budget_pages}, proceeding with default GP cascade`);
+      }
+    } catch (learnErr: any) {
+      console.warn(`[RELOOP_PLANNER] Learning store read failed (non-fatal): ${learnErr.message}`);
+    }
+
+    return { executorType: 'gp_cascade', reasoning: 'First loop — using GP cascade (cheap, fast, structured data).' };
+  }
+
+  // ... rest of existing logic unchanged ...
+IMPORTANT: Since rulesPlan is now async, the plan function already handles this (it calls llmPlan which is async, with rulesPlan as fallback). But make sure rulesPlan is declared as async and the fallback in plan() uses await rulesPlan(context).
+Change 7: Emit policy_applied artefact
+In loop-skeleton.ts, after computing the queryShapeKey and before the first loop, read and emit what was learned:
+typescriptimport { readLearningStore, buildPolicyAppliedPayload, emitPolicyAppliedArtefact, mergePolicyKnobs, BASELINE_DEFAULTS } from '../learning-store';
+
+// After computing queryShapeKey:
+try {
+  const learned = await readLearningStore(queryShapeKey);
+  const policy = mergePolicyKnobs(BASELINE_DEFAULTS, learned.exists ? learned.knobs : null, learned.fieldMetadata);
+  const policyPayload = buildPolicyAppliedPayload(queryShapeKey, policy, learned.fieldMetadata, learned.exists);
+
+  await emitPolicyAppliedArtefact({
+    runId,
+    userId,
+    conversationId,
+    policyApplied: policyPayload,
+  });
+  console.log(`[LEARNING] Policy applied: shape=${queryShapeKey} learned_used=${policyPayload.learned_used} fields=[${policyPayload.learned_fields_used.join(',')}]`);
+} catch (policyErr: any) {
+  console.warn(`[LEARNING] Policy applied artefact failed (non-fatal): ${policyErr.message}`);
+}
+Summary of changes
+FileWhat changestower-artefact-judge.tsAdd queryShapeKey param, include in request, persist learning_update from responsemission-executor.tsCompute queryShapeKey, pass to judgeArtefactreloop/loop-skeleton.tsCompute queryShapeKey, pass to judgeArtefact, record executor outcomes, emit policy_applied artefactreloop/planner.tsRead learning store on loop 1, skip GP if learned data says GPT-4o was better
+What this enables
+After this change:
+
+Every run computes a query shape key (e.g. find_venues::pubs::GB::attr:live_music)
+The Tower evaluates whether to suggest policy changes based on the run outcome
+The Supervisor persists those changes to the learning store
+The Supervisor also records which executor found the most results
+On the NEXT run with a similar query shape, the planner checks the learning store and starts with the best executor
+The UI shows "Applied policy" with learned/default badges (already built)
+
+What NOT to change
+
+Do NOT change the Tower — it already works correctly
+Do NOT change the UI — it already renders policy_applied artefacts
+Do NOT change the learning store functions — they already work
+Do NOT change query-shape-key.ts — it already works
+Just wire the existing pieces together
