@@ -35,6 +35,7 @@ import {
 import { planExecutionRouter } from "./supervisor/plan-execution";
 import { jobsRouter } from "./supervisor/jobs-router";
 import { handleExplainRun } from "./supervisor/explain-run";
+import { outreachRouter } from './routes/routes-outreach';
 
 // SUPERVISOR_EXECUTION_ENABLED: REMOVED — all execution goes through Supervisor unconditionally.
 
@@ -66,6 +67,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // ========================================
   app.use('/api/supervisor', planExecutionRouter);
   app.use('/api/supervisor/jobs', jobsRouter);
+  app.use('/api/outreach', outreachRouter);
+  console.log('[ROUTES] Registered outreach routes: /api/outreach/*');
   console.log(`[ROUTES] Supervisor execution enabled: true (unconditional)`);
   console.log(`[ROUTES] Registered: POST /api/supervisor/execute-plan`);
   console.log(`[ROUTES] Registered: POST /api/supervisor/jobs/start`);
