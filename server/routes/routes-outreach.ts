@@ -81,7 +81,7 @@ outreachRouter.post('/config', async (req, res) => {
         signature_text: signature_text || null,
         user_real_email: user_real_email || null,
         sending_domain: 'wyshbonesales.com',
-        reply_to_domain: 'inbound.wyshbonesales.com',
+        reply_to_domain: 'wyshbonesales.com',
         enabled: true,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'user_id' })
@@ -93,7 +93,7 @@ outreachRouter.post('/config', async (req, res) => {
     const fromPreview = buildFromAddress(display_name, handle, 'wyshbonesales.com');
     res.json({
       config: data,
-      preview: { from_address: fromPreview, example_reply_to: `reply+example-id@inbound.wyshbonesales.com` },
+      preview: { from_address: fromPreview, example_reply_to: `reply+example-id@wyshbonesales.com` },
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
