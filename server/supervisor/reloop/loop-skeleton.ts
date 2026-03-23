@@ -446,6 +446,17 @@ export async function runReloop(params: {
 
   console.log(`[RELOOP_SKELETON] Combined delivery: ${combinedLeads.length} accumulated → ${verifiedLeads.length} verified → ${deliveredLeads.length} delivered`);
 
+  const circuitBreakerFired = lastGateDecision?.circuitBreaker ?? false;
+  const circuitBreakerNote = circuitBreakerFired
+    ? `I tried ${executorsTriedSoFar.join(' and ')} across ${totalLoops} search rounds but couldn't find all ${requestedCount ?? 'requested'} results. Here are the ${deliveredLeads.length} I'm confident about.`
+    : null;
+  const shortfallNote = !circuitBreakerFired && requestedCount && deliveredLeads.length < requestedCount
+    ? `I searched using ${executorsTriedSoFar.join(' and ')} and found ${deliveredLeads.length} verified results out of ${requestedCount} requested.`
+    : null;
+  const deliveryNote = circuitBreakerNote ?? shortfallNote ?? null;
+
+  console.log(`[RELOOP_SKELETON] Delivery note: ${deliveryNote ?? 'none'}`);
+
   logRunEvent(runId, {
     stage: 'combined_delivery_start',
     level: 'info',
@@ -481,6 +492,7 @@ export async function runReloop(params: {
           executor: r.plannerDecision.executorType,
           found: r.executorOutput.entities.length,
         })),
+        delivery_note: deliveryNote,
       },
       userId,
       conversationId,
@@ -575,6 +587,7 @@ export async function runReloop(params: {
     delivered_total_count: mergedExact.length + mergedClosest.length,
     shortfall: requestedCount ? Math.max(0, requestedCount - mergedExact.length) : 0,
     tower_verdict: combinedTowerVerdict,
+    delivery_note: deliveryNote,
   } : null;
 
   const combinedResult: MissionExecutionResult = {
