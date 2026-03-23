@@ -100,6 +100,92 @@ outreachRouter.post('/config', async (req, res) => {
   }
 });
 
+// POST /trigger — trigger outreach drafting for a completed discovery run
+outreachRouter.post('/trigger', async (req, res) => {
+  const userId = getUserId(req);
+  const { run_id } = req.body;
+  if (!run_id) return res.status(400).json({ error: 'run_id is required' });
+  if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+  try {
+    // Get user's outreach config
+    const { data: config } = await supabase
+      .from('outreach_config')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('enabled', true)
+      .single();
+
+    if (!config) {
+      return res.status(400).json({ error: 'No outreach config found. Set up your outreach identity first via POST /api/outreach/config' });
+    }
+
+    // Fetch the run's artefacts to find delivered leads
+    const { storage } = await import('../storage');
+    const artefacts = await storage.getArtefactsByRunId(run_id);
+    
+    // Look for final_delivery, combined_delivery, or leads_list artefact
+    const deliveryArtefact = artefacts
+      .filter((a: any) => ['final_delivery', 'combined_delivery', 'leads_list'].includes(a.type))
+      .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+
+    if (!deliveryArtefact) {
+      return res.status(404).json({ error: 'No delivery artefact found for this run. Run a discovery query first.' });
+    }
+
+    const payload = deliveryArtefact.payloadJson as any;
+    const leads = payload?.leads || [];
+
+    if (leads.length === 0) {
+      return res.status(404).json({ error: 'No leads found in the delivery artefact.' });
+    }
+
+    console.log(`[OUTREACH_TRIGGER] Triggering outreach for run ${run_id} — ${leads.length} leads found`);
+
+    // Import the outreach adapter and run it
+    const { outreachAdapter } = await import('../supervisor/reloop/outreach-adapter');
+    const { randomUUID } = await import('crypto');
+
+    const outreachRunId = randomUUID();
+    
+    const result = await outreachAdapter({
+      executorType: 'outreach',
+      mission: {
+        queryText: payload?.normalized_goal || payload?.original_user_goal || 'outreach',
+        rawUserInput: payload?.original_user_goal || 'outreach',
+        businessType: '',
+        location: '',
+        country: 'GB',
+        requestedCount: null,
+      },
+      constraints: { hardConstraints: [], softConstraints: [], structuredConstraints: [] },
+      knownEntities: leads.map((l: any) => l.name),
+      budget: { maxApiCalls: 50, maxTimeMs: 300000 },
+      missionContext: {
+        runId: outreachRunId,
+        userId,
+        deliveredLeads: leads,
+        intentNarrative: payload?.intent_narrative || null,
+      },
+    });
+
+    console.log(`[OUTREACH_TRIGGER] Outreach complete: ${result.entities.length} drafts created`);
+
+    res.json({
+      ok: true,
+      outreach_run_id: outreachRunId,
+      discovery_run_id: run_id,
+      leads_found: leads.length,
+      drafts_created: result.entities.length,
+      unreachable: (result.rawResult as any)?.unreachableNames || [],
+      errors: result.executionMetadata.errorsEncountered,
+    });
+  } catch (err: any) {
+    console.error(`[OUTREACH_TRIGGER] Error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /drafts
 outreachRouter.get('/drafts', async (req, res) => {
   const userId = getUserId(req);
