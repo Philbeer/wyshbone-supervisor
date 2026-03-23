@@ -1,7 +1,6 @@
 -- 007_outreach.sql
 -- Outreach executor tables: user config + message tracking
 
--- User outreach configuration (sending identity)
 CREATE TABLE IF NOT EXISTS outreach_config (
   id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   user_id TEXT NOT NULL UNIQUE,
@@ -21,7 +20,6 @@ CREATE TABLE IF NOT EXISTS outreach_config (
 CREATE INDEX IF NOT EXISTS idx_outreach_config_user_id ON outreach_config(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_config_handle ON outreach_config(handle);
 
--- Individual outreach messages
 CREATE TABLE IF NOT EXISTS outreach_messages (
   id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   run_id TEXT NOT NULL,
