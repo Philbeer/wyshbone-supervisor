@@ -1,0 +1,136 @@
+/**
+ * outreach-drafter.ts
+ * 
+ * Drafts personalised outreach emails for each lead using GPT-4o.
+ * Uses: lead data, contact info, user context, intent narrative.
+ */
+
+export interface DraftInput {
+  leadName: string;
+  leadAddress: string;
+  leadWebsite: string | null;
+  leadPhone: string | null;
+  contactEmail: string | null;
+  contactName: string | null;
+  contactRole: string | null;
+  senderName: string;
+  senderCompany: string | null;
+  senderRole: string | null;
+  originalQuery: string;
+  intentNarrative: {
+    entityDescription: string;
+    keyDiscriminator: string;
+  } | null;
+  matchSummary: string | null;
+  evidenceSnippets: string[];
+  toneGuidance: string | null;
+  callToAction: string | null;
+}
+
+export interface DraftOutput {
+  subject: string;
+  bodyHtml: string;
+  bodyText: string;
+  model: string;
+  personalisationNotes: string;
+}
+
+export async function draftOutreachEmail(input: DraftInput): Promise<DraftOutput> {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    throw new Error('OPENAI_API_KEY not set — cannot draft outreach emails');
+  }
+
+  const { default: OpenAI } = await import('openai');
+  const client = new OpenAI({ apiKey: openaiKey });
+
+  const contactLine = input.contactName
+    ? `Contact: ${input.contactName}${input.contactRole ? ` (${input.contactRole})` : ''} at ${input.contactEmail || 'no email found'}`
+    : input.contactEmail
+      ? `Contact email: ${input.contactEmail}`
+      : 'No direct contact found — address to the business generally';
+
+  const evidenceLine = input.evidenceSnippets.length > 0
+    ? `Evidence from their website/listings:\n${input.evidenceSnippets.slice(0, 3).map(s => `- ${s}`).join('\n')}`
+    : 'No specific evidence gathered from their website.';
+
+  const matchLine = input.matchSummary
+    ? `Why they matched the search: ${input.matchSummary}`
+    : '';
+
+  const toneLine = input.toneGuidance || 'Professional but warm. Not salesy. Direct and respectful of their time.';
+  const ctaLine = input.callToAction || 'Suggest a brief conversation or meeting to explore mutual fit.';
+
+  const prompt = `You are drafting a personalised cold outreach email on behalf of ${input.senderName}${input.senderCompany ? ` from ${input.senderCompany}` : ''}${input.senderRole ? ` (${input.senderRole})` : ''}.
+
+RECIPIENT BUSINESS:
+- Name: ${input.leadName}
+- Address: ${input.leadAddress}
+- Website: ${input.leadWebsite || 'unknown'}
+- ${contactLine}
+
+CONTEXT:
+The sender searched for: "${input.originalQuery}"
+${input.intentNarrative ? `They're looking for: ${input.intentNarrative.entityDescription}` : ''}
+${input.intentNarrative ? `Key quality they care about: ${input.intentNarrative.keyDiscriminator}` : ''}
+${matchLine}
+${evidenceLine}
+
+TONE: ${toneLine}
+CALL TO ACTION: ${ctaLine}
+
+RULES:
+- Keep the email under 150 words. Short emails get replies.
+- Personalise using specific details about the business — reference their name, location, or what you found about them.
+- Do NOT use generic filler like "I came across your business" — be specific about WHY you're reaching out to THEM.
+- If you have evidence from their website, reference it naturally.
+- ${input.contactName ? `Address ${input.contactName} by first name.` : 'Use a general greeting like "Hi there" or "Hello".'}
+- Include a clear, single call to action.
+- Sign off with ${input.senderName}'s first name only.
+- Do NOT include the sender's email in the signature (it's in the From field).
+
+Respond with JSON only, no markdown fences:
+{
+  "subject": "email subject line (short, specific, no clickbait)",
+  "body_text": "plain text email body",
+  "body_html": "HTML email body (simple formatting only — <p>, <br>, <strong>)",
+  "personalisation_notes": "1-2 sentences explaining what you personalised and why"
+}`;
+
+  const model = process.env.OUTREACH_DRAFT_MODEL || 'gpt-4o-mini';
+
+  try {
+    const resp = await client.chat.completions.create({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      max_tokens: 1024,
+      response_format: { type: 'json_object' },
+    });
+
+    const raw = (resp.choices[0]?.message?.content ?? '').trim();
+    const parsed = JSON.parse(raw) as {
+      subject: string;
+      body_text: string;
+      body_html: string;
+      personalisation_notes: string;
+    };
+
+    if (!parsed.subject || !parsed.body_text) {
+      throw new Error('Draft response missing required fields');
+    }
+
+    console.log(`[OUTREACH_DRAFTER] Drafted email for "${input.leadName}" — subject="${parsed.subject}" notes="${parsed.personalisation_notes?.substring(0, 100)}"`);
+
+    return {
+      subject: parsed.subject,
+      bodyText: parsed.body_text,
+      bodyHtml: parsed.body_html || `<p>${parsed.body_text.replace(/\n/g, '<br>')}</p>`,
+      model,
+      personalisationNotes: parsed.personalisation_notes || '',
+    };
+  } catch (err: any) {
+    console.error(`[OUTREACH_DRAFTER] Draft failed for "${input.leadName}": ${err.message}`);
+    throw err;
+  }
+}
