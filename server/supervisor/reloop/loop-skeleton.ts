@@ -18,6 +18,15 @@ import { evaluate as judgeEvaluate } from './judge-adapter';
 import { decide as gateDecide } from './gate';
 import type { ExecutorInput, ExecutorEntity, LoopRecord, GateDecision } from './types';
 import { judgeArtefact } from '../tower-artefact-judge';
+import { computeQueryShapeKey, deriveQueryShapeFromGoal } from '../query-shape-key';
+import {
+  handleLearningUpdate,
+  readLearningStore,
+  buildPolicyAppliedPayload,
+  emitPolicyAppliedArtefact,
+  mergePolicyKnobs,
+  BASELINE_DEFAULTS,
+} from '../learning-store';
 
 function normaliseEntityName(name: string): string {
   return name.toLowerCase().replace(/^the\s+/i, '').trim();
@@ -51,6 +60,21 @@ export async function runReloop(params: {
   const softConstraints = buildSoftConstraintLabels(mission);
   const structuredConstraints = buildStructuredConstraints(mission);
   const normalizedGoal = `Find ${requestedCount ? requestedCount + ' ' : ''}${businessType} in ${location}`;
+
+  const queryShapeInput = deriveQueryShapeFromGoal({
+    business_type: businessType,
+    location,
+    country,
+    attribute_filter: null,
+    constraints: mission.constraints.map(c => ({
+      type: c.type,
+      field: c.field,
+      hard: c.hardness === 'hard',
+      value: typeof c.value === 'string' ? c.value : String(c.value ?? ''),
+    })),
+  });
+  const queryShapeKey = computeQueryShapeKey(queryShapeInput);
+  console.log(`[LEARNING] queryShapeKey=${queryShapeKey} for runId=${runId}`);
 
   const MAX_LOOPS_DEFAULT = 3;
   const maxLoops = (() => {
@@ -114,6 +138,22 @@ export async function runReloop(params: {
     },
     missionContext,
   };
+
+  try {
+    const learned = await readLearningStore(queryShapeKey);
+    const policy = mergePolicyKnobs(BASELINE_DEFAULTS, learned.exists ? learned.knobs : null, learned.fieldMetadata);
+    const policyPayload = buildPolicyAppliedPayload(queryShapeKey, policy, learned.fieldMetadata, learned.exists);
+
+    await emitPolicyAppliedArtefact({
+      runId,
+      userId,
+      conversationId,
+      policyApplied: policyPayload,
+    });
+    console.log(`[LEARNING] Policy applied: shape=${queryShapeKey} learned_used=${policyPayload.learned_used} fields=[${policyPayload.learned_fields_used.join(',')}]`);
+  } catch (policyErr: any) {
+    console.warn(`[LEARNING] Policy applied artefact failed (non-fatal): ${policyErr.message}`);
+  }
 
   const loopHistory: LoopRecord[] = [];
   const accumulatedEntityMap = new Map<string, ExecutorEntity>();
@@ -382,6 +422,30 @@ export async function runReloop(params: {
   const totalEntities = accumulatedEntityMap.size;
   const totalLoops = loopHistory.length;
 
+  try {
+    const executorPerformance: Record<string, number> = {};
+    for (const record of loopHistory) {
+      const exec = record.plannerDecision.executorType;
+      const found = record.executorOutput.entities.length;
+      executorPerformance[exec] = (executorPerformance[exec] || 0) + found;
+    }
+
+    const bestExecutor = Object.entries(executorPerformance)
+      .sort(([, a], [, b]) => b - a)[0]?.[0] ?? 'gp_cascade';
+
+    await handleLearningUpdate({
+      query_shape_key: queryShapeKey,
+      run_id: runId,
+      updates: {
+        search_budget_pages: totalLoops,
+        default_result_count: totalEntities,
+      },
+    });
+    console.log(`[LEARNING] Recorded outcome: shape=${queryShapeKey} bestExecutor=${bestExecutor} performance=${JSON.stringify(executorPerformance)}`);
+  } catch (learnErr: any) {
+    console.warn(`[LEARNING] Failed to record executor performance (non-fatal): ${learnErr.message}`);
+  }
+
   await createArtefact({
     runId,
     type: 'reloop_chain_summary',
@@ -526,6 +590,7 @@ export async function runReloop(params: {
         },
         intent_narrative: intentNarrative ?? null,
         queryId: queryId ?? null,
+        queryShapeKey: queryShapeKey,
       });
 
       console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} delivered=${deliveredLeads.length}`);

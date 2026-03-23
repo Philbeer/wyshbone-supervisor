@@ -1,6 +1,7 @@
 import { storage } from '../storage';
 import { logAFREvent } from './afr-logger';
 import type { Artefact } from '../schema';
+import { handleLearningUpdate, type LearningUpdatePayload } from './learning-store';
 
 export interface ArtefactJudgementRequest {
   runId: string;
@@ -10,6 +11,7 @@ export interface ArtefactJudgementRequest {
   artefactType: string;
   intent_narrative?: Record<string, unknown> | null;
   query_id?: string | null;
+  query_shape_key?: string | null;
 }
 
 export interface ArtefactJudgementResponse {
@@ -142,8 +144,9 @@ export async function judgeArtefact(params: {
   planVersion?: number;
   intent_narrative?: Record<string, unknown> | null;
   queryId?: string | null;
+  queryShapeKey?: string | null;
 }): Promise<JudgeArtefactResult> {
-  const { artefact, runId, goal, userId, conversationId, successCriteria, stepIndex, planVersion, intent_narrative, queryId } = params;
+  const { artefact, runId, goal, userId, conversationId, successCriteria, stepIndex, planVersion, intent_narrative, queryId, queryShapeKey } = params;
   console.log('[QID-TRACE]', 'step5:judgeArtefact_received', queryId);
 
   const request: ArtefactJudgementRequest = {
@@ -154,6 +157,7 @@ export async function judgeArtefact(params: {
     artefactType: artefact.type,
     intent_narrative,
     query_id: queryId ?? null,
+    query_shape_key: queryShapeKey ?? null,
   };
   console.log('[QID-TRACE]', 'step6:ArtefactJudgementRequest_query_id', request.query_id);
 
@@ -234,6 +238,32 @@ export async function judgeArtefact(params: {
     });
   } catch (err: any) {
     console.error(`[TOWER_JUDGE] Failed to persist judgement: ${err.message}`);
+  }
+
+  if (judgement.learning_update && judgement.learning_update.query_shape_key) {
+    const lu = judgement.learning_update;
+    const updates: Record<string, unknown> = {};
+    if (Array.isArray((lu as any).changed_fields)) {
+      for (const change of (lu as any).changed_fields) {
+        if (change.field && change.after !== undefined && change.after !== null) {
+          updates[change.field] = change.after;
+        }
+      }
+    } else if (lu.updates && typeof lu.updates === 'object') {
+      Object.assign(updates, lu.updates);
+    }
+
+    if (Object.keys(updates).length > 0) {
+      handleLearningUpdate({
+        query_shape_key: lu.query_shape_key,
+        run_id: runId,
+        updates: updates as any,
+      }).then(() => {
+        console.log(`[LEARNING] Persisted learning_update for shape=${lu.query_shape_key} fields=[${Object.keys(updates).join(',')}]`);
+      }).catch((err: any) => {
+        console.warn(`[LEARNING] Failed to persist learning_update (non-fatal): ${err.message}`);
+      });
+    }
   }
 
   const shortReason = judgement.reasons[0] || judgement.verdict;

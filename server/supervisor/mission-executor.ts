@@ -38,6 +38,7 @@ import { sanitiseLocationString, inferCountryFromLocation } from './goal-to-cons
 import { detectRelationshipPredicate, type RelationshipPredicateResult } from './relationship-predicate';
 import { RADIUS_LADDER_KM } from './shared-constants';
 import { executeGpt4oPrimaryPath, type Gpt4oSearchContext } from './gpt4o-search';
+import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './query-shape-key';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 const RUN_EXECUTION_TIMEOUT_MS_DEFAULT = 300_000;
@@ -639,6 +640,21 @@ export async function executeMissionDrivenPlan(
   const { mission, plan, runId, userId, conversationId, clientRequestId, rawUserInput, missionTrace, intentNarrative, queryId } = ctx;
   console.log('[QID-TRACE]', 'step3:executeMissionDrivenPlan_destructured', queryId);
   const { businessType, location, country, requestedCount, searchBudget } = deriveSearchParams(mission);
+
+  const queryShapeInput = deriveQueryShapeFromGoal({
+    business_type: businessType,
+    location,
+    country,
+    attribute_filter: null,
+    constraints: mission.constraints.map(c => ({
+      type: c.type,
+      field: c.field,
+      hard: c.hardness === 'hard',
+      value: typeof c.value === 'string' ? c.value : String(c.value ?? ''),
+    })),
+  });
+  const queryShapeKey = computeQueryShapeKey(queryShapeInput);
+  console.log(`[LEARNING] queryShapeKey=${queryShapeKey} for runId=${runId}`);
 
   const MAX_REPLANS = Math.min(
     parseInt(process.env.MAX_REPLANS || String(MAX_REPLANS_DEFAULT), 10),
@@ -2368,6 +2384,7 @@ IMPORTANT:
       successCriteria: finalSuccessCriteria,
       intent_narrative: intentNarrative ?? null,
       queryId: queryId ?? null,
+      queryShapeKey: queryShapeKey,
     });
 
     finalVerdict = towerResult.judgement.verdict;

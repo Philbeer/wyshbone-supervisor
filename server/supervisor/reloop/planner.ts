@@ -1,4 +1,6 @@
 import type { LoopRecord, PlannerDecision } from './types';
+import { readLearningStore } from '../learning-store';
+import { computeQueryShapeKey, deriveQueryShapeFromGoal } from '../query-shape-key';
 
 export interface PlannerContext {
   loopNumber: number;
@@ -31,7 +33,7 @@ export interface PlannerContext {
   conversationId?: string;
 }
 
-export function rulesPlan(context: PlannerContext): PlannerDecision {
+export async function rulesPlan(context: PlannerContext): Promise<PlannerDecision> {
   const { loopNumber, loopHistory, executionPath, availableExecutors, circuitBreaker } = context;
 
   const executorsTriedSoFar = new Set(loopHistory.map(r => r.plannerDecision.executorType));
@@ -43,12 +45,38 @@ export function rulesPlan(context: PlannerContext): PlannerDecision {
     return { executorType: fastest, reasoning: reason };
   }
 
-  if (loopNumber === 1) {
+  if (loopNumber === 1 && context.mission) {
     if (executionPath === 'gpt4o_primary') {
       const reason = 'User explicitly requested GPT-4o primary path for first loop.';
       console.log(`[RELOOP_PLANNER] Loop ${loopNumber}: chose gpt4o_search because ${reason}`);
       return { executorType: 'gpt4o_search', reasoning: reason };
     }
+
+    try {
+      const shapeInput = deriveQueryShapeFromGoal({
+        business_type: context.mission.businessType,
+        location: context.mission.location,
+        country: context.mission.country,
+        constraints: context.constraints?.hardConstraints?.map(h => ({
+          type: h, field: h, hard: true,
+          value: h,
+        })),
+      });
+      const shapeKey = computeQueryShapeKey(shapeInput);
+      const learned = await readLearningStore(shapeKey);
+
+      if (learned.exists) {
+        if (learned.knobs.search_budget_pages >= 2 && availableExecutors.includes('gpt4o_search')) {
+          const reason = `Learning store: previous runs for shape "${shapeKey}" needed ${learned.knobs.search_budget_pages} loops — skipping GP cascade, starting with GPT-4o.`;
+          console.log(`[RELOOP_PLANNER] Loop ${loopNumber}: ${reason}`);
+          return { executorType: 'gpt4o_search', reasoning: reason };
+        }
+        console.log(`[RELOOP_PLANNER] Loop ${loopNumber}: learned data for shape "${shapeKey}" — search_budget_pages=${learned.knobs.search_budget_pages}, proceeding with default GP cascade`);
+      }
+    } catch (learnErr: any) {
+      console.warn(`[RELOOP_PLANNER] Learning store read failed (non-fatal): ${learnErr.message}`);
+    }
+
     const reason = 'First loop — using GP cascade (cheap, fast, structured data).';
     console.log(`[RELOOP_PLANNER] Loop ${loopNumber}: chose gp_cascade because ${reason}`);
     return { executorType: 'gp_cascade', reasoning: reason };
@@ -89,6 +117,6 @@ export async function plan(context: PlannerContext): Promise<PlannerDecision> {
     return result;
   } catch (err: any) {
     console.warn(`[RELOOP_PLANNER] LLM planner failed: ${err.message} — falling back to rules-based planner`);
-    return rulesPlan(context);
+    return await rulesPlan(context);
   }
 }
