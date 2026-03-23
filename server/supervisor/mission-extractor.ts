@@ -558,24 +558,24 @@ EXAMPLE 1 — "find bottle shops in East Sussex that sell craft beer":
   "ambiguity_flags": []
 }
 
-EXAMPLE 2 — "find organisations that work with the local authority in Blackpool":
+EXAMPLE 2 — "find suppliers to the fire service in Kent":
 {
-  "entity_description": "organisations that have a formal or funded relationship with Blackpool Council",
-  "entity_exclusions": ["organisations merely located in Blackpool", "organisations that mention Blackpool without a council relationship", "national organisations with no local Blackpool presence"],
-  "commercial_context": "likely researching the council supply chain or partnership ecosystem, possibly to identify decision-makers or entry points",
-  "key_discriminator": "explicit named relationship with Blackpool Council — not just operating in Blackpool",
+  "entity_description": "businesses that supply goods or services to Kent Fire and Rescue Service under contract or framework agreement",
+  "entity_exclusions": ["fire equipment retailers selling to the public", "businesses merely located near fire stations", "fire safety training companies not contracted to the fire service"],
+  "commercial_context": "likely researching the public sector supply chain to identify procurement opportunities or partnership entry points",
+  "key_discriminator": "has a direct supply or contractual relationship with Kent Fire and Rescue Service — not just selling fire-related products to the general public",
   "findability": "hard",
-  "findability_reason": "council relationships are rarely stated as searchable text on an organisation's own website — more likely found in council documents, tender records, or press releases",
+  "findability_reason": "supply relationships with emergency services are rarely stated on a supplier's own website — more likely found in procurement portals, contract registers, or freedom of information responses",
   "suggested_approaches": [
-    "check Blackpool Council website for named partners, suppliers, and funded organisations",
-    "search for organisations that mention Blackpool Council in their own content",
-    "search council meeting minutes and procurement records for named suppliers"
+    "search Kent Fire and Rescue Service website for published contract registers, supplier lists, and procurement frameworks",
+    "search for businesses that mention Kent Fire and Rescue Service as a client on their own website",
+    "search government procurement portals (Contracts Finder, Find a Tender) for Kent fire service contracts"
   ],
-  "fallback_intent": "charities, housing associations, and social enterprises operating in Blackpool that typically work with local authorities",
+  "fallback_intent": "fire safety and emergency equipment suppliers operating in Kent that typically work with public sector clients",
   "scarcity_expectation": "unknown",
-  "clarification_needed": true,
-  "clarification_question": "Are you looking for funded partners and grant recipients, or suppliers and contractors — or both?",
-  "ambiguity_flags": ["works with is vague — could mean funded, contracted, or informally partnered"]
+  "clarification_needed": false,
+  "clarification_question": null,
+  "ambiguity_flags": []
 }
 
 Return ONLY valid JSON. No markdown fences, no commentary, no explanation.`;
