@@ -5,8 +5,8 @@
  * Handles: sending emails, processing delivery webhooks, processing inbound replies.
  */
 
-import { getResendClient } from '../../notifications/resend-client';
-import { supabase } from '../../supabase';
+import { getResendClient } from '../notifications/resend-client';
+import { supabase } from '../supabase';
 
 // ── Types ──
 
