@@ -1,0 +1,116 @@
+Prompt 3 of 4 — Wake Scheduler (the poll function)
+CONTEXT: Continuing 6.1 Sleep/Wake Goals. Delta detector and wake executor are done. Now we build the scheduler that runs on the Supervisor poll loop — it checks which goals are due, wakes them, handles delta results, and nudges the user.
+
+TASK: Create `server/supervisor/sleep-wake/wake-scheduler.ts`
+
+Imports:
+```typescript
+import { supabase } from '../../supabase';
+import { createArtefact } from '../artefacts';
+import { logAFREvent } from '../afr-logger';
+import type { SleepingGoal, WakeResult } from './types';
+import { executeWake } from './wake-executor';
+```
+
+The main exported function:
+```typescript
+export async function checkAndWakeGoals(): Promise<void>
+```
+
+Logic:
+1. Guard: if `!supabase` or if `process.env.SLEEP_WAKE_ENABLED !== 'true'`, return silently.
+2. Guard: use a module-level `let isWaking = false` lock. If `isWaking`, return (prevent overlapping wakes). Set `isWaking = true` in a try/finally.
+3. Query due goals:
+```typescript
+   const now = new Date().toISOString();
+   const { data: dueMonitors, error } = await supabase
+     .from('scheduled_monitors')
+     .select('*')
+     .eq('is_active', true)
+     .lte('next_wake_at', now)
+     .order('next_wake_at', { ascending: true })
+     .limit(5);  // Max 5 goals per tick to avoid overload
+```
+4. If no due monitors, return silently (no log spam — only log if there IS something to do).
+5. For each due monitor, map it to a `SleepingGoal`:
+```typescript
+   const goal: SleepingGoal = {
+     id: monitor.id.toString(),
+     userId: monitor.user_id,
+     conversationId: monitor.conversation_id ?? null,
+     label: monitor.label,
+     description: monitor.description ?? '',
+     scheduleType: monitor.schedule_type ?? 'daily',
+     monitorType: monitor.monitor_type ?? 'lead_search',
+     config: monitor.config ?? {},
+     baselineEntityNames: monitor.baseline_entity_names ?? [],
+     consecutiveEmptyWakes: monitor.consecutive_empty_wakes ?? 0,
+     lastRunAt: monitor.last_run_at,
+     lastRunId: monitor.last_run_id,
+     nextWakeAt: monitor.next_wake_at,
+     createdAt: monitor.created_at,
+   };
+```
+6. Call `executeWake(goal)` — wrapped in try/catch per goal.
+7. After wake, compute `next_wake_at`:
+```typescript
+   const intervals: Record<string, string> = {
+     hourly: '1 hour',
+     daily: '24 hours',
+     weekly: '7 days',
+   };
+   const interval = intervals[goal.scheduleType] ?? '24 hours';
+```
+8. Update the monitor row:
+```typescript
+   await supabase.from('scheduled_monitors').update({
+     last_run_at: new Date().toISOString(),
+     last_run_id: wakeResult.runId,
+     next_wake_at: new Date(Date.now() + intervalMs).toISOString(),
+     baseline_entity_names: JSON.stringify(wakeResult.entitiesFound),
+     consecutive_empty_wakes: wakeResult.deltaCount > 0 ? 0 : (goal.consecutiveEmptyWakes + 1),
+   }).eq('id', monitor.id);
+```
+   For `intervalMs`, compute from scheduleType: hourly=3600000, daily=86400000, weekly=604800000.
+
+9. **Nudge the user** if there are new entities AND the goal has a `conversationId`:
+```typescript
+   if (wakeResult.deltaCount > 0 && goal.conversationId) {
+     const entityList = wakeResult.newEntities.slice(0, 5).join(', ');
+     const moreCount = wakeResult.newEntities.length > 5 ? ` and ${wakeResult.newEntities.length - 5} more` : '';
+     const nudgeContent = `I checked again for "${goal.label}" and found ${wakeResult.deltaCount} new result${wakeResult.deltaCount === 1 ? '' : 's'}: ${entityList}${moreCount}. Type "show details" to see the full results.`;
+     
+     const { randomUUID } = await import('crypto');
+     const messageId = randomUUID();
+     
+     await supabase.from('messages').insert({
+       id: messageId,
+       conversation_id: goal.conversationId,
+       role: 'assistant',
+       content: nudgeContent,
+       source: 'supervisor',
+       metadata: {
+         sleep_wake: true,
+         goal_id: goal.id,
+         run_id: wakeResult.runId,
+         new_entity_count: wakeResult.deltaCount,
+         new_entities: wakeResult.newEntities,
+       },
+       created_at: Date.now(),
+     });
+     
+     console.log(`[SLEEP_WAKE] Nudged user ${goal.userId} in conversation ${goal.conversationId}: ${wakeResult.deltaCount} new entities`);
+   }
+```
+
+10. Log summary: `[SLEEP_WAKE] Goal "${goal.label}" wake complete: ${wakeResult.entitiesFound.length} total, ${wakeResult.deltaCount} new`
+
+Also create `server/supervisor/sleep-wake/index.ts` that re-exports:
+```typescript
+export { checkAndWakeGoals } from './wake-scheduler';
+export { executeWake } from './wake-executor';
+export { detectDelta } from './delta-detector';
+export type { SleepingGoal, WakeResult, DeltaResult } from './types';
+```
+
+Do NOT modify any other files yet.
