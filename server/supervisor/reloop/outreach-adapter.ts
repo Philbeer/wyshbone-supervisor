@@ -140,6 +140,100 @@ export async function outreachAdapter(input: ExecutorInput): Promise<ExecutorOut
     }));
   }
 
+  // Step 3b: GPT-4o email finder fallback for leads with no email
+  const leadsNeedingEmail = leadsWithContacts.filter(l => !l.contactEmail && l.name);
+  
+  if (leadsNeedingEmail.length > 0) {
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (openaiKey) {
+      console.log(`[OUTREACH_EXECUTOR] Running GPT-4o email finder for ${leadsNeedingEmail.length} leads without emails`);
+      
+      for (const lead of leadsNeedingEmail) {
+        try {
+          apiCallsMade++;
+          const emailFinderPrompt = `Find the contact email address for this business:
+Business name: "${lead.name}"
+Address: ${lead.address}
+${lead.website ? `Website: ${lead.website}` : ''}
+
+Search for their contact email address. Look at their website contact page, Google Business listing, social media profiles, business directories, and any other public source.
+
+Respond with JSON only, no markdown fences:
+{
+  "email_found": true or false,
+  "email": "the email address or null",
+  "contact_name": "name of the contact person if found, or null",
+  "contact_role": "role/title of the contact person if found, or null",
+  "source": "where you found the email (e.g. 'website contact page', 'Google Business listing', 'Facebook page', 'business directory')",
+  "confidence": "high" or "medium" or "low"
+}
+
+IMPORTANT:
+- Only return real email addresses you actually found, never guess or fabricate
+- Generic addresses like info@, contact@, hello@ are fine
+- If you cannot find any email, set email_found to false`;
+
+          const resp = await fetch('https://api.openai.com/v1/responses', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${openaiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: process.env.OUTREACH_EMAIL_FINDER_MODEL || 'gpt-4o-mini',
+              input: emailFinderPrompt,
+              tools: [{ type: 'web_search' }],
+              store: false,
+            }),
+          });
+
+          if (!resp.ok) {
+            console.warn(`[OUTREACH_EXECUTOR] Email finder API error for "${lead.name}": HTTP ${resp.status}`);
+            continue;
+          }
+
+          const data = await resp.json();
+          let content = '';
+          if (Array.isArray(data.output)) {
+            for (const item of data.output) {
+              if (item.type === 'message' && Array.isArray(item.content)) {
+                for (const block of item.content) {
+                  if (block.type === 'output_text') content += block.text;
+                }
+              }
+            }
+          }
+          if (!content && data.output_text) content = data.output_text;
+
+          try {
+            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              const parsed = JSON.parse(jsonMatch[0]);
+              if (parsed.email_found && parsed.email && parsed.email.includes('@')) {
+                lead.contactEmail = parsed.email;
+                lead.contactSource = `gpt4o_web_search: ${parsed.source || 'web'}`;
+                if (parsed.contact_name && !lead.contactName) lead.contactName = parsed.contact_name;
+                if (parsed.contact_role && !lead.contactRole) lead.contactRole = parsed.contact_role;
+                console.log(`[OUTREACH_EXECUTOR] GPT-4o found email for "${lead.name}": ${parsed.email} (source: ${parsed.source}, confidence: ${parsed.confidence})`);
+              } else {
+                console.log(`[OUTREACH_EXECUTOR] GPT-4o could not find email for "${lead.name}"`);
+              }
+            }
+          } catch (parseErr: any) {
+            console.warn(`[OUTREACH_EXECUTOR] Failed to parse email finder response for "${lead.name}": ${parseErr.message}`);
+          }
+        } catch (finderErr: any) {
+          console.warn(`[OUTREACH_EXECUTOR] Email finder failed for "${lead.name}": ${finderErr.message}`);
+        }
+      }
+
+      const foundByFallback = leadsNeedingEmail.filter(l => l.contactEmail).length;
+      console.log(`[OUTREACH_EXECUTOR] GPT-4o email finder: found ${foundByFallback}/${leadsNeedingEmail.length} additional emails`);
+    } else {
+      console.warn(`[OUTREACH_EXECUTOR] OPENAI_API_KEY not set — skipping GPT-4o email finder fallback`);
+    }
+  }
+
   // Step 4: Filter to leads with contact emails
   const reachableLeads = leadsWithContacts.filter(l => l.contactEmail);
   const unreachableLeads = leadsWithContacts.filter(l => !l.contactEmail);
