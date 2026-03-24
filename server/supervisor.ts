@@ -2051,6 +2051,7 @@ class SupervisorService {
             monitor_type: 'lead_search',
             schedule_type: scheduleType,
             is_active: true,
+            conversation_id: task.conversation_id,
             config: {
               original_goal: rawMsg.trim(),
               business_type: earlyParsedGoal.business_type,
