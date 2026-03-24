@@ -63,7 +63,7 @@ const migrations: Array<{ name: string; sql: string }> = [
         ADD COLUMN IF NOT EXISTS consecutive_empty_wakes INTEGER DEFAULT 0,
         ADD COLUMN IF NOT EXISTS conversation_id TEXT;
 
-      CREATE INDEX IF NOT EXISTS idx_scheduled_monitors_next_wake ON scheduled_monitors(next_wake_at) WHERE is_active = true;
+      CREATE INDEX IF NOT EXISTS idx_scheduled_monitors_next_wake ON scheduled_monitors(next_wake_at) WHERE is_active = 1;
 
       -- Backfill next_wake_at for existing monitors
       UPDATE scheduled_monitors
@@ -73,7 +73,7 @@ const migrations: Array<{ name: string; sql: string }> = [
         WHEN schedule_type = 'hourly' THEN created_at + INTERVAL '1 hour'
         ELSE created_at + INTERVAL '24 hours'
       END
-      WHERE next_wake_at IS NULL AND is_active = true;
+      WHERE next_wake_at IS NULL AND is_active = 1;
     `,
   },
 ];
