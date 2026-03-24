@@ -68,9 +68,9 @@ const migrations: Array<{ name: string; sql: string }> = [
       -- Backfill next_wake_at for existing monitors
       UPDATE scheduled_monitors
       SET next_wake_at = CASE
-        WHEN schedule_type = 'daily' THEN created_at + INTERVAL '24 hours'
-        WHEN schedule_type = 'weekly' THEN created_at + INTERVAL '7 days'
-        WHEN schedule_type = 'hourly' THEN created_at + INTERVAL '1 hour'
+        WHEN schedule_time = 'daily' THEN created_at + INTERVAL '24 hours'
+        WHEN schedule_time = 'weekly' THEN created_at + INTERVAL '7 days'
+        WHEN schedule_time = 'hourly' THEN created_at + INTERVAL '1 hour'
         ELSE created_at + INTERVAL '24 hours'
       END
       WHERE next_wake_at IS NULL AND is_active = 1;
