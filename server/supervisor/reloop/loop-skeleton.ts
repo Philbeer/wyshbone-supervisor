@@ -241,6 +241,51 @@ export async function runReloop(params: {
 
     executorsTriedSoFar.push(plannerDecision.executorType);
 
+    const executorOutputSummary = {
+      executorType: executorOutput.executorType,
+      entitiesFound: executorOutput.entities.length,
+      entitiesAttempted: executorOutput.entitiesAttempted,
+      timeMs: executorOutput.executionMetadata.timeMs,
+      apiCallsMade: executorOutput.executionMetadata.apiCallsMade,
+      errorsEncountered: executorOutput.executionMetadata.errorsEncountered,
+      rateLimitsHit: executorOutput.executionMetadata.rateLimitsHit,
+      coverageSignals: executorOutput.coverageSignals,
+    };
+
+    // ── Phase 1 Write: executor done, judge not yet run ──
+    if (supabase) {
+      try {
+        const { error: phase1Error } = await supabase.from('loop_state').insert({
+          chain_id: chainId,
+          run_id: runId,
+          user_id: userId,
+          loop_number: loopNumber,
+          executor_type: plannerDecision.executorType,
+          planner_decision: plannerDecision as unknown as Record<string, unknown>,
+          executor_output_summary: executorOutputSummary,
+          executor_completed: true,
+          executor_output_full: executorOutput as unknown as Record<string, unknown>,
+          accumulated_entities: JSON.stringify(Array.from(accumulatedEntityMap.values())),
+          judge_verdict: {},
+          gate_decision: {},
+          entities_found_this_loop: executorOutput.entities.length,
+          entities_accumulated_total: accumulatedEntityMap.size,
+          status: 'active',
+          created_at: loopStartedAt,
+          completed_at: null,
+        });
+        if (phase1Error) {
+          console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} phase-1 insert failed: ${phase1Error.message}`);
+        } else {
+          console.log(`[RELOOP_PERSIST] Loop ${loopNumber} phase-1 persisted (executor done, judge pending). chainId=${chainId}`);
+        }
+      } catch (phase1Err: any) {
+        console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} phase-1 insert threw: ${phase1Err.message}`);
+      }
+    } else {
+      console.warn(`[RELOOP_PERSIST] Supabase not configured — skipping loop_state phase-1 for loop ${loopNumber}`);
+    }
+
     const judgeVerdict = judgeEvaluate({
       executorOutput,
       requestedCount,
@@ -286,51 +331,37 @@ export async function runReloop(params: {
       ? (gateDecision.circuitBreaker ? 'circuit_broken' : 'delivered')
       : 'active';
 
-    const executorOutputSummary = {
-      executorType: executorOutput.executorType,
-      entitiesFound: executorOutput.entities.length,
-      entitiesAttempted: executorOutput.entitiesAttempted,
-      timeMs: executorOutput.executionMetadata.timeMs,
-      apiCallsMade: executorOutput.executionMetadata.apiCallsMade,
-      errorsEncountered: executorOutput.executionMetadata.errorsEncountered,
-      rateLimitsHit: executorOutput.executionMetadata.rateLimitsHit,
-      coverageSignals: executorOutput.coverageSignals,
-    };
-
+    // ── Phase 2 Write: judge + gate done, entities merged ──
     if (supabase) {
       try {
-        const { error } = await supabase.from('loop_state').insert({
-          chain_id: chainId,
-          run_id: runId,
-          user_id: userId,
-          loop_number: loopNumber,
-          executor_type: plannerDecision.executorType,
-          planner_decision: plannerDecision as unknown as Record<string, unknown>,
-          executor_output_summary: executorOutputSummary,
-          judge_verdict: judgeVerdict as unknown as Record<string, unknown>,
-          gate_decision: {
-            decision: gateDecision.decision,
-            loopNumber: gateDecision.loopNumber,
-            circuitBreaker: gateDecision.circuitBreaker,
-            failureContext: gateDecision.contextForward.failureContext,
-            suggestedNextExecutor: gateDecision.contextForward.suggestedNextExecutor,
-          },
-          entities_found_this_loop: executorOutput.entities.length,
-          entities_accumulated_total: accumulatedEntityMap.size,
-          status: loopStatus,
-          created_at: loopStartedAt,
-          completed_at: loopCompletedAt,
-        });
-        if (error) {
-          console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} Supabase insert failed: ${error.message}`);
+        const { error: phase2Error } = await supabase.from('loop_state')
+          .update({
+            judge_verdict: judgeVerdict as unknown as Record<string, unknown>,
+            gate_decision: {
+              decision: gateDecision.decision,
+              loopNumber: gateDecision.loopNumber,
+              circuitBreaker: gateDecision.circuitBreaker,
+              failureContext: gateDecision.contextForward.failureContext,
+              suggestedNextExecutor: gateDecision.contextForward.suggestedNextExecutor,
+            },
+            entities_found_this_loop: executorOutput.entities.length,
+            entities_accumulated_total: accumulatedEntityMap.size,
+            accumulated_entities: JSON.stringify(Array.from(accumulatedEntityMap.values())),
+            status: loopStatus,
+            completed_at: loopCompletedAt,
+          })
+          .eq('chain_id', chainId)
+          .eq('loop_number', loopNumber);
+        if (phase2Error) {
+          console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} phase-2 update failed: ${phase2Error.message}`);
         } else {
-          console.log(`[RELOOP_PERSIST] Loop ${loopNumber} persisted to loop_state. chainId=${chainId} status=${loopStatus}`);
+          console.log(`[RELOOP_PERSIST] Loop ${loopNumber} phase-2 persisted to loop_state. chainId=${chainId} status=${loopStatus}`);
         }
-      } catch (persistErr: any) {
-        console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} Supabase insert threw: ${persistErr.message}`);
+      } catch (phase2Err: any) {
+        console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} phase-2 update threw: ${phase2Err.message}`);
       }
     } else {
-      console.warn(`[RELOOP_PERSIST] Supabase not configured — skipping loop_state persistence for loop ${loopNumber}`);
+      console.warn(`[RELOOP_PERSIST] Supabase not configured — skipping loop_state phase-2 for loop ${loopNumber}`);
     }
 
     await createArtefact({
