@@ -22,7 +22,7 @@ export async function checkAndWakeGoals(): Promise<void> {
     const { data: dueMonitors, error } = await supabase
       .from('scheduled_monitors')
       .select('*')
-      .eq('is_active', true)
+      .eq('is_active', 1)
       .lte('next_wake_at', now)
       .order('next_wake_at', { ascending: true })
       .limit(5);
