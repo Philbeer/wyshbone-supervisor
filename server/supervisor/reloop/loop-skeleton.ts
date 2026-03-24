@@ -349,6 +349,17 @@ export async function runReloop(params: {
       }
     }
 
+    const executorOutputSummary = {
+      executorType: executorOutput.executorType,
+      entitiesFound: executorOutput.entities.length,
+      entitiesAttempted: executorOutput.entitiesAttempted,
+      timeMs: executorOutput.executionMetadata.timeMs,
+      apiCallsMade: executorOutput.executionMetadata.apiCallsMade,
+      errorsEncountered: executorOutput.executionMetadata.errorsEncountered,
+      rateLimitsHit: executorOutput.executionMetadata.rateLimitsHit,
+      coverageSignals: executorOutput.coverageSignals,
+    };
+
     if (Object.keys(executorOutput.rawResult).length > 0) {
       finalRawResult = executorOutput.rawResult;
     }

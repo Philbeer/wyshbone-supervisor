@@ -405,6 +405,15 @@ class SupervisorService {
             metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'server_restart', timed_out: true, recovered_at: new Date().toISOString() },
           });
           console.log(`[RECOVERY_RUNS] Marked agent_run ${run.id} as failed (server_restart_orphan)`);
+          if (supabase) {
+            await supabase
+              .from('loop_state')
+              .update({ status: 'circuit_broken', completed_at: new Date().toISOString() })
+              .eq('run_id', run.id)
+              .eq('status', 'active')
+              .then(() => console.log(`[RECOVERY_RUNS] Closed active loop_state rows for run ${run.id}`))
+              .catch((e: any) => console.warn(`[RECOVERY_RUNS] Failed to close loop_state rows for run ${run.id}: ${e.message}`));
+          }
           recovered++;
         } catch (err: any) {
           console.error(`[RECOVERY_RUNS] Failed to recover agent_run ${run.id}: ${err.message}`);
@@ -493,6 +502,15 @@ class SupervisorService {
             metadata: { ...existingMeta, orphan_recovered: true, orphan_reason: 'stale_sweep', timed_out: true, recovered_at: new Date().toISOString() },
           });
           console.log(`[STALE_SWEEP] Marked orphaned agent_run ${run.id} as failed`);
+          if (supabase) {
+            await supabase
+              .from('loop_state')
+              .update({ status: 'circuit_broken', completed_at: new Date().toISOString() })
+              .eq('run_id', run.id)
+              .eq('status', 'active')
+              .then(() => console.log(`[RECOVERY_RUNS] Closed active loop_state rows for run ${run.id}`))
+              .catch((e: any) => console.warn(`[RECOVERY_RUNS] Failed to close loop_state rows for run ${run.id}: ${e.message}`));
+          }
         } catch (err: any) {
           console.error(`[STALE_SWEEP] Failed to recover agent_run ${run.id}: ${err.message}`);
         }
@@ -631,6 +649,7 @@ class SupervisorService {
           recovery_attempts: attempts,
           last_recovery_trigger: trigger,
           last_recovery_at: new Date().toISOString(),
+          resume_from_loop_state: true,
         },
       }).catch((err: any) => {
         console.warn(`${logPrefix} failed to reset agent_run: ${err.message}`);
@@ -1904,6 +1923,51 @@ class SupervisorService {
     try {
       if (executionSource === 'mission') {
         console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=executeMissionWithReloop strategy=${activeMissionPlan!.strategy}`);
+
+        // ── 6.2 Crash Recovery: check for resumable loop state ──
+        let recoveryCheckpoint: import('./supervisor/reloop/types').ResumeCheckpoint | null = null;
+        const crashRecoveryEnabled = (process.env.CRASH_RECOVERY_ENABLED || 'false').toLowerCase() === 'true';
+
+        if (crashRecoveryEnabled) {
+          try {
+            const { data: existingRunData } = await supabase!
+              .from('agent_runs')
+              .select('id, status, metadata')
+              .eq('id', jobId)
+              .maybeSingle();
+            const shouldCheckResume = existingRunData?.metadata?.resume_from_loop_state === true;
+
+            if (shouldCheckResume) {
+              const { checkForResumableState } = await import('./supervisor/reloop/resume');
+              recoveryCheckpoint = await checkForResumableState(jobId);
+
+              if (recoveryCheckpoint) {
+                console.log(`[CRASH_RECOVERY] Run ${jobId}: resuming from loop ${recoveryCheckpoint.lastCompletedLoop + 1} phase=${recoveryCheckpoint.resumeFrom} entities=${recoveryCheckpoint.accumulatedEntities.length}`);
+
+                await createArtefact({
+                  runId: jobId,
+                  type: 'diagnostic',
+                  title: `Crash recovery activated for run ${jobId}`,
+                  summary: `Resuming from loop ${recoveryCheckpoint.lastCompletedLoop + 1} (${recoveryCheckpoint.resumeFrom}). ${recoveryCheckpoint.accumulatedEntities.length} entities recovered.`,
+                  payload: {
+                    resume_from: recoveryCheckpoint.resumeFrom,
+                    last_completed_loop: recoveryCheckpoint.lastCompletedLoop,
+                    accumulated_entities: recoveryCheckpoint.accumulatedEntities.length,
+                    executors_tried: recoveryCheckpoint.executorsTriedSoFar,
+                  },
+                  userId: task.user_id,
+                  conversationId: task.conversation_id,
+                }).catch(() => {});
+              } else {
+                console.log(`[CRASH_RECOVERY] Run ${jobId}: no resumable state found, will restart from scratch`);
+              }
+            }
+          } catch (recoveryErr: any) {
+            console.warn(`[CRASH_RECOVERY] Run ${jobId}: recovery check failed (non-fatal, proceeding with full restart): ${recoveryErr.message}`);
+            recoveryCheckpoint = null;
+          }
+        }
+
         const missionCtx: MissionExecutionContext = {
           mission: missionResult!.mission!,
           plan: activeMissionPlan!,
@@ -1916,6 +1980,7 @@ class SupervisorService {
           intentNarrative: missionResult!.intentNarrative ?? null,
           queryId: missionQueryId,
           executionPath: (requestData as any).execution_path === 'gpt4o_primary' ? 'gpt4o_primary' : 'gp_cascade',
+          checkpoint: recoveryCheckpoint,
         };
         console.log('[QID-TRACE]', 'step2:missionCtx_built', missionCtx.queryId);
         towerResult = await executeMissionWithReloop(missionCtx);

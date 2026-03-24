@@ -61,6 +61,7 @@ export interface MissionExecutionContext {
   intentNarrative: IntentNarrative | null;
   queryId?: string | null;
   executionPath?: 'gp_cascade' | 'gpt4o_primary';
+  checkpoint?: import('./reloop/types').ResumeCheckpoint | null;
 }
 
 export interface MissionExecutionResult {
@@ -606,6 +607,7 @@ export async function executeMissionWithReloop(
         intentNarrative: ctx.intentNarrative,
         queryId: ctx.queryId,
         executionPath: ctx.executionPath,
+        checkpoint: ctx.checkpoint ?? null,
       });
     }
 

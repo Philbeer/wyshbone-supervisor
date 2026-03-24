@@ -28,5 +28,6 @@ registerExecutor('outreach', outreachAdapter, {
 });
 
 export { runReloop } from './loop-skeleton';
+export { checkForResumableState } from './resume';
 export * from './types';
 export { registerExecutor, getAvailableExecutors } from './executor-registry';
