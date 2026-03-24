@@ -186,12 +186,15 @@ outreachRouter.post('/trigger', async (req, res) => {
   }
 });
 
-// POST /trigger-single — trigger outreach for a single lead from a completed discovery run
+// POST /trigger-single — trigger outreach for a single lead using Hunter.io
 outreachRouter.post('/trigger-single', async (req, res) => {
   const userId = getUserId(req);
   const { run_id, lead_name, lead_website } = req.body;
   if (!run_id || !lead_name) return res.status(400).json({ error: 'run_id and lead_name are required' });
   if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+  const hunterKey = process.env.HUNTER_API_KEY || process.env.HUNTER_IO_API_KEY;
+  if (!hunterKey) return res.status(503).json({ error: 'Hunter.io API key not configured' });
 
   try {
     const { data: config } = await supabase
@@ -202,99 +205,68 @@ outreachRouter.post('/trigger-single', async (req, res) => {
       .single();
 
     if (!config) {
-      return res.status(400).json({ error: 'No outreach config found. Set up your outreach identity first via POST /api/outreach/config' });
+      return res.status(400).json({ error: 'No outreach config found. Set up your outreach identity first.' });
     }
 
-    // Import tools
-    const { executeWebVisit } = await import('../supervisor/web-visit');
-    const { executeContactExtract } = await import('../supervisor/contact-extract');
     const { draftOutreachEmail } = await import('../supervisor/outreach-drafter');
     const { buildFromAddress, buildReplyToAddress } = await import('../supervisor/outreach-transport');
     const { randomUUID } = await import('crypto');
 
-    const outreachRunId = randomUUID();
-    let contactEmail: string | null = null;
-    let contactName: string | null = null;
-    let contactRole: string | null = null;
-    let contactSource = 'none';
-
-    console.log(`[OUTREACH_SINGLE] Processing "${lead_name}" from run ${run_id}`);
-
-    // Step 1: Try website extraction if we have a website
+    // Extract domain from website URL
+    let domain = '';
     if (lead_website) {
       try {
-        const webVisitResult = await executeWebVisit(
-          { url: lead_website, max_pages: 3, page_hints: ['/contact', '/about', '/team'], same_domain_only: true },
-          outreachRunId,
-        );
-        const pages = (webVisitResult as any)?.envelope?.outputs?.pages || [];
-        if (pages.length > 0) {
-          const contactResult = executeContactExtract(
-            { pages: pages.map((p: any) => ({ url: p.url || lead_website, text_clean: p.text_clean || p.text || '' })), entity_name: lead_name },
-            outreachRunId,
-          );
-          const outputs = (contactResult as any)?.envelope?.outputs;
-          if (outputs?.contacts?.emails?.length > 0) {
-            contactEmail = outputs.contacts.emails[0];
-            contactSource = 'website_extraction';
-          }
-          if (outputs?.people?.length > 0) {
-            contactName = outputs.people[0].name;
-            contactRole = outputs.people[0].role;
-          }
-        }
-      } catch (e: any) {
-        console.warn(`[OUTREACH_SINGLE] Website extraction failed for "${lead_name}": ${e.message}`);
+        const u = new URL(lead_website.startsWith('http') ? lead_website : `https://${lead_website}`);
+        domain = u.hostname.replace(/^www\./, '');
+      } catch {
+        domain = lead_website.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
       }
     }
 
-    // Step 2: GPT-4o fallback if no email found
-    if (!contactEmail && process.env.OPENAI_API_KEY) {
-      try {
-        const resp = await fetch('https://api.openai.com/v1/responses', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'gpt-4o-mini',
-            input: `Find the contact email address for "${lead_name}"${lead_website ? ` (website: ${lead_website})` : ''}. Search their website, Google, directories, social media. Return JSON only: {"email_found":true/false,"email":"address or null","contact_name":"name or null","contact_role":"role or null","source":"where found"}`,
-            tools: [{ type: 'web_search' }],
-            store: false,
-          }),
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          let content = '';
-          if (Array.isArray(data.output)) {
-            for (const item of data.output) {
-              if (item.type === 'message' && Array.isArray(item.content)) {
-                for (const block of item.content) { if (block.type === 'output_text') content += block.text; }
-              }
-            }
-          }
-          const jsonMatch = content.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
-            if (parsed.email_found && parsed.email?.includes('@')) {
-              contactEmail = parsed.email;
-              contactSource = `gpt4o_web_search: ${parsed.source || 'web'}`;
-              if (parsed.contact_name && !contactName) contactName = parsed.contact_name;
-              if (parsed.contact_role && !contactRole) contactRole = parsed.contact_role;
-            }
-          }
-        }
-      } catch (e: any) {
-        console.warn(`[OUTREACH_SINGLE] GPT-4o email finder failed for "${lead_name}": ${e.message}`);
-      }
+    if (!domain) {
+      return res.json({ ok: true, email_found: false, lead_name, message: 'No website domain available to search for emails.' });
     }
 
-    if (!contactEmail) {
-      return res.json({ ok: true, email_found: false, lead_name, message: 'No contact email could be found for this lead.' });
+    console.log(`[OUTREACH_SINGLE] Hunter.io domain search for "${lead_name}" → ${domain}`);
+
+    // Call Hunter.io domain-search API
+    const hunterUrl = `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&api_key=${hunterKey}&limit=5`;
+    const hunterResp = await fetch(hunterUrl);
+
+    if (!hunterResp.ok) {
+      const errText = await hunterResp.text();
+      console.warn(`[OUTREACH_SINGLE] Hunter.io error for ${domain}: ${hunterResp.status} ${errText}`);
+      return res.json({ ok: true, email_found: false, lead_name, message: `Hunter.io returned ${hunterResp.status}` });
     }
 
+    const hunterData = await hunterResp.json();
+    const hunterEmails = hunterData?.data?.emails || [];
+    const orgName = hunterData?.data?.organization || lead_name;
+
+    console.log(`[OUTREACH_SINGLE] Hunter.io returned ${hunterEmails.length} email(s) for ${domain}`);
+
+    if (hunterEmails.length === 0) {
+      return res.json({ ok: true, email_found: false, lead_name, emails: [], message: 'Hunter.io found no emails for this domain.' });
+    }
+
+    // Pick the best email (prefer highest confidence, then type=personal over generic)
+    const sorted = [...hunterEmails].sort((a: any, b: any) => {
+      if (a.type === 'personal' && b.type !== 'personal') return -1;
+      if (b.type === 'personal' && a.type !== 'personal') return 1;
+      return (b.confidence || 0) - (a.confidence || 0);
+    });
+
+    const best = sorted[0];
+    let contactEmail = best.value;
+    const contactName = [best.first_name, best.last_name].filter(Boolean).join(' ') || null;
+    const contactRole = best.position || best.department || null;
+    const contactSource = `hunter.io (confidence: ${best.confidence}%, type: ${best.type})`;
+
+    // TEST OVERRIDE: send to Phil's inbox
     contactEmail = 'phil@listersbrewery.com';
-    console.log(`[OUTREACH_SINGLE] Found email for "${lead_name}": ${contactEmail} (${contactSource})`);
+    console.log(`[OUTREACH_SINGLE] TEST OVERRIDE: all emails → phil@listersbrewery.com (original: ${best.value})`);
 
-    // Step 3: Draft email
+    // Draft the email
     const draft = await draftOutreachEmail({
       leadName: lead_name,
       leadAddress: '',
@@ -314,7 +286,8 @@ outreachRouter.post('/trigger-single', async (req, res) => {
       callToAction: null,
     });
 
-    // Step 4: Store draft in Supabase
+    // Store draft in Supabase
+    const outreachRunId = randomUUID();
     const messageId = randomUUID();
     const fromAddress = buildFromAddress(config.display_name, config.handle, config.sending_domain);
     const replyToAddress = buildReplyToAddress(messageId, config.reply_to_domain);
@@ -334,22 +307,32 @@ outreachRouter.post('/trigger-single', async (req, res) => {
       body_text: draft.bodyText,
       status: 'draft',
       draft_model: draft.model,
-      draft_context: { contact_source: contactSource },
+      draft_context: { contact_source: contactSource, hunter_emails_found: hunterEmails.length },
       drafted_at: new Date().toISOString(),
     });
 
-    console.log(`[OUTREACH_SINGLE] Draft created for "${lead_name}" → ${contactEmail}`);
+    console.log(`[OUTREACH_SINGLE] Draft created for "${lead_name}" → ${contactEmail} (${contactSource})`);
 
+    // Return all Hunter emails plus the draft
     res.json({
       ok: true,
       email_found: true,
       lead_name,
       recipient_email: contactEmail,
       contact_name: contactName,
+      contact_role: contactRole,
       contact_source: contactSource,
       message_id: messageId,
       subject: draft.subject,
       body_text: draft.bodyText,
+      all_emails: hunterEmails.map((e: any) => ({
+        email: e.value,
+        name: [e.first_name, e.last_name].filter(Boolean).join(' '),
+        position: e.position,
+        department: e.department,
+        type: e.type,
+        confidence: e.confidence,
+      })),
     });
   } catch (err: any) {
     console.error(`[OUTREACH_SINGLE] Error: ${err.message}`);
