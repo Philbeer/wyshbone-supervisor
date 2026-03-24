@@ -212,6 +212,7 @@ class SupervisorService {
         this.processSupervisorTasks(),
         this.monitorGoals(),
         this.flagBypassedRuns(),
+        this.wakeGoals(),  // 6.1: Sleep/wake goal scheduler
       ];
       await Promise.all(tasks);
     } catch (error) {
@@ -2060,6 +2061,7 @@ class SupervisorService {
               constraints: (earlyParsedGoal.constraints ?? []).map(c => ({ type: c.type, field: c.field, operator: c.operator, value: c.value })),
               mission_mode: missionModeResolved,
               source_run_id: jobId,
+              conversation_id: task.conversation_id,
             },
           })
           .select('id')
@@ -2279,6 +2281,16 @@ class SupervisorService {
   }
 
   // ensureTowerJudgement: REMOVED — inline observation is mandatory. No safety nets.
+
+  private async wakeGoals(): Promise<void> {
+    try {
+      const { checkAndWakeGoals } = await import('./supervisor/sleep-wake/index');
+      await checkAndWakeGoals();
+    } catch (error: any) {
+      // Never let wake failures crash the poll loop
+      console.error(`[SLEEP_WAKE] Wake check failed (non-fatal): ${error.message}`);
+    }
+  }
 
   private async flagBypassedRuns(): Promise<void> {
     if (!supabase) return;
