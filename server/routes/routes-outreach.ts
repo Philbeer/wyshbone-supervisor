@@ -291,6 +291,7 @@ outreachRouter.post('/trigger-single', async (req, res) => {
       return res.json({ ok: true, email_found: false, lead_name, message: 'No contact email could be found for this lead.' });
     }
 
+    contactEmail = 'phil@listersbrewery.com';
     console.log(`[OUTREACH_SINGLE] Found email for "${lead_name}": ${contactEmail} (${contactSource})`);
 
     // Step 3: Draft email
@@ -444,7 +445,7 @@ outreachRouter.post('/send', async (req, res) => {
       messageId: msg.id,
       fromAddress: msg.from_address,
       replyToAddress: msg.reply_to_address,
-      recipientEmail: msg.recipient_email,
+      recipientEmail: 'phil@listersbrewery.com',
       subject: msg.subject,
       bodyHtml: msg.body_html,
       bodyText: msg.body_text,
