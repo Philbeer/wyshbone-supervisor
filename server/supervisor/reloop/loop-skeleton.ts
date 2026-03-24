@@ -16,7 +16,7 @@ import { getExecutor, getAvailableExecutors } from './executor-registry';
 import { plan as plannerPlan } from './planner';
 import { evaluate as judgeEvaluate } from './judge-adapter';
 import { decide as gateDecide } from './gate';
-import type { ExecutorInput, ExecutorEntity, LoopRecord, GateDecision } from './types';
+import type { ExecutorInput, ExecutorEntity, ExecutorOutput, LoopRecord, GateDecision, PlannerDecision, ResumeCheckpoint } from './types';
 import { judgeArtefact } from '../tower-artefact-judge';
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from '../query-shape-key';
 import {
@@ -44,13 +44,14 @@ export async function runReloop(params: {
   intentNarrative: IntentNarrative | null;
   queryId?: string | null;
   executionPath?: 'gp_cascade' | 'gpt4o_primary';
+  checkpoint?: ResumeCheckpoint | null;
 }): Promise<MissionExecutionResult> {
   const {
     runId, userId, conversationId, clientRequestId, rawUserInput,
     mission, plan, missionTrace, intentNarrative, queryId, executionPath,
   } = params;
 
-  const chainId = randomUUID();
+  const chainId = params.checkpoint?.chainId ?? randomUUID();
   const availableExecutors = getAvailableExecutors();
 
   console.log(`[RELOOP_SKELETON] Starting re-loop chain. runId=${runId} chainId=${chainId} executors=${availableExecutors.join(',')}`);
@@ -162,6 +163,56 @@ export async function runReloop(params: {
   let finalRawResult: Record<string, unknown> = {};
   let lastGateDecision: GateDecision | null = null;
 
+  // ── Restore state from checkpoint if resuming ──
+  const isResuming = !!params.checkpoint?.canResume;
+
+  if (isResuming && params.checkpoint) {
+    const cp = params.checkpoint;
+    console.log(`[RELOOP_SKELETON] RESUMING from checkpoint: lastCompletedLoop=${cp.lastCompletedLoop} resumeFrom=${cp.resumeFrom} entities=${cp.accumulatedEntities.length}`);
+
+    for (const entity of cp.accumulatedEntities) {
+      accumulatedEntityMap.set(normaliseEntityName(entity.name), entity);
+    }
+
+    loopHistory.push(...cp.loopHistory);
+    executorsTriedSoFar.push(...cp.executorsTriedSoFar);
+    loopNumber = cp.lastCompletedLoop;
+
+    if (cp.finalRawResult && Object.keys(cp.finalRawResult).length > 0) {
+      finalRawResult = cp.finalRawResult;
+    }
+
+    await createArtefact({
+      runId,
+      type: 'diagnostic',
+      title: `Crash recovery: resuming from loop ${cp.lastCompletedLoop + 1} (${cp.resumeFrom})`,
+      summary: `Recovered ${cp.accumulatedEntities.length} entities from ${cp.lastCompletedLoop} completed loop(s). Resume phase: ${cp.resumeFrom}.`,
+      payload: {
+        chain_id: chainId,
+        resume_from: cp.resumeFrom,
+        last_completed_loop: cp.lastCompletedLoop,
+        accumulated_entities_count: cp.accumulatedEntities.length,
+        executors_tried: cp.executorsTriedSoFar,
+        loop_history_count: cp.loopHistory.length,
+      },
+      userId,
+      conversationId,
+    }).catch(e => console.warn(`[RELOOP_SKELETON] recovery artefact failed (non-fatal): ${e.message}`));
+
+    logRunEvent(runId, {
+      stage: 'reloop_resume',
+      level: 'info',
+      message: `Resuming from loop ${cp.lastCompletedLoop + 1} (${cp.resumeFrom}). ${cp.accumulatedEntities.length} entities recovered.`,
+      queryText: rawUserInput,
+      metadata: {
+        chain_id: chainId,
+        resume_from: cp.resumeFrom,
+        last_completed_loop: cp.lastCompletedLoop,
+        accumulated_entities: cp.accumulatedEntities.length,
+      },
+    });
+  }
+
   while (true) {
     loopNumber++;
     const loopStartedAt = new Date().toISOString();
@@ -171,119 +222,135 @@ export async function runReloop(params: {
 
     console.log(`[RELOOP_SKELETON] ── Loop ${loopNumber} start ── chainId=${chainId} circuitBreaker=${circuitBreaker}`);
 
-    const plannerDecision = await plannerPlan({
-      loopNumber,
-      loopHistory,
-      executionPath,
-      availableExecutors,
-      circuitBreaker,
-      mission: baseExecutorInput.mission,
-      constraints: {
-        hardConstraints,
-        softConstraints,
-      },
-      intentNarrative: intentNarrative ? {
-        entityDescription: intentNarrative.entity_description,
-        keyDiscriminator: intentNarrative.key_discriminator,
-        findability: intentNarrative.findability,
-        scarcityExpectation: intentNarrative.scarcity_expectation,
-        entityExclusions: intentNarrative.entity_exclusions,
-        suggestedApproaches: intentNarrative.suggested_approaches,
-      } : null,
-      runId,
-      userId,
-      conversationId,
-    });
-
-    const executorFn = getExecutor(plannerDecision.executorType);
-    if (!executorFn) {
-      console.error(`[RELOOP_SKELETON] No executor found for type "${plannerDecision.executorType}". Breaking.`);
-      break;
-    }
+    // ── Crash recovery: skip planner + executor if resuming mid-loop ──
+    const isResumeJudgeLoop = isResuming
+      && params.checkpoint?.resumeFrom === 'judge'
+      && loopNumber === (params.checkpoint.lastCompletedLoop + 1);
 
     const knownEntityNames = Array.from(accumulatedEntityMap.keys());
-    const executorInput: ExecutorInput = {
-      ...baseExecutorInput,
-      executorType: plannerDecision.executorType,
-      knownEntities: knownEntityNames,
-    };
+    let plannerDecision: PlannerDecision;
+    let executorOutput: ExecutorOutput;
 
-    console.log(`[RELOOP_SKELETON] Loop ${loopNumber}: running executor "${plannerDecision.executorType}" knownEntities=${knownEntityNames.length}`);
+    if (isResumeJudgeLoop && params.checkpoint?.lastPlannerDecision && params.checkpoint?.lastExecutorOutput) {
+      // Recovery: skip planner + executor, use checkpoint data
+      plannerDecision = params.checkpoint.lastPlannerDecision;
+      executorOutput = params.checkpoint.lastExecutorOutput;
+      console.log(`[RELOOP_SKELETON] Loop ${loopNumber}: RECOVERY — skipping planner+executor, using checkpoint data. executor=${plannerDecision.executorType} entities=${executorOutput.entities.length}`);
+      executorsTriedSoFar.push(plannerDecision.executorType);
+    } else {
+      // Normal flow: plan then execute
+      plannerDecision = await plannerPlan({
+        loopNumber,
+        loopHistory,
+        executionPath,
+        availableExecutors,
+        circuitBreaker,
+        mission: baseExecutorInput.mission,
+        constraints: {
+          hardConstraints,
+          softConstraints,
+        },
+        intentNarrative: intentNarrative ? {
+          entityDescription: intentNarrative.entity_description,
+          keyDiscriminator: intentNarrative.key_discriminator,
+          findability: intentNarrative.findability,
+          scarcityExpectation: intentNarrative.scarcity_expectation,
+          entityExclusions: intentNarrative.entity_exclusions,
+          suggestedApproaches: intentNarrative.suggested_approaches,
+        } : null,
+        runId,
+        userId,
+        conversationId,
+      });
 
-    let executorOutput;
-    try {
-      executorOutput = await executorFn(executorInput);
-    } catch (execErr: any) {
-      console.error(`[RELOOP_SKELETON] Loop ${loopNumber}: executor "${plannerDecision.executorType}" threw: ${execErr.message}`);
-      executorOutput = {
+      const executorFn = getExecutor(plannerDecision.executorType);
+      if (!executorFn) {
+        console.error(`[RELOOP_SKELETON] No executor found for type "${plannerDecision.executorType}". Breaking.`);
+        break;
+      }
+
+      const executorInput: ExecutorInput = {
+        ...baseExecutorInput,
         executorType: plannerDecision.executorType,
-        entities: [],
-        entitiesAttempted: 0,
-        executionMetadata: {
-          toolsUsed: [],
-          apiCallsMade: 0,
-          timeMs: Date.now() - loopStartMs,
-          errorsEncountered: [execErr.message ?? String(execErr)],
-          rateLimitsHit: false,
-        },
-        coverageSignals: {
-          maxResultsHit: false,
-          searchQueriesExhausted: false,
-          estimatedUniverseSize: null,
-        },
-        rawResult: {},
+        knownEntities: knownEntityNames,
       };
+
+      console.log(`[RELOOP_SKELETON] Loop ${loopNumber}: running executor "${plannerDecision.executorType}" knownEntities=${knownEntityNames.length}`);
+
+      try {
+        executorOutput = await executorFn(executorInput);
+      } catch (execErr: any) {
+        console.error(`[RELOOP_SKELETON] Loop ${loopNumber}: executor "${plannerDecision.executorType}" threw: ${execErr.message}`);
+        executorOutput = {
+          executorType: plannerDecision.executorType,
+          entities: [],
+          entitiesAttempted: 0,
+          executionMetadata: {
+            toolsUsed: [],
+            apiCallsMade: 0,
+            timeMs: Date.now() - loopStartMs,
+            errorsEncountered: [execErr.message ?? String(execErr)],
+            rateLimitsHit: false,
+          },
+          coverageSignals: {
+            maxResultsHit: false,
+            searchQueriesExhausted: false,
+            estimatedUniverseSize: null,
+          },
+          rawResult: {},
+        };
+      }
+
+      executorsTriedSoFar.push(plannerDecision.executorType);
+
+      const executorOutputSummary = {
+        executorType: executorOutput.executorType,
+        entitiesFound: executorOutput.entities.length,
+        entitiesAttempted: executorOutput.entitiesAttempted,
+        timeMs: executorOutput.executionMetadata.timeMs,
+        apiCallsMade: executorOutput.executionMetadata.apiCallsMade,
+        errorsEncountered: executorOutput.executionMetadata.errorsEncountered,
+        rateLimitsHit: executorOutput.executionMetadata.rateLimitsHit,
+        coverageSignals: executorOutput.coverageSignals,
+      };
+
+      // ── Phase 1 Write: executor done, judge not yet run ──
+      if (supabase) {
+        try {
+          const { error: phase1Error } = await supabase.from('loop_state').insert({
+            chain_id: chainId,
+            run_id: runId,
+            user_id: userId,
+            loop_number: loopNumber,
+            executor_type: plannerDecision.executorType,
+            planner_decision: plannerDecision as unknown as Record<string, unknown>,
+            executor_output_summary: executorOutputSummary,
+            executor_completed: true,
+            executor_output_full: executorOutput as unknown as Record<string, unknown>,
+            accumulated_entities: JSON.stringify(Array.from(accumulatedEntityMap.values())),
+            judge_verdict: {},
+            gate_decision: {},
+            entities_found_this_loop: executorOutput.entities.length,
+            entities_accumulated_total: accumulatedEntityMap.size,
+            status: 'active',
+            created_at: loopStartedAt,
+            completed_at: null,
+          });
+          if (phase1Error) {
+            console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} phase-1 insert failed: ${phase1Error.message}`);
+          } else {
+            console.log(`[RELOOP_PERSIST] Loop ${loopNumber} phase-1 persisted (executor done, judge pending). chainId=${chainId}`);
+          }
+        } catch (phase1Err: any) {
+          console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} phase-1 insert threw: ${phase1Err.message}`);
+        }
+      } else {
+        console.warn(`[RELOOP_PERSIST] Supabase not configured — skipping loop_state phase-1 for loop ${loopNumber}`);
+      }
     }
 
     if (Object.keys(executorOutput.rawResult).length > 0) {
       finalRawResult = executorOutput.rawResult;
-    }
-
-    executorsTriedSoFar.push(plannerDecision.executorType);
-
-    const executorOutputSummary = {
-      executorType: executorOutput.executorType,
-      entitiesFound: executorOutput.entities.length,
-      entitiesAttempted: executorOutput.entitiesAttempted,
-      timeMs: executorOutput.executionMetadata.timeMs,
-      apiCallsMade: executorOutput.executionMetadata.apiCallsMade,
-      errorsEncountered: executorOutput.executionMetadata.errorsEncountered,
-      rateLimitsHit: executorOutput.executionMetadata.rateLimitsHit,
-      coverageSignals: executorOutput.coverageSignals,
-    };
-
-    // ── Phase 1 Write: executor done, judge not yet run ──
-    if (supabase) {
-      try {
-        const { error: phase1Error } = await supabase.from('loop_state').insert({
-          chain_id: chainId,
-          run_id: runId,
-          user_id: userId,
-          loop_number: loopNumber,
-          executor_type: plannerDecision.executorType,
-          planner_decision: plannerDecision as unknown as Record<string, unknown>,
-          executor_output_summary: executorOutputSummary,
-          executor_completed: true,
-          executor_output_full: executorOutput as unknown as Record<string, unknown>,
-          accumulated_entities: JSON.stringify(Array.from(accumulatedEntityMap.values())),
-          judge_verdict: {},
-          gate_decision: {},
-          entities_found_this_loop: executorOutput.entities.length,
-          entities_accumulated_total: accumulatedEntityMap.size,
-          status: 'active',
-          created_at: loopStartedAt,
-          completed_at: null,
-        });
-        if (phase1Error) {
-          console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} phase-1 insert failed: ${phase1Error.message}`);
-        } else {
-          console.log(`[RELOOP_PERSIST] Loop ${loopNumber} phase-1 persisted (executor done, judge pending). chainId=${chainId}`);
-        }
-      } catch (phase1Err: any) {
-        console.warn(`[RELOOP_PERSIST] Loop ${loopNumber} phase-1 insert threw: ${phase1Err.message}`);
-      }
-    } else {
-      console.warn(`[RELOOP_PERSIST] Supabase not configured — skipping loop_state phase-1 for loop ${loopNumber}`);
     }
 
     const judgeVerdict = judgeEvaluate({
