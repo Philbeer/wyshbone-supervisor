@@ -83,15 +83,18 @@ export async function sendOutreachEmail(input: OutreachSendInput): Promise<Outre
     console.error(`[OUTREACH_TRANSPORT] Send failed: messageId=${input.messageId} error=${errMsg}`);
 
     if (supabase) {
-      await supabase
-        .from('outreach_messages')
-        .update({
-          status: 'failed',
-          failed_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', input.messageId)
-        .catch(() => {});
+      try {
+        await supabase
+          .from('outreach_messages')
+          .update({
+            status: 'failed',
+            failed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', input.messageId);
+      } catch (e) {
+        console.error('[OUTREACH_TRANSPORT] Failed to update message status to failed:', e);
+      }
     }
 
     return { success: false, resendMessageId: null, error: errMsg };
