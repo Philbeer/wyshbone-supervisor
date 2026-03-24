@@ -1,0 +1,26 @@
+Prompt 2 of 5 — Two-Phase Write in loop-skeleton.ts
+CONTEXT: Continuing 6.2 crash recovery. The types and migration are done. Now we need to split the single Supabase write in `server/supervisor/reloop/loop-skeleton.ts` into a two-phase write so that if the process crashes between executor completion and judge completion, the recovery logic can detect exactly where it stopped.
+
+TASK: Modify `server/supervisor/reloop/loop-skeleton.ts`. Find the single `supabase.from('loop_state').insert(...)` call that currently happens AFTER the judge and gate have both run (around line 170-200 in the while loop). Replace it with TWO writes:
+
+PHASE 1 WRITE — Insert immediately AFTER the executor returns and BEFORE `judgeEvaluate()` is called. Place it right after `executorsTriedSoFar.push(plannerDecision.executorType)` and before `const judgeVerdict = judgeEvaluate(...)`. This write should:
+- Insert a new row with `executor_completed: true`
+- Include `planner_decision`, `executor_output_summary` (the compact summary that already exists)
+- Include `executor_output_full` — the FULL `executorOutput` object serialised as JSON (entities, metadata, coverage signals, rawResult). This is needed so recovery can re-run judge without re-running the executor.
+- Include `accumulated_entities` — `JSON.stringify(Array.from(accumulatedEntityMap.values()))` — the entity map as it stands BEFORE this loop's entities are merged in (the pre-merge snapshot)
+- Set `judge_verdict: {}`, `gate_decision: {}` (empty — not yet computed)
+- Set `status: 'active'`, `completed_at: null`
+- Wrap in the same `if (supabase)` guard and try/catch pattern as the existing write
+
+PHASE 2 WRITE — Update the same row AFTER judge + gate have both run and after entities are merged into accumulatedEntityMap. Use `supabase.from('loop_state').update(...)` with `.eq('chain_id', chainId).eq('loop_number', loopNumber)`. This update should set:
+- `judge_verdict` (the full verdict object, same as current)
+- `gate_decision` (same payload as current)
+- `entities_found_this_loop`, `entities_accumulated_total`
+- `accumulated_entities` — NOW updated to include this loop's merged entities
+- `status` (active/delivered/circuit_broken — same logic as current)
+- `completed_at` (the loop completion timestamp)
+- Wrap in same guard/catch pattern, log prefix `[RELOOP_PERSIST]`
+
+DELETE the old single insert that currently does everything in one shot. Keep all the existing log messages and patterns. The artefact creation, AFR logging, and run event logging that happen after the Supabase write should remain exactly where they are (after phase 2).
+
+IMPORTANT: Do not change the function signature of `runReloop()` yet — that's prompt 4. Do not change any imports. Do not touch the combined delivery section at the bottom. Only change the Supabase persistence inside the while loop.

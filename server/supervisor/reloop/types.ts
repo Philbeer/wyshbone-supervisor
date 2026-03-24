@@ -127,4 +127,21 @@ export interface LoopStateRow {
   status: 'active' | 'delivered' | 'circuit_broken';
   created_at: string;
   completed_at: string | null;
+  executor_completed?: boolean;
+  accumulated_entities?: string;
+  executor_output_full?: Record<string, unknown>;
+}
+
+// ── Crash Recovery ──
+export interface ResumeCheckpoint {
+  canResume: boolean;
+  chainId: string;
+  lastCompletedLoop: number;
+  resumeFrom: 'planner' | 'judge' | 'full_restart';
+  accumulatedEntities: ExecutorEntity[];
+  loopHistory: LoopRecord[];
+  executorsTriedSoFar: string[];
+  lastExecutorOutput?: ExecutorOutput;
+  lastPlannerDecision?: PlannerDecision;
+  finalRawResult?: Record<string, unknown>;
 }
