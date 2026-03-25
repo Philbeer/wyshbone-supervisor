@@ -1,0 +1,47 @@
+MODE: INVESTIGATE ONLY. DO NOT CHANGE ANY CODE.
+Context
+We just ran a clarification flow. The query was "i'm looking for companies that buy cardboard wholesale". The Supervisor ran a Preflight Clarify Probe, found 2 candidates, decided to ask for location clarification, and posted the message "1. What location should I search in? (e.g. London, Sussex, Manchester)" to the Supabase messages table.
+What to investigate
+1. Check the Supervisor logs for the last 30 minutes
+Look at the Replit console output for the Supervisor repo (wyshbone-supervisor-Post-CC). Find:
+
+The preflight clarify probe execution
+The decision to ask for clarification
+The message POST to Supabase
+The metadata sent with the clarification message
+
+2. Check what metadata is sent with the clarify message
+This is CRITICAL. The UI checks for metadata.clarify_gate or metadata.mode === 'clarify' to identify clarification messages. Find the code that posts the clarify question to Supabase and check:
+
+What metadata object is included?
+Does it include clarify_gate? What value?
+Does it include mode: 'clarify'?
+Search for where the clarify message is written to the messages table
+
+3. Check the constraint-gate and mission-extractor
+In server/supervisor/constraint-gate.ts or server/supervisor/mission-extractor.ts:
+
+Find where the clarification question text is generated
+Find where it's posted to Supabase
+Check the metadata payload
+
+4. Check the clarify session handling
+When the user answers "west sussex":
+
+How does the Supervisor receive the answer?
+Does it create a new run or continue the existing one?
+What status transitions happen? (clarifying → executing → completed)
+
+5. Check the run status during clarification
+The AFR stream endpoint returns status: 'clarifying'. Find where this status is set:
+
+Is it set on the agent_runs table?
+Or is it derived from the clarify_sessions table?
+When does it transition from clarifying to executing?
+
+Output a report with:
+
+The EXACT metadata object sent with the clarification message (this is the most important finding)
+Where in the code the clarify message is posted to Supabase
+The run status lifecycle during clarification
+Any errors or warnings in the logs
