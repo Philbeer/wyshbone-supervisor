@@ -2153,9 +2153,32 @@ class SupervisorService {
       }
     }
 
-    let response = sanitizeSupervisorMessage(towerResult.response);
+    // Build natural response instead of generic "Run complete" message
+    const { buildNaturalResponse } = await import('./supervisor/response-builder');
+    const ds = towerResult.deliverySummary;
+    let response: string;
+    try {
+      response = buildNaturalResponse({
+        businessType: earlyParsedGoal?.business_type ?? missionResult?.mission?.entity_category ?? 'results',
+        location: earlyParsedGoal?.location ?? missionResult?.mission?.location_text ?? '',
+        requestedCount: ds?.requested_count ?? earlyParsedGoal?.requested_count ?? null,
+        deliveredCount: ds?.delivered_total_count ?? towerResult.leads.length,
+        verifiedCount: ds?.cvl_verified_exact_count ?? ds?.delivered_exact_count ?? 0,
+        towerVerdict: towerResult.towerVerdict ?? ds?.tower_verdict ?? null,
+        runFailed,
+        failureReason,
+        circuitBreakerFired: ds?.delivery_note?.includes('circuit') ?? false,
+        loopsUsed: ds?.plan_versions?.length ?? 1,
+        executorsUsed: ds?.plan_versions?.map((pv: any) => pv.changes_made?.[0] ?? 'search').filter(Boolean) ?? ['search'],
+        monitorCreated,
+        deliveryNote: ds?.delivery_note ?? null,
+      });
+    } catch (respErr: any) {
+      console.warn(`[RESPONSE_BUILDER] Failed (non-fatal), using neutral message: ${respErr.message}`);
+      response = sanitizeSupervisorMessage(towerResult.response);
+    }
 
-    if (monitorCreated) {
+    if (monitorCreated && !response.includes('monitoring')) {
       const monitorNote = missionModeResolved === 'alert_on_change'
         ? `\n\nI've also set up ongoing monitoring for this. I'll alert you when there are changes or new results.`
         : `\n\nI've also set up ongoing monitoring for this search. I'll check periodically and let you know about new results.`;
