@@ -12,6 +12,11 @@ export interface ArtefactJudgementRequest {
   intent_narrative?: Record<string, unknown> | null;
   query_id?: string | null;
   query_shape_key?: string | null;
+  artefact_payload?: {
+    title?: string;
+    summary?: string;
+    payload_json: Record<string, unknown>;
+  };
 }
 
 export interface ArtefactJudgementResponse {
@@ -158,6 +163,11 @@ export async function judgeArtefact(params: {
     intent_narrative,
     query_id: queryId ?? null,
     query_shape_key: queryShapeKey ?? null,
+    artefact_payload: {
+      title: artefact.title ?? undefined,
+      summary: artefact.summary ?? undefined,
+      payload_json: (typeof artefact.payloadJson === 'string' ? JSON.parse(artefact.payloadJson) : artefact.payloadJson) as Record<string, unknown>,
+    },
   };
   console.log('[QID-TRACE]', 'step6:ArtefactJudgementRequest_query_id', request.query_id);
 
