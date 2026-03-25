@@ -27,6 +27,7 @@ const MONITOR_PATTERNS = [
 const FOLLOWUP_PATTERNS = [
   /\b(show.+more|tell.+more|details|expand|what about|how about|also|and what|the (first|second|third|fourth|fifth|\d+th) one)\b/i,
   /\b(now find|now show|add.+filter|narrow|refine|with.+(beer garden|outdoor|live music|food))\b/i,
+  /\b(number\s*\d+|#\d+|\d+(?:st|nd|rd|th)\s+(?:one|result|lead)|the\s+(?:first|second|third|fourth|fifth)\s+(?:one|result|lead)?)\b/i,
 ];
 
 export function classifyMessage(message: string): ClassificationResult {

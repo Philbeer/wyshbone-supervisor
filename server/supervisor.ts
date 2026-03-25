@@ -987,10 +987,20 @@ class SupervisorService {
         return;
       }
 
-      // For followup and outreach_request, log but continue to pipeline for now
-      // These will get proper handling in Session 9 (A2 conversation context)
+      if (classification.messageClass === 'followup' && task.conversation_id) {
+        try {
+          const { getConversationContext, resolveLeadReference } = await import('./supervisor/conversation-context');
+          const ctx = await getConversationContext(task.conversation_id);
+          if (ctx.leads.length > 0) {
+            console.log(`[CONVERSATION_CONTEXT] Loaded ${ctx.leads.length} leads from last delivery in conversation ${task.conversation_id}`);
+            (requestData as any)._conversation_context = ctx;
+          }
+        } catch (ctxErr: any) {
+          console.warn(`[CONVERSATION_CONTEXT] Failed to load context (non-fatal): ${ctxErr.message}`);
+        }
+      }
       if (classification.messageClass !== 'search') {
-        console.log(`[MESSAGE_CLASSIFIER] Non-search class "${classification.messageClass}" — proceeding to pipeline (will be handled properly in future)`);
+        console.log(`[MESSAGE_CLASSIFIER] Non-search class "${classification.messageClass}" — proceeding to pipeline`);
       }
     }
 
