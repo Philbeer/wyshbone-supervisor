@@ -940,6 +940,60 @@ class SupervisorService {
     }
     console.log('[QID-TRACE]', 'step1:processChatTask_computed', missionQueryId);
 
+    // ═══ MESSAGE CLASSIFIER ═══
+    // Fast classification to avoid burning 20+ LLM calls on "hi" or "thanks"
+    const isClarifyResponse = !!(requestData.clarify_answer || requestData.continuation_of_run || requestData._constraint_gate_resolved);
+
+    if (!isClarifyResponse && !missionQueryId) {
+      const { classifyMessage: classifyMsg } = await import('./supervisor/message-classifier');
+      const classification = classifyMsg(rawMsg);
+      console.log(`[MESSAGE_CLASSIFIER] class=${classification.messageClass} confidence=${classification.confidence} reason=${classification.reason} msg="${rawMsg.substring(0, 60)}"`);
+
+      if (classification.messageClass === 'chat') {
+        // Respond conversationally without running the pipeline
+        const chatResponses = [
+          "Hey! I'm ready to help you find leads. Try something like 'find 10 web design agencies in Brighton' or 'search for craft breweries in Sussex'.",
+          "Hi there! What would you like me to search for today?",
+          "Hello! Tell me what kind of businesses you're looking for and where, and I'll get searching.",
+        ];
+        const chatResponse = chatResponses[Math.floor(Math.random() * chatResponses.length)];
+        const messageId = randomUUID();
+
+        await Promise.all([
+          supabase!.from('supervisor_tasks').update({
+            status: 'completed',
+            result: { response: chatResponse.substring(0, 200), message_id: messageId, classifier: 'chat' },
+          }).eq('id', task.id),
+          supabase!.from('messages').insert({
+            id: messageId,
+            conversation_id: task.conversation_id,
+            role: 'assistant',
+            content: chatResponse,
+            source: 'supervisor',
+            metadata: { supervisor_task_id: task.id, run_id: jobId, classifier: 'chat', classification },
+            created_at: Date.now(),
+          }).select().single(),
+        ]);
+
+        await storage.updateAgentRun(jobId, {
+          status: 'completed',
+          terminalState: 'completed',
+          endedAt: new Date(),
+          metadata: { verdict: 'chat_classified', classifier: classification },
+        }).catch(() => {});
+
+        console.log(`[MESSAGE_CLASSIFIER] Handled as chat — no pipeline triggered. runId=${jobId}`);
+        await emitTaskExecutionCompleted('chat_classified');
+        return;
+      }
+
+      // For followup and outreach_request, log but continue to pipeline for now
+      // These will get proper handling in Session 9 (A2 conversation context)
+      if (classification.messageClass !== 'search') {
+        console.log(`[MESSAGE_CLASSIFIER] Non-search class "${classification.messageClass}" — proceeding to pipeline (will be handled properly in future)`);
+      }
+    }
+
     console.log(`[SUPERVISOR] Executing task ${task.id} — message="${rawMsg.substring(0, 80)}"`);
     taskExecutionStartedEmitted = true;
     logAFREvent({
