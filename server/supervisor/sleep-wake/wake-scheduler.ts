@@ -97,6 +97,28 @@ export async function checkAndWakeGoals(): Promise<void> {
         });
 
         console.log(`[SLEEP_WAKE] Nudged user ${goal.userId} in conversation ${goal.conversationId}: ${wakeResult.deltaCount} new entities`);
+      } else if (wakeResult.deltaCount === 0 && goal.consecutiveEmptyWakes >= 4 && goal.conversationId) {
+        // Notify user after 5 consecutive empty wakes
+        const { randomUUID } = await import('crypto');
+        const messageId = randomUUID();
+        const emptyNudge = `I've checked "${goal.label}" ${goal.consecutiveEmptyWakes + 1} times now with no new results. Would you like me to keep monitoring, change the schedule, or stop checking?`;
+
+        await supabase.from('messages').insert({
+          id: messageId,
+          conversation_id: goal.conversationId,
+          role: 'assistant',
+          content: emptyNudge,
+          source: 'supervisor',
+          metadata: {
+            sleep_wake: true,
+            goal_id: goal.id,
+            empty_wake_nudge: true,
+            consecutive_empty_wakes: goal.consecutiveEmptyWakes + 1,
+          },
+          created_at: Date.now(),
+        });
+
+        console.log(`[SLEEP_WAKE] Empty wake nudge sent for goal ${goal.id} after ${goal.consecutiveEmptyWakes + 1} empty checks`);
       }
 
       console.log(`[SLEEP_WAKE] Goal "${goal.label}" wake complete: ${wakeResult.entitiesFound.length} total, ${wakeResult.deltaCount} new`);
