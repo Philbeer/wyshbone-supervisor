@@ -62,6 +62,7 @@ interface Gpt4oLead {
   description: string;
   evidence: string;
   source_url: string;
+  website?: string;
   location: string;
   confidence: 'high' | 'medium' | 'low';
 }
@@ -90,6 +91,7 @@ For EACH result you find, provide:
 - description: Brief description of what they do
 - evidence: The specific evidence that they match the search criteria (quote or paraphrase from your source)
 - source_url: The URL where you found this information
+- website: The entity's own website URL (their .com or .co.uk homepage). This is NOT the same as source_url. If you found them via a LinkedIn job listing, news article, or directory, look up their actual company website separately. Never use linkedin.com, indeed.com, glassdoor.com, or news sites as the website.
 - location: Their address or location if available
 - confidence: "high" if evidence is direct and clear, "medium" if inferred or from secondary source, "low" if uncertain
 
@@ -103,6 +105,7 @@ Respond with ONLY a JSON object in this exact format:
       "description": "...",
       "evidence": "...",
       "source_url": "...",
+      "website": "...",
       "location": "...",
       "confidence": "high|medium|low"
     }
@@ -162,6 +165,23 @@ async function callGpt4oWebSearch(
     const parsed = JSON.parse(jsonMatch[0]) as Gpt4oSearchResponse;
     if (!parsed.results || !Array.isArray(parsed.results)) {
       return { parsed: null, raw: rawText, error: 'GPT-4o response missing results array' };
+    }
+
+    const REJECTED_WEBSITE_DOMAINS = ['linkedin.com', 'indeed.com', 'glassdoor.com', 'reed.co.uk', 'totaljobs.com', 'monster.com', 'bbc.co.uk', 'bbc.com', 'theguardian.com', 'reuters.com'];
+
+    for (const result of parsed.results) {
+      // Use explicit website field if GPT-4o provided one
+      if ((result as any).website) {
+        result.source_url = (result as any).website;
+      }
+      // Filter out job boards and news sites from source_url
+      try {
+        const urlHost = new URL(result.source_url).hostname.toLowerCase();
+        if (REJECTED_WEBSITE_DOMAINS.some(d => urlHost.includes(d))) {
+          console.log(`[GPT4O_SEARCH] Rejected website URL for "${result.name}": ${result.source_url} (job board/news site)`);
+          result.source_url = '';
+        }
+      } catch {}
     }
 
     return { parsed, raw: rawText };
