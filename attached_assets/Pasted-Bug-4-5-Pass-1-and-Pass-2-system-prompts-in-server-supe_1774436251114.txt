@@ -1,0 +1,42 @@
+Bug 4.5: Pass 1 and Pass 2 system prompts in server/supervisor/mission-extractor.ts contain examples that are near-identical to benchmark queries, contaminating benchmark results.
+
+Replace these specific examples in PASS1_SYSTEM_PROMPT:
+
+1. Find and replace the example:
+   User: "find pubs in arundel that have the word swan in the name"
+   Change to:
+   User: "find wine bars in Bath that have the word cellar in the name"
+
+   And update its output to match:
+   "semantic_interpretation": "The user wants wine bars in Bath whose business name contains \"cellar\". This is a one-time search."
+
+2. Find and replace the example:
+   User: "find pubs in arundel that mention live music on their website"
+   Change to:
+   User: "find gastropubs in Oxford that mention Sunday roast on their website"
+
+   And update its output:
+   Change has_entity, has_location, has_website_evidence to true (same as before).
+   "semantic_interpretation": "The user wants gastropubs in Oxford whose website text contains \"Sunday roast\". This is a one-time search."
+
+Now in PASS2_SYSTEM_PROMPT, replace the matching schema examples:
+
+3. The first full example starting with:
+   Semantic input: The user wants pubs in Arundel whose business name contains "swan".
+   Change to:
+   Semantic input: The user wants wine bars in Bath whose business name contains "cellar".
+   Update the JSON: entity_category "wine bars", location_text "Bath", location_constraint value "Bath", text_compare value "cellar".
+
+4. The second full example starting with:
+   Semantic input: The user wants pubs in Arundel whose website text contains "live music".
+   Change to:
+   Semantic input: The user wants gastropubs in Oxford whose website text contains "Sunday roast".
+   Update the JSON: entity_category "gastropubs", location_text "Oxford", location_constraint value "Oxford", website_evidence value "Sunday roast".
+
+5. Also find and replace the example:
+   Semantic input: The user wants pubs in Sussex whose business name contains "The Swan" and that have a beer garden.
+   Change to:
+   Semantic input: The user wants pubs in Hampshire whose business name contains "The Crown" and that have a beer garden.
+   Update the JSON: location_text "Hampshire", location_constraint value "Hampshire", text_compare value "The Crown".
+
+Only change the example text and JSON values. Do NOT change any prompt rules, constraint type definitions, operator lists, or structural logic. The examples should teach the same patterns using different place names and search terms.

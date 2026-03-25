@@ -135,7 +135,7 @@ Mission mode:
 
 EXAMPLES:
 
-User: "find pubs in arundel that have the word swan in the name"
+User: "find wine bars in Bath that have the word cellar in the name"
 Output:
 {
   "constraint_checklist": {
@@ -145,10 +145,10 @@ Output:
     "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
     "has_monitoring_intent": false
   },
-  "semantic_interpretation": "The user wants pubs in Arundel whose business name contains \\"swan\\". This is a one-time search."
+  "semantic_interpretation": "The user wants wine bars in Bath whose business name contains \\"cellar\\". This is a one-time search."
 }
 
-User: "find pubs in arundel that mention live music on their website"
+User: "find gastropubs in Oxford that mention Sunday roast on their website"
 Output:
 {
   "constraint_checklist": {
@@ -158,7 +158,7 @@ Output:
     "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
     "has_monitoring_intent": false
   },
-  "semantic_interpretation": "The user wants pubs in Arundel whose website text contains \\"live music\\". This is a one-time search."
+  "semantic_interpretation": "The user wants gastropubs in Oxford whose website text contains \\"Sunday roast\\". This is a one-time search."
 }
 
 User: "keep checking which hospitals in the UK offer the sleep apnea implant and alert me if it starts near my area"
@@ -379,26 +379,26 @@ CRITICAL RULES:
 
 FULL EXAMPLES:
 
-Semantic input: The user wants pubs in Arundel whose business name contains "swan". This is a one-time search.
+Semantic input: The user wants wine bars in Bath whose business name contains "cellar". This is a one-time search.
 {
-  "entity_category": "pubs",
-  "location_text": "Arundel",
+  "entity_category": "wine bars",
+  "location_text": "Bath",
   "requested_count": null,
   "constraints": [
-    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Arundel", "hardness": "hard" },
-    { "type": "text_compare", "field": "name", "operator": "contains", "value": "swan", "hardness": "hard" }
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Bath", "hardness": "hard" },
+    { "type": "text_compare", "field": "name", "operator": "contains", "value": "cellar", "hardness": "hard" }
   ],
   "mission_mode": "research_now"
 }
 
-Semantic input: The user wants pubs in Arundel whose website text contains "live music". This is a one-time search.
+Semantic input: The user wants gastropubs in Oxford whose website text contains "Sunday roast". This is a one-time search.
 {
-  "entity_category": "pubs",
-  "location_text": "Arundel",
+  "entity_category": "gastropubs",
+  "location_text": "Oxford",
   "requested_count": null,
   "constraints": [
-    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Arundel", "hardness": "hard" },
-    { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "live music", "hardness": "hard" }
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Oxford", "hardness": "hard" },
+    { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "Sunday roast", "hardness": "hard" }
   ],
   "mission_mode": "research_now"
 }
@@ -452,14 +452,14 @@ Semantic input: The user wants 10 Italian restaurants in Brighton that have outd
   "mission_mode": "research_now"
 }
 
-Semantic input: The user wants pubs in Sussex whose business name contains "The Swan" and that have a beer garden. This is a one-time search.
+Semantic input: The user wants pubs in Hampshire whose business name contains "The Crown" and that have a beer garden. This is a one-time search.
 {
   "entity_category": "pubs",
-  "location_text": "Sussex",
+  "location_text": "Hampshire",
   "requested_count": null,
   "constraints": [
-    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Sussex", "hardness": "hard" },
-    { "type": "text_compare", "field": "name", "operator": "contains", "value": "The Swan", "hardness": "hard" },
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Hampshire", "hardness": "hard" },
+    { "type": "text_compare", "field": "name", "operator": "contains", "value": "The Crown", "hardness": "hard" },
     { "type": "attribute_check", "field": "amenity", "operator": "has", "value": "beer garden", "hardness": "hard" }
   ],
   "mission_mode": "research_now"
