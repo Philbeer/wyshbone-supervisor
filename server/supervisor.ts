@@ -2112,6 +2112,9 @@ class SupervisorService {
 
         console.log(`[MONITOR_CREATE] mission_mode=${missionModeResolved} — creating scheduled monitor: "${monitorLabel}" schedule=${scheduleType}`);
 
+        const nowMs = Date.now();
+        const nextWakeIso = new Date(nowMs + (scheduleType === 'weekly' ? 7 * 24 * 3600000 : 24 * 3600000)).toISOString();
+
         const { data: monitorData, error: monitorError } = await supabase!
           .from('scheduled_monitors')
           .insert({
@@ -2119,8 +2122,8 @@ class SupervisorService {
             label: monitorLabel,
             description: monitorDescription,
             monitor_type: 'lead_search',
-            schedule_type: scheduleType,
-            is_active: true,
+            schedule: scheduleType,
+            is_active: 1,
             conversation_id: task.conversation_id,
             config: {
               original_goal: rawMsg.trim(),
@@ -2132,6 +2135,10 @@ class SupervisorService {
               source_run_id: jobId,
               conversation_id: task.conversation_id,
             },
+            created_at: nowMs,
+            updated_at: nowMs,
+            next_wake_at: nextWakeIso,
+            next_run_at: nowMs + (scheduleType === 'weekly' ? 7 * 24 * 3600000 : 24 * 3600000),
           })
           .select('id')
           .single();
