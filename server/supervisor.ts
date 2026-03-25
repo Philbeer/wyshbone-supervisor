@@ -1502,6 +1502,10 @@ class SupervisorService {
     if (earlyParsedGoal) {
       const preflightResult = this.evaluatePreflightClarify(rawMsg, earlyParsedGoal, previewBT, previewLoc, previewTime, canonicalIntent);
       if (preflightResult) {
+        // Suppress preflight clarify if the structured mission has enough to search
+        if (_missionHasEnoughToSearch) {
+          console.log(`[PREFLIGHT_CLARIFY] Suppressed — mission has enough to search: entity="${_clarifyGateEntity}" location="${_clarifyGateLocation}" constraints=${_clarifyGateConstraintCount}`);
+        } else {
         console.log(`[PREFLIGHT_CLARIFY] Triggered — reason=${preflightResult.reason} questions=${preflightResult.questions.length} runId=${jobId}`);
 
         await createArtefact({
@@ -1603,6 +1607,7 @@ class SupervisorService {
 
         await emitTaskExecutionCompleted('preflight_clarify', { reason: preflightResult.reason });
         return;
+        } // end else (_missionHasEnoughToSearch suppression)
       }
     }
 
