@@ -262,10 +262,6 @@ outreachRouter.post('/trigger-single', async (req, res) => {
     const contactRole = best.position || best.department || null;
     const contactSource = `hunter.io (confidence: ${best.confidence}%, type: ${best.type})`;
 
-    // TEST OVERRIDE: send to Phil's inbox
-    contactEmail = 'phil@listersbrewery.com';
-    console.log(`[OUTREACH_SINGLE] TEST OVERRIDE: all emails → phil@listersbrewery.com (original: ${best.value})`);
-
     // Draft the email
     const draft = await draftOutreachEmail({
       leadName: lead_name,
@@ -428,7 +424,7 @@ outreachRouter.post('/send', async (req, res) => {
       messageId: msg.id,
       fromAddress: msg.from_address,
       replyToAddress: msg.reply_to_address,
-      recipientEmail: 'phil@listersbrewery.com',
+      recipientEmail: msg.recipient_email,
       subject: msg.subject,
       bodyHtml: msg.body_html,
       bodyText: msg.body_text,
