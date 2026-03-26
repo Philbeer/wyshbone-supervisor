@@ -63,3 +63,7 @@ MAX_REPLANS = "2"
 INTENT_EXTRACTOR_MODE = "off"
 INTENT_EXTRACTOR_PROBE = "true"
 LOGS_API_KEY = "wyshbone-logs-2026"
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
