@@ -780,3 +780,73 @@ Output shows only two lines:
 2. The new DISABLED log line (line 1255) — no message-posting code remains
 
 **Result:** The preflight probe is now the sole authority for clarification questions. `PASS3_CLARIFY` never posts a message.
+
+---
+
+## 2026-03-26 — Timing & Performance Investigation: Cardboard Wholesale Clarification Run
+
+### Query Traced
+- Initial message: `"companies that buy cardboard wholesale"`
+- Clarification reply: `"west sussex"`
+- Run ID: `1e57dad4-8fac-471b-a6c9-b39635fc320b`
+
+---
+
+### 1. PASS3_CLARIFY Status
+
+**DISABLED — confirmed.** Two lines exist in `server/supervisor.ts`:
+
+- **Line 1219** (unchanged): Benchmark bypass path — logs but does not block.
+- **Line 1255** (new): `[PASS3_CLARIFY] DISABLED — preflight probe is the sole clarification authority. clarification_needed=... entity="..." location="..."`
+
+PASS3_CLARIFY no longer posts a clarification message. The preflight probe is the sole gatekeeper.
+
+---
+
+### 2. Run Timeline (Reconstructed from Logs)
+
+| Stage | Log Evidence | Notes |
+|---|---|---|
+| Original query received | line 2403: `[MESSAGE_CLASSIFIER] class=search` | "companies that buy cardboard wholesale" |
+| Mission extraction | line 2518: `pass1=3473ms pass3=5288ms pass2=2096ms total=10857ms` | ~10.9s to extract intent |
+| PREFLIGHT_CLARIFY triggered | line 2578-2579: `reasons=missing location` | Correct — no location in query |
+| Run paused, awaiting user | line 2590: `status=clarifying` | Clarify gate artefact emitted |
+| User replied "west sussex" | line 2862: new task `3dfb88c6-535a-4543-b76b-885455d5099c` | Task re-queued with location |
+| Mission re-extraction (west sussex run) | line 2897: `Pass 3 duration=5331ms` | Strategy: `discovery_then_website_evidence` |
+| LLM planner chose gp_cascade | (implied from executor log) | With WEB_VISIT + evidence extraction |
+| gp_cascade executor complete | line 3733: `entities=7 timeMs=144574 verdict=pass` | **~144.6 seconds** — dominant cost |
+| Tower verdict | line 3716-3718: `verdict=pass action=continue` | |
+| Delivery summary | line 3728: `status=PASS exact=7 total=7` | |
+| `run_complete` logged | line 3732: `stage=run_complete` | |
+| Post-processing artefacts | lines 3741–3763: reloop_iteration, reloop_chain_summary, combined_delivery | Sequential, appears fast |
+| **FINAL_MESSAGE sent** | **line 3768**: `task_status=completed status=OK` | UI result panel triggered here |
+| Benchmark logged | line 3769: `timestamp=2026-03-26T15:23:55.237Z` | End of run |
+
+---
+
+### 3. Root Cause of Delay
+
+**The delay is not between breadcrumbs and final_message — it is the run itself.**
+
+The strategy selected was `discovery_then_website_evidence` (because the query implied companies that *buy* cardboard, triggering a website content constraint). This forces:
+- Google Places discovery
+- Web visits to each candidate's website
+- Evidence extraction per site
+
+This resulted in **144,574ms (~2.4 minutes)** of executor time. Compare to simple `discovery_only` runs (gp_cascade, no website visits) which complete in **6,000–9,700ms**.
+
+The breadcrumbs likely showed `discovery_complete` early (fast Google Places call), but the result panel waited for the full web-visit + evidence phase to complete and for `FINAL_MESSAGE` to fire. That is the gap the user perceived.
+
+**Post-completion processing** (reloop_judge, reloop_gate, learning_store, artefact writes after `run_complete`) spans only ~36 log lines and appears to complete in under a second — not a meaningful contributor.
+
+---
+
+### 4. Additional Signal
+
+- `failure_classification=EVIDENCE_EXTRACTION_FAILURE` on the benchmark despite `tower_verdict=pass`. 7 of the initially discovered candidates passed evidence checks; others were dropped at extraction. This is expected behaviour for the `discovery_then_website_evidence` path.
+- The breadcrumb UI shows `discovery_complete` early, creating a perceived gap because web-visit stages do not emit a dedicated breadcrumb stage. **The user's observation is real and accurate** — there is a silence between Google Places completing and the result panel appearing while web visits run.
+
+---
+
+### 5. No Code Changed
+Investigation only. No fixes applied.
