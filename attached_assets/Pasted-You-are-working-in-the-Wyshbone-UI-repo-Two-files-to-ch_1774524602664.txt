@@ -1,0 +1,67 @@
+You are working in the Wyshbone UI repo. Two files to change.
+Problem
+After the user answers a clarification question, the continuation search reuses the same run_id. The LiveActivityTicker component fetches ALL events for that run, including the preflight probe's events ("Thinking", "Google Places found 2", "Run complete"). The "Run complete" from the preflight makes the ticker think the run is already finished, so it doesn't show the real search breadcrumbs.
+Fix: Add a minEventTimestamp prop to LiveActivityTicker
+File 1: client/src/components/results/LiveActivityTicker.tsx
+
+Add minEventTimestamp?: number to the LiveActivityTickerProps interface:
+
+typescriptexport interface LiveActivityTickerProps {
+  runId: string | null;
+  clientRequestId: string | null;
+  isActive: boolean;
+  intentNarrativePayload?: IntentNarrativePayload | null;
+  minEventTimestamp?: number;  // ← ADD THIS
+}
+
+Destructure it in the component:
+
+typescriptexport function LiveActivityTicker({ runId, clientRequestId, isActive, intentNarrativePayload, minEventTimestamp }: LiveActivityTickerProps) {
+
+In fetchAndProcess, filter events BEFORE passing to deriveMilestones and deriveEphemeral. After if (!data || !Array.isArray(data.events)) return;, add:
+
+typescript      // Filter out events from before minEventTimestamp (e.g., preflight probe events)
+      let filteredEvents = data.events;
+      if (minEventTimestamp) {
+        filteredEvents = data.events.filter(e => new Date(e.ts).getTime() >= minEventTimestamp);
+      }
+Then change the two calls to use filteredEvents:
+typescript      const newMilestones = deriveMilestones(filteredEvents);  // was data.events
+      const ephemeral = isActive ? deriveEphemeral(filteredEvents) : null;  // was data.events
+File 2: client/src/pages/chat.tsx
+
+Add a ref to store the clarification answer timestamp:
+
+typescriptconst clarifyAnswerTimestampRef = useRef<number | null>(null);
+(Put it near the other clarify refs, around line 327)
+
+In handleSubmit, where the old ticker is removed (around line 3027), set the timestamp:
+
+typescriptif (isAnsweringClarification) {
+  supervisorClarifyRunIdRef.current = null;
+  supervisorClarifyCridRef.current = null;
+  setIsSupervisorClarifying(false);
+  clarifyAnswerTimestampRef.current = Date.now();  // ← ADD THIS
+  setMessages(prev => prev.filter(m => !(m as any).isActivityTicker));
+}
+
+Find where the ticker message is created in the SSE handler (around line 2595). It creates a message with isActivityTicker: true. The LiveActivityTicker component is rendered in the JSX when it encounters this message. Find where <LiveActivityTicker is rendered in the JSX (search for LiveActivityTicker in the render section). Add the minEventTimestamp prop:
+
+typescript<LiveActivityTicker
+  runId={...}
+  clientRequestId={...}
+  isActive={...}
+  intentNarrativePayload={...}
+  minEventTimestamp={clarifyAnswerTimestampRef.current || undefined}  // ← ADD THIS
+/>
+
+Reset the ref in handleNewChat:
+
+typescriptclarifyAnswerTimestampRef.current = null;
+Verify
+bashgrep -n "minEventTimestamp" client/src/pages/chat.tsx client/src/components/results/LiveActivityTicker.tsx
+Show me the output.
+Files to change
+
+client/src/components/results/LiveActivityTicker.tsx — add prop, filter events
+client/src/pages/chat.tsx — add ref, set timestamp, pass prop, reset on new chat
