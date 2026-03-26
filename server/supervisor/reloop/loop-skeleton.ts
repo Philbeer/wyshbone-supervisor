@@ -11,6 +11,12 @@ import {
 import { createArtefact } from '../artefacts';
 import { logAFREvent } from '../afr-logger';
 import { logRunEvent } from '../run-logger';
+import {
+  emitPhaseEntered,
+  emitMilestoneReached,
+  emitIntentResolved,
+  emitResultsReady,
+} from '../protocol-logger';
 import { supabase } from '../../supabase';
 import { getExecutor, getAvailableExecutors } from './executor-registry';
 import { plan as plannerPlan } from './planner';
@@ -55,6 +61,39 @@ export async function runReloop(params: {
   const availableExecutors = getAvailableExecutors();
 
   console.log(`[RELOOP_SKELETON] Starting re-loop chain. runId=${runId} chainId=${chainId} executors=${availableExecutors.join(',')}`);
+
+  const protocolBase = { userId, runId, conversationId, clientRequestId };
+  const isGpt4oPrimary = executionPath === 'gpt4o_primary';
+  const manifestPhases = isGpt4oPrimary
+    ? [
+        { name: 'intent_resolution', label: 'Understanding intent', index: 0 },
+        { name: 'gpt4o_search', label: 'GPT-4o search', index: 1 },
+        { name: 'quality_check', label: 'Quality check', index: 2 },
+        { name: 'delivery', label: 'Delivering results', index: 3 },
+      ]
+    : [
+        { name: 'intent_resolution', label: 'Understanding intent', index: 0 },
+        { name: 'gp_cascade', label: 'Google Places search', index: 1 },
+        { name: 'web_evidence', label: 'Gathering web evidence', index: 2 },
+        { name: 'evidence_verification', label: 'Verifying evidence', index: 3 },
+        { name: 'quality_check', label: 'Quality check', index: 4 },
+        { name: 'delivery', label: 'Delivering results', index: 5 },
+      ];
+
+  createArtefact({
+    runId,
+    type: 'run_manifest',
+    title: 'Run manifest',
+    summary: `Protocol manifest for run ${runId}. path=${executionPath ?? 'gp_cascade'} phases=${manifestPhases.map(p => p.name).join(',')}`,
+    payload: {
+      chain_id: chainId,
+      execution_path: executionPath ?? 'gp_cascade',
+      phases: manifestPhases,
+      available_executors: availableExecutors,
+    },
+    userId,
+    conversationId,
+  }).catch(() => {});
 
   const { businessType, location, country, requestedCount } = deriveSearchParams(mission);
   const hardConstraints = buildHardConstraintLabels(mission);
@@ -154,6 +193,17 @@ export async function runReloop(params: {
     console.log(`[LEARNING] Policy applied: shape=${queryShapeKey} learned_used=${policyPayload.learned_used} fields=[${policyPayload.learned_fields_used.join(',')}]`);
   } catch (policyErr: any) {
     console.warn(`[LEARNING] Policy applied artefact failed (non-fatal): ${policyErr.message}`);
+  }
+
+  if (intentNarrative) {
+    emitIntentResolved({
+      ...protocolBase,
+      entityDescription: intentNarrative.entity_description,
+      scarcityExpectation: intentNarrative.scarcity_expectation,
+      keyDiscriminator: intentNarrative.key_discriminator,
+      findability: intentNarrative.findability,
+      exclusions: intentNarrative.entity_exclusions,
+    }).catch(() => {});
   }
 
   const loopHistory: LoopRecord[] = [];
@@ -277,6 +327,15 @@ export async function runReloop(params: {
 
       console.log(`[RELOOP_SKELETON] Loop ${loopNumber}: running executor "${plannerDecision.executorType}" knownEntities=${knownEntityNames.length}`);
 
+      emitPhaseEntered({
+        ...protocolBase,
+        phaseName: plannerDecision.executorType,
+        phaseLabel: `Searching: ${businessType} in ${location}`,
+        phaseIndex: 1,
+        totalPhases: isGpt4oPrimary ? 4 : 6,
+        detail: `Loop ${loopNumber}`,
+      }).catch(() => {});
+
       try {
         executorOutput = await executorFn(executorInput);
       } catch (execErr: any) {
@@ -302,6 +361,14 @@ export async function runReloop(params: {
       }
 
       executorsTriedSoFar.push(plannerDecision.executorType);
+
+      emitMilestoneReached({
+        ...protocolBase,
+        milestoneKey: `${plannerDecision.executorType}_complete`,
+        milestoneText: `${plannerDecision.executorType} search complete`,
+        phaseName: plannerDecision.executorType,
+        detail: `Loop ${loopNumber} — found ${executorOutput.entities.length} entities`,
+      }).catch(() => {});
 
       const executorOutputSummary = {
         executorType: executorOutput.executorType,
@@ -705,6 +772,23 @@ export async function runReloop(params: {
       console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} delivered=${deliveredLeads.length}`);
       combinedTowerVerdict = towerResult.judgement.verdict;
     }
+
+    emitPhaseEntered({
+      ...protocolBase,
+      phaseName: 'quality_check',
+      phaseLabel: 'Quality check',
+      phaseIndex: isGpt4oPrimary ? 2 : 4,
+      totalPhases: isGpt4oPrimary ? 4 : 6,
+      detail: `Tower verdict: ${combinedTowerVerdict ?? 'unknown'}`,
+    }).catch(() => {});
+
+    emitMilestoneReached({
+      ...protocolBase,
+      milestoneKey: 'quality_check_complete',
+      milestoneText: 'Quality check complete',
+      phaseName: 'quality_check',
+      detail: `Tower verdict: ${combinedTowerVerdict ?? 'unknown'}`,
+    }).catch(() => {});
   } catch (judgeErr: any) {
     const errMsg = judgeErr?.message ?? String(judgeErr);
     const errStack = judgeErr?.stack ?? '';
@@ -777,6 +861,31 @@ export async function runReloop(params: {
       placeId: l.placeId,
     })),
   };
+
+  emitPhaseEntered({
+    ...protocolBase,
+    phaseName: 'delivery',
+    phaseLabel: 'Delivering results',
+    phaseIndex: isGpt4oPrimary ? 3 : 5,
+    totalPhases: isGpt4oPrimary ? 4 : 6,
+    detail: `${deliveredLeads.length} leads`,
+  }).catch(() => {});
+
+  emitMilestoneReached({
+    ...protocolBase,
+    milestoneKey: 'delivery_complete',
+    milestoneText: 'Delivery complete',
+    phaseName: 'delivery',
+    detail: `${deliveredLeads.length} leads delivered`,
+  }).catch(() => {});
+
+  emitResultsReady({
+    ...protocolBase,
+    resultCount: deliveredLeads.length,
+    resultType: 'leads',
+    towerVerdict: combinedTowerVerdict,
+    totalLoops,
+  }).catch(() => {});
 
   return combinedResult;
 }

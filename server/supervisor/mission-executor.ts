@@ -33,6 +33,7 @@ import {
 } from './delivery-summary';
 import { logAFREvent } from './afr-logger';
 import { logRunEvent } from './run-logger';
+import { emitProgressTick } from './protocol-logger';
 import { storage } from '../storage';
 import { sanitiseLocationString, inferCountryFromLocation } from './goal-to-constraints';
 import { detectRelationshipPredicate, type RelationshipPredicateResult } from './relationship-predicate';
@@ -1200,6 +1201,16 @@ export async function executeMissionDrivenPlan(
             }
           }
           const pageHintsArg = allPageHints.length > 0 ? allPageHints.slice(0, 6) : undefined;
+
+          emitProgressTick({
+            userId,
+            runId,
+            conversationId,
+            clientRequestId,
+            pubName: lead.name,
+            domain: lead.website,
+            phaseName: 'web_evidence',
+          }).catch(() => {});
 
           runToolCallCount++;
           const wvResult = await executeAction({
