@@ -1252,6 +1252,13 @@ class SupervisorService {
     }
 
     if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && !_missionHasEnoughToSearch && !missionQueryId) {
+      // Guard: if entity or location is missing, the preflight clarify probe owns this case and will
+      // ask a structured, deterministic question. Skip PASS3_CLARIFY so the legacy LLM-generated
+      // clarification_question never fires instead of the preflight probe.
+      const _preflightWouldFire = !_clarifyGateEntity || !_clarifyGateLocation;
+      if (_preflightWouldFire) {
+        console.log(`[PASS3_CLARIFY] Skipped — preflight probe owns this case (entity="${_clarifyGateEntity || '<missing>'}" location="${_clarifyGateLocation || '<missing>'}")`);
+      } else {
       const clarifyQ = missionResult.intentNarrative.clarification_question || 'Could you clarify your request a bit more?';
       console.log(`[PASS3_CLARIFY] clarification_needed=true question="${clarifyQ.substring(0, 80)}"`);
 
@@ -1267,6 +1274,7 @@ class SupervisorService {
       }).catch(() => {});
       await emitTaskExecutionCompleted('pass3_clarify');
       return;
+      }
     }
 
     let earlyParsedGoal: ParsedGoal | null = null;

@@ -520,3 +520,110 @@ One line changed in `server/supervisor/mission-executor.ts` inside `processOneLe
 - Run a test query with an attribute constraint (e.g. "pubs in Arundel with a beer garden") to confirm `gpt-4o-mini` evidence quality is acceptable.
 - If evidence quality drops noticeably, set `EVIDENCE_JUDGE_MODEL=gpt-4o` in the Secrets tab — no code change or redeploy required.
 - The task (classifying 5 short text windows against a single yes/no criterion) is well within mini's capability; the expectation is no regression.
+
+---
+
+## 2026-03-26 — PASS3_CLARIFY Legacy Path Fires Instead of Preflight Probe
+
+### Problem
+
+When the user sends "i'm looking for companies that buy cardboard wholesale", **sometimes** a wrong Supervisor message appears: "I'd be happy to find leads for you! Could you tell me what type of businesses you're looking for?" — instead of the correct preflight clarify probe which asks "What location should I search in?".
+
+### Grep Output
+
+**Search for legacy message strings:**
+```
+grep -rn "happy to find\|what type of\|could you tell\|type of businesses" server/ --include="*.ts"
+# → No output (strings are LLM-generated at runtime, not hardcoded)
+```
+
+**Clarification references in supervisor.ts:**
+```
+98:    missingFields: contract.clarify_questions.map(...)
+945:    const isClarifyResponse = ...
+1218:    if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && missionQueryId)
+1254:    if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && !_missionHasEnoughToSearch && !missionQueryId)
+1567:    const preflightResult = this.evaluatePreflightClarify(...)
+```
+
+**Message insertions in supervisor.ts:**
+```
+967:   supabase!.from('messages').insert(...)
+1261:  supabase!.from('messages').insert({ ..., clarify_gate: 'pass3_clarify' })
+1629:  supabase!.from('messages').insert(...)
+1840:  supabase!.from('messages').insert({ ..., clarify_gate: 'constraint_gate_stop' })
+```
+
+**LLM calls in supervisor.ts:**
+```
+# → No direct openai/anthropic references in supervisor.ts (called via mission extractor module)
+```
+
+**evaluatePreflightClarify:**
+```
+1567:  const preflightResult = this.evaluatePreflightClarify(rawMsg, earlyParsedGoal, ...)
+2464:  private evaluatePreflightClarify(...): { reason, questions, options } | null
+2480:  if (!bt)  → asks "What type of business are you looking for?"
+2485:  if (!loc) → asks "What location should I search in?"
+```
+
+**processChatTask order:**
+```
+Line 1056: mission extraction runs
+Line 1218: PASS3_CLARIFY bypass for benchmark runs
+Line 1254: PASS3_CLARIFY gate — fires and returns early ← BUG FIRES HERE
+Line 1272: earlyParsedGoal / canonicalIntent set
+Line 1567: preflight probe evaluated ← NEVER REACHED
+```
+
+### Code Path That Generates the Wrong Message
+
+**`server/supervisor.ts` lines 1254–1269 (`PASS3_CLARIFY`):**
+
+```typescript
+if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && !_missionHasEnoughToSearch && !missionQueryId) {
+  const clarifyQ = missionResult.intentNarrative.clarification_question || 'Could you clarify your request a bit more?';
+  // Posts clarifyQ directly to messages table → returns early at line 1269
+  return;
+}
+```
+
+The mission LLM (Pass 3) sets `clarification_needed=true` and generates a free-form `clarification_question` string such as "I'd be happy to find leads for you! Could you tell me what type of businesses you're looking for?". This LLM output is non-deterministic and sometimes asks the wrong question (entity instead of location). PASS3_CLARIFY posts it verbatim and returns, so the preflight probe at line 1567 never runs.
+
+### Why the Preflight Probe Didn't Fire
+
+PASS3_CLARIFY is ordered **before** the preflight probe in `processChatTask`. When `clarification_needed=true` and `!_missionHasEnoughToSearch` (location missing), PASS3_CLARIFY fires first and executes `return`, terminating the task before the preflight probe is ever evaluated. Additionally, `earlyParsedGoal` — required by the preflight probe — is not even computed until line 1272, after PASS3_CLARIFY would already have returned.
+
+### Fix Applied
+
+Added a guard inside the PASS3_CLARIFY block in `server/supervisor.ts` (line 1257):
+
+```typescript
+// Guard: if entity or location is missing, the preflight clarify probe owns this case.
+// Skip PASS3_CLARIFY so the legacy LLM-generated clarification_question never fires
+// instead of the preflight probe.
+const _preflightWouldFire = !_clarifyGateEntity || !_clarifyGateLocation;
+if (_preflightWouldFire) {
+  console.log(`[PASS3_CLARIFY] Skipped — preflight probe owns this case (entity="${_clarifyGateEntity || '<missing>'}" location="${_clarifyGateLocation || '<missing>'}")`);
+} else {
+  // ... existing PASS3_CLARIFY fire-and-return logic ...
+}
+```
+
+**Logic:** Both `_clarifyGateEntity` and `_clarifyGateLocation` are already computed at line 1226–1227 (from the structured mission result), before PASS3_CLARIFY is evaluated. If either is missing, the preflight probe will fire with a deterministic, structured question. PASS3_CLARIFY now only fires when both entity AND location are present but `clarification_needed=true` for some other reason (e.g. ambiguous constraint) — a case the preflight probe would NOT handle.
+
+### Files Modified
+
+- `server/supervisor.ts` — PASS3_CLARIFY block (lines 1257–1281): added `_preflightWouldFire` guard with `else` branch wrapping the fire-and-return code.
+
+### Decisions Made
+
+- Guard uses `!_clarifyGateEntity || !_clarifyGateLocation` — matches exactly the two branches inside `evaluatePreflightClarify` that produce structured questions.
+- PASS3_CLARIFY is preserved (not deleted) for cases where entity+location are both present and some other reason triggers the LLM's clarification flag.
+- No changes to the preflight probe logic, mission extractor, or any other path.
+
+### What's Next
+
+- Test with "i'm looking for companies that buy cardboard wholesale" — should consistently receive "What location should I search in?" from the preflight probe.
+- Monitor logs for `[PASS3_CLARIFY] Skipped` to confirm the guard is firing on location-missing queries.
+- Consider whether the PASS3_CLARIFY path is still needed at all once the preflight probe coverage is confirmed complete.
