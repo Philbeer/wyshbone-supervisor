@@ -1,0 +1,48 @@
+MODE: INVESTIGATE ONLY. DO NOT CHANGE ANY CODE.
+Context
+We just ran a clarification flow test. Query: "i'm looking for companies that buy cardboard wholesale" → Supervisor asked for location → user answered "west sussex" → search completed with results.
+What to investigate
+1. Check the last run's logs
+Look at the Replit console output from the last 30 minutes for the Supervisor repo (wyshbone-supervisor-Post-CC). Find:
+
+The preflight clarify probe execution and result
+The clarify message being posted to Supabase
+The continuation run being triggered after "west sussex"
+The full search execution (Google Places, website visits, verification)
+The final delivery summary
+Any errors or warnings
+
+2. Check the continuation run flow
+When the user answers "west sussex":
+
+Does the Supervisor receive clarify_answer or continuation_of_run in the request?
+Does it create a NEW agent_run or reuse the existing one?
+What is the new run's crid vs the original run's crid?
+Does the new run go through the full pipeline (mission extraction → Google Places → verification → delivery)?
+
+3. Check the run status transitions for the CONTINUATION run
+
+What statuses does the continuation run go through? (starting → executing → completed?)
+Does it ever enter 'clarifying' status? (it shouldn't)
+When does it reach 'completed'?
+
+4. Check the artefacts produced
+
+How many artefacts does the continuation run produce?
+Does it produce an intent_narrative artefact?
+Does it produce a delivery_summary?
+Are there any duplicate artefacts between the clarify run and the continuation run?
+
+5. Check the activity events emitted
+The UI's LiveActivityTicker polls /api/afr/stream to get activity events for breadcrumbs. Check:
+
+Does the continuation run emit activity events? (search_started, websites_visited, verification_complete, etc.)
+Are these events linked to the continuation's crid or the original crid?
+What does the /api/afr/stream endpoint return during the continuation run?
+
+Output a report with:
+
+The continuation run's lifecycle (statuses, timing)
+Whether activity events are emitted and linked correctly
+Any errors during the continuation
+The artefact list for the continuation run
