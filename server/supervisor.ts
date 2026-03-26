@@ -1252,29 +1252,7 @@ class SupervisorService {
     }
 
     if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && !_missionHasEnoughToSearch && !missionQueryId) {
-      // Guard: if entity or location is missing, the preflight clarify probe owns this case and will
-      // ask a structured, deterministic question. Skip PASS3_CLARIFY so the legacy LLM-generated
-      // clarification_question never fires instead of the preflight probe.
-      const _preflightWouldFire = !_clarifyGateEntity || !_clarifyGateLocation;
-      if (_preflightWouldFire) {
-        console.log(`[PASS3_CLARIFY] Skipped — preflight probe owns this case (entity="${_clarifyGateEntity || '<missing>'}" location="${_clarifyGateLocation || '<missing>'}")`);
-      } else {
-      const clarifyQ = missionResult.intentNarrative.clarification_question || 'Could you clarify your request a bit more?';
-      console.log(`[PASS3_CLARIFY] clarification_needed=true question="${clarifyQ.substring(0, 80)}"`);
-
-      const clarifyMsgId = randomUUID();
-      await Promise.all([
-        supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyQ.substring(0, 200), message_id: clarifyMsgId, clarify_gate: 'pass3_clarify' } }).eq('id', task.id),
-        supabase!.from('messages').insert({ id: clarifyMsgId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(clarifyQ), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_gate: 'pass3_clarify' }, created_at: Date.now() }).select().single(),
-      ]);
-      await storage.updateAgentRun(jobId, {
-        status: 'clarifying',
-        terminalState: null,
-        metadata: { verdict: 'pass3_clarify', awaiting: 'user_input' },
-      }).catch(() => {});
-      await emitTaskExecutionCompleted('pass3_clarify');
-      return;
-      }
+      console.log(`[PASS3_CLARIFY] DISABLED — preflight probe is the sole clarification authority. clarification_needed=${missionResult.intentNarrative.clarification_needed} entity="${_clarifyGateEntity}" location="${_clarifyGateLocation}"`);
     }
 
     let earlyParsedGoal: ParsedGoal | null = null;

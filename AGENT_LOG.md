@@ -760,3 +760,23 @@ This is not a flow failure — it is a known classification pattern when website
 | Run completed successfully | ✅ PASS, 7 leads, `task_status=completed` |
 | Legacy Supervisor clarify text | ✅ None — preflight system handled exclusively |
 | Anomaly | ⚠️ `EVIDENCE_EXTRACTION_FAILURE` classification despite PASS (expected, not a bug) |
+
+## 2026-03-26 — Disable PASS3_CLARIFY block
+
+**Task:** Disable the PASS3_CLARIFY block in `server/supervisor.ts` so the preflight clarify probe is the sole clarification authority.
+
+**Problem:** `PASS3_CLARIFY` was firing LLM-generated clarification questions even when the preflight probe should have handled clarification. The guard only skipped `PASS3_CLARIFY` when entity OR location was missing. When the mission extractor found a generic location from context (e.g., "UK"), both fields were present, so the guard didn't skip — and `PASS3_CLARIFY` posted non-deterministic, often unhelpful LLM questions.
+
+**Fix applied:** Replaced the entire `PASS3_CLARIFY` block (including the inner guard logic, Supabase writes, `updateAgentRun`, `emitTaskExecutionCompleted`, and `return`) with a single `console.log` line that logs the DISABLED state.
+
+**File changed:** `server/supervisor.ts` (lines ~1254–1278 replaced)
+
+**Verification:**
+```
+grep -n "PASS3_CLARIFY" server/supervisor.ts | head -10
+```
+Output shows only two lines:
+1. The benchmark bypass log (line 1219) — unchanged, correct
+2. The new DISABLED log line (line 1255) — no message-posting code remains
+
+**Result:** The preflight probe is now the sole authority for clarification questions. `PASS3_CLARIFY` never posts a message.
