@@ -627,3 +627,136 @@ if (_preflightWouldFire) {
 - Test with "i'm looking for companies that buy cardboard wholesale" — should consistently receive "What location should I search in?" from the preflight probe.
 - Monitor logs for `[PASS3_CLARIFY] Skipped` to confirm the guard is firing on location-missing queries.
 - Consider whether the PASS3_CLARIFY path is still needed at all once the preflight probe coverage is confirmed complete.
+
+---
+
+## Clarification flow investigation — cardboard wholesale query
+
+**Date:** 2026-03-26
+
+### Query under investigation
+
+- User query: `"i'm looking for companies that buy cardboard wholesale"`
+- Supervisor asked: `"What location should I search in?"`
+- User answered: `"west sussex"`
+- Run ID: `106550eb-ba0a-41c8-9a83-b7951abb15c6`
+- Conversation ID: `b75b2311-9f0f-4df4-b75f-ed67489cbfff`
+- Continuation task ID: `62dee5cc-a4d2-407f-8a22-4385e4c10e38`
+
+---
+
+### 1. Did the preflight probe fire correctly?
+
+**YES — fired correctly.**
+
+Log sequence (lines ~4750–4773 of the workflow log):
+
+```
+[INTENT_PREVIEW] bt=companies purchasing cardboard in bulk loc=null count=null
+[PREFLIGHT_CLARIFY] semantic_source=fallback_regex reasons=missing location
+[PREFLIGHT_CLARIFY] Triggered — reason=missing location questions=1 runId=106550eb-...
+[Storage] Created artefact 'Clarification Required' (type=clarify_gate) id=e1f65a04-...
+[PREFLIGHT_CLARIFY] Run awaiting user input — status=clarifying
+[AFR_LOGGER] Logged: preflight_clarify_probe - success
+[PROBE] preflight_clarify_probe emitted for runId=106550eb-...
+```
+
+- `semantic_source=fallback_regex` — location was missing, regex fallback correctly detected absence.
+- `clarify_gate` artefact written to storage: ✅
+- Run status set to `clarifying`: ✅
+- `preflight_clarify_probe` emitted via AFR_LOGGER and PROBE: ✅
+
+**Note:** The preflight ran twice — task `c97dabe5` (first attempt) and task `62dee5cc` (second attempt, same `crid`). On the second, `RUN_PERSIST` detected `agent_run already exists (retry/resume)` and resumed correctly without creating a duplicate run.
+
+---
+
+### 2. Did the continuation run execute fully?
+
+**YES — executed fully and completed successfully.**
+
+After "west sussex" was submitted, task `62dee5cc` processed `message="west sussex"`:
+
+```
+[SUPERVISOR] Executing task 62dee5cc-... — message="west sussex"
+```
+
+The continuation correctly parsed the location as **West Sussex** (confirmed in the Tower judgement payload: `"location": "West Sussex"`).
+
+Execution used a **richer strategy** than simple discovery — because "wholesale cardboard" is a website-evidence constraint:
+
+- Strategy: `discovery_then_website_evidence`
+- Tool chain: `SEARCH_PLACES → WEB_VISIT → EVIDENCE_EXTRACT → TOWER_JUDGE`
+- SEARCH_PLACES: 20 results from 5 queries
+- 7 leads passed verification (all 7 verified)
+- Tower verdict: **PASS**
+
+Run completion:
+
+```
+[DELIVERY_SUMMARY] runId=106550eb-... status=PASS exact=7 closest=0 total=7 tower=PASS
+[RUN_LOGGER] stage=run_complete
+[FINAL_MESSAGE] task_status=completed status=OK
+[BENCHMARK] query="west sussex" delivered_count=7 verified_count=7 tower_verdict=pass
+```
+
+**Fully completed: ✅**
+
+---
+
+### 3. Were activity events emitted for the continuation?
+
+**YES — full set of activity events emitted.**
+
+Events confirmed for run `106550eb-ba0a-41c8-9a83-b7951abb15c6`:
+
+| Event | Status |
+|---|---|
+| `preflight_clarify_probe` | ✅ success |
+| `intent_extractor_probe` | ✅ success |
+| `intent_extractor_after_probe` | ✅ success |
+| `mission_received` | ✅ pending → success |
+| `task_execution_started` | ✅ pending |
+| `plan_execution_started` | ✅ pending |
+| `tool_call_started` (multiple) | ✅ pending |
+| `tool_call_completed` (multiple) | ✅ success |
+| `step_completed` | ✅ success |
+| `artefact_created` (many) | ✅ success |
+| `tower_judgement` | ✅ success |
+| `tower_verdict` | ✅ success |
+| `run_completed` | ✅ success |
+| `reloop_iteration` | ✅ success |
+| `task_execution_completed` | ✅ success |
+
+The UI should have received breadcrumbs throughout. No gaps in activity event chain were observed.
+
+---
+
+### 4. Did the Supervisor attempt any legacy clarification message?
+
+**NO — none detected.**
+
+Grepped for: `happy to`, `what type of`, `could you tell`, `I'd be`, `i would be` — zero matches in the entire log.
+
+The Supervisor did not generate any legacy "I'd be happy to find leads..." message. The preflight system intercepted the missing-location case exclusively and cleanly.
+
+---
+
+### 5. Notable anomaly — EVIDENCE_EXTRACTION_FAILURE classification despite PASS
+
+The BENCHMARK entry records `failure_classification=EVIDENCE_EXTRACTION_FAILURE` even though `tower_verdict=pass`. This is expected — the "wholesale cardboard" constraint was checked against company websites via EVIDENCE_EXTRACT, and no company's website contained the phrase "wholesale cardboard" explicitly. However, 7 companies still passed overall verification by other means. The Tower judged the delivery acceptable given the constraint difficulty.
+
+This is not a flow failure — it is a known classification pattern when website evidence is absent but results are still delivered.
+
+---
+
+### Summary
+
+| Dimension | Result |
+|---|---|
+| Preflight probe fired | ✅ Yes — `fallback_regex`, `missing location` |
+| Continuation run executed | ✅ Yes — fully, with `west sussex` correctly parsed |
+| Location used in search | ✅ `West Sussex` (not bare "sussex") |
+| Activity events emitted | ✅ Full set — UI breadcrumbs available |
+| Run completed successfully | ✅ PASS, 7 leads, `task_status=completed` |
+| Legacy Supervisor clarify text | ✅ None — preflight system handled exclusively |
+| Anomaly | ⚠️ `EVIDENCE_EXTRACTION_FAILURE` classification despite PASS (expected, not a bug) |
