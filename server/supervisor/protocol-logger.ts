@@ -39,6 +39,7 @@ async function emitProtocolEvent(params: ProtocolBase & {
     duration_ms: null,
     conversation_id: conversationId ?? null,
     run_id: runId,
+    client_request_id: clientRequestId ?? null,
     metadata: {
       protocol: 'v1',
       runType: 'tool',
