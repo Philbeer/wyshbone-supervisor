@@ -1202,6 +1202,10 @@ export async function executeMissionDrivenPlan(
           }
           const pageHintsArg = allPageHints.length > 0 ? allPageHints.slice(0, 6) : undefined;
 
+          console.log('[PROTOCOL_EMIT] logProgressTick:', {
+            tickText: `Visiting ${lead.name}${lead.website ? ` (${lead.website})` : ''}`,
+            phaseName: 'web_evidence',
+          });
           emitProgressTick({
             userId,
             runId,

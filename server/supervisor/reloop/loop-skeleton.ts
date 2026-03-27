@@ -80,6 +80,10 @@ export async function runReloop(params: {
         { name: 'delivery', label: 'Delivering results', index: 5 },
       ];
 
+  console.log('[PROTOCOL_EMIT] Posting run_manifest artefact:', {
+    executor: executionPath ?? 'gp_cascade',
+    phases: manifestPhases.map(p => p.name),
+  });
   createArtefact({
     runId,
     type: 'run_manifest',
@@ -327,6 +331,19 @@ export async function runReloop(params: {
 
       console.log(`[RELOOP_SKELETON] Loop ${loopNumber}: running executor "${plannerDecision.executorType}" knownEntities=${knownEntityNames.length}`);
 
+      console.log('[EXECUTOR_START] Beginning execution after clarification:', {
+        executor: plannerDecision.executorType,
+        runId,
+        clientRequestId,
+        query: rawUserInput,
+      });
+
+      console.log('[PROTOCOL_EMIT] logPhaseEntered:', {
+        phaseName: plannerDecision.executorType,
+        phaseLabel: `Searching: ${businessType} in ${location}`,
+        phaseIndex: 1,
+        totalPhases: isGpt4oPrimary ? 4 : 6,
+      });
       emitPhaseEntered({
         ...protocolBase,
         phaseName: plannerDecision.executorType,
@@ -362,6 +379,11 @@ export async function runReloop(params: {
 
       executorsTriedSoFar.push(plannerDecision.executorType);
 
+      console.log('[PROTOCOL_EMIT] logMilestoneReached:', {
+        milestoneKey: `${plannerDecision.executorType}_complete`,
+        milestoneText: `${plannerDecision.executorType} search complete`,
+        phaseName: plannerDecision.executorType,
+      });
       emitMilestoneReached({
         ...protocolBase,
         milestoneKey: `${plannerDecision.executorType}_complete`,
