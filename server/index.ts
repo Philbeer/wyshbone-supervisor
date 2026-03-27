@@ -12,6 +12,15 @@ import { startDeepResearchScheduler } from "./supervisor/schedulers/deep-researc
 import crypto from "crypto";
 import { assertTowerConfig } from "./supervisor/tower-artefact-judge";
 
+process.on('uncaughtException', (err: Error) => {
+  console.error('[PROCESS] Uncaught exception (non-fatal — server continues):', err?.message ?? err);
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  console.error('[PROCESS] Unhandled promise rejection (non-fatal — server continues):', msg);
+});
+
 const app = express();
 
 // CORS configuration for cross-origin requests
