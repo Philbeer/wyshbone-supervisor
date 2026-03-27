@@ -25,7 +25,7 @@ async function emitProtocolEvent(params: ProtocolBase & {
 }): Promise<void> {
   if (!supabase) return;
   const { userId, runId, conversationId, clientRequestId, actionTaken, taskGenerated, status, metadata } = params;
-  const insertPayload = {
+  await supabase.from('agent_activities').insert({
     id: `proto_${actionTaken.substring(0, 12)}_${Date.now()}_${Math.random().toString(36).substring(7)}`,
     user_id: userId,
     timestamp: Date.now(),
@@ -47,17 +47,7 @@ async function emitProtocolEvent(params: ProtocolBase & {
       ...metadata,
     },
     created_at: Date.now(),
-  };
-  try {
-    const { error: insertError } = await supabase.from('agent_activities').insert(insertPayload);
-    if (insertError) {
-      console.error('[PROTOCOL_LOGGER] Insert failed for action_taken=' + actionTaken, JSON.stringify(insertError));
-    } else {
-      console.log('[PROTOCOL_LOGGER] Insert OK: action_taken=' + actionTaken + ' id=' + insertPayload.id);
-    }
-  } catch (err: any) {
-    console.error('[PROTOCOL_LOGGER] Insert threw (network/fatal):', err.message);
-  }
+  }).catch(() => {});
 }
 
 export async function emitPhaseEntered(params: ProtocolBase & {
