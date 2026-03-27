@@ -1,0 +1,96 @@
+INVESTIGATION PROMPT — SUPERVISOR REPO (wyshbone-supervisor-Post-CC)
+Problem
+After user answers a clarification, the UI shows "Waiting for first agent action..." — no breadcrumbs appear. We need to verify the Supervisor is emitting protocol events.
+Investigation Tasks
+1. Check if protocol event helpers exist
+Search for these functions in the codebase:
+
+logPhaseEntered
+logMilestoneReached
+logProgressTick
+logIntentResolved
+
+If they DON'T exist, Prompt 3 was not applied — the Supervisor isn't emitting protocol events.
+2. Add logging to verify protocol events are emitted
+If the functions exist, find where they're called and add logging:
+typescript// Wherever logMilestoneReached is called:
+console.log('[PROTOCOL_EMIT] logMilestoneReached:', {
+  milestoneKey,
+  milestoneText,
+  phaseName,
+});
+
+// Wherever logPhaseEntered is called:
+console.log('[PROTOCOL_EMIT] logPhaseEntered:', {
+  phaseName,
+  phaseLabel,
+  phaseIndex,
+  totalPhases,
+});
+
+// Wherever logProgressTick is called:
+console.log('[PROTOCOL_EMIT] logProgressTick:', {
+  tickText,
+  phaseName,
+});
+3. Check if run_manifest is being posted
+The run_manifest artefact declares the phase sequence. Search for:
+
+run_manifest
+type: 'run_manifest'
+
+If found, add logging:
+typescriptconsole.log('[PROTOCOL_EMIT] Posting run_manifest artefact:', {
+  executor,
+  phases: phases.map(p => p.name),
+});
+4. Verify activities are being logged with protocol metadata
+The protocol events use the existing logActivity function but with special metadata. Check if activities have:
+typescriptmetadata: {
+  protocol: 'v1',
+  actionTaken: 'milestone_reached', // or 'phase_entered', 'progress_tick'
+  // ... other fields
+}
+Search for protocol: 'v1' in the codebase.
+5. Check the executor flow after clarification
+When user answers a clarification:
+
+A new run should start (or existing run should continue)
+The executor (e.g., gp_cascade) should emit protocol events as it works
+
+Add logging at the start of executor execution:
+typescriptconsole.log('[EXECUTOR_START] Beginning execution after clarification:', {
+  executor: executorName,
+  runId,
+  clientRequestId,
+  query: userQuery,
+});
+6. Check database for protocol activities
+Query the agent_activities table for the run:
+sqlSELECT id, type, summary, created_at, 
+       metadata->>'protocol' as protocol,
+       metadata->>'actionTaken' as action_taken,
+       metadata->>'milestoneKey' as milestone_key
+FROM agent_activities 
+WHERE client_request_id = '<THE_CRID_FROM_UI>'
+ORDER BY created_at DESC
+LIMIT 20;
+If protocol column is NULL for all rows, the Supervisor isn't using the protocol helpers.
+What Prompt 3 should have added
+Prompt 3 was supposed to make the Supervisor emit protocol events at key moments:
+
+When execution starts: logPhaseEntered({ phaseName: 'search', phaseIcon: '🔍', ... })
+When Google Places returns: logMilestoneReached({ milestoneKey: 'gp_search', milestoneText: 'Found 15 candidates', ... })
+When visiting websites: logProgressTick({ tickText: 'Visiting The Norfolk Arms...', ... })
+When verification completes: logMilestoneReached({ milestoneKey: 'evidence_done', ... })
+When Tower judges: logMilestoneReached({ milestoneKey: 'tower_verdict', ... })
+
+Quick verification
+After user answers clarification, check Supervisor console for:
+
+[PROTOCOL_EMIT] logs — if missing, protocol helpers not being called
+[EXECUTOR_START] — if missing, executor not starting
+Any errors about logMilestoneReached is not a function — helpers not imported
+
+If protocol helpers don't exist
+You need to apply Prompt 3 from the WYSHBONE_PROTOCOL_PROMPTS.md file to the Supervisor repo. This adds the protocol event emission to the executor flow.
