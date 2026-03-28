@@ -88,7 +88,7 @@ setInterval(() => {
   const now = Date.now();
   let evicted = 0;
   for (const [key, entry] of searchResultsCache) {
-    if (now > entry.expiresAt) { searchResultsCache.delete(key); evicted++; }
+    if (now > entry.expiresAt) { searchResultsCache.delete(key); evicted++; } // No-op in dev mode (Infinity TTL)
   }
   const total = cacheStats.hits + cacheStats.misses;
   const hitRate = total > 0 ? Math.round((cacheStats.hits / total) * 100) : 0;
@@ -356,10 +356,10 @@ export async function searchPlaces(
     };
     searchResultsCache.set(cacheKey, {
       data: resultToCache,
-      expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hour TTL
+      expiresAt: Infinity, // Never expires (dev mode)
       createdAt: Date.now(),
     });
-    console.log(`💾 [GP CACHE] Stored: "${query}" in "${location}" (${places.length} results, cached for 24h)`);
+    console.log(`💾 [GP CACHE] Stored: "${query}" in "${location}" (${places.length} results, cached permanently (dev mode))`);
 
     return resultToCache;
 
