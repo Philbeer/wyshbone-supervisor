@@ -71,6 +71,30 @@ const placeCache = new Map<string, {
 // ---------------------------------------------------------------------------
 const geocodeCache = new Map<string, { lat: number; lng: number } | null>();
 
+// ---------------------------------------------------------------------------
+// In-memory search results cache — keyed by query+location+country+mode
+// Prevents identical searches from hitting Google repeatedly (24h TTL)
+// ---------------------------------------------------------------------------
+interface SearchCacheEntry {
+  data: SearchPlacesResult;
+  expiresAt: number;
+  createdAt: number;
+}
+const searchResultsCache = new Map<string, SearchCacheEntry>();
+let cacheStats = { hits: 0, misses: 0 };
+
+// Periodic cleanup and stats logging
+setInterval(() => {
+  const now = Date.now();
+  let evicted = 0;
+  for (const [key, entry] of searchResultsCache) {
+    if (now > entry.expiresAt) { searchResultsCache.delete(key); evicted++; }
+  }
+  const total = cacheStats.hits + cacheStats.misses;
+  const hitRate = total > 0 ? Math.round((cacheStats.hits / total) * 100) : 0;
+  console.log(`📊 [GP CACHE] Hits: ${cacheStats.hits} | Misses: ${cacheStats.misses} | Rate: ${hitRate}% | Entries: ${searchResultsCache.size}${evicted ? ` | Evicted: ${evicted}` : ''}`);
+}, 10 * 60 * 1000); // Every 10 minutes
+
 const UK_COUNTRY_VARIANTS = new Set([
   'uk', 'united kingdom', 'gb', 'great britain', 'england', 'scotland', 'wales',
 ]);
@@ -147,6 +171,17 @@ export async function searchPlaces(
   maxResults: number = 20,
   mode: GoogleQueryMode = 'TEXT_ONLY',
 ): Promise<SearchPlacesResult> {
+  // ─── SEARCH CACHE CHECK ───────────────────────────────────────
+  const cacheKey = `search:${query.toLowerCase().trim()}||${location.toLowerCase().trim()}||${country.toLowerCase().trim()}||${maxResults}||${mode}`;
+  const cachedSearch = searchResultsCache.get(cacheKey);
+  if (cachedSearch && Date.now() < cachedSearch.expiresAt) {
+    cacheStats.hits++;
+    const ageMin = Math.round((Date.now() - cachedSearch.createdAt) / 60000);
+    console.log(`⚡ [GP CACHE HIT] "${query}" in "${location}" (age: ${ageMin}m) — saved 1+ API call`);
+    return cachedSearch.data;
+  }
+  cacheStats.misses++;
+
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
 
   if (!apiKey) {
@@ -313,11 +348,20 @@ export async function searchPlaces(
     console.log(`[GOOGLE_PLACES] places_websites_found=${websitesFound}/${places.length}`);
     console.log(`[GOOGLE_PLACES] Found ${places.length} places (requested up to ${maxResults})`);
 
-    return {
+    // ─── CACHE THE RESULT ─────────────────────────────────────────
+    const resultToCache: SearchPlacesResult = {
       success: true,
       places,
       debug: buildDebug(requestedMode, usedMode, searchQuery, regionUsed, biasApplied, biasLocation, radiusUsed, pagesFetched, places.length, biasFallback),
     };
+    searchResultsCache.set(cacheKey, {
+      data: resultToCache,
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hour TTL
+      createdAt: Date.now(),
+    });
+    console.log(`💾 [GP CACHE] Stored: "${query}" in "${location}" (${places.length} results, cached for 24h)`);
+
+    return resultToCache;
 
   } catch (error: any) {
     console.error('[GOOGLE_PLACES] Exception:', error.message);
