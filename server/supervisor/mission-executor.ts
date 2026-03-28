@@ -44,7 +44,7 @@ import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './query-shape-ke
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 const RUN_EXECUTION_TIMEOUT_MS_DEFAULT = 300_000;
 const MAX_TOOL_CALLS_DEFAULT = 150;
-const MAX_REPLANS_DEFAULT = 5;
+const MAX_REPLANS_DEFAULT = 2;
 const HARD_CAP_MAX_REPLANS = 10;
 const DEFAULT_SEARCH_BUDGET = 20;
 const ENRICH_CONCURRENCY = 3;
@@ -439,7 +439,7 @@ async function generatePlacesQueries(
   const { default: OpenAI } = await import('openai');
   const client = new OpenAI({ apiKey: openaiKey });
 
-  const prompt = `You are a Google Places search expert. Generate 3-5 search queries that will find the best results in Google Places for this business type.
+  const prompt = `You are a Google Places search expert. Generate 1-2 search queries that will find the best results in Google Places for this business type.
 
 Entity the user wants:
 ${intentNarrative.entity_description}
@@ -454,7 +454,7 @@ Suggested approaches:
 ${intentNarrative.suggested_approaches.join('\n')}
 
 Rules:
-- Each query should use different keywords to maximise coverage
+- Use ONE primary query with the most specific terms. Only add a second if there is a genuinely different way users would search for this business type.
 - Prefer specific terms over generic ones
 - Google Places works best with short noun phrases like "craft beer shop" or "independent off licence"
 - Do not include location — that is added separately
@@ -936,8 +936,8 @@ export async function executeMissionDrivenPlan(
 
   const placeMatchCount = new Map<string, { lead: DiscoveredLead; count: number }>();
   const placeNameToId = new Map<string, string>();
-  const PLACES_PER_QUERY = 10;
-  const MAX_QUERIES = 5;
+  const PLACES_PER_QUERY = 20;
+  const MAX_QUERIES = 2;
   const queriesToRun = generatedQueries.slice(0, MAX_QUERIES);
 
   for (let qi = 0; qi < queriesToRun.length; qi++) {
@@ -2051,51 +2051,7 @@ IMPORTANT:
           }
         }
 
-        if (replansUsed === 1 && intentNarrative && intentNarrative.suggested_approaches.length > 1) {
-          const altQuery = intentNarrative.suggested_approaches[1];
-          console.log(`[BEHAVIOUR_JUDGE] First replan — running suggested_approaches[1] as alternative query: "${altQuery.substring(0, 100)}"`);
-          try {
-            runToolCallCount++;
-            const altResult = await executeAction({
-              toolName: 'SEARCH_PLACES',
-              toolArgs: {
-                query: altQuery,
-                location,
-                country,
-                maxResults: currentSearchBudget,
-                target_count: requestedCount ?? DEFAULT_SEARCH_BUDGET,
-              },
-              userId,
-              tracker: toolTracker,
-              runId,
-              conversationId,
-              clientRequestId,
-            });
-            if (altResult.success && altResult.data?.places && Array.isArray(altResult.data.places)) {
-              const existingAltIds = new Set(leads.map(l => l.placeId));
-              let altAdded = 0;
-              for (const p of altResult.data.places as any[]) {
-                const pid = p.place_id || p.id || '';
-                if (pid && !existingAltIds.has(pid)) {
-                  leads.push({
-                    name: p.name || p.displayName?.text || 'Unknown Business',
-                    address: p.formatted_address || p.formattedAddress || `${location}, ${country}`,
-                    phone: p.phone || p.nationalPhoneNumber || p.internationalPhoneNumber || null,
-                    website: p.website || p.websiteUri || null,
-                    placeId: pid,
-                    source: 'google_places',
-                    lat: typeof p.lat === 'number' ? p.lat : (p.geometry?.location?.lat ?? null),
-                    lng: typeof p.lng === 'number' ? p.lng : (p.geometry?.location?.lng ?? null),
-                  });
-                  altAdded++;
-                }
-              }
-              console.log(`[BEHAVIOUR_JUDGE] suggested_approaches[1] added ${altAdded} new leads (total now: ${leads.length})`);
-            }
-          } catch (altErr: any) {
-            console.warn(`[BEHAVIOUR_JUDGE] suggested_approaches[1] search failed (non-fatal): ${altErr.message}`);
-          }
-        }
+        // COST_FIX: Removed suggested_approaches[1] alt query — was firing an extra $0.032 Places call on every first replan
       } catch (reSearchErr: any) {
         console.warn(`[MISSION_EXEC] Replan search failed: ${reSearchErr.message}`);
         break;
