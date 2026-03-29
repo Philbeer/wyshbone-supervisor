@@ -107,7 +107,7 @@ function sanitizeSupervisorMessage(msg: string): string {
     return SUPERVISOR_NEUTRAL_MESSAGE;
   }
   // Block conversational preamble that LLMs generate as "helpful" ack messages
-  const PREAMBLE_RE = /I'd be happy to|I would be happy to|Could you tell me what|what type of businesses|what kind of businesses|Let me help you find/i;
+  const PREAMBLE_RE = /I'd be happy to|I would be happy to|Could you tell me what|what type of businesses|what kind of businesses|Let me help you find|I can help you|I'll help you find/i;
   if (PREAMBLE_RE.test(msg)) {
     console.warn(`[SUPERVISOR_MSG_GUARD] Blocked conversational preamble: "${msg.substring(0, 120)}…"`);
     return SUPERVISOR_NEUTRAL_MESSAGE;
@@ -1221,10 +1221,6 @@ class SupervisorService {
       }
     }
 
-    if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && missionQueryId) {
-      console.log(`[PASS3_CLARIFY] clarification_needed=true but benchmark run (query_id=${missionQueryId}) — bypassing clarification gate, forcing execution`);
-    }
-
     // Deterministic searchability check: if the mission already has entity_category + location_text +
     // at least one constraint, there is enough content to execute a search regardless of what the LLM
     // sets for clarification_needed. The LLM flag is treated as a suggestion, not a gate, when the
@@ -1238,28 +1234,6 @@ class SupervisorService {
       !!_clarifyGateEntity &&
       !!_clarifyGateLocation &&
       _clarifyGateConstraintCount > 0;
-
-    if (missionResult?.intentNarrative?.clarification_needed) {
-      console.log('[CLARIFY-GATE] Values:', {
-        entity_category: _clarifyGateEntity,
-        location_text: _clarifyGateLocation,
-        constraintCount: _clarifyGateConstraintCount,
-        clarify_if_needed: missionResult.intentNarrative.clarification_needed,
-      });
-      console.log('[CLARIFY-GATE] _missionHasEnoughToSearch:', _missionHasEnoughToSearch);
-    }
-
-    if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && _missionHasEnoughToSearch && !missionQueryId) {
-      console.log('[CLARIFY-GATE] Suppressed — mission has enough to search:', {
-        entity_category: _clarifyGateEntity,
-        location_text: _clarifyGateLocation,
-        constraintCount: _clarifyGateConstraintCount,
-      });
-    }
-
-    if (missionMode === 'active' && missionResult?.intentNarrative?.clarification_needed && !_missionHasEnoughToSearch && !missionQueryId) {
-      console.log(`[PASS3_CLARIFY] DISABLED — preflight probe is the sole clarification authority. clarification_needed=${missionResult.intentNarrative.clarification_needed} entity="${_clarifyGateEntity}" location="${_clarifyGateLocation}"`);
-    }
 
     let earlyParsedGoal: ParsedGoal | null = null;
     let intentSource: 'mission' | 'canonical' | 'legacy' = 'legacy';
@@ -1907,12 +1881,6 @@ class SupervisorService {
       // override any non-stop clarify block (e.g. relationship predicates that Pass 3
       // correctly identified as commercial context rather than constraints).
       if (!outerGateResult.can_execute && (!outerGateResult.stop_recommended || missionQueryId)) {
-        const pass3ClearedClarification = missionMode === 'active' && missionResult?.ok &&
-          missionResult.intentNarrative?.clarification_needed === false;
-        if (pass3ClearedClarification) {
-          console.log(`[CONSTRAINT_GATE_OUTER] Pass 3 says clarification_needed=false — overriding clarify-only block (types: ${outerGateResult.constraints.map((c: any) => c.type).join(', ')}), proceeding to search`);
-          outerGateResult = { ...outerGateResult, can_execute: true, why_blocked: null, clarify_questions: [] };
-        }
         // If the structured mission has entity + location + constraint, it is searchable regardless
         // of what the constraint gate says about can_execute. Relationship predicates flagging
         // can_execute=false with stop_recommended=false should never halt a search that has
