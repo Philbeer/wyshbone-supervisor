@@ -1058,6 +1058,28 @@ class SupervisorService {
       ts: Date.now(),
     });
 
+    // INTENT_FIX: On clarification continuations, rawMsg is the clarification answer
+    // (e.g., "sussex"), not the full original query. Mission extraction on this produces
+    // intentNarrative = null because the LLM cannot extract a complete intent from one word.
+    // The rawMsg restoration at the constraint_gate block (further down) happens AFTER
+    // mission extraction already ran, so we fix it here before extraction starts.
+    if (isClarifyResponse && task.conversation_id) {
+      // For constraint_gate continuations: peek at the pending contract (non-destructive —
+      // getPendingContract only deletes on TTL expiry, not on every read).
+      const earlyPending = getPendingContract(task.conversation_id);
+      if (earlyPending?.originalMessage && earlyPending.originalMessage !== rawMsg) {
+        console.log(`[INTENT_FIX] Restoring rawMsg for mission extraction from pending contract: "${earlyPending.originalMessage.substring(0, 80)}" (was: "${rawMsg.substring(0, 40)}")`);
+        rawMsg = earlyPending.originalMessage;
+      } else if ((requestData as any).original_message && String((requestData as any).original_message) !== rawMsg) {
+        // For preflight_clarify continuations: client may send original_message in request_data
+        const origMsg = String((requestData as any).original_message);
+        if (origMsg.length > rawMsg.length) {
+          console.log(`[INTENT_FIX] Restoring rawMsg for mission extraction from requestData.original_message: "${origMsg.substring(0, 80)}" (was: "${rawMsg.substring(0, 40)}")`);
+          rawMsg = origMsg;
+        }
+      }
+    }
+
     let missionResult: Awaited<ReturnType<typeof extractStructuredMission>> | null = null;
     const missionMode = getMissionExtractorMode();
 

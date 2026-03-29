@@ -1,0 +1,43 @@
+Bug fix: Intent narrative missing on clarification continuation runs.
+
+ROOT CAUSE: In server/supervisor.ts processChatTask(), when a user answers a 
+clarification question (e.g. "sussex"), rawMsg is set to the answer at line 942. 
+Mission extraction runs at line 1066 on rawMsg = "sussex" and produces 
+intentNarrative = null because the LLM can't extract intent from one word.
+
+The original query IS restored at line 1834 (pendingConstraint.originalMessage) 
+but that's AFTER mission extraction already completed.
+
+FIX: Before mission extraction runs (around line 1060-1066), if this is a 
+clarification continuation (isClarifyResponse === true), reconstruct rawMsg 
+from the original query + the clarification answer.
+
+Find the section where mission extraction is called (around line 1066). 
+It should look something like:
+
+  const missionResult = await extractStructuredMission(rawMsg, conversationContextStr, ...);
+
+Add this IMMEDIATELY BEFORE that call:
+
+  // INTENT_FIX: On clarification continuations, reconstruct the full query
+  // so mission extraction gets "companies that buy laser cutting machines for metal in sussex"
+  // instead of just "sussex"
+  if (isClarifyResponse && requestData.clarify_answer) {
+    const originalQuery = requestData.original_message || requestData.user_message || rawMsg;
+    const clarifyAnswer = requestData.clarify_answer;
+    // Only reconstruct if rawMsg is just the answer (short, no entity info)
+    if (rawMsg.length < 50 && rawMsg === clarifyAnswer) {
+      rawMsg = `${originalQuery} in ${clarifyAnswer}`;
+      console.log(`[INTENT_FIX] Reconstructed rawMsg for mission extraction: "${rawMsg.substring(0, 100)}"`);
+    }
+  }
+
+This way mission extraction gets "companies that buy laser cutting machines for metal in sussex" 
+instead of just "sussex", and can produce a valid intent narrative.
+
+IMPORTANT: Check what fields are available in requestData for the original query. 
+The field might be called original_message, user_message, originalUserMessage, or 
+something else. Show me the requestData structure for clarification continuations 
+before making the change — grep for where requestData is built in the clarify path.
+
+Only modify server/supervisor.ts. Do NOT change mission-extractor.ts or mission-executor.ts.
