@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "WuLicUYY5Oz1ct6LFCZe8"
+uri = "file://COST_AUDIT_REPORT.md"
+type = "text"
+title = "Supervisor Codebase — Full Cost Audit Report"
