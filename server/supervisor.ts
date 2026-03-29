@@ -106,6 +106,12 @@ function sanitizeSupervisorMessage(msg: string): string {
     console.warn(`[SUPERVISOR_MSG_GUARD] Blocked count-claiming message: "${msg.substring(0, 120)}…"`);
     return SUPERVISOR_NEUTRAL_MESSAGE;
   }
+  // Block conversational preamble that LLMs generate as "helpful" ack messages
+  const PREAMBLE_RE = /I'd be happy to|I would be happy to|Could you tell me what|what type of businesses|what kind of businesses|Let me help you find/i;
+  if (PREAMBLE_RE.test(msg)) {
+    console.warn(`[SUPERVISOR_MSG_GUARD] Blocked conversational preamble: "${msg.substring(0, 120)}…"`);
+    return SUPERVISOR_NEUTRAL_MESSAGE;
+  }
   return sanitizeMessageContent(msg);
 }
 
@@ -2179,6 +2185,11 @@ class SupervisorService {
     } catch (respErr: any) {
       console.warn(`[RESPONSE_BUILDER] Failed (non-fatal), using neutral message: ${respErr.message}`);
       response = sanitizeSupervisorMessage(towerResult.response);
+      // Strip any LLM-generated conversational preamble that leaked through
+      if (/I'd be happy to|I would be happy to|Could you tell me|what type of businesses|what kind of businesses/i.test(response)) {
+        console.warn(`[SUPERVISOR_MSG_GUARD] Blocked conversational preamble in response: "${response.substring(0, 120)}"`);
+        response = SUPERVISOR_NEUTRAL_MESSAGE;
+      }
     }
 
     if (monitorCreated && !response.includes('monitoring')) {
