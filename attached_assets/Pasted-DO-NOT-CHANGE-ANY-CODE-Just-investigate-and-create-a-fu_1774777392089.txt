@@ -1,0 +1,62 @@
+DO NOT CHANGE ANY CODE. Just investigate and create a full cost audit report.
+
+I need to find EVERY external API call and LLM call in the supervisor codebase that 
+costs money. For each one, report what it does, how often it fires, and whether it's 
+necessary.
+
+SEARCH 1 — All OpenAI calls:
+  grep -rn "openai" server/ --include="*.ts" -i
+  grep -rn "chat.completions.create" server/ --include="*.ts"
+  grep -rn "api.openai.com" server/ --include="*.ts"
+  grep -rn "responses" server/ --include="*.ts" | grep -i "openai\|gpt"
+
+For each call found, report:
+  - File and line number
+  - What model is used (gpt-4o, gpt-4o-mini, etc.)
+  - What it does (intent extraction, query generation, exclusion filter, etc.)
+  - How often it fires per run (once? per lead? per constraint?)
+  - Approximate cost per call (gpt-4o-mini ~$0.00015/1K input, $0.0006/1K output; 
+    gpt-4o ~$0.0025/1K input, $0.01/1K output)
+  - Is it ESSENTIAL or could it be removed/cached/simplified?
+
+SEARCH 2 — All Anthropic/Claude calls:
+  grep -rn "anthropic" server/ --include="*.ts" -i
+  grep -rn "claude" server/ --include="*.ts" -i
+  grep -rn "messages.create" server/ --include="*.ts"
+
+SEARCH 3 — All Google API calls:
+  grep -rn "googleapis.com" server/ --include="*.ts"
+  grep -rn "places.googleapis" server/ --include="*.ts"
+  grep -rn "maps.googleapis" server/ --include="*.ts"
+  grep -rn "GOOGLE_PLACES" server/ --include="*.ts" | head -20
+
+SEARCH 4 — All other external HTTP calls:
+  grep -rn "fetch(" server/ --include="*.ts" | grep -v node_modules | grep -v "\.test\." | head -40
+
+For each external call, classify as:
+  - ESSENTIAL (core functionality, can't remove)
+  - OPTIMIZABLE (could be cached, batched, or use cheaper model)
+  - WASTEFUL (fires unnecessarily, duplicate, or unused)
+
+SEARCH 5 — Per-run call count analysis:
+Trace a single "find pubs in Brighton" run through the code and count EVERY 
+external API/LLM call that fires. List them in order:
+
+  1. Mission extraction (Pass 1) — what model? what cost?
+  2. Mission extraction (Pass 2) — what model?
+  3. Intent narrative (Pass 3) — what model?
+  4. Intent extractor shadow — what model?
+  5. generatePlacesQueries — what model?
+  6. filterByEntityExclusions — what model? how many calls per batch?
+  7. Google Places Text Search — how many calls?
+  8. Discovery cascade GPT-4o web search — what model?
+  9. GPT-4o verification fallback per lead — what model? how many per run?
+  10. Tower judge — what model?
+  11. Reloop planner LLM — what model?
+  12. Any others?
+
+Total them up for:
+  a) A simple run (clear query, few results)
+  b) A complex run (vague query, reloop, web visits, discovery cascade)
+
+Create a table showing: Call name | Model | Fires per run | Cost per call | Essential?
