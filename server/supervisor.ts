@@ -1063,6 +1063,7 @@ class SupervisorService {
     // intentNarrative = null because the LLM cannot extract a complete intent from one word.
     // The rawMsg restoration at the constraint_gate block (further down) happens AFTER
     // mission extraction already ran, so we fix it here before extraction starts.
+    console.log(`[INTENT_FIX_DEBUG] isClarifyResponse=${isClarifyResponse} clarify_answer=${(requestData as any).clarify_answer} rawMsg="${rawMsg?.substring(0,80)}" user_message="${(requestData as any).user_message?.substring(0,80)}" keys=${Object.keys(requestData).join(',')}`);
     if (isClarifyResponse && task.conversation_id) {
       // For constraint_gate continuations: peek at the pending contract (non-destructive —
       // getPendingContract only deletes on TTL expiry, not on every read).
