@@ -511,7 +511,7 @@ async function filterByEntityExclusions(
 
   const kept: DiscoveredLead[] = [];
   const excluded: Array<{ name: string; reason: string }> = [];
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = 20;
 
   for (let i = 0; i < leads.length; i += BATCH_SIZE) {
     const batch = leads.slice(i, i + BATCH_SIZE);
