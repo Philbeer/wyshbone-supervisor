@@ -1070,9 +1070,9 @@ class SupervisorService {
       if (earlyPending?.originalMessage && earlyPending.originalMessage !== rawMsg) {
         console.log(`[INTENT_FIX] Restoring rawMsg for mission extraction from pending contract: "${earlyPending.originalMessage.substring(0, 80)}" (was: "${rawMsg.substring(0, 40)}")`);
         rawMsg = earlyPending.originalMessage;
-      } else if ((requestData as any).original_message && String((requestData as any).original_message) !== rawMsg) {
-        // For preflight_clarify continuations: client may send original_message in request_data
-        const origMsg = String((requestData as any).original_message);
+      } else if (((requestData as any).original_user_message || (requestData as any).original_message) && String((requestData as any).original_user_message || (requestData as any).original_message) !== rawMsg) {
+        // For preflight_clarify continuations: client may send original_user_message or original_message in request_data
+        const origMsg = String((requestData as any).original_user_message || (requestData as any).original_message);
         if (origMsg.length > rawMsg.length) {
           console.log(`[INTENT_FIX] Restoring rawMsg for mission extraction from requestData.original_message: "${origMsg.substring(0, 80)}" (was: "${rawMsg.substring(0, 40)}")`);
           rawMsg = origMsg;
@@ -1645,7 +1645,7 @@ class SupervisorService {
         await storage.updateAgentRun(jobId, {
           status: 'clarifying',
           terminalState: null,
-          metadata: { verdict: 'preflight_clarify', awaiting: 'user_input', reason: preflightResult.reason },
+          metadata: { verdict: 'preflight_clarify', awaiting: 'user_input', reason: preflightResult.reason, original_message: rawMsg },
         }).catch((runErr: any) => console.warn(`[PREFLIGHT_CLARIFY] updateAgentRun failed: ${runErr.message}`));
         console.log(`[PREFLIGHT_CLARIFY] Run awaiting user input — runId=${jobId} status=clarifying`);
 
@@ -1772,6 +1772,25 @@ class SupervisorService {
             }
             storePendingContract(task.conversation_id, recoveredOriginal, existingRun.metadata.constraint_contract, recoveredRunId);
             pendingConstraint = getPendingContract(task.conversation_id);
+          }
+        } else if (existingRun && existingRun.metadata?.verdict === 'preflight_clarify') {
+          // Recover original message for preflight clarify continuation
+          let recoveredOriginal = existingRun.metadata.original_message || '';
+          if (!recoveredOriginal) {
+            // Fallback: get first user message from conversation
+            const { data: userMsgs } = await supabase!.from('messages')
+              .select('content')
+              .eq('conversation_id', task.conversation_id)
+              .eq('role', 'user')
+              .order('created_at', { ascending: true })
+              .limit(1);
+            recoveredOriginal = userMsgs?.[0]?.content || '';
+          }
+          if (recoveredOriginal) {
+            console.log(`[PREFLIGHT_RECOVERY] Recovered original query: "${recoveredOriginal.substring(0, 80)}" for clarify answer: "${rawMsg.substring(0, 40)}"`);
+            rawMsg = `${recoveredOriginal} in ${rawMsg}`;
+            jobId = existingRun.id;
+            isClarifyResponse = true;
           }
         }
       } catch (e: any) {

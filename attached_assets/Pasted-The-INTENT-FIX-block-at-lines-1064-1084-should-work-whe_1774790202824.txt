@@ -1,0 +1,69 @@
+The INTENT_FIX block at lines 1064-1084 should work when called through the real UI 
+(which sends clarify_answer and original_user_message in requestData). The previous 
+test was via CLI which didn't send those fields.
+
+TWO CHANGES needed for belt-and-braces:
+
+CHANGE 1 — Store original_message when preflight_clarify fires (so recovery works later).
+
+Find the updateAgentRun call when preflight_clarify fires (around line 1645-1649). 
+It currently looks like:
+
+  storage.updateAgentRun(jobId, {
+    status: 'clarifying',
+    terminalState: null,
+    metadata: { verdict: 'preflight_clarify', awaiting: 'user_input', reason: preflightResult.reason },
+  })
+
+Add original_message to the metadata:
+
+  storage.updateAgentRun(jobId, {
+    status: 'clarifying',
+    terminalState: null,
+    metadata: { verdict: 'preflight_clarify', awaiting: 'user_input', reason: preflightResult.reason, original_message: rawMsg },
+  })
+
+CHANGE 2 — Add preflight_clarify recovery alongside constraint_gate recovery.
+
+Find the constraint_gate recovery block (around lines 1741-1776) that checks:
+  if (existingRun.metadata?.verdict === 'constraint_gate_clarify' && ...)
+
+Add an else if block IMMEDIATELY AFTER the constraint_gate_clarify block:
+
+  else if (existingRun && existingRun.metadata?.verdict === 'preflight_clarify') {
+    // Recover original message for preflight clarify continuation
+    let recoveredOriginal = existingRun.metadata.original_message || '';
+    if (!recoveredOriginal) {
+      // Fallback: get first user message from conversation
+      const { data: userMsgs } = await supabase!.from('messages')
+        .select('content')
+        .eq('conversation_id', task.conversation_id)
+        .eq('role', 'user')
+        .order('created_at', { ascending: true })
+        .limit(1);
+      recoveredOriginal = userMsgs?.[0]?.content || '';
+    }
+    if (recoveredOriginal) {
+      console.log(`[PREFLIGHT_RECOVERY] Recovered original query: "${recoveredOriginal.substring(0, 80)}" for clarify answer: "${rawMsg.substring(0, 40)}"`);
+      rawMsg = `${recoveredOriginal} in ${rawMsg}`;
+      jobId = existingRun.id;
+      isClarifyResponse = true;
+    }
+  }
+
+CHANGE 3 — Update the INTENT_FIX block to also check for original_user_message 
+(which the UI sends). Find the existing INTENT_FIX block around line 1064. 
+Update the original query source to check multiple fields:
+
+In the line that reads:
+  const originalQuery = requestData.original_message || requestData.user_message || rawMsg;
+
+Change to:
+  const originalQuery = (requestData as any).original_user_message || (requestData as any).original_message || rawMsg;
+
+This matches the field name the UI actually sends (original_user_message, not original_message).
+
+After all 3 changes, restart with kill 1 and test through the REAL UI:
+1. Type "can you find companies that buy laser cutting machines for metal"
+2. When asked for location, type "sussex"
+3. Check if the intent narrative card appears
