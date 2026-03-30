@@ -885,7 +885,7 @@ class SupervisorService {
       return;
     }
 
-    const { message, matchingLeads, noCachedPages } = refineResult;
+    const { message, matchingLeads, noCachedPages, liveFetched } = refineResult;
     const messageId = randomUUID();
 
     // Build metadata — if we have matches, surface them as leads so the UI
@@ -900,6 +900,7 @@ class SupervisorService {
       total_checked: refineResult.totalChecked,
       matches: matchingLeads.length,
       no_cached_pages: noCachedPages,
+      live_fetched: liveFetched,
     };
 
     if (matchingLeads.length > 0) {
@@ -938,7 +939,7 @@ class SupervisorService {
         terminalState: 'completed',
         endedAt: new Date(),
         metadata: {
-          verdict: noCachedPages ? 'refine_no_cache' : 'refine_completed',
+          verdict: liveFetched ? 'refine_live_fetched' : noCachedPages ? 'refine_no_cache' : 'refine_completed',
           matches: matchingLeads.length,
           total_checked: refineResult.totalChecked,
         },

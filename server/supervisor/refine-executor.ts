@@ -2,6 +2,7 @@ import { storage } from '../storage';
 import { createArtefact } from './artefacts';
 import { logAFREvent } from './afr-logger';
 import { supabase } from '../supabase';
+import { executeWebVisit } from './web-visit';
 
 export interface RefineLead {
   name: string;
@@ -28,6 +29,7 @@ export interface RefineResult {
   nonMatchingLeads: RefineNonMatchedLead[];
   totalChecked: number;
   noCachedPages: boolean;
+  liveFetched: boolean;
 }
 
 function extractDomain(url: string): string {
@@ -64,10 +66,9 @@ function normalizeArtefact(raw: any): any {
   };
 }
 
-// Internal helper — query web_visit_pages artefacts for a specific, already-resolved run_id.
-// Does NOT do ID resolution (avoids recursion). Used by fetchWebVisitArtefacts.
+// ── Cached artefact lookup ─────────────────────────────────────────────────────
+
 async function queryWebVisitsByRunId(runId: string): Promise<any[]> {
-  // ── 1. Try local Drizzle DB ────────────────────────────────────────────────
   let localAll: any[] = [];
   try {
     localAll = await storage.getArtefactsByRunId(runId);
@@ -85,7 +86,6 @@ async function queryWebVisitsByRunId(runId: string): Promise<any[]> {
 
   if (!supabase) return [];
 
-  // ── 2. Supabase REST fallback ──────────────────────────────────────────────
   try {
     const { data: allRows, error: diagErr } = await supabase
       .from('artefacts')
@@ -120,13 +120,10 @@ async function queryWebVisitsByRunId(runId: string): Promise<any[]> {
 async function fetchWebVisitArtefacts(sourceRunId: string): Promise<any[]> {
   console.log(`[REFINE_LOOKUP] Querying artefacts for source_run_id="${sourceRunId}"`);
 
-  // ── Primary lookup: treat source_run_id as agent_runs.id ──────────────────
   const primaryResults = await queryWebVisitsByRunId(sourceRunId);
   if (primaryResults.length > 0) return primaryResults;
 
-  // ── Fallback: source_run_id might actually be a client_request_id ─────────
-  // This happens when the UI passes the clientRequestId instead of the actual
-  // run UUID. Resolve via agent_runs table and retry.
+  // Fallback: source_run_id might be a client_request_id — resolve via agent_runs
   if (!supabase) {
     console.warn(`[REFINE_LOOKUP] No Supabase client — cannot resolve client_request_id fallback`);
     return [];
@@ -147,7 +144,7 @@ async function fetchWebVisitArtefacts(sourceRunId: string): Promise<any[]> {
     }
 
     if (!runRow?.id || runRow.id === sourceRunId) {
-      console.log(`[REFINE_LOOKUP] No client_request_id match found for "${sourceRunId}" — confirmed empty`);
+      console.log(`[REFINE_LOOKUP] No client_request_id match found for "${sourceRunId}" — proceeding to live fetch`);
       return [];
     }
 
@@ -158,6 +155,112 @@ async function fetchWebVisitArtefacts(sourceRunId: string): Promise<any[]> {
     return [];
   }
 }
+
+// ── Live homepage fetch (used when no cached pages exist) ──────────────────────
+
+async function liveRefineWithFetch(
+  leads: RefineLead[],
+  constraint: string,
+  sourceRunId: string,
+  runId: string,
+  userId: string,
+  conversationId: string | undefined,
+): Promise<{
+  matchingLeads: RefineMatchedLead[];
+  nonMatchingLeads: RefineNonMatchedLead[];
+  fetchedCount: number;
+}> {
+  const matchingLeads: RefineMatchedLead[] = [];
+  const nonMatchingLeads: RefineNonMatchedLead[] = [];
+
+  const withWebsite = leads.filter(l => !!l.website);
+  const withoutWebsite = leads.filter(l => !l.website);
+
+  for (const lead of withoutWebsite) {
+    nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_website' });
+  }
+
+  if (withWebsite.length === 0) {
+    return { matchingLeads, nonMatchingLeads, fetchedCount: 0 };
+  }
+
+  console.log(`[REFINE_LIVE] Fetching ${withWebsite.length} homepage(s) in parallel for constraint="${constraint}"`);
+
+  // Fetch all homepages in parallel — max_pages: 1 = homepage only
+  const fetchSettled = await Promise.allSettled(
+    withWebsite.map(async (lead) => {
+      const url = lead.website!;
+      console.log(`[REFINE_LIVE] Fetching ${url} for lead "${lead.name}"`);
+      const envelope = await executeWebVisit({ url, max_pages: 1 }, runId);
+      const pages: any[] = (envelope.outputs as any)?.pages ?? [];
+      return { lead, pages, url };
+    }),
+  );
+
+  let fetchedCount = 0;
+
+  // Process results sequentially (no concurrency issues writing to shared arrays)
+  const cacheWrites: Promise<any>[] = [];
+
+  for (const settled of fetchSettled) {
+    if (settled.status === 'rejected') {
+      // Find which lead this was — not directly available but we warned in executeWebVisit
+      console.warn(`[REFINE_LIVE] A homepage fetch threw: ${settled.reason}`);
+      continue;
+    }
+
+    const { lead, pages, url } = settled.value;
+
+    if (pages.length === 0) {
+      console.log(`[REFINE_LIVE] No pages returned for "${lead.name}" (${url}) — marking unmatched`);
+      nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'fetch_failed' });
+      continue;
+    }
+
+    fetchedCount++;
+
+    // Cache under the source run so future refinements reuse the data
+    const cacheWrite = createArtefact({
+      runId: sourceRunId,
+      type: 'web_visit_pages',
+      title: `${lead.name} — ${extractDomain(url)}`,
+      summary: `Homepage fetched live during refinement`,
+      payload: {
+        outputs: {
+          pages,
+          site_summary: `Live-fetched homepage for lead: ${lead.name}`,
+          site_language: 'en',
+          crawl: { attempted_pages: 1, fetched_pages: pages.length, blocked: false, retryable: false, http_failures_count: 0 },
+        },
+      },
+      userId,
+      conversationId,
+    }).catch((err: any) =>
+      console.warn(`[REFINE_LIVE] Cache write failed for "${lead.name}": ${err.message}`),
+    );
+    cacheWrites.push(cacheWrite);
+
+    // Constraint check against all text from the fetched page(s)
+    const fullText = pages.map((p: any) => (typeof p.text_clean === 'string' ? p.text_clean : '')).join(' ');
+    const result = checkConstraint(fullText, constraint);
+
+    if (result.match) {
+      console.log(`[REFINE_LIVE] "${lead.name}" → MATCH for "${constraint}"`);
+      matchingLeads.push({ ...lead, refine_match: true, refine_evidence: result.snippet ?? '' });
+    } else {
+      console.log(`[REFINE_LIVE] "${lead.name}" → NO MATCH for "${constraint}"`);
+      nonMatchingLeads.push({ ...lead, refine_match: false });
+    }
+  }
+
+  // Fire cache writes without blocking the response
+  Promise.allSettled(cacheWrites).catch(() => {});
+
+  console.log(`[REFINE_LIVE] Complete — fetched=${fetchedCount} matched=${matchingLeads.length}/${leads.length}`);
+  return { matchingLeads, nonMatchingLeads, fetchedCount };
+}
+
+// ── Cached-artefact helpers ────────────────────────────────────────────────────
 
 function buildPageText(artefact: any): string {
   const pages: any[] = artefact.payloadJson?.outputs?.pages ?? [];
@@ -187,6 +290,8 @@ function artefactMatchesLead(artefact: any, lead: RefineLead): boolean {
   return false;
 }
 
+// ── Public entry point ────────────────────────────────────────────────────────
+
 export async function executeRefine(
   sourceRunId: string,
   leads: RefineLead[],
@@ -200,49 +305,66 @@ export async function executeRefine(
   const webVisitArtefacts = await fetchWebVisitArtefacts(sourceRunId);
   const noCachedPages = webVisitArtefacts.length === 0;
 
-  if (noCachedPages) {
-    console.log(`[REFINE] No cached web pages found for source run ${sourceRunId}`);
-  }
-
-  const matchingLeads: RefineMatchedLead[] = [];
-  const nonMatchingLeads: RefineNonMatchedLead[] = [];
-
-  for (const lead of leads) {
-    if (noCachedPages) {
-      nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_cached_pages' });
-      continue;
-    }
-
-    const matchingArtefacts = webVisitArtefacts.filter(a => artefactMatchesLead(a, lead));
-
-    if (matchingArtefacts.length === 0) {
-      console.log(`[REFINE] No artefacts matched lead "${lead.name}" — marking unmatched`);
-      nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_cached_pages' });
-      continue;
-    }
-
-    const fullText = matchingArtefacts.map(buildPageText).join(' ');
-    const result = checkConstraint(fullText, constraint);
-
-    if (result.match) {
-      console.log(`[REFINE] "${lead.name}" → MATCH for "${constraint}"`);
-      matchingLeads.push({ ...lead, refine_match: true, refine_evidence: result.snippet ?? '' });
-    } else {
-      console.log(`[REFINE] "${lead.name}" → NO MATCH for "${constraint}"`);
-      nonMatchingLeads.push({ ...lead, refine_match: false });
-    }
-  }
-
+  let matchingLeads: RefineMatchedLead[] = [];
+  let nonMatchingLeads: RefineNonMatchedLead[] = [];
   let message: string;
+  let liveFetched = false;
+
   if (noCachedPages) {
-    message = `I don't have cached website data from that search. Would you like me to run a new search with "${constraint}" included as a requirement?`;
-  } else if (matchingLeads.length === 0) {
-    message = `None of the ${leads.length} results mention "${constraint}" on their websites. This doesn't mean they don't have it — it just wasn't visible on their site. Would you like me to run a fresh search specifically looking for "${constraint}"?`;
+    // ── Live fetch path ──────────────────────────────────────────────────────
+    console.log(`[REFINE] No cached pages — fetching homepages live`);
+
+    const liveResult = await liveRefineWithFetch(
+      leads, constraint, sourceRunId, runId, userId, conversationId,
+    );
+
+    matchingLeads = liveResult.matchingLeads;
+    nonMatchingLeads = liveResult.nonMatchingLeads;
+    liveFetched = true;
+
+    const leadsWithWebsite = leads.filter(l => !!l.website).length;
+    const { fetchedCount } = liveResult;
+
+    if (fetchedCount === 0 && leadsWithWebsite === 0) {
+      message = `None of the ${leads.length} results have a website URL, so I couldn't check for "${constraint}".`;
+    } else if (fetchedCount === 0) {
+      message = `I tried to check the websites live but couldn't load any of them. Would you like me to run a fresh search specifically for "${constraint}"?`;
+    } else if (matchingLeads.length === 0) {
+      message = `I checked ${fetchedCount} website${fetchedCount !== 1 ? 's' : ''} live — none of the ${leads.length} results mention "${constraint}" on their homepage.`;
+    } else {
+      message = `I checked ${fetchedCount} website${fetchedCount !== 1 ? 's' : ''} live and found ${matchingLeads.length} of ${leads.length} result${leads.length !== 1 ? 's' : ''} mentioning "${constraint}" on their homepage.`;
+    }
   } else {
-    message = `Of the ${leads.length} results, ${matchingLeads.length} mention "${constraint}" on their website.`;
+    // ── Cached artefact path ─────────────────────────────────────────────────
+    for (const lead of leads) {
+      const matchingArtefacts = webVisitArtefacts.filter(a => artefactMatchesLead(a, lead));
+
+      if (matchingArtefacts.length === 0) {
+        console.log(`[REFINE] No artefacts matched lead "${lead.name}" — marking unmatched`);
+        nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_cached_pages' });
+        continue;
+      }
+
+      const fullText = matchingArtefacts.map(buildPageText).join(' ');
+      const result = checkConstraint(fullText, constraint);
+
+      if (result.match) {
+        console.log(`[REFINE] "${lead.name}" → MATCH for "${constraint}"`);
+        matchingLeads.push({ ...lead, refine_match: true, refine_evidence: result.snippet ?? '' });
+      } else {
+        console.log(`[REFINE] "${lead.name}" → NO MATCH for "${constraint}"`);
+        nonMatchingLeads.push({ ...lead, refine_match: false });
+      }
+    }
+
+    if (matchingLeads.length === 0) {
+      message = `None of the ${leads.length} results mention "${constraint}" on their websites. This doesn't mean they don't have it — it just wasn't visible on their site. Would you like me to run a fresh search specifically looking for "${constraint}"?`;
+    } else {
+      message = `Of the ${leads.length} results, ${matchingLeads.length} mention "${constraint}" on their website.`;
+    }
   }
 
-  console.log(`[REFINE] Complete — matched=${matchingLeads.length}/${leads.length} cached=${!noCachedPages}`);
+  console.log(`[REFINE] Complete — matched=${matchingLeads.length}/${leads.length} cached=${!noCachedPages} live=${liveFetched}`);
 
   await createArtefact({
     runId,
@@ -255,6 +377,7 @@ export async function executeRefine(
       total_checked: leads.length,
       matches: matchingLeads.length,
       cached_pages_available: !noCachedPages,
+      live_fetched: liveFetched,
       web_visit_artefacts_used: webVisitArtefacts.length,
       matching_leads: matchingLeads,
       non_matching_leads: nonMatchingLeads,
@@ -277,8 +400,9 @@ export async function executeRefine(
       total_checked: leads.length,
       matches: matchingLeads.length,
       no_cached_pages: noCachedPages,
+      live_fetched: liveFetched,
     },
   }).catch(() => {});
 
-  return { message, matchingLeads, nonMatchingLeads, totalChecked: leads.length, noCachedPages };
+  return { message, matchingLeads, nonMatchingLeads, totalChecked: leads.length, noCachedPages, liveFetched };
 }
