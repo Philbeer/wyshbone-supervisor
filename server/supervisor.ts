@@ -1930,7 +1930,14 @@ class SupervisorService {
           }
           if (recoveredOriginal) {
             console.log(`[PREFLIGHT_RECOVERY] Recovered original query: "${recoveredOriginal.substring(0, 80)}" for clarify answer: "${rawMsg.substring(0, 40)}"`);
-            rawMsg = `${recoveredOriginal} in ${rawMsg}`;
+            // Map nationwide-intent words to a real location before combining
+            const nationwideRe = /^\s*(anywhere|everywhere|nationwide|all over|whole country|uk\s*wide|all of uk|all of the uk)\s*$/i;
+            if (nationwideRe.test(rawMsg)) {
+              console.log(`[PREFLIGHT_RECOVERY] Mapped nationwide intent "${rawMsg.trim()}" → "United Kingdom"`);
+              rawMsg = `${recoveredOriginal} in United Kingdom`;
+            } else {
+              rawMsg = `${recoveredOriginal} in ${rawMsg}`;
+            }
             jobId = existingRun.id;
             isClarifyResponse = true;
           }
