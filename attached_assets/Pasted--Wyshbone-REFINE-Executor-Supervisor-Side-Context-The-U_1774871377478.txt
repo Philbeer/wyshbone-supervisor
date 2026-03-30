@@ -1,0 +1,198 @@
+# Wyshbone REFINE Executor — Supervisor Side
+
+## Context
+
+The UI now sends a `refine_results` task type to the supervisor when a user asks something like "which of those have a beer garden?" after a previous search. The UI has already:
+
+1. Classified the message as `refine_results` with an extracted `constraint` keyword
+2. Looked up the leads from the most recent search run via the `delivery_summary` artefact
+3. Created a supervisor task with this payload:
+
+```json
+{
+  "task_type": "refine_results",
+  "request_data": {
+    "source_run_id": "abc-123",
+    "leads": [
+      { "name": "The Black Lion", "website": "https://theblacklion.co.uk", ... },
+      { "name": "The Cricketers", "website": "https://thecricketers.co.uk", ... },
+      ...
+    ],
+    "new_constraint": "beer garden",
+    "conversation_id": "xyz-789"
+  }
+}
+```
+
+The supervisor needs to handle this task type, check each lead against the new constraint using cached web page data, and return only the matching leads.
+
+## What to Implement
+
+### Step 1: Route the `refine_results` task type in `server/supervisor.ts`
+
+Find where `processChatTask` or the task dispatcher switches on `task_type`. Add a handler for `refine_results` that calls a new `refineResults()` function instead of the normal `executeMissionWithReloop` path.
+
+```typescript
+case 'refine_results':
+  await this.refineResults(task);
+  break;
+```
+
+### Step 2: Create the `refineResults()` method
+
+This can live in `server/supervisor.ts` or in a new file `server/supervisor/refine-executor.ts`. The logic is:
+
+```
+async refineResults(task):
+  const { source_run_id, leads, new_constraint, conversation_id } = task.request_data
+  
+  const matchingLeads = []
+  const nonMatchingLeads = []
+  
+  for each lead in leads:
+    // Step A: Try to find cached web pages from the original run
+    const cachedPages = await getArtefacts({
+      run_id: source_run_id,
+      type: 'web_visit_pages',
+      // match by lead name or URL
+    })
+    
+    if cachedPages exist:
+      // Step B: Search cached page text for the constraint keyword
+      const pageText = cachedPages.content.toLowerCase()
+      const constraintLower = new_constraint.toLowerCase()
+      
+      // Simple keyword check first
+      if pageText.includes(constraintLower):
+        matchingLeads.push({
+          ...lead,
+          refine_match: true,
+          refine_evidence: extractSnippet(pageText, constraintLower)
+        })
+      else:
+        nonMatchingLeads.push({ ...lead, refine_match: false })
+    
+    else:
+      // Step C: No cached pages — try a fresh web visit (optional, slower)
+      // For v1, just mark as "unknown" — don't re-visit
+      nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_cached_pages' })
+  
+  // Step D: Write results artefact
+  await createArtefact({
+    run_id: task.run_id,
+    type: 'refine_results',
+    content: {
+      constraint: new_constraint,
+      source_run_id: source_run_id,
+      total_checked: leads.length,
+      matches: matchingLeads.length,
+      matching_leads: matchingLeads,
+      non_matching_leads: nonMatchingLeads,
+    }
+  })
+  
+  // Step E: Create delivery artefact (so the UI can display results)
+  await createArtefact({
+    run_id: task.run_id,
+    type: 'delivery_summary',
+    content: {
+      leads: matchingLeads,
+      total: matchingLeads.length,
+      message: `Of the ${leads.length} results, ${matchingLeads.length} match "${new_constraint}".`
+    }
+  })
+  
+  // Step F: Stream a summary message back to the UI
+  // Use the same SSE/message mechanism as normal search completions
+  await this.sendCompletionMessage(
+    task,
+    `Of the ${leads.length} results, ${matchingLeads.length} mention "${new_constraint}" on their website.`
+  )
+  
+  // Step G: Mark task as completed
+  await this.completeTask(task.id, 'completed')
+```
+
+### Step 3: Finding cached web pages
+
+The original search run saves artefacts with type `web_visit_pages`. These contain the scraped text from each lead's website. To find them:
+
+```typescript
+// Query artefacts table for the source run's web visit pages
+const { data: artefacts } = await supabase
+  .from('artefacts')  // or whatever the artefacts table is called
+  .select('*')
+  .eq('run_id', source_run_id)
+  .eq('type', 'web_visit_pages')
+```
+
+Each artefact is associated with a specific lead. Match by lead name or by the URL in the artefact content.
+
+If the artefacts table uses a different schema, check the existing code in `mission-executor.ts` — look for where `WEB_VISIT` artefacts are created and stored. Use the same query pattern to read them back.
+
+### Step 4: Keyword matching with snippet extraction
+
+For the constraint check, start simple:
+
+```typescript
+function checkConstraint(pageText: string, constraint: string): { match: boolean, snippet?: string } {
+  const text = pageText.toLowerCase()
+  const keyword = constraint.toLowerCase()
+  
+  // Split multi-word constraint into individual words
+  const words = keyword.split(/\s+/)
+  
+  // Check if ALL words appear in the text
+  const allPresent = words.every(w => text.includes(w))
+  
+  if (!allPresent) return { match: false }
+  
+  // Extract a snippet around the first keyword occurrence
+  const idx = text.indexOf(words[0])
+  const start = Math.max(0, idx - 100)
+  const end = Math.min(text.length, idx + 200)
+  const snippet = pageText.substring(start, end).trim()
+  
+  return { match: true, snippet: '...' + snippet + '...' }
+}
+```
+
+This is deliberately simple. Don't use LLM calls for the constraint check in v1 — keyword matching against cached text is instant and free. We can upgrade to semantic matching later if needed.
+
+### Step 5: Handle the completion in the UI
+
+The UI already handles `delivery_summary` artefacts for normal searches. The refine results should use the same artefact type so the existing UI rendering works. The `delivery_summary` artefact should have the same shape as a normal search delivery but with only the matching leads.
+
+Check how the normal search completion renders lead cards in the chat — the refine results should follow the same pattern so no UI changes are needed for display.
+
+## Edge Cases
+
+1. **No cached pages for any lead** — all leads return "no_cached_pages". Send a message: "I don't have cached website data for these results. Would you like me to re-search with the constraint included?"
+
+2. **Zero matches** — send: "None of the {N} results mention '{constraint}' on their websites. This doesn't mean they don't have it — it just wasn't on their website. Would you like me to search specifically for {entity_type} with {constraint}?"
+
+3. **Constraint is very short or common** — "food" or "drink" will match almost everything. That's OK for v1. The user will learn to be specific.
+
+4. **source_run_id doesn't exist** — the original run may have been cleaned up. Handle gracefully: "I couldn't find the previous search results. Would you like me to run a new search?"
+
+## Files to Modify
+
+- `server/supervisor.ts` — add `refine_results` case in task dispatcher, add `refineResults()` method
+- Possibly `server/supervisor/refine-executor.ts` (NEW) if you want to keep it separate
+- No changes needed to `mission-executor.ts` — we're reusing the artefact data, not the executor
+
+## How to Test
+
+1. In the Wyshbone UI, start a new chat
+2. Type "Find me pubs in Brighton" — wait for results
+3. Type "Which of those have a beer garden?"
+4. Check the supervisor console — you should see the `refine_results` task being processed
+5. Check the Live Activity panel — should show the refinement completing
+6. Chat should display "Of the 20 results, X mention 'beer garden' on their website"
+
+## Important Notes
+
+- Do NOT call Google Places API for refinements — the whole point is to reuse existing data
+- Do NOT launch a full mission execution — no reloop, no mission extraction, no Pass 1
+- Keep it simple: read cached pages, keyword match, return results
+- The entire refinement should complete in under 30 seconds

@@ -29,6 +29,7 @@ import { detectTimePredicate, buildClarifyQuestion as buildTimePredicateClarifyQ
 import { recordBenchmarkRun, type BenchmarkRunInput } from './evaluator/benchmarkLogger';
 import type { RunContext, PlanHistoryEntry } from './evaluator/classifyRunFailure';
 import { BENCHMARK_QUERIES, getBenchmarkQueryId } from '../config/benchmarkQueries';
+import { executeRefine, type RefineLead } from './supervisor/refine-executor';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 
@@ -837,6 +838,117 @@ class SupervisorService {
     }
   }
 
+  // ─── REFINE EXECUTOR ─────────────────────────────────────────────────────────
+  // Handles refine_results tasks: filters cached web-page artefacts from the
+  // source run by a new keyword constraint. No LLM calls — pure text matching.
+  private async handleRefineResults(
+    task: SupervisorTask,
+    jobId: string,
+    clientRequestId: string,
+  ): Promise<void> {
+    if (!supabase) return;
+
+    const rd = task.request_data as any;
+    const sourceRunId: string = rd.source_run_id ?? '';
+    const leads: RefineLead[] = Array.isArray(rd.leads) ? rd.leads : [];
+    const constraint: string = String(rd.new_constraint || rd.user_message || '').trim();
+
+    console.log(`[REFINE_HANDLER] runId=${jobId} source=${sourceRunId} constraint="${constraint}" leads=${leads.length}`);
+
+    let refineResult: Awaited<ReturnType<typeof executeRefine>>;
+    try {
+      refineResult = await executeRefine(
+        sourceRunId,
+        leads,
+        constraint,
+        jobId,
+        task.user_id,
+        task.conversation_id,
+      );
+    } catch (err: any) {
+      console.error(`[REFINE_HANDLER] executeRefine threw: ${err.message}`);
+      const errMsgId = randomUUID();
+      await Promise.all([
+        supabase.from('messages').insert({
+          id: errMsgId,
+          conversation_id: task.conversation_id,
+          role: 'assistant',
+          content: 'Something went wrong while refining the results. Please try again.',
+          source: 'supervisor',
+          metadata: { supervisor_task_id: task.id, run_id: jobId, run_error: true },
+          created_at: Date.now(),
+        }),
+        supabase.from('supervisor_tasks').update({ status: 'failed', result: { message_id: errMsgId } }).eq('id', task.id),
+        storage.updateAgentRun(jobId, { status: 'failed', terminalState: null, endedAt: new Date(), error: err.message.substring(0, 300) }).catch(() => {}),
+      ]).catch(() => {});
+      return;
+    }
+
+    const { message, matchingLeads, noCachedPages } = refineResult;
+    const messageId = randomUUID();
+
+    // Build metadata — if we have matches, surface them as leads so the UI
+    // can render them as lead cards using the same format as a normal run.
+    const msgMetadata: Record<string, unknown> = {
+      supervisor_task_id: task.id,
+      run_id: jobId,
+      source_run_id: sourceRunId,
+      classifier: 'refine',
+      capabilities: ['refine_results'],
+      refine_constraint: constraint,
+      total_checked: refineResult.totalChecked,
+      matches: matchingLeads.length,
+      no_cached_pages: noCachedPages,
+    };
+
+    if (matchingLeads.length > 0) {
+      msgMetadata['leads'] = matchingLeads;
+      msgMetadata['run_lane'] = true;
+      msgMetadata['status'] = 'PASS';
+      msgMetadata['final_verdict'] = 'PASS';
+      msgMetadata['trust_status'] = 'UNVERIFIED';
+    }
+
+    const taskStatus = 'completed';
+    await Promise.all([
+      supabase.from('supervisor_tasks').update({
+        status: taskStatus,
+        result: {
+          message_id: messageId,
+          run_id: jobId,
+          source_run_id: sourceRunId,
+          matches: matchingLeads.length,
+          total_checked: refineResult.totalChecked,
+        },
+      }).eq('id', task.id),
+
+      supabase.from('messages').insert({
+        id: messageId,
+        conversation_id: task.conversation_id,
+        role: 'assistant',
+        content: message,
+        source: 'supervisor',
+        metadata: msgMetadata,
+        created_at: Date.now(),
+      }),
+
+      storage.updateAgentRun(jobId, {
+        status: 'completed',
+        terminalState: 'completed',
+        endedAt: new Date(),
+        metadata: {
+          verdict: noCachedPages ? 'refine_no_cache' : 'refine_completed',
+          matches: matchingLeads.length,
+          total_checked: refineResult.totalChecked,
+        },
+      }).catch(() => {}),
+    ]).catch((err: any) => {
+      console.error(`[REFINE_HANDLER] Final write failed: ${err.message}`);
+    });
+
+    console.log(`[REFINE_HANDLER] Done runId=${jobId} task=${task.id} matches=${matchingLeads.length}/${refineResult.totalChecked}`);
+  }
+
   private async processChatTask(task: SupervisorTask) {
     if (!supabase) return;
 
@@ -956,6 +1068,13 @@ class SupervisorService {
     }
 
     registerActiveTask(task.conversation_id, task.id, jobId);
+
+    // ═══ EARLY ROUTING: refine_results ═══
+    // Bypass the full LLM pipeline — filter existing cached web pages by keyword
+    if ((task.task_type as string) === 'refine_results') {
+      await this.handleRefineResults(task, jobId, clientRequestId);
+      return;
+    }
 
     console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=build_user_context`);
     const userContext = await this.buildUserContext(task.user_id);
