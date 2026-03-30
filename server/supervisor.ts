@@ -30,6 +30,7 @@ import { recordBenchmarkRun, type BenchmarkRunInput } from './evaluator/benchmar
 import type { RunContext, PlanHistoryEntry } from './evaluator/classifyRunFailure';
 import { BENCHMARK_QUERIES, getBenchmarkQueryId } from '../config/benchmarkQueries';
 import { executeRefine, type RefineLead } from './supervisor/refine-executor';
+import { attemptRescueLLM, logRescueEvent, updateRescueSuccess, type RescueResult } from './supervisor/rescue-llm';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 
@@ -2197,10 +2198,138 @@ class SupervisorService {
         console.log('[QID-TRACE]', 'step2:missionCtx_built', missionCtx.queryId);
         towerResult = await executeMissionWithReloop(missionCtx);
       } else {
-        const legacyReason = legacyFallbackReason ?? 'mission_extraction_failed';
-        console.error(`[LEGACY_REMOVED] runId=${jobId} — legacy execution path removed. Reason: ${legacyReason}`);
-        throw new Error(`Could not process your request — the query could not be understood well enough to search. Please try rephrasing. (${legacyReason})`);
+      const legacyReason = legacyFallbackReason ?? 'mission_extraction_failed';
+      console.log(`[RESCUE_LLM] runId=${jobId} — mission extraction failed (${legacyReason}). Attempting rescue...`);
+
+      let rescueResult: RescueResult;
+      try {
+        const recentHistory: Array<{ role: string; content: string }> = [];
+        if (task.conversation_id && supabase) {
+          try {
+            const { data: histMsgs } = await supabase
+              .from('messages')
+              .select('role, content')
+              .eq('conversation_id', task.conversation_id)
+              .order('created_at', { ascending: false })
+              .limit(6);
+            if (histMsgs) {
+              for (const m of histMsgs.reverse()) {
+                recentHistory.push({ role: m.role, content: String(m.content || '').substring(0, 300) });
+              }
+            }
+          } catch (histErr: any) {
+            console.warn(`[RESCUE_LLM] Failed to fetch conversation history: ${histErr.message}`);
+          }
+        }
+
+        rescueResult = await attemptRescueLLM({
+          originalQuery: rawMsg,
+          conversationHistory: recentHistory,
+          failureReason: legacyReason,
+          extractedGoal: earlyParsedGoal,
+          canonicalIntent: canonicalIntent,
+          userId: task.user_id,
+          jobId,
+          clientRequestId,
+          conversationId: task.conversation_id,
+        });
+      } catch (rescueErr: any) {
+        console.error(`[RESCUE_LLM] attemptRescueLLM threw: ${rescueErr.message}`);
+        rescueResult = {
+          outcome: 'clarification_needed',
+          reasoning: `Rescue LLM threw: ${rescueErr.message}`,
+          clarificationQuestion: "I want to make sure I find exactly the right leads for you. Could you tell me a bit more about what you're looking for — specifically, what type of business and where?",
+          missingFields: ['business_type', 'location'],
+        };
       }
+
+      logRescueEvent({
+        outcome: rescueResult.outcome,
+        reasoning: rescueResult.reasoning,
+        originalQuery: rawMsg,
+        failureReason: legacyReason,
+        rewrittenMission: rescueResult.rewrittenMission,
+        clarificationQuestion: rescueResult.clarificationQuestion,
+        missingFields: rescueResult.missingFields,
+        confidence: rescueResult.confidence,
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+        runId: jobId,
+        partialExtraction: earlyParsedGoal,
+      }).catch((logErr: any) => console.warn(`[RESCUE_LLM] logRescueEvent failed: ${logErr.message}`));
+
+      createArtefact({
+        runId: jobId,
+        type: 'rescue_llm',
+        title: `Rescue LLM: ${rescueResult.outcome}`,
+        summary: rescueResult.reasoning,
+        payload: {
+          outcome: rescueResult.outcome,
+          reasoning: rescueResult.reasoning,
+          rewritten_mission: rescueResult.rewrittenMission ?? null,
+          clarification_question: rescueResult.clarificationQuestion ?? null,
+          confidence: rescueResult.confidence ?? null,
+          failure_reason: legacyReason,
+          original_query: rawMsg,
+        },
+        userId: task.user_id,
+        conversationId: task.conversation_id,
+      }).catch(() => {});
+
+      if (rescueResult.outcome === 'self_healed' && rescueResult.rewrittenMission) {
+        console.log(`[RESCUE_LLM] Self-healed! bt="${rescueResult.rewrittenMission.business_type}" loc="${rescueResult.rewrittenMission.location}"`);
+        const rewrittenQuery = `find ${rescueResult.rewrittenMission.business_type} in ${rescueResult.rewrittenMission.location}${rescueResult.rewrittenMission.criteria ? ' ' + rescueResult.rewrittenMission.criteria : ''}`;
+
+        try {
+          const rescuedMission = await extractStructuredMission(rewrittenQuery, conversationContextStr);
+          if (rescuedMission.ok && rescuedMission.mission) {
+            const rescuedPlan = buildMissionPlan(rescuedMission.mission);
+            logMissionPlan(rescuedPlan, jobId);
+            const rescuedCtx: MissionExecutionContext = {
+              mission: rescuedMission.mission,
+              plan: rescuedPlan,
+              runId: jobId,
+              userId: task.user_id,
+              conversationId: task.conversation_id,
+              clientRequestId,
+              rawUserInput: rawMsg,
+              missionTrace: rescuedMission.trace,
+              intentNarrative: rescuedMission.intentNarrative,
+              queryId: missionQueryId,
+            };
+            towerResult = await executeMissionWithReloop(rescuedCtx);
+            const rescueSucceeded = towerResult && towerResult.leads && towerResult.leads.length > 0;
+            updateRescueSuccess(jobId, rescueSucceeded, towerResult?.leads?.length ?? 0).catch(() => {});
+            console.log(`[RESCUE_LLM] Self-heal complete: ${towerResult.leads.length} leads`);
+          } else {
+            throw new Error(`Re-extraction failed: ${rescuedMission.trace.failure_stage}`);
+          }
+        } catch (reExecErr: any) {
+          console.error(`[RESCUE_LLM] Self-heal execution failed: ${reExecErr.message}`);
+          updateRescueSuccess(jobId, false, 0).catch(() => {});
+          const fallbackQ = "I want to make sure I find exactly the right leads for you. Could you tell me a bit more about what you're looking for — specifically, what type of business and where?";
+          const messageId = randomUUID();
+          await Promise.all([
+            supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: fallbackQ.substring(0, 200), message_id: messageId, rescue_llm: 'self_heal_failed' } }).eq('id', task.id),
+            supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(fallbackQ), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, rescue_llm: 'self_heal_failed' }, created_at: Date.now() }).select().single(),
+          ]);
+          await storage.updateAgentRun(jobId, { status: 'clarifying', terminalState: null, metadata: { verdict: 'rescue_self_heal_failed', awaiting: 'user_input' } }).catch(() => {});
+          await emitTaskExecutionCompleted('rescue_self_heal_failed');
+          return;
+        }
+      } else {
+        console.log(`[RESCUE_LLM] Needs clarification: ${rescueResult.clarificationQuestion}`);
+        const messageId = randomUUID();
+        const clarifyContent = rescueResult.clarificationQuestion || "I want to make sure I find exactly the right leads for you. Could you tell me a bit more about what you're looking for — specifically, what type of business and where?";
+        await Promise.all([
+          supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyContent.substring(0, 200), message_id: messageId, rescue_llm: 'clarification_needed' } }).eq('id', task.id),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(clarifyContent), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, rescue_llm: 'clarification_needed', rescue_reasoning: rescueResult.reasoning }, created_at: Date.now() }).select().single(),
+        ]);
+        await storage.updateAgentRun(jobId, { status: 'clarifying', terminalState: null, metadata: { verdict: 'rescue_clarification', awaiting: 'user_input', original_message: rawMsg } }).catch(() => {});
+        await emitTaskExecutionCompleted('rescue_clarification');
+        return;
+      }
+    }
     } catch (execErr: any) {
       runFailed = true;
       failureReason = execErr.message || String(execErr);
