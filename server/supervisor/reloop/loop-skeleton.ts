@@ -217,6 +217,22 @@ export async function runReloop(params: {
   let finalRawResult: Record<string, unknown> = {};
   let lastGateDecision: GateDecision | null = null;
 
+  // Wall-clock deadline for the entire reloop chain. Prevents infinite execution
+  // when individual loops contain slow LLM calls, web visits, or Tower round-trips.
+  // Defaults to 8 minutes (well under the 12-minute hard task timeout in supervisor.ts).
+  const RELOOP_WALL_CLOCK_TIMEOUT_MS = parseInt(
+    process.env.RELOOP_WALL_CLOCK_TIMEOUT_MS || String(8 * 60 * 1000), 10,
+  );
+  const reloopStartMs = Date.now();
+  const isReloopDeadlineExceeded = (): boolean => {
+    const elapsed = Date.now() - reloopStartMs;
+    if (elapsed > RELOOP_WALL_CLOCK_TIMEOUT_MS) {
+      console.warn(`[RELOOP_DEADLINE] runId=${runId} chainId=${chainId} — wall-clock timeout exceeded: ${Math.round(elapsed / 1000)}s > ${Math.round(RELOOP_WALL_CLOCK_TIMEOUT_MS / 1000)}s — forcing delivery`);
+      return true;
+    }
+    return false;
+  };
+
   // ── Restore state from checkpoint if resuming ──
   const isResuming = !!params.checkpoint?.canResume;
 
@@ -272,7 +288,11 @@ export async function runReloop(params: {
     const loopStartedAt = new Date().toISOString();
     const loopStartMs = Date.now();
 
-    const circuitBreaker = loopNumber > maxLoops;
+    // Check wall-clock deadline before starting a new loop.
+    // This exits cleanly with whatever entities have been accumulated so far.
+    const reloopDeadlineHit = isReloopDeadlineExceeded();
+
+    const circuitBreaker = loopNumber > maxLoops || reloopDeadlineHit;
 
     console.log(`[RELOOP_SKELETON] ── Loop ${loopNumber} start ── chainId=${chainId} circuitBreaker=${circuitBreaker}`);
 

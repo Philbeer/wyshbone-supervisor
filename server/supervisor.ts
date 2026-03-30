@@ -164,6 +164,13 @@ class SupervisorService {
   private static readonly STALE_TASK_TIMEOUT_MS = 90 * 1000; // 90 seconds (was 5 min — too long for stuck tasks)
   private static readonly MAX_RECOVERY_ATTEMPTS = 3;
   private lastNoTasksLogAt: number = 0;
+  // In-flight task registry — prevents re-queuing tasks already executing and enables
+  // timeout enforcement without blocking the poll loop.
+  private _inFlightTasks: Map<string, { startedAt: number }> = new Map();
+  // Hard outer timeout for the entire processChatTask call (covers LLM extraction +
+  // mission execution + reloop). Must be > RUN_EXECUTION_TIMEOUT_MS (5 min) +
+  // pre-execution overhead. Set to 12 minutes.
+  private static readonly TASK_HARD_TIMEOUT_MS = 12 * 60 * 1000;
 
   async start() {
     if (this.isRunning) {
@@ -438,11 +445,15 @@ class SupervisorService {
     try {
       const cutoffEpoch = Date.now() - SupervisorService.STALE_TASK_TIMEOUT_MS;
 
+      // Collect run IDs that are actively queued OR actively executing (non-blocking).
+      // These must not be swept — they are legitimately in-progress.
       const activeRunIds = new Set<string>();
       for (const t of this.pendingClaimedQueue) {
         const rid = t.run_id || t.request_data?.run_id;
         if (rid) activeRunIds.add(rid);
       }
+      // Also protect tasks currently in-flight (launched non-blocking)
+      Array.from(this._inFlightTasks.keys()).forEach(taskId => activeRunIds.add(taskId));
 
       const { data: staleTasks, error } = await supabase
         .from('supervisor_tasks')
@@ -677,9 +688,8 @@ class SupervisorService {
 
   private async processSupervisorTasks() {
     if (!supabase) return;
-    
-    await this.sweepStaleTasks();
 
+    await this.sweepStaleTasks();
     await this.claimPendingTasks();
 
     const tasksToProcess: any[] = [];
@@ -696,65 +706,75 @@ class SupervisorService {
       return;
     }
 
-    console.log(`[TASK_PROCESS] Processing ${tasksToProcess.length} claimed task(s)`);
+    console.log(`[TASK_PROCESS] Dispatching ${tasksToProcess.length} claimed task(s) (non-blocking) in-flight=${this._inFlightTasks.size}`);
 
     for (const task of tasksToProcess) {
-      try {
-        await this.processChatTask(task as SupervisorTask);
-      } catch (error) {
-        const errMsg = error instanceof Error ? error.message : String(error);
-        console.error(`Failed to process task ${task.id}:`, error);
-
-        const taskRunId = task.run_id || task.request_data?.run_id || task.id;
-        createArtefact({
-          runId: taskRunId,
-          type: 'diagnostic',
-          title: 'Run failed: unhandled exception in processChatTask',
-          summary: `Error: ${errMsg.substring(0, 200)}`,
-          payload: { reason: 'unhandled_exception', error: errMsg, taskId: task.id },
-          userId: task.user_id,
-          conversationId: task.conversation_id,
-        }).catch((e: any) => console.warn(`[PROCESS_TASK] Failed to emit diagnostic artefact: ${e.message}`));
-
-        await supabase
-          .from('supervisor_tasks')
-          .update({
-            status: 'failed',
-            error: errMsg
-          })
-          .eq('id', task.id);
+      if (this._inFlightTasks.has(task.id)) {
+        console.log(`[TASK_PROCESS] Skipping task ${task.id} — already in-flight`);
+        continue;
       }
 
-      while (this.pendingClaimedQueue.length > 0) {
-        const bgTask = this.pendingClaimedQueue.shift();
-        if (!bgTask) break;
-        console.log(`[TASK_PROCESS] Also processing bg-claimed task ${bgTask.id}`);
-        try {
-          await this.processChatTask(bgTask as SupervisorTask);
-        } catch (bgError) {
-          const errMsg = bgError instanceof Error ? bgError.message : String(bgError);
-          console.error(`Failed to process bg task ${bgTask.id}:`, bgError);
+      this._inFlightTasks.set(task.id, { startedAt: Date.now() });
+      console.log(`[TASK_PROCESS] Launching task ${task.id} non-blocking (in-flight=${this._inFlightTasks.size})`);
 
-          const taskRunId = bgTask.run_id || bgTask.request_data?.run_id || bgTask.id;
+      // Fire non-blocking — the poll loop must never await a mission execution.
+      // A hard outer timeout prevents a single stuck run from occupying the slot forever.
+      const hardTimeoutMs = SupervisorService.TASK_HARD_TIMEOUT_MS;
+      const taskId = task.id;
+      const runThis = async () => {
+        const timeoutHandle = setTimeout(async () => {
+          console.error(`[TASK_HARD_TIMEOUT] task=${taskId} exceeded ${hardTimeoutMs / 1000}s — aborting and marking failed`);
+          this._inFlightTasks.delete(taskId);
+          if (!supabase) return;
+          await supabase
+            .from('supervisor_tasks')
+            .update({ status: 'failed', error: `Task exceeded hard timeout of ${hardTimeoutMs / 1000}s` })
+            .eq('id', taskId)
+            .eq('status', 'processing');
+          const taskRunId = task.run_id || task.request_data?.run_id || taskId;
+          await storage.updateAgentRun(taskRunId, {
+            status: 'failed',
+            terminalState: 'failed',
+            error: `Hard task timeout after ${hardTimeoutMs / 1000}s`,
+            endedAt: new Date(),
+            metadata: { timed_out: true, timeout_reason: 'task_hard_timeout', timeout_ms: hardTimeoutMs },
+          }).catch(() => {});
+        }, hardTimeoutMs);
+
+        try {
+          await this.processChatTask(task as SupervisorTask);
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : String(error);
+          console.error(`Failed to process task ${taskId}:`, error);
+          const taskRunId = task.run_id || task.request_data?.run_id || taskId;
           createArtefact({
             runId: taskRunId,
             type: 'diagnostic',
             title: 'Run failed: unhandled exception in processChatTask',
             summary: `Error: ${errMsg.substring(0, 200)}`,
-            payload: { reason: 'unhandled_exception', error: errMsg, taskId: bgTask.id },
-            userId: bgTask.user_id,
-            conversationId: bgTask.conversation_id,
-          }).catch((e: any) => console.warn(`[TASK_PROCESS] Failed to emit diagnostic artefact: ${e.message}`));
-
-          await supabase
-            .from('supervisor_tasks')
-            .update({
-              status: 'failed',
-              error: errMsg
-            })
-            .eq('id', bgTask.id);
+            payload: { reason: 'unhandled_exception', error: errMsg, taskId },
+            userId: task.user_id,
+            conversationId: task.conversation_id,
+          }).catch((e: any) => console.warn(`[PROCESS_TASK] Failed to emit diagnostic artefact: ${e.message}`));
+          if (supabase) {
+            await supabase
+              .from('supervisor_tasks')
+              .update({ status: 'failed', error: errMsg })
+              .eq('id', taskId);
+          }
+        } finally {
+          clearTimeout(timeoutHandle);
+          this._inFlightTasks.delete(taskId);
+          console.log(`[TASK_PROCESS] Task ${taskId} completed/failed — in-flight=${this._inFlightTasks.size}`);
         }
-      }
+      };
+
+      // Intentionally not awaited — allows the poll loop to dispatch multiple
+      // tasks concurrently and return immediately.
+      runThis().catch((e: any) => {
+        console.error(`[TASK_PROCESS] Unexpected top-level error for task ${taskId}: ${e.message}`);
+        this._inFlightTasks.delete(taskId);
+      });
     }
   }
 
