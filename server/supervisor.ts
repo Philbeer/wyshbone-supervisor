@@ -1090,7 +1090,38 @@ class SupervisorService {
 
     // ═══ MESSAGE CLASSIFIER ═══
     // Fast classification to avoid burning 20+ LLM calls on "hi" or "thanks"
-    const isClarifyResponse = !!(requestData.clarify_answer || requestData.continuation_of_run || requestData._constraint_gate_resolved);
+    let isClarifyResponse = !!(requestData.clarify_answer || requestData.continuation_of_run || requestData._constraint_gate_resolved);
+
+    // ─── EARLY PREFLIGHT_CLARIFY DETECTION ───
+    // Must run BEFORE the message classifier so a bare location answer like "anywhere"
+    // is never classified as 'chat'. The UI sends no special flags for preflight clarify
+    // replies, so we detect them by checking for a pending 'clarifying' run in the DB.
+    if (!isClarifyResponse && supabase && task.conversation_id) {
+      try {
+        const { data: earlyPreflightRuns } = await supabase.from('agent_runs')
+          .select('id, status, metadata')
+          .eq('conversation_id', task.conversation_id)
+          .eq('status', 'clarifying')
+          .order('created_at', { ascending: false })
+          .limit(1);
+        const earlyPreflightRun = earlyPreflightRuns?.[0];
+        if (earlyPreflightRun?.metadata?.verdict === 'preflight_clarify') {
+          const recoveredOriginal = earlyPreflightRun.metadata.original_message || '';
+          if (recoveredOriginal) {
+            const nationwideRe = /^\s*(anywhere|everywhere|nationwide|all over|whole country|uk\s*wide|all of uk|all of the uk)\s*$/i;
+            const combined = nationwideRe.test(rawMsg)
+              ? `${recoveredOriginal} in United Kingdom`
+              : `${recoveredOriginal} in ${rawMsg}`;
+            console.log(`[EARLY_PREFLIGHT_RECOVERY] Combined query: "${combined.substring(0, 100)}" (was: "${rawMsg.substring(0, 40)}")`);
+            rawMsg = combined;
+            isClarifyResponse = true;
+            (requestData as any)._skip_preflight_clarify = true;
+          }
+        }
+      } catch (e: any) {
+        console.warn(`[EARLY_PREFLIGHT_RECOVERY] Non-fatal DB check failed: ${e.message}`);
+      }
+    }
 
     if (!isClarifyResponse && !missionQueryId) {
       const { classifyMessage: classifyMsg } = await import('./supervisor/message-classifier');
@@ -1915,7 +1946,7 @@ class SupervisorService {
             storePendingContract(task.conversation_id, recoveredOriginal, existingRun.metadata.constraint_contract, recoveredRunId);
             pendingConstraint = getPendingContract(task.conversation_id);
           }
-        } else if (existingRun && existingRun.metadata?.verdict === 'preflight_clarify') {
+        } else if (existingRun && existingRun.metadata?.verdict === 'preflight_clarify' && !(requestData as any)._skip_preflight_clarify) {
           // Recover original message for preflight clarify continuation
           let recoveredOriginal = existingRun.metadata.original_message || '';
           if (!recoveredOriginal) {
