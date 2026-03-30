@@ -64,37 +64,97 @@ function normalizeArtefact(raw: any): any {
   };
 }
 
-async function fetchWebVisitArtefacts(sourceRunId: string): Promise<any[]> {
+// Internal helper — query web_visit_pages artefacts for a specific, already-resolved run_id.
+// Does NOT do ID resolution (avoids recursion). Used by fetchWebVisitArtefacts.
+async function queryWebVisitsByRunId(runId: string): Promise<any[]> {
+  // ── 1. Try local Drizzle DB ────────────────────────────────────────────────
+  let localAll: any[] = [];
   try {
-    const allArtefacts = await storage.getArtefactsByRunId(sourceRunId);
-    const local = allArtefacts.filter((a: any) => a.type === 'web_visit_pages');
+    localAll = await storage.getArtefactsByRunId(runId);
+    const localTypes = [...new Set(localAll.map((a: any) => a.type))];
+    console.log(`[REFINE_LOOKUP] Local storage run_id="${runId}": ${localAll.length} total, types=[${localTypes.join(', ')}]`);
+
+    const local = localAll.filter((a: any) => a.type === 'web_visit_pages');
     if (local.length > 0) {
-      console.log(`[REFINE] ${local.length} web_visit_pages artefacts found in local storage for run ${sourceRunId}`);
+      console.log(`[REFINE_LOOKUP] Local hit: ${local.length} web_visit_pages for run_id="${runId}"`);
       return local.map(normalizeArtefact);
     }
   } catch (err: any) {
-    console.warn(`[REFINE] Local storage lookup failed (non-fatal): ${err.message}`);
+    console.warn(`[REFINE_LOOKUP] Local storage error: ${err.message}`);
   }
 
   if (!supabase) return [];
 
+  // ── 2. Supabase REST fallback ──────────────────────────────────────────────
   try {
+    const { data: allRows, error: diagErr } = await supabase
+      .from('artefacts')
+      .select('id, type')
+      .eq('run_id', runId);
+
+    if (!diagErr) {
+      const sbTypes = [...new Set((allRows ?? []).map((r: any) => r.type))];
+      console.log(`[REFINE_LOOKUP] Supabase run_id="${runId}": ${(allRows ?? []).length} total, types=[${sbTypes.join(', ')}]`);
+    }
+
     const { data, error } = await supabase
       .from('artefacts')
       .select('*')
-      .eq('run_id', sourceRunId)
+      .eq('run_id', runId)
       .eq('type', 'web_visit_pages');
 
     if (error) {
-      console.warn(`[REFINE] Supabase artefact lookup failed (non-fatal): ${error.message}`);
+      console.warn(`[REFINE_LOOKUP] Supabase web_visit_pages query failed: ${error.message}`);
       return [];
     }
 
     const results = (data ?? []).map(normalizeArtefact);
-    console.log(`[REFINE] ${results.length} web_visit_pages artefacts found in Supabase for run ${sourceRunId}`);
+    console.log(`[REFINE_LOOKUP] Supabase ${results.length > 0 ? 'hit' : 'miss'}: ${results.length} web_visit_pages for run_id="${runId}"`);
     return results;
   } catch (err: any) {
-    console.warn(`[REFINE] Supabase fallback failed (non-fatal): ${err.message}`);
+    console.warn(`[REFINE_LOOKUP] Supabase fallback error: ${err.message}`);
+    return [];
+  }
+}
+
+async function fetchWebVisitArtefacts(sourceRunId: string): Promise<any[]> {
+  console.log(`[REFINE_LOOKUP] Querying artefacts for source_run_id="${sourceRunId}"`);
+
+  // ── Primary lookup: treat source_run_id as agent_runs.id ──────────────────
+  const primaryResults = await queryWebVisitsByRunId(sourceRunId);
+  if (primaryResults.length > 0) return primaryResults;
+
+  // ── Fallback: source_run_id might actually be a client_request_id ─────────
+  // This happens when the UI passes the clientRequestId instead of the actual
+  // run UUID. Resolve via agent_runs table and retry.
+  if (!supabase) {
+    console.warn(`[REFINE_LOOKUP] No Supabase client — cannot resolve client_request_id fallback`);
+    return [];
+  }
+
+  console.log(`[REFINE_LOOKUP] Zero results — attempting client_request_id resolution for "${sourceRunId}"`);
+  try {
+    const { data: runRow, error: runErr } = await supabase
+      .from('agent_runs')
+      .select('id')
+      .eq('client_request_id', sourceRunId)
+      .limit(1)
+      .maybeSingle();
+
+    if (runErr) {
+      console.warn(`[REFINE_LOOKUP] agent_runs lookup failed: ${runErr.message}`);
+      return [];
+    }
+
+    if (!runRow?.id || runRow.id === sourceRunId) {
+      console.log(`[REFINE_LOOKUP] No client_request_id match found for "${sourceRunId}" — confirmed empty`);
+      return [];
+    }
+
+    console.log(`[REFINE_LOOKUP] Resolved client_request_id "${sourceRunId}" → run_id="${runRow.id}"`);
+    return queryWebVisitsByRunId(runRow.id);
+  } catch (err: any) {
+    console.warn(`[REFINE_LOOKUP] client_request_id resolution error: ${err.message}`);
     return [];
   }
 }

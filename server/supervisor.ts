@@ -853,7 +853,8 @@ class SupervisorService {
     const leads: RefineLead[] = Array.isArray(rd.leads) ? rd.leads : [];
     const constraint: string = String(rd.new_constraint || rd.user_message || '').trim();
 
-    console.log(`[REFINE_HANDLER] runId=${jobId} source=${sourceRunId} constraint="${constraint}" leads=${leads.length}`);
+    console.log(`[REFINE_HANDLER] runId=${jobId} source_run_id="${sourceRunId}" constraint="${constraint}" leads=${leads.length}`);
+    console.log(`[REFINE_HANDLER] request_data keys=[${Object.keys(rd).join(', ')}] source_run_id_raw=${JSON.stringify(rd.source_run_id)}`);
 
     let refineResult: Awaited<ReturnType<typeof executeRefine>>;
     try {
