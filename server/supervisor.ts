@@ -1693,7 +1693,7 @@ class SupervisorService {
       console.error(`[INTENT_PREVIEW] DB write FAILED — runId=${jobId} conversationId=${task.conversation_id} error=${previewErr.message}`);
     }
 
-    if (earlyParsedGoal) {
+    if (earlyParsedGoal && !(requestData as any)._skip_preflight_clarify) {
       const preflightResult = this.evaluatePreflightClarify(rawMsg, earlyParsedGoal, previewBT, previewLoc, previewTime, canonicalIntent);
       if (preflightResult) {
         // Suppress preflight clarify if the structured mission has enough to search
@@ -1932,12 +1932,15 @@ class SupervisorService {
             console.log(`[PREFLIGHT_RECOVERY] Recovered original query: "${recoveredOriginal.substring(0, 80)}" for clarify answer: "${rawMsg.substring(0, 40)}"`);
             // Map nationwide-intent words to a real location before combining
             const nationwideRe = /^\s*(anywhere|everywhere|nationwide|all over|whole country|uk\s*wide|all of uk|all of the uk)\s*$/i;
-            if (nationwideRe.test(rawMsg)) {
+            const isNationwideAnswer = nationwideRe.test(rawMsg);
+            if (isNationwideAnswer) {
               console.log(`[PREFLIGHT_RECOVERY] Mapped nationwide intent "${rawMsg.trim()}" → "United Kingdom"`);
               rawMsg = `${recoveredOriginal} in United Kingdom`;
             } else {
               rawMsg = `${recoveredOriginal} in ${rawMsg}`;
             }
+            // Flag to skip preflight clarify on this pass — user already answered the location question
+            (requestData as any)._skip_preflight_clarify = true;
             jobId = existingRun.id;
             isClarifyResponse = true;
           }
