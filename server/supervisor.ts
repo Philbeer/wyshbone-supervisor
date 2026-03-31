@@ -1083,25 +1083,6 @@ class SupervisorService {
     const userContext = await this.buildUserContext(task.user_id);
     let rawMsg = String(requestData.user_message || '');
 
-    // ─── LOCATION-SEPARATOR FORMAT NORMALIZER ───
-    // The UI sends preflight clarify continuations as "originalQuery — location: answer".
-    // The mission extractor cannot parse a location from this format, so we rewrite it to
-    // natural language ("originalQuery in answer") right at entry, before anything else runs.
-    const locationSepMatch = rawMsg.match(/^(.+?)\s*—\s*location:\s*(.+)$/i);
-    if (locationSepMatch) {
-      const entityPart = locationSepMatch[1].trim();
-      const locationPart = locationSepMatch[2].trim();
-      const nationwideReNorm = /^\s*(anywhere|everywhere|nationwide|all over|whole country|uk\s*wide|all of uk|all of the uk)\s*$/i;
-      if (nationwideReNorm.test(locationPart) || locationPart === entityPart) {
-        // Nationwide intent or malformed (location === entity) → default to United Kingdom
-        rawMsg = `${entityPart} in United Kingdom`;
-      } else {
-        rawMsg = `${entityPart} in ${locationPart}`;
-      }
-      console.log(`[LOCATION_SEP_PARSE] Rewrote "— location:" format → "${rawMsg.substring(0, 100)}"`);
-      (requestData as any)._skip_preflight_clarify = true;
-    }
-
     const missionQueryId: string | null = (requestData as any).query_id || getBenchmarkQueryId(rawMsg.trim()) || null;
     if (missionQueryId) {
       console.log(`[MISSION_EXEC] benchmark run detected — query_id=${missionQueryId}`);
@@ -1111,45 +1092,6 @@ class SupervisorService {
     // ═══ MESSAGE CLASSIFIER ═══
     // Fast classification to avoid burning 20+ LLM calls on "hi" or "thanks"
     let isClarifyResponse = !!(requestData.clarify_answer || requestData.continuation_of_run || requestData._constraint_gate_resolved);
-
-    // ─── EARLY PREFLIGHT_CLARIFY DETECTION ───
-    // Must run BEFORE the message classifier so a bare location answer like "anywhere"
-    // is never classified as 'chat'. The UI sends no special flags for preflight clarify
-    // replies, so we detect them by checking for a pending 'clarifying' run in the DB.
-    if (!isClarifyResponse && supabase && task.conversation_id) {
-      try {
-        const { data: earlyPreflightRuns } = await supabase.from('agent_runs')
-          .select('id, status, metadata')
-          .eq('conversation_id', task.conversation_id)
-          .eq('status', 'clarifying')
-          .order('created_at', { ascending: false })
-          .limit(1);
-        const earlyPreflightRun = earlyPreflightRuns?.[0];
-        if (earlyPreflightRun?.metadata?.verdict === 'preflight_clarify' && !(requestData as any)._skip_preflight_clarify) {
-          const recoveredOriginal = earlyPreflightRun.metadata.original_message || '';
-          if (recoveredOriginal) {
-            const nationwideRe = /^\s*(anywhere|everywhere|nationwide|all over|whole country|uk\s*wide|all of uk|all of the uk)\s*$/i;
-            let combined: string;
-            if (nationwideRe.test(rawMsg)) {
-              combined = `${recoveredOriginal} in United Kingdom`;
-            } else if (rawMsg.trim() === recoveredOriginal.trim()) {
-              // rawMsg is the same as the original query — this is a retry/duplicate task
-              // with no real location answer. Default to United Kingdom to avoid infinite loop.
-              combined = `${recoveredOriginal} in United Kingdom`;
-              console.log(`[EARLY_PREFLIGHT_RECOVERY] rawMsg === recoveredOriginal (duplicate task?) — defaulting to United Kingdom`);
-            } else {
-              combined = `${recoveredOriginal} in ${rawMsg}`;
-            }
-            console.log(`[EARLY_PREFLIGHT_RECOVERY] Combined query: "${combined.substring(0, 100)}" (was: "${rawMsg.substring(0, 40)}")`);
-            rawMsg = combined;
-            isClarifyResponse = true;
-            (requestData as any)._skip_preflight_clarify = true;
-          }
-        }
-      } catch (e: any) {
-        console.warn(`[EARLY_PREFLIGHT_RECOVERY] Non-fatal DB check failed: ${e.message}`);
-      }
-    }
 
     if (!isClarifyResponse && !missionQueryId) {
       const { classifyMessage: classifyMsg } = await import('./supervisor/message-classifier');
