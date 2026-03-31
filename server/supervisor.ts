@@ -1102,10 +1102,10 @@ class SupervisorService {
         const { data: pfRuns } = await supabase.from('agent_runs')
           .select('id, status, metadata')
           .eq('conversation_id', task.conversation_id)
-          .eq('status', 'clarifying')
+          .in('status', ['clarifying', 'executing'])
           .order('created_at', { ascending: false })
           .limit(1);
-        const pfRun = pfRuns?.[0];
+        const pfRun = pfRuns?.find(r => r.metadata?.verdict === 'preflight_clarify');
         if (pfRun?.metadata?.verdict === 'preflight_clarify' && pfRun.metadata.original_message) {
           const pfOriginal = pfRun.metadata.original_message;
           const nationwideRe = /^\s*(anywhere|everywhere|nationwide|all over|whole country|uk\s*wide|all of uk|all of the uk)\s*$/i;
