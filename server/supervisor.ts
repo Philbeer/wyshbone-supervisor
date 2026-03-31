@@ -1514,7 +1514,10 @@ class SupervisorService {
             conversationId: task.conversation_id,
           }).catch(() => {});
         } catch (planErr: any) {
-          console.warn(`[MISSION_PLANNER] Plan generation failed (non-fatal, falling back to legacy): ${planErr.message}`);
+          const bt = missionResult?.mission?.entity_category ?? 'unknown';
+          const loc = missionResult?.mission?.location_text ?? 'unknown';
+          const constraintSummary = missionResult?.mission?.constraints?.map(c => `${c.type}(${c.field}="${c.value}")`).join(', ') ?? 'none';
+          console.warn(`[PLAN_BUILD_FAIL] bt="${bt}" location="${loc}" constraints=[${constraintSummary}] error="${planErr.message}"`);
           useMissionExecution = false;
           activeMissionPlan = null;
           legacyFallbackReason = `plan_build_failed: ${planErr.message?.substring(0, 100)}`;
@@ -2248,12 +2251,64 @@ class SupervisorService {
       let directExecutionSucceeded = false;
 
       // ── RESCUE_SKIP guard ────────────────────────────────────────────────────
-      // If mission extraction actually succeeded but plan building failed,
-      // try executing the mission directly instead of firing rescue LLM.
-      if (missionResult?.ok && missionResult.mission?.business_type && missionResult.mission?.location) {
-        console.log(`[RESCUE_SKIP] runId=${jobId} — Mission extraction succeeded (bt="${missionResult.mission.business_type}" loc="${missionResult.mission.location}") but plan building failed (reason=${legacyFallbackReason ?? 'unknown'}). Executing mission directly instead of rescue LLM.`);
+      // If mission extraction actually succeeded but plan building failed (or
+      // missionMode isn't 'active' so useMissionExecution was never set),
+      // build a minimal fallback plan inline and execute directly instead of
+      // firing the rescue LLM on a perfectly valid query.
+      //
+      // NOTE: uses entity_category / location_text — the actual StructuredMission
+      // field names. The old guard checked business_type / location (wrong) so
+      // it never fired. Fixed here.
+      if (missionResult?.ok && missionResult.mission?.entity_category && missionResult.mission?.location_text) {
+        const _rsBt  = missionResult.mission.entity_category;
+        const _rsLoc = missionResult.mission.location_text;
+        console.log(`[RESCUE_SKIP] runId=${jobId} — Mission extraction succeeded (bt="${_rsBt}" loc="${_rsLoc}") but useMissionExecution=false (reason=${legacyFallbackReason ?? 'unknown'}). Building inline fallback plan and executing directly.`);
         try {
-          const fallbackPlan = buildMissionPlan(missionResult.mission);
+          // Build a minimal discovery-only plan inline — do NOT re-call
+          // buildMissionPlan since that is likely what threw. The inline plan
+          // uses discovery_only strategy which is safe for any valid query.
+          const fallbackPlan: MissionPlan = {
+            strategy: 'discovery_only',
+            tool_sequence: ['SEARCH_PLACES'],
+            steps: [{
+              order: 1,
+              tool: 'SEARCH_PLACES',
+              purpose: `Discover candidate ${_rsBt} in ${_rsLoc}`,
+              driven_by_constraint_indices: [],
+            }],
+            rules_fired: ['RULE_DISCOVERY'],
+            constraint_mappings: [],
+            verification_methods: ['none'],
+            expected_artefacts: ['search_results'],
+            selection_reason: `Rescue-skip fallback plan for "${_rsBt}" in "${_rsLoc}" — bypassing buildMissionPlan (reason: ${legacyFallbackReason ?? 'unknown'})`,
+            verification_policy: {
+              verification_policy: 'DIRECTORY_VERIFIED',
+              reason: 'Discovery-only rescue-skip fallback plan',
+            },
+            canonical_input: {
+              entity_category: missionResult.mission.entity_category,
+              location_text: missionResult.mission.location_text,
+              mission_mode: missionResult.mission.mission_mode,
+              constraints: missionResult.mission.constraints.map((c, i) => ({
+                index: i,
+                type: c.type,
+                field: c.field,
+                operator: c.operator,
+                value: c.value,
+                hardness: c.hardness,
+              })),
+            },
+          };
+
+          // Fix Problem 3: keep activeMissionPlan up-to-date for downstream
+          // benchmark records so planGenerated is not falsely logged as false.
+          activeMissionPlan = fallbackPlan;
+
+          // Fix Problem 2: emit plan artefact so the UI gets an early signal
+          // that execution has started (same as the normal mission path at ~1500).
+          persistMissionPlan(fallbackPlan, jobId, task.user_id, task.conversation_id)
+            .catch((e: any) => console.warn(`[RESCUE_SKIP] persistMissionPlan failed (non-fatal): ${e.message}`));
+
           const directCtx: MissionExecutionContext = {
             mission: missionResult.mission,
             plan: fallbackPlan,
@@ -2272,6 +2327,7 @@ class SupervisorService {
           console.log(`[RESCUE_SKIP] Direct execution succeeded — ${towerResult.leads.length} leads`);
         } catch (directExecErr: any) {
           console.warn(`[RESCUE_SKIP] Direct execution also failed (${directExecErr.message}), falling through to rescue LLM`);
+          activeMissionPlan = null; // revert since execution didn't complete
         }
       }
 

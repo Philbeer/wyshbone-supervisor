@@ -1,0 +1,33 @@
+Fix the RESCUE_SKIP guard in supervisor.ts — it re-calls buildMissionPlan which fails again
+The RESCUE_SKIP guard at line ~2248 has three problems:
+Problem 1: It calls buildMissionPlan(missionResult.mission) again — but when the original failure was plan_build_failed, this is the same function with the same input, so it throws again. The guard provides zero benefit for the most common failure case.
+Fix: Instead of calling buildMissionPlan, build a minimal plan object inline that just needs business_type and location. Replace:
+typescriptconst fallbackPlan = buildMissionPlan(missionResult.mission);
+with:
+typescript// Build minimal plan directly — don't re-call buildMissionPlan since that's what threw
+const fallbackPlan = {
+  strategy: 'gp_cascade' as const,
+  steps: [{
+    tool: 'search_places',
+    args: {
+      business_type: missionResult.mission.business_type,
+      location: missionResult.mission.location,
+      criteria: missionResult.mission.criteria || '',
+    },
+  }],
+  constraints: [],
+  original_user_goal: rawMsg.trim(),
+};
+Check what fields MissionPlan type requires and include them. The point is to bypass buildMissionPlan entirely and construct just enough for executeMissionWithReloop to work.
+Problem 2: The RESCUE_SKIP path doesn't call persistMissionPlan or postArtefactToUI, so the UI has no early signal that execution started. This causes the "Run still processing — retrying" delay.
+Fix: After building the fallbackPlan and before calling executeMissionWithReloop, add:
+typescript// Persist plan artefact so UI gets early signal
+persistMissionPlan(fallbackPlan, jobId, task.user_id, task.conversation_id)
+  .catch((e: any) => console.warn(`[RESCUE_SKIP] persistMissionPlan failed: ${e.message}`));
+Make sure persistMissionPlan is imported/available — check how the normal mission path at line ~1500 calls it.
+Problem 3: activeMissionPlan stays null through the RESCUE_SKIP path, making benchmark records show planGenerated: false.
+Fix: After building the fallbackPlan, set:
+typescriptactiveMissionPlan = fallbackPlan;
+This is a minor diagnostic fix but keeps the data clean.
+Also: In the catch (planErr) block at line ~1519, check if the error is specifically about a name constraint or criteria parsing (like "called the red lion"). If the mission has a valid business_type and location but the plan building fails on criteria/constraints, log clearly:
+typescriptconsole.warn(`[PLAN_BUILD_FAIL] business_type=${missionResult?.mission?.business_type}, location=${missionResult?.mi
