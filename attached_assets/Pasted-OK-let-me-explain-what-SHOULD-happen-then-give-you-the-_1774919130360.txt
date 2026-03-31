@@ -1,0 +1,57 @@
+OK let me explain what SHOULD happen, then give you the fix.
+What should happen:
+
+"find pubs" → no location → asks "What location?"
+User says "anywhere" → supervisor combines it into "find pubs in United Kingdom" → runs the search → delivers results
+
+What's actually happening:
+The INTENT_FIX block restores rawMsg back to "find pubs" (the original query WITHOUT the location answer), then mission extraction runs on "find pubs" which has no location, so preflight fires again. The clarification answer is being thrown away.
+The fix the supervisor Agent built earlier (EARLY_PREFLIGHT_RECOVERY) was actually correct — I was wrong to tell it to remove it. That block combines the original query with the answer BEFORE mission extraction runs.
+Paste this into the Supervisor repo Replit Agent:
+
+There is a bug in server/supervisor.ts in the processChatTask method. When a user answers a preflight clarify question (e.g. "anywhere" in response to "What location?"), the INTENT_FIX block restores rawMsg to the original query WITHOUT the clarification answer. This means mission extraction runs on the original query with no location, and preflight fires again in a loop.
+The fix: Add an early preflight recovery block BEFORE the message classifier (before isClarifyResponse is checked). This block should:
+
+Check if isClarifyResponse is true AND the conversation has a clarifying agent_run with metadata.verdict === 'preflight_clarify'
+If found, get the original_message from that run's metadata
+Combine it with the current rawMsg: check if rawMsg matches nationwide words (anywhere/everywhere/nationwide/etc) → use "United Kingdom", otherwise append rawMsg as the location
+Set rawMsg to the combined query (e.g. "find pubs in United Kingdom")
+Set (requestData as any)._skip_preflight_clarify = true to prevent the preflight from firing again
+
+Place this block immediately after let rawMsg = String(requestData.user_message || ''); and BEFORE the message classifier if (!isClarifyResponse && !missionQueryId) check.
+Here is the exact code to add:
+typescript// ═══ EARLY PREFLIGHT RECOVERY: combine original query + clarification answer ═══
+// Must run BEFORE the message classifier and BEFORE mission extraction.
+// Without this, INTENT_FIX restores rawMsg to the original query (no location),
+// mission extraction sees no location, and preflight fires again in a loop.
+if (isClarifyResponse && task.conversation_id && supabase) {
+  try {
+    const { data: pfRuns } = await supabase.from('agent_runs')
+      .select('id, status, metadata')
+      .eq('conversation_id', task.conversation_id)
+      .eq('status', 'clarifying')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    const pfRun = pfRuns?.[0];
+    if (pfRun?.metadata?.verdict === 'preflight_clarify' && pfRun.metadata.original_message) {
+      const pfOriginal = pfRun.metadata.original_message;
+      const nationwideRe = /^\s*(anywhere|everywhere|nationwide|all over|whole country|uk\s*wide|all of uk|all of the uk)\s*$/i;
+      if (nationwideRe.test(rawMsg)) {
+        rawMsg = `${pfOriginal} in United Kingdom`;
+        console.log(`[EARLY_PREFLIGHT_RECOVERY] Mapped nationwide: "${rawMsg}"`);
+      } else if (rawMsg.trim() === pfOriginal.trim()) {
+        rawMsg = `${pfOriginal} in United Kingdom`;
+        console.log(`[EARLY_PREFLIGHT_RECOVERY] Duplicate query defaulted to UK: "${rawMsg}"`);
+      } else {
+        rawMsg = `${pfOriginal} in ${rawMsg}`;
+        console.log(`[EARLY_PREFLIGHT_RECOVERY] Combined: "${rawMsg}"`);
+      }
+      (requestData as any)._skip_preflight_clarify = true;
+      (requestData as any).user_message = rawMsg;
+      jobId = pfRun.id;
+    }
+  } catch (pfErr: any) {
+    console.warn(`[EARLY_PREFLIGHT_RECOVERY] Non-fatal: ${pfErr.message}`);
+  }
+}
+Do not remove or change any other code. Just add this block after the rawMsg declaration and before the message classifier.

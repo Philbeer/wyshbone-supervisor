@@ -1093,6 +1093,41 @@ class SupervisorService {
     // Fast classification to avoid burning 20+ LLM calls on "hi" or "thanks"
     let isClarifyResponse = !!(requestData.clarify_answer || requestData.continuation_of_run || requestData._constraint_gate_resolved);
 
+    // ═══ EARLY PREFLIGHT RECOVERY: combine original query + clarification answer ═══
+    // Must run BEFORE the message classifier and BEFORE mission extraction.
+    // Without this, INTENT_FIX restores rawMsg to the original query (no location),
+    // mission extraction sees no location, and preflight fires again in a loop.
+    if (isClarifyResponse && task.conversation_id && supabase) {
+      try {
+        const { data: pfRuns } = await supabase.from('agent_runs')
+          .select('id, status, metadata')
+          .eq('conversation_id', task.conversation_id)
+          .eq('status', 'clarifying')
+          .order('created_at', { ascending: false })
+          .limit(1);
+        const pfRun = pfRuns?.[0];
+        if (pfRun?.metadata?.verdict === 'preflight_clarify' && pfRun.metadata.original_message) {
+          const pfOriginal = pfRun.metadata.original_message;
+          const nationwideRe = /^\s*(anywhere|everywhere|nationwide|all over|whole country|uk\s*wide|all of uk|all of the uk)\s*$/i;
+          if (nationwideRe.test(rawMsg)) {
+            rawMsg = `${pfOriginal} in United Kingdom`;
+            console.log(`[EARLY_PREFLIGHT_RECOVERY] Mapped nationwide: "${rawMsg}"`);
+          } else if (rawMsg.trim() === pfOriginal.trim()) {
+            rawMsg = `${pfOriginal} in United Kingdom`;
+            console.log(`[EARLY_PREFLIGHT_RECOVERY] Duplicate query defaulted to UK: "${rawMsg}"`);
+          } else {
+            rawMsg = `${pfOriginal} in ${rawMsg}`;
+            console.log(`[EARLY_PREFLIGHT_RECOVERY] Combined: "${rawMsg}"`);
+          }
+          (requestData as any)._skip_preflight_clarify = true;
+          (requestData as any).user_message = rawMsg;
+          jobId = pfRun.id;
+        }
+      } catch (pfErr: any) {
+        console.warn(`[EARLY_PREFLIGHT_RECOVERY] Non-fatal: ${pfErr.message}`);
+      }
+    }
+
     if (!isClarifyResponse && !missionQueryId) {
       const { classifyMessage: classifyMsg } = await import('./supervisor/message-classifier');
       const classification = classifyMsg(rawMsg);
