@@ -1517,6 +1517,7 @@ class SupervisorService {
           console.warn(`[MISSION_PLANNER] Plan generation failed (non-fatal, falling back to legacy): ${planErr.message}`);
           useMissionExecution = false;
           activeMissionPlan = null;
+          legacyFallbackReason = `plan_build_failed: ${planErr.message?.substring(0, 100)}`;
         }
       } catch (bridgeErr: any) {
         legacyFallbackReason = `mission_bridge_error: ${bridgeErr.message?.substring(0, 100)}`;
@@ -2244,6 +2245,37 @@ class SupervisorService {
         console.log('[QID-TRACE]', 'step2:missionCtx_built', missionCtx.queryId);
         towerResult = await executeMissionWithReloop(missionCtx);
       } else {
+      let directExecutionSucceeded = false;
+
+      // ── RESCUE_SKIP guard ────────────────────────────────────────────────────
+      // If mission extraction actually succeeded but plan building failed,
+      // try executing the mission directly instead of firing rescue LLM.
+      if (missionResult?.ok && missionResult.mission?.business_type && missionResult.mission?.location) {
+        console.log(`[RESCUE_SKIP] runId=${jobId} — Mission extraction succeeded (bt="${missionResult.mission.business_type}" loc="${missionResult.mission.location}") but plan building failed (reason=${legacyFallbackReason ?? 'unknown'}). Executing mission directly instead of rescue LLM.`);
+        try {
+          const fallbackPlan = buildMissionPlan(missionResult.mission);
+          const directCtx: MissionExecutionContext = {
+            mission: missionResult.mission,
+            plan: fallbackPlan,
+            runId: jobId,
+            userId: task.user_id,
+            conversationId: task.conversation_id,
+            clientRequestId,
+            rawUserInput: rawMsg.trim(),
+            missionTrace: missionResult.trace,
+            intentNarrative: missionResult.intentNarrative ?? null,
+            queryId: missionQueryId,
+            executionPath: (requestData as any).execution_path === 'gpt4o_primary' ? 'gpt4o_primary' : 'gp_cascade',
+          };
+          towerResult = await executeMissionWithReloop(directCtx);
+          directExecutionSucceeded = true;
+          console.log(`[RESCUE_SKIP] Direct execution succeeded — ${towerResult.leads.length} leads`);
+        } catch (directExecErr: any) {
+          console.warn(`[RESCUE_SKIP] Direct execution also failed (${directExecErr.message}), falling through to rescue LLM`);
+        }
+      }
+
+      if (!directExecutionSucceeded) {
       const legacyReason = legacyFallbackReason ?? 'mission_extraction_failed';
       console.log(`[RESCUE_LLM] runId=${jobId} — mission extraction failed (${legacyReason}). Attempting rescue...`);
 
@@ -2357,7 +2389,7 @@ class SupervisorService {
           const messageId = randomUUID();
           await Promise.all([
             supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: fallbackQ.substring(0, 200), message_id: messageId, rescue_llm: 'self_heal_failed' } }).eq('id', task.id),
-            supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(fallbackQ), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, rescue_llm: 'self_heal_failed' }, created_at: Date.now() }).select().single(),
+            supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeSupervisorMessage(fallbackQ), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, rescue_llm: 'self_heal_failed', clarify_gate: 'rescue_llm', mode: 'clarify' }, created_at: Date.now() }).select().single(),
           ]);
           await storage.updateAgentRun(jobId, { status: 'clarifying', terminalState: null, metadata: { verdict: 'rescue_self_heal_failed', awaiting: 'user_input' } }).catch(() => {});
           await emitTaskExecutionCompleted('rescue_self_heal_failed');
@@ -2369,12 +2401,13 @@ class SupervisorService {
         const clarifyContent = rescueResult.clarificationQuestion || "I want to make sure I find exactly the right leads for you. Could you tell me a bit more about what you're looking for — specifically, what type of business and where?";
         await Promise.all([
           supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: clarifyContent.substring(0, 200), message_id: messageId, rescue_llm: 'clarification_needed' } }).eq('id', task.id),
-          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(clarifyContent), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, rescue_llm: 'clarification_needed', rescue_reasoning: rescueResult.reasoning }, created_at: Date.now() }).select().single(),
+          supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeSupervisorMessage(clarifyContent), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, rescue_llm: 'clarification_needed', rescue_reasoning: rescueResult.reasoning, clarify_gate: 'rescue_llm', mode: 'clarify' }, created_at: Date.now() }).select().single(),
         ]);
         await storage.updateAgentRun(jobId, { status: 'clarifying', terminalState: null, metadata: { verdict: 'rescue_clarification', awaiting: 'user_input', original_message: rawMsg } }).catch(() => {});
         await emitTaskExecutionCompleted('rescue_clarification');
         return;
       }
+      } // end if (!directExecutionSucceeded)
     }
     } catch (execErr: any) {
       runFailed = true;

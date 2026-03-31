@@ -1,0 +1,24 @@
+Fix 3 bugs causing legacy clarification on valid queries in supervisor.ts
+When a user sends "find pubs in arundel called the red lion", the system fires the rescue LLM and asks "Could you tell me what type of businesses you're looking for?" — this should never happen because the query has both business_type and location.
+Bug 1 (line ~1518): buildMissionPlan exception silently discards a valid extraction
+Find the catch (planErr) block around line 1518 where useMissionExecution is reset to false after buildMissionPlan throws. Change this so that instead of giving up entirely, it logs the plan error but still attempts execution using the raw missionResult. Add legacyFallbackReason = 'plan_build_failed: ' + planErr.message so we at least know why it fell back. The key change: if missionResult?.ok && missionResult.mission is still valid (which it is — extraction succeeded), don't reset useMissionExecution to false. Instead, try to construct a minimal plan from missionResult.mission directly (business_type + location + criteria).
+Bug 2 (line ~2175 else branch): Legacy path should NOT fire rescue LLM when missionResult.ok is true
+In the else branch (where executionSource === 'legacy'), add a guard at the top:
+typescript// If mission extraction actually succeeded but plan building failed,
+// try executing the mission directly instead of firing rescue LLM
+if (missionResult?.ok && missionResult.mission?.business_type && missionResult.mission?.location) {
+  console.log(`[RESCUE_SKIP] Mission extraction succeeded (${missionResult.mission.business_type} in ${missionResult.mission.location}) but plan building failed. Executing mission directly instead of rescue LLM.`);
+  // Build a minimal mission plan and execute it
+  // ... call executeMissionWithReloop with the valid mission data
+  // Skip the rescue LLM entirely
+}
+Only call attemptRescueLLM if missionResult is truly invalid (ok=false, or missing business_type/location).
+Bug 3 (line ~2372): Wrong sanitizer on rescue LLM clarification messages
+Find the line around 2372 where rescue LLM clarification messages are inserted into the messages table:
+typescriptcontent: sanitizeMessageContent(clarifyContent)
+Change it to:
+typescriptcontent: sanitizeSupervisorMessage(clarifyContent)
+This ensures the PREAMBLE_RE guard catches "I'd be happy to find leads" and replaces it with the neutral fallback message. Make sure sanitizeSupervisorMessage is imported at the top of the file if it isn't already.
+Also apply the same fix to the self-heal-failed message insertion around line 2360 — change sanitizeMessageContent to sanitizeSupervisorMessage there too.
+Also add clarify_gate metadata to rescue LLM messages:
+On both rescue LLM message insertions (lines ~2360 and ~2372), add clarify_gate: 'rescue_llm' to the metadata object, and mode: 'clarify' as well. This ensures the UI realtime handler correctly identifies these as clarification messages instead of suppressing them or letting them through raw.
