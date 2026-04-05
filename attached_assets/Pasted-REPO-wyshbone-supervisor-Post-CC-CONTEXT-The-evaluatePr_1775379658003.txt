@@ -1,0 +1,111 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: The `evaluatePreflightClarify` system was a pre-mission-extractor gate that asked the user clarifying questions (mainly about missing location or relationship predicates) BEFORE running the pipeline. It was made partially redundant by the mission extractor + constraint gate, which handle the same cases better. But the preflight still fires in edge cases, blocking legitimate queries like "find organisations that supply West Sussex County Council" and making the chat look broken.
+
+We are removing it entirely. The outer constraint gate (which stays) handles all the same cases already.
+
+TASK: Remove all preflight clarify code from server/supervisor.ts and update documentation. Do NOT touch any other files. Do NOT touch the outer constraint gate logic.
+
+══════════════════════════════════════════════════════════════
+STEP 1: Remove the EARLY PREFLIGHT RECOVERY block
+══════════════════════════════════════════════════════════════
+
+In server/supervisor.ts, inside the `processChatTask` method, find the block that starts with this comment (approximately line 1098):
+
+```
+// ═══ EARLY PREFLIGHT RECOVERY: combine original query + clarification answer ═══
+// Must run BEFORE the message classifier and BEFORE mission extraction.
+```
+
+This block checks for `isClarifyResponse` and looks for an agent_run with `metadata?.verdict === 'preflight_clarify'`. It combines the original query with the user's location answer.
+
+DELETE this entire block — from the comment `// ═══ EARLY PREFLIGHT RECOVERY` down to the closing `} catch (pfErr: any)` and its `}` (the end of the `if (isClarifyResponse && task.conversation_id && supabase)` block that specifically handles preflight recovery).
+
+IMPORTANT: There is ALSO a separate early block just above it that handles `_constraint_gate_resolved` — do NOT delete that. Only delete the preflight-specific recovery block. You can identify the right one because it specifically checks for `verdict === 'preflight_clarify'` and sets `_skip_preflight_clarify`.
+
+══════════════════════════════════════════════════════════════
+STEP 2: Remove the preflight call and handler block
+══════════════════════════════════════════════════════════════
+
+Find the block that starts with (approximately line 1736):
+
+```
+if (earlyParsedGoal && !(requestData as any)._skip_preflight_clarify) {
+    const preflightResult = this.evaluatePreflightClarify(rawMsg, earlyParsedGoal, previewBT, previewLoc, previewTime, canonicalIntent);
+```
+
+This is a large block (~100 lines) that:
+- Calls `evaluatePreflightClarify`
+- Checks `_missionHasEnoughToSearch` for suppression
+- Creates clarify_gate artefacts
+- Sends clarification messages to the user
+- Sets agent_run status to 'clarifying' with verdict 'preflight_clarify'
+- Emits preflight_clarify_probe
+- Returns early from processChatTask
+
+DELETE the entire `if (earlyParsedGoal && !(requestData as any)._skip_preflight_clarify)` block and everything inside it, up to and including its closing `}`.
+
+DO NOT delete the code that comes AFTER this block (the factory demo check, constraint gate recovery, etc). The block ends with a `return;` inside the preflight handler and then has a closing `}` — delete up to and including that final `}`.
+
+══════════════════════════════════════════════════════════════
+STEP 3: Remove the preflight recovery in the constraint gate section
+══════════════════════════════════════════════════════════════
+
+Further down in processChatTask, inside the pending constraint recovery section, there is an `else if` block that checks for preflight_clarify (approximately line 1958):
+
+```
+} else if (existingRun && existingRun.metadata?.verdict === 'preflight_clarify' && !(requestData as any)._skip_preflight_clarify) {
+```
+
+This block recovers the original query for preflight clarify continuations. Since preflight_clarify will never exist anymore, this is dead code.
+
+DELETE the entire `else if` block — from `} else if (existingRun && existingRun.metadata?.verdict === 'preflight_clarify'` to its closing `}`. Make sure the `if` / `else if` chain above it (the constraint_gate_clarify recovery) still compiles correctly.
+
+══════════════════════════════════════════════════════════════
+STEP 4: Remove the evaluatePreflightClarify method
+══════════════════════════════════════════════════════════════
+
+Find the private method definition (approximately line 2875):
+
+```
+private evaluatePreflightClarify(
+```
+
+Delete the entire method — from `private evaluatePreflightClarify(` to its closing `}`. This is the last method in the SupervisorService class that uses this name, so it should be safe to remove.
+
+══════════════════════════════════════════════════════════════
+STEP 5: Clean up remaining _skip_preflight_clarify references
+══════════════════════════════════════════════════════════════
+
+After steps 1-4, search the file for any remaining references to `_skip_preflight_clarify`. Remove any lines that set or read this flag, since there is no longer a preflight to skip.
+
+══════════════════════════════════════════════════════════════
+STEP 6: Update replit.md
+══════════════════════════════════════════════════════════════
+
+In replit.md, find the bullet point about "Supervisor Preflight Clarify" that describes `evaluatePreflightClarify()`. Either:
+- Remove it entirely, OR
+- Replace it with: "**Preflight Clarify (REMOVED)**: Previously ran before execution to check for missing location or ambiguous relationship predicates. Removed in favour of the outer constraint gate and mission extractor's structured completeness checks."
+
+Also update any other replit.md sections that mention preflight_clarify as an active code path.
+
+══════════════════════════════════════════════════════════════
+STEP 7: Verify
+══════════════════════════════════════════════════════════════
+
+After all deletions:
+1. Search the file for "preflight_clarify" — the only remaining references should be in `attached_assets/` (old prompt files) and `docs/` (historical reports). No references should remain in `server/supervisor.ts` code.
+2. Search for "evaluatePreflightClarify" — should return zero results in live code.
+3. Search for "_skip_preflight_clarify" — should return zero results in live code.
+4. Run the TypeScript compiler or build to verify no compile errors.
+
+══════════════════════════════════════════════════════════════
+WHAT TO KEEP (do NOT touch these)
+══════════════════════════════════════════════════════════════
+
+- The `_missionHasEnoughToSearch` variable and its computation (used by the OUTER constraint gate, not just preflight)
+- The OUTER CONSTRAINT GATE block (the one that checks `outerGateAlreadyResolved` and calls `preExecutionConstraintGate` / `preExecutionConstraintGateFromIntent`) — this stays, it's a different system
+- The constraint gate's own `_missionHasEnoughToSearch` suppression — this stays
+- The `relationship-predicate.ts` file — this is used by the constraint-led-extractor and constraint gate, not just preflight
+- The `constraint-gate.ts` file — completely untouched
+- Everything in `docs/` — historical forensic reports, leave as-is
