@@ -163,7 +163,7 @@ class SupervisorService {
   private missingTableWarned: boolean = false;
   private nonNumericIdWarned: boolean = false;
   private startupRecoveryDone: boolean = false;
-  private static readonly STALE_TASK_TIMEOUT_MS = 90 * 1000; // 90 seconds (was 5 min — too long for stuck tasks)
+  private static readonly STALE_TASK_TIMEOUT_MS = parseInt(process.env.STALE_TASK_TIMEOUT_MS || String(4 * 60 * 1000), 10); // 4 minutes default (configurable). Website evidence runs take 2-3 min.
   private static readonly MAX_RECOVERY_ATTEMPTS = 3;
   private lastNoTasksLogAt: number = 0;
   // In-flight task registry — prevents re-queuing tasks already executing and enables
