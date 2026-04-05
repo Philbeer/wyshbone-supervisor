@@ -1,0 +1,522 @@
+CONTEXT: Wyshbone has 12 benchmark queries used to measure system quality. Any example inside a system prompt that shares BOTH a location AND entity type with a benchmark query can contaminate the model's behaviour on that benchmark. We need to replace all overlapping examples with safe alternatives that use locations and entity types not present in any benchmark.
+
+BENCHMARK QUERIES (for reference — do NOT modify these):
+B01: "Find dentists in Brighton"
+B02: "Find coffee roasters in Manchester"  
+B03: "Find pubs in Arundel mentioning live music"
+B04: "Find cafes in Bristol that mention vegan food"
+B05: "Find pubs called Swan in Sussex"
+B06: "Find organisations that work with Blackpool council"
+B07: "Find companies partnered with the University of Manchester"
+B08: "Find pubs in York that mention quiz night"
+B09: "Find hotels in London mentioning rooftop bars"
+B10: "Find the best rated coffee shops in Cambridge"
+B11: "Find breweries supplying pubs in Leeds"
+B12: "Find pubs in Brighton that brew their own beer"
+
+CONTAMINATED LOCATIONS (used in benchmarks — avoid in examples): Brighton, Manchester, Arundel, Bristol, Sussex, East Sussex, Blackpool, York, London, Cambridge, Leeds
+
+SAFE REPLACEMENT LOCATIONS: Nottingham, Cardiff, Sheffield, Liverpool, Glasgow, Exeter, Norwich, Canterbury, Chester, Harrogate, Durham, Winchester
+
+═══════════════════════════════════════════════════════════════
+FILE 1: server/supervisor/mission-extractor.ts
+═══════════════════════════════════════════════════════════════
+
+There are 3 prompt constants to edit: PASS1_SYSTEM_PROMPT, PASS2_SYSTEM_PROMPT, and PASS3_SYSTEM_PROMPT.
+Do NOT touch any code outside the prompt strings. Do NOT change Examples that are already safe.
+
+────────────────────────────────────
+PASS1_SYSTEM_PROMPT — 3 example changes
+────────────────────────────────────
+
+CHANGE 1a — Replace the Brighton example in PASS1_SYSTEM_PROMPT.
+
+FIND:
+User: "find 10 italian restaurants in Brighton with outdoor seating and at least 4.5 stars"
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": true, "has_relationship_check": false, "has_numeric_range": true,
+    "has_time_constraint": false, "has_status_check": false, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": true,
+    "has_monitoring_intent": false
+  },
+  "semantic_interpretation": "The user wants 10 Italian restaurants in Brighton that have outdoor seating and a rating of at least 4.5 stars. This is a one-time search."
+}
+
+REPLACE WITH:
+User: "find 10 italian restaurants in Nottingham with outdoor seating and at least 4.5 stars"
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": true, "has_relationship_check": false, "has_numeric_range": true,
+    "has_time_constraint": false, "has_status_check": false, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": true,
+    "has_monitoring_intent": false
+  },
+  "semantic_interpretation": "The user wants 10 Italian restaurants in Nottingham that have outdoor seating and a rating of at least 4.5 stars. This is a one-time search."
+}
+
+
+CHANGE 1b — Replace the Bristol/dentists example in PASS1_SYSTEM_PROMPT.
+
+FIND:
+User: "find dentists near Bristol that work with NHS and have good reviews"
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": false, "has_relationship_check": true, "has_numeric_range": false,
+    "has_time_constraint": false, "has_status_check": false, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
+    "has_monitoring_intent": false
+  },
+  "semantic_interpretation": "The user wants dentists near Bristol that have a relationship with the NHS. This is a one-time search."
+}
+
+REPLACE WITH:
+User: "find physiotherapists near Sheffield that work with NHS and have good reviews"
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": false, "has_relationship_check": true, "has_numeric_range": false,
+    "has_time_constraint": false, "has_status_check": false, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
+    "has_monitoring_intent": false
+  },
+  "semantic_interpretation": "The user wants physiotherapists near Sheffield that have a relationship with the NHS. This is a one-time search."
+}
+
+
+CHANGE 1c — Replace the London example in PASS1_SYSTEM_PROMPT.
+
+FIND:
+User: "watch for new co-working spaces in London and let me know when one opens"
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": false, "has_relationship_check": false, "has_numeric_range": false,
+    "has_time_constraint": true, "has_status_check": false, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
+    "has_monitoring_intent": true
+  },
+  "semantic_interpretation": "The user wants co-working spaces in London. They want to be alerted when new ones open. The mission mode is alert-on-change with a time constraint for newly opened venues."
+}
+
+REPLACE WITH:
+User: "watch for new co-working spaces in Glasgow and let me know when one opens"
+Output:
+{
+  "constraint_checklist": {
+    "has_entity": true, "has_location": true, "has_text_compare": false,
+    "has_attribute_check": false, "has_relationship_check": false, "has_numeric_range": false,
+    "has_time_constraint": true, "has_status_check": false, "has_website_evidence": false,
+    "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
+    "has_monitoring_intent": true
+  },
+  "semantic_interpretation": "The user wants co-working spaces in Glasgow. They want to be alerted when new ones open. The mission mode is alert-on-change with a time constraint for newly opened venues."
+}
+
+
+────────────────────────────────────
+PASS2_SYSTEM_PROMPT — 4 example changes
+────────────────────────────────────
+
+CHANGE 2a — Replace the Manchester/cafes example.
+
+FIND:
+Semantic input: The user wants cafes in Manchester whose website text contains "vegan food". This is a one-time search.
+{
+  "entity_category": "cafes",
+  "location_text": "Manchester",
+  "requested_count": null,
+  "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Manchester", "hardness": "hard" },
+    { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "vegan food", "hardness": "hard" }
+  ],
+  "mission_mode": "research_now"
+}
+
+REPLACE WITH:
+Semantic input: The user wants cafes in Norwich whose website text contains "vegan food". This is a one-time search.
+{
+  "entity_category": "cafes",
+  "location_text": "Norwich",
+  "requested_count": null,
+  "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Norwich", "hardness": "hard" },
+    { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "vegan food", "hardness": "hard" }
+  ],
+  "mission_mode": "research_now"
+}
+
+
+CHANGE 2b — Replace the Brighton/Italian restaurants example.
+
+FIND:
+Semantic input: The user wants 10 Italian restaurants in Brighton that have outdoor seating and a rating of at least 4.5 stars. This is a one-time search.
+{
+  "entity_category": "Italian restaurants",
+  "location_text": "Brighton",
+  "requested_count": 10,
+  "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Brighton", "hardness": "hard" },
+    { "type": "attribute_check", "field": "amenity", "operator": "has", "value": "outdoor seating", "hardness": "hard" },
+    { "type": "numeric_range", "field": "rating", "operator": "gte", "value": 4.5, "hardness": "hard" }
+  ],
+  "mission_mode": "research_now"
+}
+
+REPLACE WITH:
+Semantic input: The user wants 10 Italian restaurants in Nottingham that have outdoor seating and a rating of at least 4.5 stars. This is a one-time search.
+{
+  "entity_category": "Italian restaurants",
+  "location_text": "Nottingham",
+  "requested_count": 10,
+  "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Nottingham", "hardness": "hard" },
+    { "type": "attribute_check", "field": "amenity", "operator": "has", "value": "outdoor seating", "hardness": "hard" },
+    { "type": "numeric_range", "field": "rating", "operator": "gte", "value": 4.5, "hardness": "hard" }
+  ],
+  "mission_mode": "research_now"
+}
+
+
+CHANGE 2c — Replace the Bristol/dentists example.
+
+FIND:
+Semantic input: The user wants dentists near Bristol that have a relationship with the NHS. This is a one-time search.
+{
+  "entity_category": "dentists",
+  "location_text": "Bristol",
+  "requested_count": null,
+  "constraints": [
+    { "type": "relationship_check", "field": "client", "operator": "serves", "value": "NHS", "hardness": "hard" }
+  ],
+  "mission_mode": "research_now"
+}
+
+REPLACE WITH:
+Semantic input: The user wants physiotherapists near Sheffield that have a relationship with the NHS. This is a one-time search.
+{
+  "entity_category": "physiotherapists",
+  "location_text": "Sheffield",
+  "requested_count": null,
+  "constraints": [
+    { "type": "relationship_check", "field": "client", "operator": "serves", "value": "NHS", "hardness": "hard" }
+  ],
+  "mission_mode": "research_now"
+}
+
+
+CHANGE 2d — Replace the London/vets example.
+
+FIND:
+Semantic input: The user wants 5 vets in London that extract email addresses. This is a one-time search.
+{
+  "entity_category": "vets",
+  "location_text": "London",
+  "requested_count": 5,
+  "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "London", "hardness": "hard" },
+    { "type": "contact_extraction", "field": "email", "operator": "extract", "value": null, "hardness": "hard" }
+  ],
+  "mission_mode": "research_now"
+}
+
+REPLACE WITH:
+Semantic input: The user wants 5 vets in Canterbury that extract email addresses. This is a one-time search.
+{
+  "entity_category": "vets",
+  "location_text": "Canterbury",
+  "requested_count": 5,
+  "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Canterbury", "hardness": "hard" },
+    { "type": "contact_extraction", "field": "email", "operator": "extract", "value": null, "hardness": "hard" }
+  ],
+  "mission_mode": "research_now"
+}
+
+
+────────────────────────────────────
+PASS3_SYSTEM_PROMPT — 2 example changes
+────────────────────────────────────
+
+CHANGE 3a — Replace the East Sussex/bottle shops example (Example 1).
+
+FIND:
+EXAMPLE 1 — "find bottle shops in East Sussex that sell craft beer":
+{
+  "entity_description": "independent retail shops that stock craft beer from multiple producers for sale to the public",
+  "entity_exclusions": ["breweries selling their own beer", "supermarkets and chain off-licences", "online-only retailers"],
+  "commercial_context": "likely a craft brewer seeking independent stockists to place their product in",
+  "key_discriminator": "sells multiple brands of craft beer from different producers — not a single producer's own shop",
+  "findability": "moderate",
+  "findability_reason": "bottle shops often have websites listing their stock or mentioning craft beer explicitly",
+  "suggested_approaches": [
+    "search Google Places for bottle shops and off-licences in East Sussex",
+    "visit each website and look for mentions of craft beer, local beer, or multiple brewery names",
+    "search for East Sussex craft beer retailers and independent off-licences"
+  ],
+  "fallback_intent": "independent off-licences and specialist drink retailers in East Sussex",
+  "scarcity_expectation": "scarce",
+  "clarification_needed": false,
+  "clarification_question": null,
+  "ambiguity_flags": []
+}
+
+REPLACE WITH:
+EXAMPLE 1 — "find bottle shops in Somerset that sell craft beer":
+{
+  "entity_description": "independent retail shops that stock craft beer from multiple producers for sale to the public",
+  "entity_exclusions": ["breweries selling their own beer", "supermarkets and chain off-licences", "online-only retailers"],
+  "commercial_context": "likely a craft brewer seeking independent stockists to place their product in",
+  "key_discriminator": "sells multiple brands of craft beer from different producers — not a single producer's own shop",
+  "findability": "moderate",
+  "findability_reason": "bottle shops often have websites listing their stock or mentioning craft beer explicitly",
+  "suggested_approaches": [
+    "search Google Places for bottle shops and off-licences in Somerset",
+    "visit each website and look for mentions of craft beer, local beer, or multiple brewery names",
+    "search for Somerset craft beer retailers and independent off-licences"
+  ],
+  "fallback_intent": "independent off-licences and specialist drink retailers in Somerset",
+  "scarcity_expectation": "scarce",
+  "clarification_needed": false,
+  "clarification_question": null,
+  "ambiguity_flags": []
+}
+
+
+CHANGE 3b — Replace the Sussex/breweries example (Example 3).
+
+FIND:
+EXAMPLE 3 — "monitor for new craft breweries in Sussex":
+{
+  "entity_description": "craft breweries that have recently opened or are newly established in Sussex",
+  "entity_exclusions": ["pubs that serve craft beer but don't brew it", "homebrew supply shops"],
+  "commercial_context": "likely a craft beer distributor or enthusiast wanting to discover new breweries as they open",
+  "key_discriminator": "is a brewery that brews beer on-site — not a pub, bar, or shop that merely sells craft beer",
+  "findability": "moderate",
+  "findability_reason": "new breweries often announce their opening on social media and local news, and register on directories",
+  "suggested_approaches": [
+    "search Google Places for breweries in Sussex and check which ones are recently added or have recent first reviews",
+    "search for 'new brewery Sussex' or 'brewery opening Sussex' in news and local publications",
+    "check brewery directories like CAMRA, Untappd, and BreweryDB for recent Sussex additions"
+  ],
+  "fallback_intent": "all craft breweries in Sussex, then filter by evidence of recent establishment",
+  "scarcity_expectation": "scarce",
+  "clarification_needed": false,
+  "clarification_question": null,
+  "ambiguity_flags": []
+}
+
+REPLACE WITH:
+EXAMPLE 3 — "monitor for new craft breweries in Devon":
+{
+  "entity_description": "craft breweries that have recently opened or are newly established in Devon",
+  "entity_exclusions": ["pubs that serve craft beer but don't brew it", "homebrew supply shops"],
+  "commercial_context": "likely a craft beer distributor or enthusiast wanting to discover new breweries as they open",
+  "key_discriminator": "is a brewery that brews beer on-site — not a pub, bar, or shop that merely sells craft beer",
+  "findability": "moderate",
+  "findability_reason": "new breweries often announce their opening on social media and local news, and register on directories",
+  "suggested_approaches": [
+    "search Google Places for breweries in Devon and check which ones are recently added or have recent first reviews",
+    "search for 'new brewery Devon' or 'brewery opening Devon' in news and local publications",
+    "check brewery directories like CAMRA, Untappd, and BreweryDB for recent Devon additions"
+  ],
+  "fallback_intent": "all craft breweries in Devon, then filter by evidence of recent establishment",
+  "scarcity_expectation": "scarce",
+  "clarification_needed": false,
+  "clarification_question": null,
+  "ambiguity_flags": []
+}
+
+
+═══════════════════════════════════════════════════════════════
+FILE 2: server/supervisor/intent-extractor.ts
+═══════════════════════════════════════════════════════════════
+
+Edit only the INTENT_EXTRACTOR_SYSTEM_PROMPT constant. Do NOT change any code outside it.
+
+────────────────────────────────────
+4 example changes
+────────────────────────────────────
+
+CHANGE 4a — Replace the London/gyms example.
+
+FIND:
+User: "find gyms in London that opened in the last 6 months"
+{
+  "mission_type": "find_businesses",
+  "entity_kind": "venue",
+  "entity_category": "gyms",
+  "location_text": "London",
+  "geo_mode": "city",
+  "radius_km": null,
+  "requested_count": null,
+  "default_count_policy": "page_1",
+  "constraints": [
+    { "type": "time", "raw": "opened in the last 6 months", "hardness": "hard", "evidence_mode": "web_search", "clarify_if_needed": true, "clarify_question": "Opening dates aren't always verifiable. Should we use proxy signals like recent first Google reviews or news mentions?" }
+  ],
+  "plan_template_hint": "search_and_verify",
+  "preferred_evidence_order": ["news", "web_search"]
+}
+
+REPLACE WITH:
+User: "find gyms in Liverpool that opened in the last 6 months"
+{
+  "mission_type": "find_businesses",
+  "entity_kind": "venue",
+  "entity_category": "gyms",
+  "location_text": "Liverpool",
+  "geo_mode": "city",
+  "radius_km": null,
+  "requested_count": null,
+  "default_count_policy": "page_1",
+  "constraints": [
+    { "type": "time", "raw": "opened in the last 6 months", "hardness": "hard", "evidence_mode": "web_search", "clarify_if_needed": true, "clarify_question": "Opening dates aren't always verifiable. Should we use proxy signals like recent first Google reviews or news mentions?" }
+  ],
+  "plan_template_hint": "search_and_verify",
+  "preferred_evidence_order": ["news", "web_search"]
+}
+
+
+CHANGE 4b — Replace the Arundel/pubs example.
+
+FIND:
+User: "find 10 pubs in Arundel"
+{
+  "mission_type": "find_businesses",
+  "entity_kind": "venue",
+  "entity_category": "pubs",
+  "location_text": "Arundel",
+  "geo_mode": "city",
+  "radius_km": null,
+  "requested_count": 10,
+  "default_count_policy": "explicit",
+  "constraints": [
+    { "type": "name_filter", "raw": "location: Arundel", "hardness": "hard", "evidence_mode": "google_places", "clarify_if_needed": false, "clarify_question": null }
+  ],
+  "plan_template_hint": "simple_search",
+  "preferred_evidence_order": []
+}
+
+REPLACE WITH:
+User: "find 10 pubs in Harrogate"
+{
+  "mission_type": "find_businesses",
+  "entity_kind": "venue",
+  "entity_category": "pubs",
+  "location_text": "Harrogate",
+  "geo_mode": "city",
+  "radius_km": null,
+  "requested_count": 10,
+  "default_count_policy": "explicit",
+  "constraints": [
+    { "type": "name_filter", "raw": "location: Harrogate", "hardness": "hard", "evidence_mode": "google_places", "clarify_if_needed": false, "clarify_question": null }
+  ],
+  "plan_template_hint": "simple_search",
+  "preferred_evidence_order": []
+}
+
+
+CHANGE 4c — Replace the Brighton/dentists example. THIS IS THE HIGHEST RISK — almost identical to benchmark B01.
+
+FIND:
+User: "dentists near Brighton with 4.5 star rating"
+{
+  "mission_type": "find_businesses",
+  "entity_kind": "company",
+  "entity_category": "dentists",
+  "location_text": "Brighton",
+  "geo_mode": "radius",
+  "radius_km": null,
+  "requested_count": null,
+  "default_count_policy": "page_1",
+  "constraints": [
+    { "type": "rating", "raw": "4.5 star rating", "hardness": "hard", "evidence_mode": "places_fields", "clarify_if_needed": false, "clarify_question": null }
+  ],
+  "plan_template_hint": "search_and_verify",
+  "preferred_evidence_order": ["places_fields"]
+}
+
+REPLACE WITH:
+User: "opticians near Chester with 4.5 star rating"
+{
+  "mission_type": "find_businesses",
+  "entity_kind": "company",
+  "entity_category": "opticians",
+  "location_text": "Chester",
+  "geo_mode": "radius",
+  "radius_km": null,
+  "requested_count": null,
+  "default_count_policy": "page_1",
+  "constraints": [
+    { "type": "rating", "raw": "4.5 star rating", "hardness": "hard", "evidence_mode": "places_fields", "clarify_if_needed": false, "clarify_question": null }
+  ],
+  "plan_template_hint": "search_and_verify",
+  "preferred_evidence_order": ["places_fields"]
+}
+
+
+CHANGE 4d — Replace the Manchester/vegan restaurants example.
+
+FIND:
+User: "monitor new vegan restaurants opening in Manchester"
+{
+  "mission_type": "monitor",
+  "entity_kind": "venue",
+  "entity_category": "vegan restaurants",
+  "location_text": "Manchester",
+  "geo_mode": "city",
+  "radius_km": null,
+  "requested_count": null,
+  "default_count_policy": "page_1",
+  "constraints": [
+    { "type": "time", "raw": "new opening", "hardness": "hard", "evidence_mode": "web_search", "clarify_if_needed": false, "clarify_question": null }
+  ],
+  "plan_template_hint": "search_and_verify",
+  "preferred_evidence_order": ["news", "web_search"]
+}
+
+REPLACE WITH:
+User: "monitor new vegan restaurants opening in Cardiff"
+{
+  "mission_type": "monitor",
+  "entity_kind": "venue",
+  "entity_category": "vegan restaurants",
+  "location_text": "Cardiff",
+  "geo_mode": "city",
+  "radius_km": null,
+  "requested_count": null,
+  "default_count_policy": "page_1",
+  "constraints": [
+    { "type": "time", "raw": "new opening", "hardness": "hard", "evidence_mode": "web_search", "clarify_if_needed": false, "clarify_question": null }
+  ],
+  "plan_template_hint": "search_and_verify",
+  "preferred_evidence_order": ["news", "web_search"]
+}
+
+
+═══════════════════════════════════════════════════════════════
+SUMMARY OF ALL CHANGES
+═══════════════════════════════════════════════════════════════
+
+File: server/supervisor/mission-extractor.ts (9 changes)
+  PASS1: Brighton→Nottingham, Bristol/dentists→Sheffield/physiotherapists, London→Glasgow
+  PASS2: Manchester→Norwich, Brighton→Nottingham, Bristol/dentists→Sheffield/physiotherapists, London→Canterbury
+  PASS3: East Sussex→Somerset, Sussex→Devon
+
+File: server/supervisor/intent-extractor.ts (4 changes)
+  London→Liverpool, Arundel→Harrogate, Brighton/dentists→Chester/opticians, Manchester→Cardiff
+
+IMPORTANT RULES:
+- Only change the prompt string constants. Do not change ANY code.
+- Each find-and-replace is self-contained. Do them one at a time.
+- Do not change examples that are already safe (Bath, Oxford, Hampshire, Texas, UK).
+- The JSON structure and field names must remain identical — only location names, entity types, and their occurrences within text change.
+- After all changes, no example in any prompt should share both a location AND entity type with any of the 12 benchmark queries.
