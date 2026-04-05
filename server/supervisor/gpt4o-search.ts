@@ -468,6 +468,18 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
         findability: intentNarrative?.findability ?? null,
         supplementary_search_fired: roundsPerformed > 1,
       },
+      // Include verification summary inline so Tower doesn't need a DB lookup
+      verification_summary: {
+        verified_exact_count: cappedGpt4oLeads.filter(l => l.confidence === 'high').length,
+        verified_weak_count: cappedGpt4oLeads.filter(l => l.confidence === 'medium').length,
+        unverified_count: cappedGpt4oLeads.filter(l => l.confidence === 'low').length,
+        total_leads: cappedLeads.length,
+      },
+      // Include delivered count and requested count at top level for Tower resolution
+      delivered_count: cappedLeads.length,
+      accumulated_count: cappedLeads.length,
+      requested_count: requestedCount,
+      requested_count_user: requestedCount !== null ? requestedCount : undefined,
     },
     userId,
     conversationId,
@@ -489,7 +501,7 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     const finalSuccessCriteria = {
       mission_type: 'leadgen',
       target_count: requestedCount ?? 20,
-      requested_count_user: requestedCount !== null ? 'explicit' : 'implicit',
+      requested_count_user: requestedCount !== null ? requestedCount : 'implicit',
       requested_count_value: requestedCount,
       hard_constraints: hardConstraints,
       soft_constraints: softConstraints,
@@ -554,8 +566,9 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     });
   } catch (towerErr: any) {
     console.error(`[GPT4O_SEARCH] Tower final judgement failed: ${towerErr.message}`);
-    finalVerdict = 'error';
-    finalAction = 'stop';
+    finalVerdict = 'tower_unavailable';
+    finalAction = 'continue';
+    console.warn(`[GPT4O_SEARCH] Tower unavailable — delivering results without Tower verdict. Error: ${towerErr.message}`);
 
     await createArtefact({
       runId,
