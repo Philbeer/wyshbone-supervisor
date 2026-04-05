@@ -1,0 +1,23 @@
+REPO: wyshbone-supervisor-Post-CC
+
+TASK: Documentation-only cleanup. Update replit.md to accurately describe the current intent extraction architecture. No code changes.
+
+In replit.md, find ALL sections that reference the "shadow" intent extractor, "canonical intent extractor", or describe the intent extraction pipeline. Replace or update them to reflect this accurate description of the current architecture:
+
+CURRENT ARCHITECTURE (use this as the source of truth):
+
+**Intent Extraction Pipeline (3-tier fallback):**
+1. **Mission Extractor (PRIMARY)** — `server/supervisor/mission-extractor.ts`. Three-pass LLM pipeline: Pass 1 (semantic interpretation) → Pass 3 (intent narrative with findability, scarcity, exclusions) → Pass 2 (structured JSON schema mapping). Always runs. Produces `StructuredMission` with typed constraints, `IntentNarrative` for search strategy, and full extraction trace. This is the active primary pipeline that drives all execution.
+
+2. **Canonical Intent Extractor (OPT-IN FALLBACK)** — `server/supervisor/intent-extractor.ts` + `server/supervisor/intent-shadow.ts`. Controlled by env var `INTENT_EXTRACTOR_MODE` (default: `off`). When enabled (`active`), runs a separate LLM call producing a `CanonicalIntent` schema. Used as fallback if mission extraction fails. When `off` (default), does not run and costs nothing. The "shadow" name is historical — it was originally added as a diagnostic observer before the mission extractor was built.
+
+3. **Legacy Goal Parser (EMERGENCY FALLBACK)** — `server/supervisor/goal-to-constraints.ts`. Single LLM call producing a `ParsedGoal`. Only runs if both mission and canonical extractors fail. Last resort.
+
+The intent source is tracked per-run as `intentSource: 'mission' | 'canonical' | 'legacy'` and logged in artefacts for diagnostics.
+
+SPECIFIC EDITS:
+- Find the bullet point about "Canonical Intent Wiring (Semantic Overreach Reduction)" and update it to note this is opt-in fallback, not active by default.
+- Find the bullet point about "Canonical Intent Extractor (Phase 0 Shadow Mode)" and rename to "Canonical Intent Extractor (Opt-In Fallback)" with accurate description.
+- Find the bullet point about "Canonical Intent Extractor (Active Primary Parser)" — this is inaccurate, the mission extractor is the active primary. Fix the description.
+- Anywhere "shadow mode" is mentioned, clarify that this refers to the canonical extractor's optional diagnostic mode, not the primary pipeline.
+- Do NOT change any code files — this is a docs-only update.
