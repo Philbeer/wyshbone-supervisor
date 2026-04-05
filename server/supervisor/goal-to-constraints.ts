@@ -122,7 +122,7 @@ CRITICAL RULE — Delivery requirements vs location:
 
 CONSTRAINT TYPES and how to detect them:
 - COUNT_MIN: when user says "find N" → { id: "c_count", type: "COUNT_MIN", field: "count", operator: ">=", value: N, hard: true, rationale: "User requested N results" }
-- LOCATION_EQUALS: when user says "in <place>" → { id: "c_location", type: "LOCATION_EQUALS", field: "location", operator: "=", value: "<place>", hard: false, rationale: "..." }
+- LOCATION_EQUALS: when user says "in <place>" → { id: "c_location", type: "LOCATION_EQUALS", field: "location", operator: "=", value: "<place>", hard: true, rationale: "..." }
 - LOCATION_NEAR: when user says "near <place>" or "within X km" → { id: "c_location", type: "LOCATION_NEAR", field: "location", operator: "within_km", value: { center: "<place>", km: N }, hard: false, rationale: "..." }
 - CATEGORY_EQUALS: DISABLED — business type is used as a text query term only, not as a verifiable constraint. Do NOT emit any CATEGORY_EQUALS constraint.
 - NAME_STARTS_WITH: when user says "starting with X" or "beginning with X" → { id: "c_name_prefix", type: "NAME_STARTS_WITH", field: "name", operator: "starts_with", value: "X", hard: false, rationale: "..." }
@@ -140,7 +140,8 @@ CRITICAL RULE — Attribute vs Name distinction:
 HARD vs SOFT rules:
 - If user uses words like "must", "only", "exactly", "strict", "strictly", "do not relax", "hard constraint" → mark that constraint as hard: true
 - Default hard: COUNT_MIN (always hard), HAS_ATTRIBUTE (hard because user explicitly asked for this feature)
-- Default soft: LOCATION_EQUALS, LOCATION_NEAR, NAME_STARTS_WITH, NAME_CONTAINS, MUST_USE_TOOL
+- Default hard: LOCATION_EQUALS (named locations are boundaries, not suggestions)
+- Default soft: LOCATION_NEAR, NAME_STARTS_WITH, NAME_CONTAINS, MUST_USE_TOOL
 - HAS_ATTRIBUTE becomes soft ONLY if user uses hedging language: "preferably with", "if possible", "ideally", "optionally", "nice to have", "bonus if"
 - Override: if user says "must be in london only" → LOCATION_EQUALS becomes hard.
 - "find pubs that have a beer garden" → HAS_ATTRIBUTE hard: true (user stated it as a requirement)

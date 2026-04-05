@@ -453,7 +453,7 @@ export function missionToParsedGoal(
       field: 'location',
       operator: '=',
       value: location,
-      hard: false,
+      hard: true,
       rationale: `Location: ${location}`,
     });
   }
