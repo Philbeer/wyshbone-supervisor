@@ -1093,41 +1093,6 @@ class SupervisorService {
     // Fast classification to avoid burning 20+ LLM calls on "hi" or "thanks"
     let isClarifyResponse = !!(requestData.clarify_answer || requestData.continuation_of_run || requestData._constraint_gate_resolved);
 
-    // ═══ EARLY PREFLIGHT RECOVERY: combine original query + clarification answer ═══
-    // Must run BEFORE the message classifier and BEFORE mission extraction.
-    // Without this, INTENT_FIX restores rawMsg to the original query (no location),
-    // mission extraction sees no location, and preflight fires again in a loop.
-    if (isClarifyResponse && task.conversation_id && supabase) {
-      try {
-        const { data: pfRuns } = await supabase.from('agent_runs')
-          .select('id, status, metadata')
-          .eq('conversation_id', task.conversation_id)
-          .in('status', ['clarifying', 'executing'])
-          .order('created_at', { ascending: false })
-          .limit(1);
-        const pfRun = pfRuns?.find(r => r.metadata?.verdict === 'preflight_clarify');
-        if (pfRun?.metadata?.verdict === 'preflight_clarify' && pfRun.metadata.original_message) {
-          const pfOriginal = pfRun.metadata.original_message;
-          const nationwideRe = /^\s*(anywhere|everywhere|nationwide|all over|whole country|uk\s*wide|all of uk|all of the uk)\s*$/i;
-          if (nationwideRe.test(rawMsg)) {
-            rawMsg = `${pfOriginal} in United Kingdom`;
-            console.log(`[EARLY_PREFLIGHT_RECOVERY] Mapped nationwide: "${rawMsg}"`);
-          } else if (rawMsg.trim() === pfOriginal.trim()) {
-            rawMsg = `${pfOriginal} in United Kingdom`;
-            console.log(`[EARLY_PREFLIGHT_RECOVERY] Duplicate query defaulted to UK: "${rawMsg}"`);
-          } else {
-            rawMsg = `${pfOriginal} in ${rawMsg}`;
-            console.log(`[EARLY_PREFLIGHT_RECOVERY] Combined: "${rawMsg}"`);
-          }
-          (requestData as any)._skip_preflight_clarify = true;
-          (requestData as any).user_message = rawMsg;
-          jobId = pfRun.id;
-        }
-      } catch (pfErr: any) {
-        console.warn(`[EARLY_PREFLIGHT_RECOVERY] Non-fatal: ${pfErr.message}`);
-      }
-    }
-
     if (!isClarifyResponse && !missionQueryId) {
       const { classifyMessage: classifyMsg } = await import('./supervisor/message-classifier');
       const classification = classifyMsg(rawMsg);
@@ -1249,7 +1214,7 @@ class SupervisorService {
         console.log(`[INTENT_FIX] Restoring rawMsg for mission extraction from pending contract: "${earlyPending.originalMessage.substring(0, 80)}" (was: "${rawMsg.substring(0, 40)}")`);
         rawMsg = earlyPending.originalMessage;
       } else if (((requestData as any).original_user_message || (requestData as any).original_message) && String((requestData as any).original_user_message || (requestData as any).original_message) !== rawMsg) {
-        // For preflight_clarify continuations: client may send original_user_message or original_message in request_data
+        // Client may send original_user_message or original_message in request_data for clarify continuations
         const origMsg = String((requestData as any).original_user_message || (requestData as any).original_message);
         if (origMsg.length > rawMsg.length) {
           console.log(`[INTENT_FIX] Restoring rawMsg for mission extraction from requestData.original_message: "${origMsg.substring(0, 80)}" (was: "${rawMsg.substring(0, 40)}")`);
@@ -1733,118 +1698,6 @@ class SupervisorService {
       console.error(`[INTENT_PREVIEW] DB write FAILED — runId=${jobId} conversationId=${task.conversation_id} error=${previewErr.message}`);
     }
 
-    if (earlyParsedGoal && !(requestData as any)._skip_preflight_clarify) {
-      const preflightResult = this.evaluatePreflightClarify(rawMsg, earlyParsedGoal, previewBT, previewLoc, previewTime, canonicalIntent);
-      if (preflightResult) {
-        // Suppress preflight clarify if the structured mission has enough to search
-        if (_missionHasEnoughToSearch) {
-          console.log(`[PREFLIGHT_CLARIFY] Suppressed — mission has enough to search: entity="${_clarifyGateEntity}" location="${_clarifyGateLocation}" constraints=${_clarifyGateConstraintCount}`);
-        } else {
-        console.log(`[PREFLIGHT_CLARIFY] Triggered — reason=${preflightResult.reason} questions=${preflightResult.questions.length} runId=${jobId}`);
-
-        await createArtefact({
-          runId: jobId,
-          type: 'clarify_gate',
-          title: 'Clarification Required',
-          summary: preflightResult.reason,
-          payload: {
-            mode: 'clarify',
-            reason: preflightResult.reason,
-            questions: preflightResult.questions,
-            options: preflightResult.options,
-            parsed_fields: {
-              business_type: previewBT,
-              location: previewLoc,
-              count: previewCount,
-              time_filter: previewTime,
-            },
-            source: 'supervisor_preflight',
-          },
-          userId: task.user_id,
-          conversationId: task.conversation_id,
-        }).catch((e: any) => console.error(`[PREFLIGHT_CLARIFY] clarify_gate artefact write failed: ${e.message}`));
-
-        this.postArtefactToUI({
-          runId: jobId,
-          clientRequestId,
-          type: 'clarify_gate',
-          payload: {
-            title: 'Clarification Required',
-            mode: 'clarify',
-            reason: preflightResult.reason,
-            questions: preflightResult.questions,
-            options: preflightResult.options,
-          },
-          userId: task.user_id,
-          conversationId: task.conversation_id,
-        }).catch((uiErr: any) => console.warn(`[PREFLIGHT_CLARIFY] postArtefactToUI failed: ${uiErr.message}`));
-
-        const clarifyMsg = preflightResult.questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
-        const messageId = randomUUID();
-
-        const [taskUpdateResult, msgResult] = await Promise.all([
-          supabase!.from('supervisor_tasks').update({
-            status: 'completed',
-            result: {
-              response: clarifyMsg.substring(0, 200),
-              message_id: messageId,
-              clarify_gate: 'preflight_clarify',
-              mode: 'clarify',
-              question: preflightResult.questions[0],
-              options: preflightResult.options,
-              reason: preflightResult.reason,
-              run_id: jobId,
-            },
-          }).eq('id', task.id),
-          supabase!.from('messages').insert({
-            id: messageId,
-            conversation_id: task.conversation_id,
-            role: 'assistant',
-            content: sanitizeMessageContent(clarifyMsg),
-            source: 'supervisor',
-            metadata: {
-              supervisor_task_id: task.id,
-              run_id: jobId,
-              clarify_gate: 'preflight_clarify',
-              mode: 'clarify',
-              reason: preflightResult.reason,
-              questions: preflightResult.questions,
-              options: preflightResult.options,
-              clarify_state: {
-                business_type: previewBT,
-                location: previewLoc,
-                count: previewCount,
-                time_filter: previewTime,
-              },
-            },
-            created_at: Date.now(),
-          }).select().single(),
-        ]);
-
-        if (taskUpdateResult.error) console.error(`[PREFLIGHT_CLARIFY] task update failed: ${taskUpdateResult.error.message}`);
-        if (msgResult.error) console.error(`[PREFLIGHT_CLARIFY] message insert failed: ${msgResult.error.message}`);
-
-        await storage.updateAgentRun(jobId, {
-          status: 'clarifying',
-          terminalState: null,
-          metadata: { verdict: 'preflight_clarify', awaiting: 'user_input', reason: preflightResult.reason, original_message: rawMsg },
-        }).catch((runErr: any) => console.warn(`[PREFLIGHT_CLARIFY] updateAgentRun failed: ${runErr.message}`));
-        console.log(`[PREFLIGHT_CLARIFY] Run awaiting user input — runId=${jobId} status=clarifying`);
-
-        await emitProbe('preflight_clarify_probe', task.user_id, jobId, task.conversation_id, {
-          run_id: jobId,
-          reason: preflightResult.reason,
-          questions: preflightResult.questions,
-          parsed_fields: { business_type: previewBT, location: previewLoc, count: previewCount, time_filter: previewTime },
-          ts: Date.now(),
-        });
-
-        await emitTaskExecutionCompleted('preflight_clarify', { reason: preflightResult.reason });
-        return;
-        } // end else (_missionHasEnoughToSearch suppression)
-      }
-    }
-
     const isFactoryDemo = rawMsg.trim().toLowerCase() === 'run the injection moulding demo';
 
     if (isFactoryDemo) {
@@ -1954,35 +1807,6 @@ class SupervisorService {
             }
             storePendingContract(task.conversation_id, recoveredOriginal, existingRun.metadata.constraint_contract, recoveredRunId);
             pendingConstraint = getPendingContract(task.conversation_id);
-          }
-        } else if (existingRun && existingRun.metadata?.verdict === 'preflight_clarify' && !(requestData as any)._skip_preflight_clarify) {
-          // Recover original message for preflight clarify continuation
-          let recoveredOriginal = existingRun.metadata.original_message || '';
-          if (!recoveredOriginal) {
-            // Fallback: get first user message from conversation
-            const { data: userMsgs } = await supabase!.from('messages')
-              .select('content')
-              .eq('conversation_id', task.conversation_id)
-              .eq('role', 'user')
-              .order('created_at', { ascending: true })
-              .limit(1);
-            recoveredOriginal = userMsgs?.[0]?.content || '';
-          }
-          if (recoveredOriginal) {
-            console.log(`[PREFLIGHT_RECOVERY] Recovered original query: "${recoveredOriginal.substring(0, 80)}" for clarify answer: "${rawMsg.substring(0, 40)}"`);
-            // Map nationwide-intent words to a real location before combining
-            const nationwideRe = /^\s*(anywhere|everywhere|nationwide|all over|whole country|uk\s*wide|all of uk|all of the uk)\s*$/i;
-            const isNationwideAnswer = nationwideRe.test(rawMsg);
-            if (isNationwideAnswer) {
-              console.log(`[PREFLIGHT_RECOVERY] Mapped nationwide intent "${rawMsg.trim()}" → "United Kingdom"`);
-              rawMsg = `${recoveredOriginal} in United Kingdom`;
-            } else {
-              rawMsg = `${recoveredOriginal} in ${rawMsg}`;
-            }
-            // Flag to skip preflight clarify on this pass — user already answered the location question
-            (requestData as any)._skip_preflight_clarify = true;
-            jobId = existingRun.id;
-            isClarifyResponse = true;
           }
         }
       } catch (e: any) {
@@ -2870,80 +2694,6 @@ class SupervisorService {
     } catch (err: any) {
       console.error(`[BYPASS_DETECTOR] Poller error (non-fatal): ${err.message}`);
     }
-  }
-
-  private evaluatePreflightClarify(
-    rawMsg: string,
-    parsedGoal: ParsedGoal,
-    previewBT: string | null,
-    previewLoc: string | null,
-    previewTime: string | null,
-    canonicalIntent?: import('./supervisor/canonical-intent').CanonicalIntent | null,
-  ): { reason: string; questions: string[]; options: string[] | null; semantic_source?: 'canonical' | 'fallback_regex' } | null {
-    const questions: string[] = [];
-    let options: string[] | null = null;
-    const reasons: string[] = [];
-    let semanticSource: 'canonical' | 'fallback_regex' = canonicalIntent ? 'canonical' : 'fallback_regex';
-
-    const bt = canonicalIntent?.entity_category?.trim() || parsedGoal.business_type?.trim() || previewBT;
-    const loc = canonicalIntent?.location_text?.trim() || parsedGoal.location?.trim() || previewLoc;
-
-    if (!bt) {
-      questions.push('What type of business are you looking for? (e.g. pubs, dentists, gyms)');
-      reasons.push('missing business_type');
-    }
-
-    if (!loc) {
-      questions.push('What location should I search in? (e.g. London, Sussex, Manchester)');
-      reasons.push('missing location');
-    }
-
-    let timeHandled = false;
-    if (canonicalIntent) {
-      const timeConstraint = canonicalIntent.constraints.find(c => c.type === 'time');
-      if (timeConstraint) {
-        const contract = buildTimePredicateContract(timeConstraint.raw);
-        if (contract && !contract.can_execute) {
-          const timeQ = buildTimePredicateClarifyQuestion(contract);
-          questions.push(timeQ);
-          reasons.push('time_predicate_unverifiable');
-          const supported = contract.proxy_options.filter(p => p.supported);
-          options = [
-            ...supported.map(p => `${p.label}: ${p.description}`),
-            'Best-effort (unverified): Search without verifying opening dates',
-          ];
-          timeHandled = true;
-        }
-      }
-    }
-
-    if (!timeHandled && !canonicalIntent) {
-      const timeDetected = detectTimePredicate(rawMsg);
-      if (timeDetected) {
-        semanticSource = 'fallback_regex';
-        const contract = buildTimePredicateContract(rawMsg);
-        if (contract && !contract.can_execute) {
-          const timeQ = buildTimePredicateClarifyQuestion(contract);
-          questions.push(timeQ);
-          reasons.push('time_predicate_unverifiable');
-          const supported = contract.proxy_options.filter(p => p.supported);
-          options = [
-            ...supported.map(p => `${p.label}: ${p.description}`),
-            'Best-effort (unverified): Search without verifying opening dates',
-          ];
-        }
-      }
-    }
-
-    if (questions.length === 0) return null;
-
-    console.log(`[PREFLIGHT_CLARIFY] semantic_source=${semanticSource} reasons=${reasons.join(', ')}`);
-    return {
-      reason: reasons.join('; '),
-      questions,
-      options,
-      semantic_source: semanticSource,
-    };
   }
 
   private async postArtefactToUI(params: {
