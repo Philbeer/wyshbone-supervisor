@@ -588,7 +588,7 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
 
   await storage.updateAgentRun(runId, {
     status: 'completed',
-    terminalState: 'completed',
+    terminalState: finalVerdict === 'error' ? 'failed' : finalVerdict === 'fail' ? 'stopped' : 'completed',
     metadata: {
       verdict: finalVerdict,
       action: finalAction,

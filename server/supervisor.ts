@@ -937,7 +937,7 @@ class SupervisorService {
 
       storage.updateAgentRun(jobId, {
         status: 'completed',
-        terminalState: 'completed',
+        terminalState: (refineResult as any).deliverySummary?.status === 'STOP' ? 'stopped' : (refineResult as any).deliverySummary?.status === 'ERROR' ? 'failed' : 'completed',
         endedAt: new Date(),
         metadata: {
           verdict: liveFetched ? 'refine_live_fetched' : noCachedPages ? 'refine_no_cache' : 'refine_completed',
@@ -1126,7 +1126,7 @@ class SupervisorService {
 
         await storage.updateAgentRun(jobId, {
           status: 'completed',
-          terminalState: 'completed',
+          terminalState: (classification as any).deliverySummary?.status === 'STOP' ? 'stopped' : (classification as any).deliverySummary?.status === 'ERROR' ? 'failed' : 'completed',
           endedAt: new Date(),
           metadata: { verdict: 'chat_classified', classifier: classification },
         }).catch(() => {});
