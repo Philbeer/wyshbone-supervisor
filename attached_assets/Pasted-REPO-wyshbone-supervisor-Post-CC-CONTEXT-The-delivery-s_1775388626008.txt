@@ -1,0 +1,67 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: The delivery_summary artefact correctly produces PASS/PARTIAL/STOP/ERROR statuses. But the agent_run record always gets `terminalState: 'completed'` regardless of what the Tower verdict was. This means anything checking the run status (UI, AFR, analytics) sees "completed" even when the run was stopped by Tower or failed verification.
+
+FIX: Derive the agent_run terminalState from the delivery summary status instead of always using 'completed'.
+
+Mapping:
+- Delivery PASS or PARTIAL → terminalState: 'completed' (results were delivered)
+- Delivery STOP → terminalState: 'stopped' (Tower or system stopped the run)
+- Delivery ERROR → terminalState: 'failed'
+- Delivery CHANGE_PLAN → terminalState: 'completed' (still in progress, plan was changed)
+
+═══════════════════════════════════════════════════════════════
+CHANGE 1: server/supervisor.ts — around line 940
+═══════════════════════════════════════════════════════════════
+
+Find the block where the agent_run is updated after a successful execution. It will look something like:
+
+```typescript
+status: 'completed',
+terminalState: 'completed',
+```
+
+Change to use the delivery summary status. The delivery summary payload should be available at this point (it was just emitted). Use the `ds.status` field:
+
+```typescript
+status: 'completed',
+terminalState: ds?.status === 'STOP' ? 'stopped' : ds?.status === 'ERROR' ? 'failed' : 'completed',
+```
+
+Where `ds` is the delivery summary payload. If the variable name is different, find the delivery summary status that was just built. It might be stored in the execution result, e.g. `result.deliverySummary?.status`.
+
+═══════════════════════════════════════════════════════════════
+CHANGE 2: server/supervisor.ts — around line 1129
+═══════════════════════════════════════════════════════════════
+
+Same change at the second location where `terminalState: 'completed'` is set:
+
+```typescript
+terminalState: ds?.status === 'STOP' ? 'stopped' : ds?.status === 'ERROR' ? 'failed' : 'completed',
+```
+
+═══════════════════════════════════════════════════════════════
+CHANGE 3: server/supervisor/gpt4o-search.ts — around line 590-591
+═══════════════════════════════════════════════════════════════
+
+Find where the agent_run is updated at the end of `executeGpt4oPrimaryPath`:
+
+```typescript
+status: 'completed',
+terminalState: 'completed',
+```
+
+The GPT-4o path has `finalVerdict` available (pass/fail/error/tower_unavailable). Use it:
+
+```typescript
+status: 'completed',
+terminalState: finalVerdict === 'error' ? 'failed' : finalVerdict === 'fail' ? 'stopped' : 'completed',
+```
+
+═══════════════════════════════════════════════════════════════
+DO NOT CHANGE
+═══════════════════════════════════════════════════════════════
+
+- delivery-summary.ts — already correct, produces proper PASS/PARTIAL/STOP/ERROR
+- The supervisor_tasks table status — that's a different field ('completed'/'failed') for the task itself
+- Any 'failed' terminalState that's already set in error catch blocks — those are correct
