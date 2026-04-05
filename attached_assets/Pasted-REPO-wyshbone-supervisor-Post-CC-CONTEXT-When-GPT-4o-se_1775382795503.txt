@@ -1,0 +1,82 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: When GPT-4o search runs complete, the Tower verdict comes back as "error" and all leads show verificationStatus: "error". This has been open since Session 3 (March 23).
+
+ROOT CAUSE: The Tower's judge-artefact endpoint tries to look up `constraint_led_evidence` and `lead_verification` artefacts from its OWN database by run_id. But the GPT-4o search path creates these artefacts in Supabase (Supervisor's DB), not in the Tower's DB. So the Tower finds no evidence, and the judgement either fails or produces a degraded result.
+
+The GP cascade path partially avoids this because its evidence data flows through the delivery payload, not just artefacts. The GPT-4o path doesn't include this evidence data in the payload sent to Tower.
+
+FIX: Include the evidence data inline in the artefact payload that gets sent to Tower, so Tower doesn't need to look it up from its own DB.
+
+═══════════════════════════════════════════════════════════════
+CHANGE: server/supervisor/gpt4o-search.ts
+═══════════════════════════════════════════════════════════════
+
+In the `executeGpt4oPrimaryPath` function, find where the `finalDeliveryArtefact` is created. It's a `createArtefact()` call with `type: 'final_delivery'`.
+
+Add a `verification_summary` object to the payload so Tower has the evidence data inline without needing a DB lookup:
+
+FIND the payload object inside the createArtefact call for final_delivery. After the `behaviour_judge` field, add:
+
+```typescript
+      // Include verification summary inline so Tower doesn't need a DB lookup
+      verification_summary: {
+        verified_exact_count: cappedGpt4oLeads.filter(l => l.confidence === 'high').length,
+        verified_weak_count: cappedGpt4oLeads.filter(l => l.confidence === 'medium').length,
+        unverified_count: cappedGpt4oLeads.filter(l => l.confidence === 'low').length,
+        total_leads: cappedLeads.length,
+      },
+      // Include delivered count and requested count at top level for Tower resolution
+      delivered_count: cappedLeads.length,
+      accumulated_count: cappedLeads.length,
+      requested_count: requestedCount,
+      requested_count_user: requestedCount !== null ? requestedCount : undefined,
+```
+
+Also, in the `finalSuccessCriteria` object (same function, a bit higher up), change:
+
+```typescript
+requested_count_user: requestedCount !== null ? 'explicit' : 'implicit',
+```
+
+to:
+
+```typescript
+requested_count_user: requestedCount !== null ? requestedCount : 'implicit',
+```
+
+The Tower's `toFiniteNumber()` function needs a NUMBER for `requested_count_user`, not the string 'explicit'. The string 'explicit' is silently converted to `undefined`, which can cause the Tower to use wrong defaults for count comparison.
+
+═══════════════════════════════════════════════════════════════
+ALSO CHECK: server/supervisor/gpt4o-search.ts error handling
+═══════════════════════════════════════════════════════════════
+
+In the Tower catch block near the end of `executeGpt4oPrimaryPath`, the current code sets:
+
+```typescript
+finalVerdict = 'error';
+finalAction = 'stop';
+```
+
+This is too harsh. Change to:
+
+```typescript
+finalVerdict = 'tower_unavailable';
+finalAction = 'continue';
+```
+
+And add a console.warn after it:
+
+```typescript
+console.warn(`[GPT4O_SEARCH] Tower unavailable — delivering results without Tower verdict. Error: ${towerErr.message}`);
+```
+
+This way, GPT-4o search results still get delivered even if Tower is temporarily unreachable. The results are still useful — they just haven't been quality-checked.
+
+═══════════════════════════════════════════════════════════════
+DO NOT CHANGE
+═══════════════════════════════════════════════════════════════
+
+- Tower repo (wyshbone-control-tower-post-CC) — no changes needed there
+- loop-skeleton.ts — the reloop path already handles Tower failures gracefully
+- tower-artefact-judge.ts — the Supervisor-side Tower caller is fine
