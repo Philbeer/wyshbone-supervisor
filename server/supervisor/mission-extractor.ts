@@ -174,7 +174,7 @@ Output:
   "semantic_interpretation": "The user wants hospitals in the UK that offer the service \\"sleep apnea implant\\". They want ongoing monitoring with alerts when this service becomes available near their area. The mission mode is alert-on-change, with a location proximity filter for the user's area."
 }
 
-User: "find 10 italian restaurants in Brighton with outdoor seating and at least 4.5 stars"
+User: "find 10 italian restaurants in Nottingham with outdoor seating and at least 4.5 stars"
 Output:
 {
   "constraint_checklist": {
@@ -184,10 +184,10 @@ Output:
     "has_contact_extraction": false, "has_ranking": false, "has_requested_count": true,
     "has_monitoring_intent": false
   },
-  "semantic_interpretation": "The user wants 10 Italian restaurants in Brighton that have outdoor seating and a rating of at least 4.5 stars. This is a one-time search."
+  "semantic_interpretation": "The user wants 10 Italian restaurants in Nottingham that have outdoor seating and a rating of at least 4.5 stars. This is a one-time search."
 }
 
-User: "find dentists near Bristol that work with NHS and have good reviews"
+User: "find physiotherapists near Sheffield that work with NHS and have good reviews"
 Output:
 {
   "constraint_checklist": {
@@ -197,10 +197,10 @@ Output:
     "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
     "has_monitoring_intent": false
   },
-  "semantic_interpretation": "The user wants dentists near Bristol that have a relationship with the NHS. This is a one-time search."
+  "semantic_interpretation": "The user wants physiotherapists near Sheffield that have a relationship with the NHS. This is a one-time search."
 }
 
-User: "watch for new co-working spaces in London and let me know when one opens"
+User: "watch for new co-working spaces in Glasgow and let me know when one opens"
 Output:
 {
   "constraint_checklist": {
@@ -210,7 +210,7 @@ Output:
     "has_contact_extraction": false, "has_ranking": false, "has_requested_count": false,
     "has_monitoring_intent": true
   },
-  "semantic_interpretation": "The user wants co-working spaces in London. They want to be alerted when new ones open. The mission mode is alert-on-change with a time constraint for newly opened venues."
+  "semantic_interpretation": "The user wants co-working spaces in Glasgow. They want to be alerted when new ones open. The mission mode is alert-on-change with a time constraint for newly opened venues."
 }
 
 Return ONLY valid JSON matching this structure. No markdown fences, no commentary.`;
@@ -403,13 +403,13 @@ Semantic input: The user wants gastropubs in Oxford whose website text contains 
   "mission_mode": "research_now"
 }
 
-Semantic input: The user wants cafes in Manchester whose website text contains "vegan food". This is a one-time search.
+Semantic input: The user wants cafes in Norwich whose website text contains "vegan food". This is a one-time search.
 {
   "entity_category": "cafes",
-  "location_text": "Manchester",
+  "location_text": "Norwich",
   "requested_count": null,
   "constraints": [
-    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Manchester", "hardness": "hard" },
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Norwich", "hardness": "hard" },
     { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "vegan food", "hardness": "hard" }
   ],
   "mission_mode": "research_now"
@@ -439,13 +439,13 @@ Semantic input: The user wants hospitals in the UK that offer the service "sleep
   "mission_mode": "alert_on_change"
 }
 
-Semantic input: The user wants 10 Italian restaurants in Brighton that have outdoor seating and a rating of at least 4.5 stars. This is a one-time search.
+Semantic input: The user wants 10 Italian restaurants in Nottingham that have outdoor seating and a rating of at least 4.5 stars. This is a one-time search.
 {
   "entity_category": "Italian restaurants",
-  "location_text": "Brighton",
+  "location_text": "Nottingham",
   "requested_count": 10,
   "constraints": [
-    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Brighton", "hardness": "hard" },
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Nottingham", "hardness": "hard" },
     { "type": "attribute_check", "field": "amenity", "operator": "has", "value": "outdoor seating", "hardness": "hard" },
     { "type": "numeric_range", "field": "rating", "operator": "gte", "value": 4.5, "hardness": "hard" }
   ],
@@ -465,10 +465,10 @@ Semantic input: The user wants pubs in Hampshire whose business name contains "T
   "mission_mode": "research_now"
 }
 
-Semantic input: The user wants dentists near Bristol that have a relationship with the NHS. This is a one-time search.
+Semantic input: The user wants physiotherapists near Sheffield that have a relationship with the NHS. This is a one-time search.
 {
-  "entity_category": "dentists",
-  "location_text": "Bristol",
+  "entity_category": "physiotherapists",
+  "location_text": "Sheffield",
   "requested_count": null,
   "constraints": [
     { "type": "relationship_check", "field": "client", "operator": "serves", "value": "NHS", "hardness": "hard" }
@@ -476,13 +476,13 @@ Semantic input: The user wants dentists near Bristol that have a relationship wi
   "mission_mode": "research_now"
 }
 
-Semantic input: The user wants 5 vets in London that extract email addresses. This is a one-time search.
+Semantic input: The user wants 5 vets in Canterbury that extract email addresses. This is a one-time search.
 {
   "entity_category": "vets",
-  "location_text": "London",
+  "location_text": "Canterbury",
   "requested_count": 5,
   "constraints": [
-    { "type": "location_constraint", "field": "address", "operator": "within", "value": "London", "hardness": "hard" },
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Canterbury", "hardness": "hard" },
     { "type": "contact_extraction", "field": "email", "operator": "extract", "value": null, "hardness": "hard" }
   ],
   "mission_mode": "research_now"
@@ -545,7 +545,7 @@ RULES:
 - clarification_question must be null if clarification_needed is false.
 - ambiguity_flags: empty array [] if no genuine ambiguity.
 
-EXAMPLE 1 — "find bottle shops in East Sussex that sell craft beer":
+EXAMPLE 1 — "find bottle shops in Somerset that sell craft beer":
 {
   "entity_description": "independent retail shops that stock craft beer from multiple producers for sale to the public",
   "entity_exclusions": ["breweries selling their own beer", "supermarkets and chain off-licences", "online-only retailers"],
@@ -554,11 +554,11 @@ EXAMPLE 1 — "find bottle shops in East Sussex that sell craft beer":
   "findability": "moderate",
   "findability_reason": "bottle shops often have websites listing their stock or mentioning craft beer explicitly",
   "suggested_approaches": [
-    "search Google Places for bottle shops and off-licences in East Sussex",
+    "search Google Places for bottle shops and off-licences in Somerset",
     "visit each website and look for mentions of craft beer, local beer, or multiple brewery names",
-    "search for East Sussex craft beer retailers and independent off-licences"
+    "search for Somerset craft beer retailers and independent off-licences"
   ],
-  "fallback_intent": "independent off-licences and specialist drink retailers in East Sussex",
+  "fallback_intent": "independent off-licences and specialist drink retailers in Somerset",
   "scarcity_expectation": "scarce",
   "clarification_needed": false,
   "clarification_question": null,
@@ -585,20 +585,20 @@ EXAMPLE 2 — "find accountancy firms in Edinburgh that specialise in R&D tax cr
   "ambiguity_flags": []
 }
 
-EXAMPLE 3 — "monitor for new craft breweries in Sussex":
+EXAMPLE 3 — "monitor for new craft breweries in Devon":
 {
-  "entity_description": "craft breweries that have recently opened or are newly established in Sussex",
+  "entity_description": "craft breweries that have recently opened or are newly established in Devon",
   "entity_exclusions": ["pubs that serve craft beer but don't brew it", "homebrew supply shops"],
   "commercial_context": "likely a craft beer distributor or enthusiast wanting to discover new breweries as they open",
   "key_discriminator": "is a brewery that brews beer on-site — not a pub, bar, or shop that merely sells craft beer",
   "findability": "moderate",
   "findability_reason": "new breweries often announce their opening on social media and local news, and register on directories",
   "suggested_approaches": [
-    "search Google Places for breweries in Sussex and check which ones are recently added or have recent first reviews",
-    "search for 'new brewery Sussex' or 'brewery opening Sussex' in news and local publications",
-    "check brewery directories like CAMRA, Untappd, and BreweryDB for recent Sussex additions"
+    "search Google Places for breweries in Devon and check which ones are recently added or have recent first reviews",
+    "search for 'new brewery Devon' or 'brewery opening Devon' in news and local publications",
+    "check brewery directories like CAMRA, Untappd, and BreweryDB for recent Devon additions"
   ],
-  "fallback_intent": "all craft breweries in Sussex, then filter by evidence of recent establishment",
+  "fallback_intent": "all craft breweries in Devon, then filter by evidence of recent establishment",
   "scarcity_expectation": "scarce",
   "clarification_needed": false,
   "clarification_question": null,

@@ -124,12 +124,12 @@ NEGATIVE RULES:
 
 EXAMPLES:
 
-User: "find gyms in London that opened in the last 6 months"
+User: "find gyms in Liverpool that opened in the last 6 months"
 {
   "mission_type": "find_businesses",
   "entity_kind": "venue",
   "entity_category": "gyms",
-  "location_text": "London",
+  "location_text": "Liverpool",
   "geo_mode": "city",
   "radius_km": null,
   "requested_count": null,
@@ -141,29 +141,29 @@ User: "find gyms in London that opened in the last 6 months"
   "preferred_evidence_order": ["news", "web_search"]
 }
 
-User: "find 10 pubs in Arundel"
+User: "find 10 pubs in Harrogate"
 {
   "mission_type": "find_businesses",
   "entity_kind": "venue",
   "entity_category": "pubs",
-  "location_text": "Arundel",
+  "location_text": "Harrogate",
   "geo_mode": "city",
   "radius_km": null,
   "requested_count": 10,
   "default_count_policy": "explicit",
   "constraints": [
-    { "type": "name_filter", "raw": "location: Arundel", "hardness": "hard", "evidence_mode": "google_places", "clarify_if_needed": false, "clarify_question": null }
+    { "type": "name_filter", "raw": "location: Harrogate", "hardness": "hard", "evidence_mode": "google_places", "clarify_if_needed": false, "clarify_question": null }
   ],
   "plan_template_hint": "simple_search",
   "preferred_evidence_order": []
 }
 
-User: "dentists near Brighton with 4.5 star rating"
+User: "opticians near Chester with 4.5 star rating"
 {
   "mission_type": "find_businesses",
   "entity_kind": "company",
-  "entity_category": "dentists",
-  "location_text": "Brighton",
+  "entity_category": "opticians",
+  "location_text": "Chester",
   "geo_mode": "radius",
   "radius_km": null,
   "requested_count": null,
@@ -209,12 +209,12 @@ User: "keep checking which hospitals in the UK offer the sleep apnea implant and
   "preferred_evidence_order": ["website_text", "web_search"]
 }
 
-User: "monitor new vegan restaurants opening in Manchester"
+User: "monitor new vegan restaurants opening in Cardiff"
 {
   "mission_type": "monitor",
   "entity_kind": "venue",
   "entity_category": "vegan restaurants",
-  "location_text": "Manchester",
+  "location_text": "Cardiff",
   "geo_mode": "city",
   "radius_km": null,
   "requested_count": null,
