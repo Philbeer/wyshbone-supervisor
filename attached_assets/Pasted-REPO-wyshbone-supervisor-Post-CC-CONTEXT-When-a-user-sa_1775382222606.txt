@@ -1,0 +1,83 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: When a user says "find pubs in Arundel", the named location "Arundel" should be a HARD constraint — results outside Arundel should be rejected. Currently, all three intent-to-constraint bridge files hardcode LOCATION_EQUALS as soft (hard: false), which means the system treats location as a suggestion rather than a boundary. The mission extractor prompt already correctly tells the LLM to emit hard location constraints, but the bridge code overrides this to soft.
+
+TASK: Make named location constraints hard by default in all three files. This is a small change — just flip `hard: false` to `hard: true` in three places.
+
+═══════════════════════════════════════════════════════════════
+CHANGE 1: server/supervisor/mission-bridge.ts
+═══════════════════════════════════════════════════════════════
+
+In the `missionToParsedGoal` function, find the block that creates the hardcoded LOCATION_EQUALS constraint:
+
+```typescript
+if (location) {
+    constraints.push({
+      id: 'c_location',
+      type: 'LOCATION_EQUALS',
+      field: 'location',
+      operator: '=',
+      value: location,
+      hard: false,
+      rationale: `Location: ${location}`,
+    });
+  }
+```
+
+Change `hard: false` to `hard: true`.
+
+═══════════════════════════════════════════════════════════════
+CHANGE 2: server/supervisor/intent-bridge.ts
+═══════════════════════════════════════════════════════════════
+
+In the `canonicalIntentToParsedGoal` function, find the LOCATION_EQUALS block:
+
+```typescript
+constraints.push({
+        id: 'c_location',
+        type: 'LOCATION_EQUALS',
+        field: 'location',
+        operator: '=',
+        value: location,
+        hard: false,
+        rationale: `Location: ${location}`,
+      });
+```
+
+Change `hard: false` to `hard: true`.
+
+Also in the same function, the LOCATION_NEAR block (for "near X" queries) should stay as `hard: false` — proximity is genuinely soft. Only change the LOCATION_EQUALS one.
+
+═══════════════════════════════════════════════════════════════
+CHANGE 3: server/supervisor/goal-to-constraints.ts
+═══════════════════════════════════════════════════════════════
+
+In the SYSTEM_PROMPT string, find the line:
+
+```
+- Default soft: LOCATION_EQUALS, LOCATION_NEAR, NAME_STARTS_WITH, NAME_CONTAINS, MUST_USE_TOOL
+```
+
+Change to:
+
+```
+- Default hard: LOCATION_EQUALS (named locations are boundaries, not suggestions)
+- Default soft: LOCATION_NEAR, NAME_STARTS_WITH, NAME_CONTAINS, MUST_USE_TOOL
+```
+
+Also in the same prompt, find:
+
+```
+- LOCATION_EQUALS: when user says "in <place>" → { id: "c_location", type: "LOCATION_EQUALS", field: "location", operator: "=", value: "<place>", hard: false, rationale: "..." }
+```
+
+Change `hard: false` to `hard: true`.
+
+═══════════════════════════════════════════════════════════════
+DO NOT CHANGE
+═══════════════════════════════════════════════════════════════
+
+- LOCATION_NEAR should stay soft (hard: false) — proximity is genuinely flexible
+- The mission extractor prompts in mission-extractor.ts — these already correctly emit hard location constraints
+- Any test files — they may need updating if they assert `hard: false` for LOCATION_EQUALS, but check the build first and only fix tests that actually break
+- The CVL (constraint verification layer) — it already handles both hard and soft LOCATION_EQUALS correctly
