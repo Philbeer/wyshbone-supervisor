@@ -565,21 +565,21 @@ EXAMPLE 1 — "find bottle shops in East Sussex that sell craft beer":
   "ambiguity_flags": []
 }
 
-EXAMPLE 2 — "find suppliers to the fire service in Kent":
+EXAMPLE 2 — "find accountancy firms in Edinburgh that specialise in R&D tax credits":
 {
-  "entity_description": "businesses that supply goods or services to Kent Fire and Rescue Service under contract or framework agreement",
-  "entity_exclusions": ["fire equipment retailers selling to the public", "businesses merely located near fire stations", "fire safety training companies not contracted to the fire service"],
-  "commercial_context": "likely researching the public sector supply chain to identify procurement opportunities or partnership entry points",
-  "key_discriminator": "has a direct supply or contractual relationship with Kent Fire and Rescue Service — not just selling fire-related products to the general public",
-  "findability": "hard",
-  "findability_reason": "supply relationships with emergency services are rarely stated on a supplier's own website — more likely found in procurement portals, contract registers, or freedom of information responses",
+  "entity_description": "accountancy practices or tax advisory firms in Edinburgh that offer specialist R&D tax credit claim services to businesses",
+  "entity_exclusions": ["general bookkeeping services without tax specialisation", "software companies that automate R&D claims but are not accountancy firms", "HMRC offices"],
+  "commercial_context": "likely a business owner or finance director looking for professional help claiming R&D tax relief",
+  "key_discriminator": "is an accountancy or tax advisory firm that explicitly offers R&D tax credit services — not a general accountant who might do it on request",
+  "findability": "moderate",
+  "findability_reason": "R&D tax credit specialisation is commonly stated on accountancy firm websites as a listed service, though some generalist firms may offer it without prominently advertising it",
   "suggested_approaches": [
-    "search Kent Fire and Rescue Service website for published contract registers, supplier lists, and procurement frameworks",
-    "search for businesses that mention Kent Fire and Rescue Service as a client on their own website",
-    "search government procurement portals (Contracts Finder, Find a Tender) for Kent fire service contracts"
+    "search Google Places for accountancy firms and tax advisors in Edinburgh",
+    "visit each firm's website and look for mentions of R&D tax credits, R&D relief, or innovation tax incentives on their services page",
+    "search for 'R&D tax credits Edinburgh accountant' to find firms that market this specialism directly"
   ],
-  "fallback_intent": "fire safety and emergency equipment suppliers operating in Kent that typically work with public sector clients",
-  "scarcity_expectation": "unknown",
+  "fallback_intent": "accountancy firms in Edinburgh that offer specialist tax advisory services",
+  "scarcity_expectation": "moderate",
   "clarification_needed": false,
   "clarification_question": null,
   "ambiguity_flags": []
