@@ -5,6 +5,8 @@ import type { SleepingGoal, WakeResult } from './types';
 import { executeWake } from './wake-executor';
 
 let isWaking = false;
+let dailyWakeCount = 0;
+let dailyWakeResetDate = '';
 
 const INTERVAL_MS: Record<string, number> = {
   hourly: 3_600_000,
