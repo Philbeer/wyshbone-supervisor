@@ -1221,6 +1221,7 @@ class SupervisorService {
     let effectiveMsg = rawMsg;
     if (userContext.recentSearches && userContext.recentSearches.length > 0) {
       const msgLower = rawMsg.toLowerCase().trim();
+      console.log(`[CROSS_SESSION_DEBUG] rawMsg="${rawMsg}" recentSearches=${userContext.recentSearches?.length ?? 0}`);
       const vaguePatterns = [
         /^(now\s+)?find\s+(some|more|them)\s+(in|near|around)\s+/i,
         /^(same|that)\s+(search|again|one)\s+(in|for|but)\s+/i,
