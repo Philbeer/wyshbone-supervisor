@@ -151,6 +151,12 @@ interface UserContext {
     label: string;
     prompt: string;
   }>;
+  recentSearches?: Array<{
+    query: string;
+    delivered: number;
+    verdict: string;
+    created: string;
+  }>;
 }
 
 class SupervisorService {
@@ -1180,6 +1186,15 @@ class SupervisorService {
       } catch (ctxErr: any) {
         console.warn(`[INTENT_EXTRACTOR_SHADOW] conversation context fetch failed (non-fatal): ${ctxErr.message}`);
       }
+    }
+
+    // Append cross-session search history to context
+    if (userContext.recentSearches && userContext.recentSearches.length > 0) {
+      const searchHistoryStr = userContext.recentSearches
+        .map(s => `- "${s.query}" → ${s.delivered} results (${s.verdict}, ${s.created})`)
+        .join('\n');
+      const historyBlock = `\n\nUser's recent search history (from previous sessions):\n${searchHistoryStr}`;
+      conversationContextStr = (conversationContextStr || '') + historyBlock;
     }
 
     let shadowResult: { ran: boolean; extraction: any; error: string | null } = { ran: false, extraction: null, error: null };
@@ -3315,6 +3330,39 @@ class SupervisorService {
     } catch (error) {
       console.error('Error building user context:', error);
     }
+
+    // ── Cross-session memory: recent search history ──
+    let recentSearches: Array<{ query: string; delivered: number; verdict: string; created: string }> = [];
+    try {
+      if (supabase) {
+        const { data: recentRuns } = await supabase
+          .from('agent_runs')
+          .select('id, goal_summary, status, terminal_state, result, created_at')
+          .eq('user_id', userId)
+          .in('status', ['completed'])
+          .order('created_at', { ascending: false })
+          .limit(10);
+
+        if (recentRuns && recentRuns.length > 0) {
+          recentSearches = recentRuns
+            .filter((r: any) => r.goal_summary && r.goal_summary.length > 5)
+            .map((r: any) => {
+              const result = typeof r.result === 'string' ? (() => { try { return JSON.parse(r.result); } catch { return {}; } })() : (r.result || {});
+              return {
+                query: r.goal_summary || '',
+                delivered: result.deliveredCount ?? result.delivered_count ?? 0,
+                verdict: result.towerVerdict ?? result.tower_verdict ?? r.terminal_state ?? 'unknown',
+                created: r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : 'unknown',
+              };
+            })
+            .slice(0, 5); // Keep top 5 most recent
+        }
+      }
+      console.log(`  🔄 Found ${recentSearches.length} recent searches for cross-session context`);
+    } catch (err: any) {
+      console.warn(`  ⚠️ Cross-session memory fetch failed (non-fatal): ${err.message}`);
+    }
+    context.recentSearches = recentSearches;
 
     return context;
   }
