@@ -500,6 +500,7 @@ function verifyOneConstraint(
         lead.lng,
         locationValue,
         constraint.hard,
+        lead.address,
       );
 
       const geoEvidence = {

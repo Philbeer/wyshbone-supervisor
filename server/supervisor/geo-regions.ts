@@ -254,31 +254,56 @@ export function verifyLocationGeo(
   lng: number | null | undefined,
   locationName: string,
   isHardConstraint: boolean,
+  leadAddress?: string | null,
 ): GeoVerificationResult {
   const regionKeys = resolveRegionKeys(locationName);
 
   if (regionKeys.length === 0) {
-    if (lat != null && lng != null) {
-      return {
-        status: isHardConstraint ? 'UNKNOWN' : 'SEARCH_BOUNDED',
-        method: isHardConstraint ? 'unknown' : 'search_bounded',
-        regionKey: null,
-        regionName: null,
-        lat: lat ?? null,
-        lng: lng ?? null,
-        confidence: 'low',
-        reason: `No region boundary data for "${locationName}"; ${isHardConstraint ? 'cannot geo-verify (hard constraint)' : 'search was bounded to this region (soft constraint)'}`,
-      };
+    // No bounding box for this location (it's a town/city, not a county).
+    // Fallback: check if the lead's address contains the location name.
+    const locationLower = locationName.toLowerCase().trim();
+    const addressLower = (leadAddress || '').toLowerCase();
+
+    if (addressLower && locationLower) {
+      // Check if address contains the location name
+      const addressContainsLocation = addressLower.includes(locationLower);
+
+      if (addressContainsLocation) {
+        return {
+          status: 'VERIFIED_GEO',
+          method: 'search_bounded',
+          regionKey: null,
+          regionName: locationName,
+          lat: lat ?? null,
+          lng: lng ?? null,
+          confidence: 'medium',
+          reason: `Lead address "${leadAddress}" contains "${locationName}" (address match)`,
+        };
+      } else {
+        // Address exists but doesn't contain the location — likely out of area
+        return {
+          status: 'OUT_OF_AREA',
+          method: 'search_bounded',
+          regionKey: null,
+          regionName: locationName,
+          lat: lat ?? null,
+          lng: lng ?? null,
+          confidence: 'medium',
+          reason: `Lead address "${leadAddress}" does not contain "${locationName}" — likely outside target area`,
+        };
+      }
     }
+
+    // No address available either — truly unknown
     return {
       status: isHardConstraint ? 'UNKNOWN' : 'SEARCH_BOUNDED',
       method: isHardConstraint ? 'unknown' : 'search_bounded',
       regionKey: null,
       regionName: null,
-      lat: null,
-      lng: null,
+      lat: lat ?? null,
+      lng: lng ?? null,
       confidence: 'low',
-      reason: `No region boundary data for "${locationName}" and no lat/lng available`,
+      reason: `No region boundary data for "${locationName}" and no address available`,
     };
   }
 
@@ -313,6 +338,24 @@ export function verifyLocationGeo(
   }
 
   const regionNames = regionKeys.map(k => getRegion(k)?.name ?? k).join(' / ');
+
+  // Bbox says out of area, but double-check with address string
+  // (bbox is for the county — the town might be at the edge)
+  const locationLower = locationName.toLowerCase().trim();
+  const addressLower = (leadAddress || '').toLowerCase();
+  if (addressLower && addressLower.includes(locationLower)) {
+    return {
+      status: 'VERIFIED_GEO',
+      method: 'search_bounded',
+      regionKey: regionKeys[0],
+      regionName: locationName,
+      lat,
+      lng,
+      confidence: 'medium',
+      reason: `Lead address contains "${locationName}" despite being outside ${regionNames} bbox (address override)`,
+    };
+  }
+
   return {
     status: 'OUT_OF_AREA',
     method: 'geo_bbox',
