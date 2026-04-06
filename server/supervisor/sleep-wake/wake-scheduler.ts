@@ -43,7 +43,7 @@ export async function checkAndWakeGoals(): Promise<void> {
         conversationId: monitor.conversation_id ?? null,
         label: monitor.label,
         description: monitor.description ?? '',
-        scheduleType: monitor.schedule_time ?? 'daily',
+        scheduleType: monitor.schedule ?? 'daily',
         monitorType: monitor.monitor_type ?? 'lead_search',
         config: monitor.config ?? {},
         baselineEntityNames: monitor.baseline_entity_names ?? [],
