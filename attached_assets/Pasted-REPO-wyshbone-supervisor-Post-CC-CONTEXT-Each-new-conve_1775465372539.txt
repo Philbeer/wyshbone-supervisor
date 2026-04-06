@@ -1,0 +1,118 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: Each new conversation starts completely fresh — the Supervisor has no idea what the user searched before. If they found "pubs in Arundel with live music" yesterday and today ask "find more like those", the system doesn't know what "those" refers to.
+
+The infrastructure already exists:
+- `agent_runs` table has every past search with query, results, verdict
+- `agent_memory` table has preferences/patterns (used by autonomous agent, not by Supervisor chat)
+- `delivery_summary` artefacts have full result details
+
+The fix: when processing a new chat task, fetch the user's recent search history and include it as context for the mission extractor. This lets users reference past searches naturally.
+
+═══════════════════════════════════════════════════════════════
+CHANGE 1: server/supervisor.ts — buildUserContext method
+═══════════════════════════════════════════════════════════════
+
+Find the `private async buildUserContext(userId: string)` method. It already fetches facts, messages, monitors, research runs.
+
+After the existing context building (after the monitors/research queries), add a new section to fetch recent search history:
+
+```typescript
+    // ── Cross-session memory: recent search history ──
+    let recentSearches: Array<{ query: string; delivered: number; verdict: string; created: string }> = [];
+    try {
+      if (supabase) {
+        const { data: recentRuns } = await supabase
+          .from('agent_runs')
+          .select('id, goal_summary, status, terminal_state, result, created_at')
+          .eq('user_id', userId)
+          .in('status', ['completed'])
+          .order('created_at', { ascending: false })
+          .limit(10);
+
+        if (recentRuns && recentRuns.length > 0) {
+          recentSearches = recentRuns
+            .filter((r: any) => r.goal_summary && r.goal_summary.length > 5)
+            .map((r: any) => {
+              const result = typeof r.result === 'string' ? (() => { try { return JSON.parse(r.result); } catch { return {}; } })() : (r.result || {});
+              return {
+                query: r.goal_summary || '',
+                delivered: result.deliveredCount ?? result.delivered_count ?? 0,
+                verdict: result.towerVerdict ?? result.tower_verdict ?? r.terminal_state ?? 'unknown',
+                created: r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : 'unknown',
+              };
+            })
+            .slice(0, 5); // Keep top 5 most recent
+        }
+      }
+      console.log(`  🔄 Found ${recentSearches.length} recent searches for cross-session context`);
+    } catch (err: any) {
+      console.warn(`  ⚠️ Cross-session memory fetch failed (non-fatal): ${err.message}`);
+    }
+```
+
+Then add `recentSearches` to the returned `UserContext` object. Add the field to the UserContext interface too.
+
+═══════════════════════════════════════════════════════════════
+CHANGE 2: server/types/supervisor-chat.ts or wherever UserContext is defined
+═══════════════════════════════════════════════════════════════
+
+Add the new field to the UserContext interface:
+
+```typescript
+  recentSearches?: Array<{
+    query: string;
+    delivered: number;
+    verdict: string;
+    created: string;
+  }>;
+```
+
+═══════════════════════════════════════════════════════════════
+CHANGE 3: server/supervisor.ts — processChatTask, pass to mission extractor
+═══════════════════════════════════════════════════════════════
+
+Find where `conversationContextStr` is built (around line 1178). After the existing conversation context string is built, append the cross-session search history:
+
+```typescript
+    // Append cross-session search history to context
+    if (userContext.recentSearches && userContext.recentSearches.length > 0) {
+      const searchHistoryStr = userContext.recentSearches
+        .map(s => `- "${s.query}" → ${s.delivered} results (${s.verdict}, ${s.created})`)
+        .join('\n');
+      const historyBlock = `\n\nUser's recent search history (from previous sessions):\n${searchHistoryStr}`;
+      conversationContextStr = (conversationContextStr || '') + historyBlock;
+    }
+```
+
+This means the mission extractor prompt will now include lines like:
+```
+User's recent search history (from previous sessions):
+- "find pubs in Arundel that have live music" → 12 results (pass, 2026-04-05)
+- "find companies in West Sussex that are expanding" → 5 results (pass, 2026-04-05)
+- "find independent bakeries in Arundel" → 7 results (pass, 2026-04-06)
+```
+
+When the user then says "find more like the pubs", the mission extractor can see they previously searched for pubs in Arundel with live music and understand the reference.
+
+═══════════════════════════════════════════════════════════════
+WHAT THIS ENABLES
+═══════════════════════════════════════════════════════════════
+
+Before: "find more like those" → system has no idea what "those" is
+After: "find more like those" → mission extractor sees recent search history, understands the user means pubs in Arundel with live music
+
+Before: "try the same search in Brighton" → fails to understand what "same search" means  
+After: "try the same search in Brighton" → sees the Arundel pubs search, replicates with Brighton
+
+Before: User repeats a search they did yesterday → runs it fresh
+After: Same query detected → system could say "You searched this on 05/04 and found 12 results. Want to search again or see those?"
+
+═══════════════════════════════════════════════════════════════
+DO NOT CHANGE
+═══════════════════════════════════════════════════════════════
+
+- memory-reader.ts — leave the agent_memory system as-is (it's for the autonomous agent)
+- conversation-context.ts — within-session context is fine
+- The mission extractor prompts — they already accept conversationContext, no prompt changes needed
+- The intent-bridge buildConversationContextString — keep the 6-turn message history as-is
