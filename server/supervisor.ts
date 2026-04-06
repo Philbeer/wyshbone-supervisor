@@ -1190,10 +1190,23 @@ class SupervisorService {
 
     // Append cross-session search history to context
     if (userContext.recentSearches && userContext.recentSearches.length > 0) {
-      const searchHistoryStr = userContext.recentSearches
-        .map(s => `- "${s.query}" → ${s.delivered} results (${s.verdict}, ${s.created})`)
-        .join('\n');
-      const historyBlock = `\n\nUser's recent search history (from previous sessions):\n${searchHistoryStr}`;
+      const searches = userContext.recentSearches;
+      const mostRecent = searches[0]; // Already sorted by created_at DESC
+      const older = searches.slice(1);
+      
+      let historyBlock = `\n\nUser's recent search history (from previous sessions):`;
+      historyBlock += `\nMOST RECENT SEARCH (use this if user says "same again", "find more", "find some", etc.):`;
+      historyBlock += `\n  >>> "${mostRecent.query}" → ${mostRecent.delivered} results (${mostRecent.verdict}, ${mostRecent.created})`;
+      
+      if (older.length > 0) {
+        historyBlock += `\nOlder searches:`;
+        for (const s of older) {
+          historyBlock += `\n  - "${s.query}" → ${s.delivered} results (${s.verdict}, ${s.created})`;
+        }
+      }
+      
+      historyBlock += `\n\nIMPORTANT: If the user's message is vague (e.g. "find some in X", "same again in Y", "try that in Z"), interpret it as the MOST RECENT search above applied to the new location. Do NOT default to a generic business type.`;
+      
       conversationContextStr = (conversationContextStr || '') + historyBlock;
     }
 
