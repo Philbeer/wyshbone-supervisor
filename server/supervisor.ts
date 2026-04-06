@@ -1214,10 +1214,44 @@ class SupervisorService {
       conversationContextStr = (conversationContextStr || '') + historyBlock;
     }
 
+    // ── Cross-session vague reference resolver ──
+    // If the user's message is short/vague AND we have recent search history,
+    // rewrite the query to include the most recent search context explicitly.
+    // This is more reliable than hoping the LLM reads embedded instructions.
+    let effectiveMsg = rawMsg;
+    if (userContext.recentSearches && userContext.recentSearches.length > 0) {
+      const msgLower = rawMsg.toLowerCase().trim();
+      const vaguePatterns = [
+        /^(now\s+)?find\s+(some|more|them)\s+(in|near|around)\s+/i,
+        /^(same|that)\s+(search|again|one)\s+(in|for|but)\s+/i,
+        /^(try|do)\s+(that|this|the same|it)\s+(in|for|near)\s+/i,
+        /^(more|some)\s+(in|near|around)\s+/i,
+        /^find\s+(some|more)\s+in\s+/i,
+      ];
+      const isVague = vaguePatterns.some(p => p.test(msgLower));
+
+      if (isVague) {
+        const mostRecent = userContext.recentSearches[0];
+        // Extract location from the vague message
+        const locationMatch = msgLower.match(/(?:in|near|around)\s+(.+?)[\s.!?]*$/i);
+        const newLocation = locationMatch ? locationMatch[1].trim() : null;
+
+        if (newLocation && mostRecent.query) {
+          // Try to extract the entity type from the most recent search
+          // e.g. "find shoe shops in London" → "shoe shops"
+          const entityMatch = mostRecent.query.match(/(?:find\s+)?(.+?)\s+(?:in|near|around)\s+/i);
+          const entityType = entityMatch ? entityMatch[1].trim() : mostRecent.query;
+
+          effectiveMsg = `find ${entityType} in ${newLocation}`;
+          console.log(`[CROSS_SESSION] Vague reference resolved: "${rawMsg}" → "${effectiveMsg}" (based on most recent search: "${mostRecent.query}")`);
+        }
+      }
+    }
+
     let shadowResult: { ran: boolean; extraction: any; error: string | null } = { ran: false, extraction: null, error: null };
     let shadowProbeError: string | null = null;
     try {
-      shadowResult = await runIntentExtractorShadow(rawMsg, jobId, task.user_id, task.conversation_id, conversationContextStr);
+      shadowResult = await runIntentExtractorShadow(effectiveMsg, jobId, task.user_id, task.conversation_id, conversationContextStr);
     } catch (e: any) {
       shadowProbeError = e.message;
       console.warn(`[INTENT_EXTRACTOR_SHADOW] top-level error (non-fatal): ${e.message}`);
@@ -1260,7 +1294,7 @@ class SupervisorService {
 
     if (missionMode !== 'off') {
       try {
-        missionResult = await extractStructuredMission(rawMsg, conversationContextStr);
+        missionResult = await extractStructuredMission(effectiveMsg, conversationContextStr);
         const canonicalForComparison = shadowResult.extraction?.validation?.intent ?? null;
 
         logMissionShadow(
