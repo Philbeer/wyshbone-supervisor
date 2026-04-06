@@ -845,6 +845,241 @@ class SupervisorService {
     }
   }
 
+  // ─── CREATE MONITOR EXECUTOR ─────────────────────────────────────────────────
+  // Handles create_monitor tasks: creates a scheduled monitor from an existing
+  // completed search run. Does NOT run a new search.
+  private async handleCreateMonitor(
+    task: SupervisorTask,
+    jobId: string,
+    clientRequestId: string,
+  ): Promise<void> {
+    if (!supabase) return;
+
+    const rd = task.request_data as any;
+    const userMessage = String(rd.user_message || '').trim();
+    const conversationId = task.conversation_id;
+
+    console.log(`[CREATE_MONITOR] runId=${jobId} conversation=${conversationId} msg="${userMessage.slice(0, 80)}"`);
+
+    try {
+      // 1. Find the most recent completed run for this conversation
+      const { data: recentRuns, error: runError } = await supabase
+        .from('agent_runs')
+        .select('id, metadata, goal_summary')
+        .eq('conversation_id', conversationId)
+        .eq('status', 'completed')
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      if (runError) {
+        console.error(`[CREATE_MONITOR] Failed to query runs: ${runError.message}`);
+        throw new Error('Could not find recent searches to monitor');
+      }
+
+      // 2. Find the most recent run that has a mission extraction artefact
+      let sourceRunId: string | null = null;
+      let missionConfig: any = null;
+
+      for (const run of (recentRuns || [])) {
+        const { data: missionArtefacts } = await supabase
+          .from('artefacts')
+          .select('payload')
+          .eq('run_id', run.id)
+          .eq('type', 'mission_extraction')
+          .limit(1);
+
+        if (missionArtefacts && missionArtefacts.length > 0) {
+          sourceRunId = run.id;
+          const payload = missionArtefacts[0].payload;
+          // The mission extraction payload contains the structured mission in layers.pass2_structured_mission
+          const mission = payload?.layers?.pass2_structured_mission || payload?.pass2_structured_mission;
+          if (mission && mission.entity_category) {
+            missionConfig = mission;
+            break;
+          }
+        }
+      }
+
+      if (!missionConfig || !sourceRunId) {
+        // Fallback: try to get config from delivery_summary artefact
+        for (const run of (recentRuns || [])) {
+          const { data: deliveryArts } = await supabase
+            .from('artefacts')
+            .select('payload')
+            .eq('run_id', run.id)
+            .eq('type', 'delivery_summary')
+            .limit(1);
+
+          if (deliveryArts && deliveryArts.length > 0) {
+            const dp = deliveryArts[0].payload;
+            if (dp?.original_user_goal) {
+              sourceRunId = run.id;
+              missionConfig = {
+                entity_category: dp.business_type || dp.original_user_goal,
+                location_text: dp.location || null,
+                constraints: dp.structured_constraints || [],
+              };
+              break;
+            }
+          }
+        }
+      }
+
+      if (!sourceRunId) {
+        const noSearchMsg = "I couldn't find a recent search to monitor. Run a search first, then ask me to set up a monitor for it.";
+        const messageId = randomUUID();
+        await Promise.all([
+          supabase.from('messages').insert({
+            id: messageId,
+            conversation_id: conversationId,
+            role: 'assistant',
+            content: noSearchMsg,
+            source: 'supervisor',
+            metadata: { supervisor_task_id: task.id, run_id: jobId, create_monitor_failed: true },
+            created_at: Date.now(),
+          }),
+          supabase.from('supervisor_tasks').update({ status: 'completed', result: { message_id: messageId, monitor_created: false } }).eq('id', task.id),
+          storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'no_search_to_monitor' } }).catch(() => {}),
+        ]);
+        return;
+      }
+
+      // 3. Parse schedule from user message
+      const msgLower = userMessage.toLowerCase();
+      let schedule = 'weekly'; // default
+      if (/\b(hourly|every\s+hour)\b/.test(msgLower)) schedule = 'hourly';
+      else if (/\b(daily|every\s+day|each\s+day)\b/.test(msgLower)) schedule = 'daily';
+      else if (/\b(weekly|every\s+week|each\s+week|once\s+a\s+week)\b/.test(msgLower)) schedule = 'weekly';
+
+      const entity = missionConfig.entity_category || 'businesses';
+      const location = missionConfig.location_text || 'unknown location';
+      const label = `${entity} in ${location}`;
+
+      // 4. Compute next_wake_at
+      const intervals: Record<string, number> = {
+        hourly: 3_600_000,
+        daily: 86_400_000,
+        weekly: 604_800_000,
+      };
+      const nextWakeAt = new Date(Date.now() + (intervals[schedule] || intervals.weekly)).toISOString();
+
+      // 5. Get baseline entity names from the source run's delivery
+      let baselineNames: string[] = [];
+      try {
+        const { data: deliveryArts } = await supabase
+          .from('artefacts')
+          .select('payload')
+          .eq('run_id', sourceRunId)
+          .in('type', ['final_delivery', 'combined_delivery', 'leads_list'])
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (deliveryArts && deliveryArts.length > 0) {
+          const leads = deliveryArts[0].payload?.leads || deliveryArts[0].payload?.payload_json?.leads || [];
+          baselineNames = leads.map((l: any) => l.name).filter(Boolean);
+        }
+      } catch (e: any) {
+        console.warn(`[CREATE_MONITOR] Failed to get baseline names: ${e.message}`);
+      }
+
+      // 6. Insert the monitor
+      const monitorId = randomUUID();
+      const { error: insertError } = await supabase.from('scheduled_monitors').insert({
+        id: monitorId,
+        user_id: task.user_id,
+        conversation_id: conversationId,
+        label: label,
+        description: `Monitor for ${entity} in ${location} (${schedule})`,
+        schedule: schedule,
+        schedule_time: '09:00',
+        monitor_type: 'lead_search',
+        config: {
+          original_goal: `find ${entity} in ${location}`,
+          business_type: entity,
+          location: location,
+          country: missionConfig.country || 'UK',
+          constraints: (missionConfig.constraints || []).map((c: any) => ({
+            type: c.type || 'entity_discovery',
+            field: c.field || 'name',
+            operator: c.operator || 'equals',
+            value: c.value || entity,
+          })),
+          mission_mode: 'monitor',
+          source_run_id: sourceRunId,
+        },
+        is_active: 1,
+        status: 'active',
+        last_run_at: new Date().toISOString(),
+        last_run_id: sourceRunId,
+        next_wake_at: nextWakeAt,
+        baseline_entity_names: JSON.stringify(baselineNames),
+        consecutive_empty_wakes: 0,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+      });
+
+      if (insertError) {
+        console.error(`[CREATE_MONITOR] Insert failed: ${insertError.message}`);
+        throw new Error(`Failed to create monitor: ${insertError.message}`);
+      }
+
+      console.log(`[CREATE_MONITOR] Created monitor ${monitorId}: "${label}" schedule=${schedule} baseline=${baselineNames.length} entities`);
+
+      // 7. Reply to user
+      const confirmMsg = `I've set up a ${schedule} monitor for "${label}". I'll check for new results and let you know when I find something. The next check is scheduled for ${new Date(nextWakeAt).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} at 9:00 AM.`;
+      const messageId = randomUUID();
+
+      await Promise.all([
+        supabase.from('messages').insert({
+          id: messageId,
+          conversation_id: conversationId,
+          role: 'assistant',
+          content: confirmMsg,
+          source: 'supervisor',
+          metadata: {
+            supervisor_task_id: task.id,
+            run_id: jobId,
+            monitor_created: true,
+            monitor_id: monitorId,
+            schedule: schedule,
+            label: label,
+            baseline_count: baselineNames.length,
+          },
+          created_at: Date.now(),
+        }),
+        supabase.from('supervisor_tasks').update({
+          status: 'completed',
+          result: { message_id: messageId, monitor_id: monitorId, monitor_created: true },
+        }).eq('id', task.id),
+        storage.updateAgentRun(jobId, {
+          status: 'completed',
+          terminalState: 'completed',
+          endedAt: new Date(),
+          metadata: { verdict: 'monitor_created', monitor_id: monitorId, schedule, label },
+        }).catch(() => {}),
+      ]);
+
+      console.log(`[CREATE_MONITOR] Done — monitor=${monitorId} task=${task.id}`);
+    } catch (err: any) {
+      console.error(`[CREATE_MONITOR] Failed: ${err.message}`);
+      const errMsg = `Sorry, I couldn't set up the monitor: ${err.message}. Try running a search first, then ask me to monitor it.`;
+      const messageId = randomUUID();
+      await Promise.all([
+        supabase.from('messages').insert({
+          id: messageId,
+          conversation_id: conversationId,
+          role: 'assistant',
+          content: errMsg,
+          source: 'supervisor',
+          metadata: { supervisor_task_id: task.id, run_id: jobId, create_monitor_error: err.message },
+          created_at: Date.now(),
+        }),
+        supabase.from('supervisor_tasks').update({ status: 'failed', result: { message_id: messageId } }).eq('id', task.id),
+        storage.updateAgentRun(jobId, { status: 'failed', terminalState: 'failed', endedAt: new Date(), error: err.message }).catch(() => {}),
+      ]).catch(() => {});
+    }
+  }
+
   // ─── REFINE EXECUTOR ─────────────────────────────────────────────────────────
   // Handles refine_results tasks: filters cached web-page artefacts from the
   // source run by a new keyword constraint. No LLM calls — pure text matching.
@@ -1082,6 +1317,10 @@ class SupervisorService {
     // Bypass the full LLM pipeline — filter existing cached web pages by keyword
     if ((task.task_type as string) === 'refine_results') {
       await this.handleRefineResults(task, jobId, clientRequestId);
+      return;
+    }
+    if ((task.task_type as string) === 'create_monitor') {
+      await this.handleCreateMonitor(task, jobId, clientRequestId);
       return;
     }
 
