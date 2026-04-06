@@ -1,0 +1,336 @@
+REPO: wyshbone-supervisor-Post-CC
+FILE: server/supervisor/mission-executor.ts
+
+CONTEXT: The evidence gathering phase currently visits every candidate's website (up to 5 pages each), runs keyword extraction, then falls back to GPT-4o for bot-blocked sites. In practice, the web visits mostly fail (bot-blocked) or find zero keyword hits, and GPT-4o fallback does the real work anyway. We're making GPT-4o verification the default and keeping website crawl as a precision tool.
+
+## What changes
+
+### 1. Add EVIDENCE_MODE feature flag
+
+At the top of the file (near the other constants like RUN_EXECUTION_TIMEOUT_MS_DEFAULT), add:
+
+```typescript
+const EVIDENCE_MODE = (process.env.EVIDENCE_MODE || 'gpt4o_primary') as 'gpt4o_primary' | 'web_crawl_first';
+```
+
+### 2. New function: batchGpt4oVerification
+
+Add a new function (before executeMissionDrivenPlan) that does batch GPT-4o verification for all candidates against all constraints. This replaces WEB_VISIT + EVIDENCE_EXTRACT + GPT-4o FALLBACK in one step.
+
+```typescript
+async function batchGpt4oVerification(
+  leads: DiscoveredLead[],
+  constraints: MissionConstraint[],
+  location: string,
+  rawUserInput: string,
+  runId: string,
+  userId: string,
+  conversationId?: string,
+  clientRequestId?: string,
+): Promise<EvidenceResult[]> {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    console.warn('[GPT4O_VERIFY] No API key — skipping verification');
+    return [];
+  }
+
+  const results: EvidenceResult[] = [];
+  const CONCURRENCY = parseInt(process.env.GPT4O_VERIFY_CONCURRENCY || '5', 10);
+
+  // Build verification tasks: one per lead × constraint combination
+  const tasks: Array<{ lead: DiscoveredLead; leadIndex: number; constraint: MissionConstraint }> = [];
+  for (let i = 0; i < leads.length; i++) {
+    for (const c of constraints) {
+      tasks.push({ lead: leads[i], leadIndex: i, constraint: c });
+    }
+  }
+
+  console.log(`[GPT4O_VERIFY] Verifying ${leads.length} leads × ${constraints.length} constraints = ${tasks.length} checks (concurrency=${CONCURRENCY})`);
+
+  // Process in concurrent batches
+  for (let batchStart = 0; batchStart < tasks.length; batchStart += CONCURRENCY) {
+    const batch = tasks.slice(batchStart, batchStart + CONCURRENCY);
+
+    const batchResults = await Promise.allSettled(batch.map(async (task) => {
+      const constraintValue = typeof task.constraint.value === 'string' 
+        ? task.constraint.value 
+        : String(task.constraint.value ?? '');
+
+      const prompt = `Search for "${task.lead.name}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${constraintValue}".
+
+Respond with JSON only, no markdown fences, no other text:
+{
+  "business_found": true or false,
+  "constraint_met": true or false,
+  "confidence": "high" or "medium" or "low",
+  "reasoning": "one sentence explaining why the constraint is or is not met",
+  "source_url": "the URL you found evidence on, or null"
+}
+
+IMPORTANT:
+- business_found means you found information about this specific business
+- constraint_met means the constraint "${constraintValue}" IS genuinely true for this business
+- If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false`;
+
+      const model = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
+      const resp = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openaiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          input: prompt,
+          tools: [{ type: 'web_search' }],
+          store: false,
+        }),
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        throw new Error(`HTTP ${resp.status}: ${errText.substring(0, 100)}`);
+      }
+
+      const data = await resp.json();
+      let content = '';
+      let sourceUrl = '';
+
+      if (Array.isArray(data.output)) {
+        for (const item of data.output) {
+          if (item.type === 'message' && Array.isArray(item.content)) {
+            for (const block of item.content) {
+              if (block.type === 'output_text') {
+                content += block.text;
+                if (Array.isArray(block.annotations)) {
+                  for (const ann of block.annotations) {
+                    if (ann.type === 'url_citation' && ann.url && !sourceUrl) {
+                      sourceUrl = ann.url;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      if (!content && data.output_text) content = data.output_text;
+
+      // Parse response
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('No JSON in response');
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      return { task, parsed, sourceUrl, content };
+    }));
+
+    for (const settledResult of batchResults) {
+      if (settledResult.status === 'rejected') {
+        // Find the task that failed — use batch index
+        const failedIdx = batchResults.indexOf(settledResult);
+        const failedTask = batch[failedIdx];
+        if (failedTask) {
+          const cv = typeof failedTask.constraint.value === 'string' ? failedTask.constraint.value : String(failedTask.constraint.value ?? '');
+          console.warn(`[GPT4O_VERIFY] Failed for "${failedTask.lead.name}" + "${cv}": ${settledResult.reason}`);
+          results.push({
+            leadIndex: failedTask.leadIndex,
+            leadName: failedTask.lead.name,
+            leadPlaceId: failedTask.lead.placeId,
+            constraintField: failedTask.constraint.field,
+            constraintValue: cv,
+            constraintType: failedTask.constraint.type,
+            evidenceFound: false,
+            evidenceStrength: 'none',
+            isBotBlocked: false,
+            towerStatus: null,
+            towerConfidence: null,
+            towerReasoning: null,
+            sourceUrl: null,
+            snippets: [],
+            sourceTier: 'web_search_fallback',
+            verdict: 'no_evidence',
+          });
+        }
+        continue;
+      }
+
+      const { task: t, parsed, sourceUrl, content } = settledResult.value;
+      const cv = typeof t.constraint.value === 'string' ? t.constraint.value : String(t.constraint.value ?? '');
+
+      if (parsed.business_found && parsed.constraint_met) {
+        results.push({
+          leadIndex: t.leadIndex,
+          leadName: t.lead.name,
+          leadPlaceId: t.lead.placeId,
+          constraintField: t.constraint.field,
+          constraintValue: cv,
+          constraintType: t.constraint.type,
+          evidenceFound: true,
+          evidenceStrength: 'strong',
+          isBotBlocked: false,
+          towerStatus: 'verified' as any,
+          towerConfidence: parsed.confidence === 'high' ? 0.85 : parsed.confidence === 'medium' ? 0.65 : 0.45,
+          towerReasoning: parsed.reasoning || 'Verified via GPT-4o verification',
+          sourceUrl: parsed.source_url || sourceUrl || null,
+          snippets: [parsed.reasoning || content.substring(0, 300)],
+          sourceTier: 'web_search_fallback',
+          verdict: 'verified',
+        });
+        console.log(`[GPT4O_VERIFY] "${t.lead.name}" + "${cv}": VERIFIED (${parsed.confidence})`);
+      } else if (parsed.business_found && !parsed.constraint_met) {
+        results.push({
+          leadIndex: t.leadIndex,
+          leadName: t.lead.name,
+          leadPlaceId: t.lead.placeId,
+          constraintField: t.constraint.field,
+          constraintValue: cv,
+          constraintType: t.constraint.type,
+          evidenceFound: false,
+          evidenceStrength: 'none',
+          isBotBlocked: false,
+          towerStatus: 'no_evidence' as any,
+          towerConfidence: null,
+          towerReasoning: parsed.reasoning || null,
+          sourceUrl: null,
+          snippets: [],
+          sourceTier: 'web_search_fallback',
+          verdict: 'no_evidence',
+        });
+        console.log(`[GPT4O_VERIFY] "${t.lead.name}" + "${cv}": NOT MET — ${(parsed.reasoning || '').substring(0, 80)}`);
+      } else {
+        results.push({
+          leadIndex: t.leadIndex,
+          leadName: t.lead.name,
+          leadPlaceId: t.lead.placeId,
+          constraintField: t.constraint.field,
+          constraintValue: cv,
+          constraintType: t.constraint.type,
+          evidenceFound: false,
+          evidenceStrength: 'none',
+          isBotBlocked: false,
+          towerStatus: null,
+          towerConfidence: null,
+          towerReasoning: null,
+          sourceUrl: null,
+          snippets: [],
+          sourceTier: 'web_search_fallback',
+          verdict: 'no_evidence',
+        });
+        console.log(`[GPT4O_VERIFY] "${t.lead.name}" + "${cv}": NOT FOUND`);
+      }
+    }
+  }
+
+  const verified = results.filter(r => r.verdict === 'verified').length;
+  const notMet = results.filter(r => r.verdict === 'no_evidence').length;
+  console.log(`[GPT4O_VERIFY] Complete: ${verified} verified, ${notMet} not met, ${results.length} total`);
+
+  // Emit artefact
+  await createArtefact({
+    runId,
+    type: 'attribute_verification',
+    title: `GPT-4o verification: ${verified}/${results.length} checks passed`,
+    summary: `${verified} verified, ${notMet} not met across ${leads.length} leads × ${constraints.length} constraints`,
+    payload: {
+      mode: 'gpt4o_primary',
+      total_checks: results.length,
+      checks_with_evidence: verified,
+      leads_checked: leads.length,
+      constraints_checked: constraints.length,
+      concurrency: CONCURRENCY,
+      results: results.map(r => ({
+        lead: r.leadName,
+        constraint: r.constraintValue,
+        type: r.constraintType,
+        found: r.evidenceFound,
+        strength: r.evidenceStrength,
+        tower_status: r.towerStatus,
+        source_tier: 'gpt4o_verification',
+      })),
+    },
+    userId,
+    conversationId,
+  }).catch(() => {});
+
+  return results;
+}
+```
+
+### 3. Modify the evidence gathering phase
+
+In `executeMissionDrivenPlan`, find the evidence gathering phase (the block starting with `if (requiresWebVisit(plan) && leads.length > 0 && !checkDeadline())`).
+
+Wrap the ENTIRE existing evidence gathering block (from the `console.log('=== Phase: Evidence Gathering ===')` through to the `// ── end discovery cascade ──` comment) in a condition:
+
+```typescript
+if (EVIDENCE_MODE === 'web_crawl_first') {
+  // ... existing code stays exactly as-is ...
+} else {
+  // GPT-4o primary verification
+  console.log(`[MISSION_EXEC] === Phase: Evidence Gathering (GPT-4o primary) ===`);
+  console.log(`[MISSION_EXEC] GPT-4o verification for ${leads.length} leads, ${evidenceConstraints.length + relationshipConstraints.length} constraints`);
+
+  const constraintsToVerify = [...evidenceConstraints, ...relationshipConstraints];
+  
+  if (constraintsToVerify.length > 0 && leads.length > 0) {
+    const gpt4oResults = await batchGpt4oVerification(
+      leads.slice(0, effectiveEnrichBatch),
+      constraintsToVerify,
+      location,
+      rawUserInput,
+      runId,
+      userId,
+      conversationId,
+      clientRequestId,
+    );
+    evidenceResults.push(...gpt4oResults);
+  }
+}
+```
+
+### 4. Skip per-candidate Tower semantic verification in GPT-4o mode
+
+The `batchGpt4oVerification` function already sets towerStatus='verified' and towerConfidence based on the GPT-4o response. So the per-candidate `requestSemanticVerification` calls (which are inside the web_crawl_first block) are naturally skipped.
+
+Tower still judges the FINAL DELIVERY as a whole — that code is AFTER the evidence gathering phase and stays unchanged.
+
+### 5. Add startup log
+
+In server/index.ts, near the SLEEP_WAKE log we added earlier, add:
+
+```typescript
+console.log(`[EVIDENCE_MODE] Evidence gathering: ${process.env.EVIDENCE_MODE || 'gpt4o_primary'}`);
+if ((process.env.EVIDENCE_MODE || 'gpt4o_primary') === 'gpt4o_primary') {
+  console.log(`   GPT-4o verification concurrency: ${process.env.GPT4O_VERIFY_CONCURRENCY || '5'}`);
+}
+```
+
+## What stays the same
+
+- Google Places discovery — unchanged
+- Exclusion filter — unchanged
+- Field filters (text_compare) — unchanged
+- Tower final delivery judgement — unchanged
+- Replan loop — unchanged
+- Delivery summary + artefacts — unchanged
+- The entire web_crawl_first code path — kept intact, selected with EVIDENCE_MODE=web_crawl_first
+
+## Environment variables
+
+- `EVIDENCE_MODE=gpt4o_primary` (new default) — GPT-4o verification for all candidates
+- `EVIDENCE_MODE=web_crawl_first` — legacy behaviour, website visits + extraction
+- `GPT4O_VERIFY_CONCURRENCY=5` — how many GPT-4o calls to run in parallel (default 5)
+
+## Future: "deep verify" tool
+
+The website crawl code is preserved in the `web_crawl_first` branch. In a future task, we'll extract it into a standalone function that can be called as a tool by the planner — triggered when the user says "are you sure about this result?" or when GPT-4o returns low confidence. That's a separate task — this prompt only does the mode switch.
+
+## Testing
+
+1. Set `EVIDENCE_MODE=gpt4o_primary` (or don't set it — it's the default)
+2. Search "find pubs with live music in Arundel"
+3. Check console: should see `[GPT4O_VERIFY]` logs instead of `[WEB_VISIT]` logs
+4. Run time should be significantly faster (no website fetching)
+5. To verify old behaviour still works: set `EVIDENCE_MODE=web_crawl_first` and re-run
+
+DO NOT change any code outside of mission-executor.ts and server/index.ts.
