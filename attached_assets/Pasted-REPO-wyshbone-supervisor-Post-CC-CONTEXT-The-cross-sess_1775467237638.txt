@@ -1,0 +1,114 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: The cross-session memory code queries `agent_runs.goal_summary` — but that column DOESN'T EXIST. The search query text lives in the `artefacts` table, in `mission_extraction` type artefacts, in `payload_json->>'raw_user_input'`. The cross-session memory has been silently returning empty results.
+
+FIX: Replace the Supabase query in buildUserContext to join agent_runs with artefacts to get the actual search query.
+
+═══════════════════════════════════════════════════════════════
+FILE: server/supervisor.ts — in the buildUserContext method, around line 3352
+═══════════════════════════════════════════════════════════════
+
+Find the cross-session memory block that starts with:
+```typescript
+    // ── Cross-session memory: recent search history ──
+```
+
+Replace the ENTIRE block (from that comment down to `context.recentSearches = recentSearches;`) with:
+
+```typescript
+    // ── Cross-session memory: recent search history ──
+    // NOTE: agent_runs has no goal_summary column — the query text lives in
+    // the mission_extraction artefact's payload_json.raw_user_input field.
+    let recentSearches: Array<{ query: string; delivered: number; verdict: string; created: string }> = [];
+    try {
+      if (supabase) {
+        // Join agent_runs with artefacts to get the search query from mission_extraction
+        const { data: recentRuns } = await supabase
+          .from('agent_runs')
+          .select('id, status, terminal_state, created_at')
+          .eq('user_id', userId)
+          .in('status', ['completed'])
+          .order('created_at', { ascending: false })
+          .limit(10);
+
+        if (recentRuns && recentRuns.length > 0) {
+          const runIds = recentRuns.map((r: any) => r.id);
+          
+          // Fetch mission_extraction artefacts to get the actual query text
+          const { data: missionArtefacts } = await supabase
+            .from('artefacts')
+            .select('run_id, payload_json')
+            .in('run_id', runIds)
+            .eq('type', 'mission_extraction')
+            .order('created_at', { ascending: false });
+
+          // Fetch delivery_summary artefacts to get delivered count and verdict
+          const { data: deliveryArtefacts } = await supabase
+            .from('artefacts')
+            .select('run_id, payload_json')
+            .in('run_id', runIds)
+            .eq('type', 'delivery_summary')
+            .order('created_at', { ascending: false });
+
+          // Build lookup maps
+          const missionByRunId = new Map<string, any>();
+          for (const ma of (missionArtefacts || [])) {
+            if (!missionByRunId.has(ma.run_id)) {
+              const p = typeof ma.payload_json === 'string' ? (() => { try { return JSON.parse(ma.payload_json); } catch { return null; } })() : ma.payload_json;
+              missionByRunId.set(ma.run_id, p);
+            }
+          }
+          
+          const deliveryByRunId = new Map<string, any>();
+          for (const da of (deliveryArtefacts || [])) {
+            if (!deliveryByRunId.has(da.run_id)) {
+              const p = typeof da.payload_json === 'string' ? (() => { try { return JSON.parse(da.payload_json); } catch { return null; } })() : da.payload_json;
+              deliveryByRunId.set(da.run_id, p);
+            }
+          }
+
+          recentSearches = recentRuns
+            .map((r: any) => {
+              const mission = missionByRunId.get(r.id);
+              const delivery = deliveryByRunId.get(r.id);
+              
+              // Extract query from mission_extraction payload
+              const rawInput = mission?.layers?.raw_user_input 
+                || mission?.raw_user_input 
+                || mission?.user_input 
+                || '';
+              
+              // Extract delivered count from delivery_summary
+              const deliveredCount = delivery?.exact ?? delivery?.delivered_count ?? delivery?.total ?? 0;
+              const verdict = delivery?.tower_verdict ?? delivery?.status ?? r.terminal_state ?? 'unknown';
+              
+              return {
+                query: rawInput,
+                delivered: deliveredCount,
+                verdict: String(verdict).toLowerCase(),
+                created: r.created_at ? new Date(typeof r.created_at === 'number' ? r.created_at : r.created_at).toISOString().split('T')[0] : 'unknown',
+              };
+            })
+            .filter(s => s.query && s.query.length > 3) // Only include runs with actual queries
+            .slice(0, 5);
+        }
+      }
+      console.log(`  🔄 Found ${recentSearches.length} recent searches for cross-session context`);
+    } catch (err: any) {
+      console.warn(`  ⚠️ Cross-session memory fetch failed (non-fatal): ${err.message}`);
+    }
+
+    context.recentSearches = recentSearches;
+```
+
+═══════════════════════════════════════════════════════════════
+WHAT THIS FIXES
+═══════════════════════════════════════════════════════════════
+
+Before: Queries non-existent `goal_summary` column → empty results → cross-session memory never works
+After: Joins to artefacts table → gets actual query from mission_extraction → history like:
+  >>> "find chemists in Littlehampton" → 5 results (pass, 2026-04-06)
+  - "find pubs in Arundel that have live music" → 12 results (pass, 2026-04-05)
+
+═══════════════════════════════════════════════════════════════
+DO NOT CHANGE the historyBlock formatting or the INSTRUCTIONS block — those are correct. Only change the data fetching.
