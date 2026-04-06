@@ -1205,7 +1205,11 @@ class SupervisorService {
         }
       }
       
-      historyBlock += `\n\nIMPORTANT: If the user's message is vague (e.g. "find some in X", "same again in Y", "try that in Z"), interpret it as the MOST RECENT search above applied to the new location. Do NOT default to a generic business type.`;
+      historyBlock += `\n\nINSTRUCTIONS FOR HANDLING VAGUE REFERENCES TO PAST SEARCHES:`;
+      historyBlock += `\n1. If the user clearly references one search (e.g. "find more pubs" or "chemists in Brighton"), use that.`;
+      historyBlock += `\n2. If the user is vague (e.g. "find some in X", "same again", "try that in Y") AND the last 2-3 searches were ALL the same type, use the MOST RECENT search as the template.`;
+      historyBlock += `\n3. If the user is vague AND recent searches are DIFFERENT types (e.g. one was chemists, another was pubs), set clarification_needed=true and clarification_question to something like "I can see you recently searched for chemists in Littlehampton and pubs in Arundel. Which type would you like me to find in [location]?"`;
+      historyBlock += `\n4. Do NOT default to a generic business type. Always use the search history to inform your interpretation.`;
       
       conversationContextStr = (conversationContextStr || '') + historyBlock;
     }

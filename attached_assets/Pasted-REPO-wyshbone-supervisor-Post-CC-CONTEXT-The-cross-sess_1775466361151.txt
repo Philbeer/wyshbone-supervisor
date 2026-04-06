@@ -1,0 +1,24 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: The cross-session memory patch emphasises the most recent search. But when the user has recently searched for very different things (chemists AND pubs), and says something vague like "find some in Chichester", the system should ask which type they mean rather than guessing.
+
+FIX: Add a clarification instruction to the cross-session history block. The mission extractor's Pass 3 already has `clarification_needed` and `clarification_question` fields — this change tells the LLM when to use them.
+
+═══════════════════════════════════════════════════════════════
+FILE: server/supervisor.ts — where the cross-session history block is built
+═══════════════════════════════════════════════════════════════
+
+Find the IMPORTANT instruction block at the end of the cross-session history (the text that starts with "IMPORTANT: If the user's message is vague"). Replace it with:
+
+```typescript
+      historyBlock += `\n\nINSTRUCTIONS FOR HANDLING VAGUE REFERENCES TO PAST SEARCHES:`;
+      historyBlock += `\n1. If the user clearly references one search (e.g. "find more pubs" or "chemists in Brighton"), use that.`;
+      historyBlock += `\n2. If the user is vague (e.g. "find some in X", "same again", "try that in Y") AND the last 2-3 searches were ALL the same type, use the MOST RECENT search as the template.`;
+      historyBlock += `\n3. If the user is vague AND recent searches are DIFFERENT types (e.g. one was chemists, another was pubs), set clarification_needed=true and clarification_question to something like "I can see you recently searched for chemists in Littlehampton and pubs in Arundel. Which type would you like me to find in [location]?"`;
+      historyBlock += `\n4. Do NOT default to a generic business type. Always use the search history to inform your interpretation.`;
+```
+
+This replaces the single IMPORTANT line with structured instructions that cover all cases.
+
+═══════════════════════════════════════════════════════════════
+DO NOT CHANGE anything else.
