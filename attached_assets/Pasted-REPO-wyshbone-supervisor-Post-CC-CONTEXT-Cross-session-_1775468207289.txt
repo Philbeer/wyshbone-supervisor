@@ -1,0 +1,92 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: Cross-session memory data IS being fetched correctly (🔄 Found 5 recent searches), but the mission extractor's Pass 1 ignores it. The search history is embedded in the conversation context string, but the LLM treats it as background noise because:
+1. The Pass 1 system prompt has no mention of search history
+2. gpt-4o-mini doesn't reliably follow instructions embedded inside user context
+
+FIX: When the user's message is short/vague AND there's search history available, rewrite the user message to the LLM to include the most recent search explicitly. Don't rely on the LLM to read the instructions — pre-process the vague reference before it reaches the LLM.
+
+═══════════════════════════════════════════════════════════════
+FILE: server/supervisor.ts — in processChatTask, BEFORE the mission extractor is called
+═══════════════════════════════════════════════════════════════
+
+Find the line where the mission extractor is called (around line 1263):
+```typescript
+missionResult = await extractStructuredMission(rawMsg, conversationContextStr);
+```
+
+BEFORE that line (but after the cross-session history is appended to conversationContextStr), add this pre-processing block:
+
+```typescript
+    // ── Cross-session vague reference resolver ──
+    // If the user's message is short/vague AND we have recent search history,
+    // rewrite the query to include the most recent search context explicitly.
+    // This is more reliable than hoping the LLM reads embedded instructions.
+    let effectiveMsg = rawMsg;
+    if (userContext.recentSearches && userContext.recentSearches.length > 0) {
+      const msgLower = rawMsg.toLowerCase().trim();
+      const vaguePatterns = [
+        /^(now\s+)?find\s+(some|more|them)\s+(in|near|around)\s+/i,
+        /^(same|that)\s+(search|again|one)\s+(in|for|but)\s+/i,
+        /^(try|do)\s+(that|this|the same|it)\s+(in|for|near)\s+/i,
+        /^(more|some)\s+(in|near|around)\s+/i,
+        /^find\s+(some|more)\s+in\s+/i,
+      ];
+      const isVague = vaguePatterns.some(p => p.test(msgLower));
+      
+      if (isVague) {
+        const mostRecent = userContext.recentSearches[0];
+        // Extract location from the vague message
+        const locationMatch = msgLower.match(/(?:in|near|around)\s+(.+?)[\s.!?]*$/i);
+        const newLocation = locationMatch ? locationMatch[1].trim() : null;
+        
+        if (newLocation && mostRecent.query) {
+          // Try to extract the entity type from the most recent search
+          // e.g. "find shoe shops in London" → "shoe shops"
+          const entityMatch = mostRecent.query.match(/(?:find\s+)?(.+?)\s+(?:in|near|around)\s+/i);
+          const entityType = entityMatch ? entityMatch[1].trim() : mostRecent.query;
+          
+          effectiveMsg = `find ${entityType} in ${newLocation}`;
+          console.log(`[CROSS_SESSION] Vague reference resolved: "${rawMsg}" → "${effectiveMsg}" (based on most recent search: "${mostRecent.query}")`);
+        }
+      }
+    }
+```
+
+Then change the mission extractor call to use `effectiveMsg`:
+
+```typescript
+    missionResult = await extractStructuredMission(effectiveMsg, conversationContextStr);
+```
+
+Also pass `effectiveMsg` to the shadow extractor if it runs:
+Find the line:
+```typescript
+    shadowResult = await runIntentExtractorShadow(rawMsg, ...
+```
+And change to:
+```typescript
+    shadowResult = await runIntentExtractorShadow(effectiveMsg, ...
+```
+
+═══════════════════════════════════════════════════════════════
+WHAT THIS DOES
+═══════════════════════════════════════════════════════════════
+
+Before: User types "now find some in chichester" → LLM receives vague message → defaults to pubs
+After: System detects vague pattern + has recent search "find shoe shops in London" → rewrites to "find shoe shops in chichester" → LLM receives clear message → searches for shoe shops
+
+The rewrite only triggers when:
+1. The message matches a vague pattern ("find some in X", "same again in X", "try that in X")
+2. There's at least one recent search in the cross-session history
+3. A new location can be extracted from the vague message
+
+Console output: [CROSS_SESSION] Vague reference resolved: "now find some in chichester" → "find shoe shops in chichester" (based on most recent search: "find shoe shops in London")
+
+═══════════════════════════════════════════════════════════════
+DO NOT CHANGE
+═══════════════════════════════════════════════════════════════
+- The mission extractor prompts (Pass 1, 2, 3) — leave them as-is
+- The conversationContextStr building — the history is still passed for context
+- The truncateContext function — working correctly
+- Clear/explicit messages like "find chemists in Brighton" — the vague patterns won't match, so they pass through unchanged
