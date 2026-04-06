@@ -1,0 +1,51 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: Cross-session memory is working but the LLM picks the most COMMON search pattern (pubs) instead of the most RECENT one (chemists) when the user says "find some in chichester". The search history needs to clearly mark which was the very last search.
+
+FIX: Update the search history formatting in supervisor.ts to emphasise the most recent search.
+
+═══════════════════════════════════════════════════════════════
+FILE: server/supervisor.ts — where cross-session history is appended to conversationContextStr
+═══════════════════════════════════════════════════════════════
+
+Find the block where `searchHistoryStr` is built (the code we just added). Replace the history formatting with:
+
+```typescript
+    // Append cross-session search history to context
+    if (userContext.recentSearches && userContext.recentSearches.length > 0) {
+      const searches = userContext.recentSearches;
+      const mostRecent = searches[0]; // Already sorted by created_at DESC
+      const older = searches.slice(1);
+      
+      let historyBlock = `\n\nUser's recent search history (from previous sessions):`;
+      historyBlock += `\nMOST RECENT SEARCH (use this if user says "same again", "find more", "find some", etc.):`;
+      historyBlock += `\n  >>> "${mostRecent.query}" → ${mostRecent.delivered} results (${mostRecent.verdict}, ${mostRecent.created})`;
+      
+      if (older.length > 0) {
+        historyBlock += `\nOlder searches:`;
+        for (const s of older) {
+          historyBlock += `\n  - "${s.query}" → ${s.delivered} results (${s.verdict}, ${s.created})`;
+        }
+      }
+      
+      historyBlock += `\n\nIMPORTANT: If the user's message is vague (e.g. "find some in X", "same again in Y", "try that in Z"), interpret it as the MOST RECENT search above applied to the new location. Do NOT default to a generic business type.`;
+      
+      conversationContextStr = (conversationContextStr || '') + historyBlock;
+    }
+```
+
+This makes the context look like:
+
+```
+User's recent search history (from previous sessions):
+MOST RECENT SEARCH (use this if user says "same again", "find more", "find some", etc.):
+  >>> "find chemists in Littlehampton" → 15 results (pass, 2026-04-06)
+Older searches:
+  - "find pubs in Arundel that have live music" → 12 results (pass, 2026-04-05)
+  - "find companies in West Sussex that are expanding" → 5 results (pass, 2026-04-05)
+
+IMPORTANT: If the user's message is vague (e.g. "find some in X", "same again in Y"), interpret it as the MOST RECENT search above applied to the new location. Do NOT default to a generic business type.
+```
+
+═══════════════════════════════════════════════════════════════
+DO NOT CHANGE anything else — this is just a formatting tweak to the context string.
