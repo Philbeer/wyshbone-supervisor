@@ -3349,36 +3349,87 @@ class SupervisorService {
     }
 
     // ── Cross-session memory: recent search history ──
+    // NOTE: agent_runs has no goal_summary column — the query text lives in
+    // the mission_extraction artefact's payload_json.raw_user_input field.
     let recentSearches: Array<{ query: string; delivered: number; verdict: string; created: string }> = [];
     try {
       if (supabase) {
+        // Join agent_runs with artefacts to get the search query from mission_extraction
         const { data: recentRuns } = await supabase
           .from('agent_runs')
-          .select('id, goal_summary, status, terminal_state, result, created_at')
+          .select('id, status, terminal_state, created_at')
           .eq('user_id', userId)
           .in('status', ['completed'])
           .order('created_at', { ascending: false })
           .limit(10);
 
         if (recentRuns && recentRuns.length > 0) {
+          const runIds = recentRuns.map((r: any) => r.id);
+          
+          // Fetch mission_extraction artefacts to get the actual query text
+          const { data: missionArtefacts } = await supabase
+            .from('artefacts')
+            .select('run_id, payload_json')
+            .in('run_id', runIds)
+            .eq('type', 'mission_extraction')
+            .order('created_at', { ascending: false });
+
+          // Fetch delivery_summary artefacts to get delivered count and verdict
+          const { data: deliveryArtefacts } = await supabase
+            .from('artefacts')
+            .select('run_id, payload_json')
+            .in('run_id', runIds)
+            .eq('type', 'delivery_summary')
+            .order('created_at', { ascending: false });
+
+          // Build lookup maps
+          const missionByRunId = new Map<string, any>();
+          for (const ma of (missionArtefacts || [])) {
+            if (!missionByRunId.has(ma.run_id)) {
+              const p = typeof ma.payload_json === 'string' ? (() => { try { return JSON.parse(ma.payload_json); } catch { return null; } })() : ma.payload_json;
+              missionByRunId.set(ma.run_id, p);
+            }
+          }
+          
+          const deliveryByRunId = new Map<string, any>();
+          for (const da of (deliveryArtefacts || [])) {
+            if (!deliveryByRunId.has(da.run_id)) {
+              const p = typeof da.payload_json === 'string' ? (() => { try { return JSON.parse(da.payload_json); } catch { return null; } })() : da.payload_json;
+              deliveryByRunId.set(da.run_id, p);
+            }
+          }
+
           recentSearches = recentRuns
-            .filter((r: any) => r.goal_summary && r.goal_summary.length > 5)
             .map((r: any) => {
-              const result = typeof r.result === 'string' ? (() => { try { return JSON.parse(r.result); } catch { return {}; } })() : (r.result || {});
+              const mission = missionByRunId.get(r.id);
+              const delivery = deliveryByRunId.get(r.id);
+              
+              // Extract query from mission_extraction payload
+              const rawInput = mission?.layers?.raw_user_input 
+                || mission?.raw_user_input 
+                || mission?.user_input 
+                || '';
+              
+              // Extract delivered count from delivery_summary
+              const deliveredCount = delivery?.exact ?? delivery?.delivered_count ?? delivery?.total ?? 0;
+              const verdict = delivery?.tower_verdict ?? delivery?.status ?? r.terminal_state ?? 'unknown';
+              
               return {
-                query: r.goal_summary || '',
-                delivered: result.deliveredCount ?? result.delivered_count ?? 0,
-                verdict: result.towerVerdict ?? result.tower_verdict ?? r.terminal_state ?? 'unknown',
-                created: r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : 'unknown',
+                query: rawInput,
+                delivered: deliveredCount,
+                verdict: String(verdict).toLowerCase(),
+                created: r.created_at ? new Date(typeof r.created_at === 'number' ? r.created_at : r.created_at).toISOString().split('T')[0] : 'unknown',
               };
             })
-            .slice(0, 5); // Keep top 5 most recent
+            .filter(s => s.query && s.query.length > 3) // Only include runs with actual queries
+            .slice(0, 5);
         }
       }
       console.log(`  🔄 Found ${recentSearches.length} recent searches for cross-session context`);
     } catch (err: any) {
       console.warn(`  ⚠️ Cross-session memory fetch failed (non-fatal): ${err.message}`);
     }
+
     context.recentSearches = recentSearches;
 
     return context;
