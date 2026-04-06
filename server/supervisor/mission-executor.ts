@@ -49,6 +49,7 @@ const HARD_CAP_MAX_REPLANS = 10;
 const DEFAULT_SEARCH_BUDGET = 20;
 const ENRICH_CONCURRENCY = 3;
 const ENRICH_BATCH_SIZE = 25;
+const EVIDENCE_MODE = (process.env.EVIDENCE_MODE || 'gpt4o_primary') as 'gpt4o_primary' | 'web_crawl_first';
 
 export interface MissionExecutionContext {
   mission: StructuredMission;
@@ -637,6 +638,238 @@ export async function executeMissionWithReloop(
   }
 }
 
+async function batchGpt4oVerification(
+  leads: DiscoveredLead[],
+  constraints: MissionConstraint[],
+  location: string,
+  rawUserInput: string,
+  runId: string,
+  userId: string,
+  conversationId?: string,
+  clientRequestId?: string,
+): Promise<EvidenceResult[]> {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    console.warn('[GPT4O_VERIFY] No API key — skipping verification');
+    return [];
+  }
+
+  const results: EvidenceResult[] = [];
+  const CONCURRENCY = parseInt(process.env.GPT4O_VERIFY_CONCURRENCY || '5', 10);
+
+  const tasks: Array<{ lead: DiscoveredLead; leadIndex: number; constraint: MissionConstraint }> = [];
+  for (let i = 0; i < leads.length; i++) {
+    for (const c of constraints) {
+      tasks.push({ lead: leads[i], leadIndex: i, constraint: c });
+    }
+  }
+
+  console.log(`[GPT4O_VERIFY] Verifying ${leads.length} leads × ${constraints.length} constraints = ${tasks.length} checks (concurrency=${CONCURRENCY})`);
+
+  for (let batchStart = 0; batchStart < tasks.length; batchStart += CONCURRENCY) {
+    const batch = tasks.slice(batchStart, batchStart + CONCURRENCY);
+
+    const batchResults = await Promise.allSettled(batch.map(async (task) => {
+      const constraintValue = typeof task.constraint.value === 'string'
+        ? task.constraint.value
+        : String(task.constraint.value ?? '');
+
+      const prompt = `Search for "${task.lead.name}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${constraintValue}".
+
+Respond with JSON only, no markdown fences, no other text:
+{
+  "business_found": true or false,
+  "constraint_met": true or false,
+  "confidence": "high" or "medium" or "low",
+  "reasoning": "one sentence explaining why the constraint is or is not met",
+  "source_url": "the URL you found evidence on, or null"
+}
+
+IMPORTANT:
+- business_found means you found information about this specific business
+- constraint_met means the constraint "${constraintValue}" IS genuinely true for this business
+- If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false`;
+
+      const model = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
+      const resp = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openaiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          input: prompt,
+          tools: [{ type: 'web_search' }],
+          store: false,
+        }),
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        throw new Error(`HTTP ${resp.status}: ${errText.substring(0, 100)}`);
+      }
+
+      const data = await resp.json();
+      let content = '';
+      let sourceUrl = '';
+
+      if (Array.isArray(data.output)) {
+        for (const item of data.output) {
+          if (item.type === 'message' && Array.isArray(item.content)) {
+            for (const block of item.content) {
+              if (block.type === 'output_text') {
+                content += block.text;
+                if (Array.isArray(block.annotations)) {
+                  for (const ann of block.annotations) {
+                    if (ann.type === 'url_citation' && ann.url && !sourceUrl) {
+                      sourceUrl = ann.url;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      if (!content && data.output_text) content = data.output_text;
+
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('No JSON in response');
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      return { task, parsed, sourceUrl, content };
+    }));
+
+    for (const settledResult of batchResults) {
+      if (settledResult.status === 'rejected') {
+        const failedIdx = batchResults.indexOf(settledResult);
+        const failedTask = batch[failedIdx];
+        if (failedTask) {
+          const cv = typeof failedTask.constraint.value === 'string' ? failedTask.constraint.value : String(failedTask.constraint.value ?? '');
+          console.warn(`[GPT4O_VERIFY] Failed for "${failedTask.lead.name}" + "${cv}": ${settledResult.reason}`);
+          results.push({
+            leadIndex: failedTask.leadIndex,
+            leadName: failedTask.lead.name,
+            leadPlaceId: failedTask.lead.placeId,
+            constraintField: failedTask.constraint.field,
+            constraintValue: cv,
+            constraintType: failedTask.constraint.type,
+            evidenceFound: false,
+            evidenceStrength: 'none',
+            isBotBlocked: false,
+            towerStatus: null,
+            towerConfidence: null,
+            towerReasoning: null,
+            sourceUrl: null,
+            snippets: [],
+            sourceTier: 'web_search_fallback',
+            verdict: 'no_evidence',
+          });
+        }
+        continue;
+      }
+
+      const { task: t, parsed, sourceUrl, content } = settledResult.value;
+      const cv = typeof t.constraint.value === 'string' ? t.constraint.value : String(t.constraint.value ?? '');
+
+      if (parsed.business_found && parsed.constraint_met) {
+        results.push({
+          leadIndex: t.leadIndex,
+          leadName: t.lead.name,
+          leadPlaceId: t.lead.placeId,
+          constraintField: t.constraint.field,
+          constraintValue: cv,
+          constraintType: t.constraint.type,
+          evidenceFound: true,
+          evidenceStrength: 'strong',
+          isBotBlocked: false,
+          towerStatus: 'verified' as any,
+          towerConfidence: parsed.confidence === 'high' ? 0.85 : parsed.confidence === 'medium' ? 0.65 : 0.45,
+          towerReasoning: parsed.reasoning || 'Verified via GPT-4o verification',
+          sourceUrl: parsed.source_url || sourceUrl || null,
+          snippets: [parsed.reasoning || content.substring(0, 300)],
+          sourceTier: 'web_search_fallback',
+          verdict: 'verified',
+        });
+        console.log(`[GPT4O_VERIFY] "${t.lead.name}" + "${cv}": VERIFIED (${parsed.confidence})`);
+      } else if (parsed.business_found && !parsed.constraint_met) {
+        results.push({
+          leadIndex: t.leadIndex,
+          leadName: t.lead.name,
+          leadPlaceId: t.lead.placeId,
+          constraintField: t.constraint.field,
+          constraintValue: cv,
+          constraintType: t.constraint.type,
+          evidenceFound: false,
+          evidenceStrength: 'none',
+          isBotBlocked: false,
+          towerStatus: 'no_evidence' as any,
+          towerConfidence: null,
+          towerReasoning: parsed.reasoning || null,
+          sourceUrl: null,
+          snippets: [],
+          sourceTier: 'web_search_fallback',
+          verdict: 'no_evidence',
+        });
+        console.log(`[GPT4O_VERIFY] "${t.lead.name}" + "${cv}": NOT MET — ${(parsed.reasoning || '').substring(0, 80)}`);
+      } else {
+        results.push({
+          leadIndex: t.leadIndex,
+          leadName: t.lead.name,
+          leadPlaceId: t.lead.placeId,
+          constraintField: t.constraint.field,
+          constraintValue: cv,
+          constraintType: t.constraint.type,
+          evidenceFound: false,
+          evidenceStrength: 'none',
+          isBotBlocked: false,
+          towerStatus: null,
+          towerConfidence: null,
+          towerReasoning: null,
+          sourceUrl: null,
+          snippets: [],
+          sourceTier: 'web_search_fallback',
+          verdict: 'no_evidence',
+        });
+        console.log(`[GPT4O_VERIFY] "${t.lead.name}" + "${cv}": NOT FOUND`);
+      }
+    }
+  }
+
+  const verified = results.filter(r => r.verdict === 'verified').length;
+  const notMet = results.filter(r => r.verdict === 'no_evidence').length;
+  console.log(`[GPT4O_VERIFY] Complete: ${verified} verified, ${notMet} not met, ${results.length} total`);
+
+  await createArtefact({
+    runId,
+    type: 'attribute_verification',
+    title: `GPT-4o verification: ${verified}/${results.length} checks passed`,
+    summary: `${verified} verified, ${notMet} not met across ${leads.length} leads × ${constraints.length} constraints`,
+    payload: {
+      mode: 'gpt4o_primary',
+      total_checks: results.length,
+      checks_with_evidence: verified,
+      leads_checked: leads.length,
+      constraints_checked: constraints.length,
+      concurrency: CONCURRENCY,
+      results: results.map(r => ({
+        lead: r.leadName,
+        constraint: r.constraintValue,
+        type: r.constraintType,
+        found: r.evidenceFound,
+        strength: r.evidenceStrength,
+        tower_status: r.towerStatus,
+        source_tier: 'gpt4o_verification',
+      })),
+    },
+    userId,
+    conversationId,
+  }).catch(() => {});
+
+  return results;
+}
+
 export async function executeMissionDrivenPlan(
   ctx: MissionExecutionContext,
 ): Promise<MissionExecutionResult> {
@@ -1169,6 +1402,7 @@ export async function executeMissionDrivenPlan(
   const webVisitPages = new Map<number, any[]>();
 
   if (
+    EVIDENCE_MODE === 'web_crawl_first' &&
     requiresWebVisit(plan) &&
     leads.length > 0 &&
     !checkDeadline()
@@ -1857,6 +2091,26 @@ IMPORTANT:
       leads.length > 0
     ) {
       console.log(`[MISSION_EXEC] No evidence found for hard evidence constraints — all results are unverified candidates`);
+    }
+  } else if (EVIDENCE_MODE !== 'web_crawl_first' && leads.length > 0 && !checkDeadline()) {
+    // GPT-4o primary verification
+    console.log(`[MISSION_EXEC] === Phase: Evidence Gathering (GPT-4o primary) ===`);
+    console.log(`[MISSION_EXEC] GPT-4o verification for ${leads.length} leads, ${evidenceConstraints.length + relationshipConstraints.length} constraints`);
+
+    const constraintsToVerify = [...evidenceConstraints, ...relationshipConstraints];
+
+    if (constraintsToVerify.length > 0 && leads.length > 0) {
+      const gpt4oResults = await batchGpt4oVerification(
+        leads.slice(0, effectiveEnrichBatch),
+        constraintsToVerify,
+        location,
+        rawUserInput,
+        runId,
+        userId,
+        conversationId,
+        clientRequestId,
+      );
+      evidenceResults.push(...gpt4oResults);
     }
   }
 

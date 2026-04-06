@@ -235,5 +235,10 @@ app.use((req, res, next) => {
     if (process.env.SLEEP_WAKE_ENABLED === 'true') {
       console.log(`   Max daily wakes: ${process.env.SLEEP_WAKE_MAX_DAILY || '5'}`);
     }
+
+    console.log(`[EVIDENCE_MODE] Evidence gathering: ${process.env.EVIDENCE_MODE || 'gpt4o_primary'}`);
+    if ((process.env.EVIDENCE_MODE || 'gpt4o_primary') === 'gpt4o_primary') {
+      console.log(`   GPT-4o verification concurrency: ${process.env.GPT4O_VERIFY_CONCURRENCY || '5'}`);
+    }
   });
 })();
