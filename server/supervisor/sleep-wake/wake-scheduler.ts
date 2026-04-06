@@ -18,6 +18,14 @@ export async function checkAndWakeGoals(): Promise<void> {
   if (!supabase || process.env.SLEEP_WAKE_ENABLED !== 'true') return;
   if (isWaking) return;
 
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== dailyWakeResetDate) {
+    dailyWakeCount = 0;
+    dailyWakeResetDate = today;
+  }
+  const maxDaily = parseInt(process.env.SLEEP_WAKE_MAX_DAILY || '5', 10);
+  if (dailyWakeCount >= maxDaily) return;
+
   isWaking = true;
   try {
     const now = new Date().toISOString();
@@ -124,6 +132,7 @@ export async function checkAndWakeGoals(): Promise<void> {
       }
 
       console.log(`[SLEEP_WAKE] Goal "${goal.label}" wake complete: ${wakeResult.entitiesFound.length} total, ${wakeResult.deltaCount} new`);
+      dailyWakeCount++;
     }
   } finally {
     isWaking = false;

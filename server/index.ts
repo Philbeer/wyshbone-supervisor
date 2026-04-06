@@ -230,5 +230,10 @@ app.use((req, res, next) => {
     // Start the deep research poller scheduler (Session 2)
     // Disabled by default - enable with ENABLE_DEEP_RESEARCH_POLLER=true
     startDeepResearchScheduler();
+
+    console.log(`[SLEEP_WAKE] Wake scheduler: ${process.env.SLEEP_WAKE_ENABLED === 'true' ? 'ENABLED' : 'disabled'}`);
+    if (process.env.SLEEP_WAKE_ENABLED === 'true') {
+      console.log(`   Max daily wakes: ${process.env.SLEEP_WAKE_MAX_DAILY || '5'}`);
+    }
   });
 })();
