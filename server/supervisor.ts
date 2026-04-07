@@ -1276,7 +1276,7 @@ class SupervisorService {
       console.error(`[BACKFILL] user_message_received backfill failed (non-fatal): ${e.message}`)
     );
 
-    this.bridgeRunToUI(uiRunId, jobId, clientRequestId, task.conversation_id, task.user_id).catch((e: any) =>
+    const _bridgePromise = this.bridgeRunToUI(uiRunId, jobId, clientRequestId, task.conversation_id, task.user_id).catch((e: any) =>
       console.error(`[RUN_BRIDGE] bridgeRunToUI failed: ${e.message}`)
     );
 
@@ -1346,6 +1346,8 @@ class SupervisorService {
 
     // ═══ CONVERSATION ROUTER (replaces classifier → gate → clarify chain) ═══
     if (process.env.CONVERSATION_ROUTER_ENABLED === 'true') {
+      // Ensure bridge completes before router sends artefacts
+      await _bridgePromise;
       try {
         const { routeConversation } = await import('./supervisor/conversation-router');
 
@@ -1445,6 +1447,8 @@ class SupervisorService {
             userId: task.user_id,
             conversationId: task.conversation_id,
           }).catch(() => {});
+          taskExecutionStartedEmitted = true;
+          await emitTaskExecutionCompleted('router_chat');
           return;
         }
 
@@ -1474,6 +1478,7 @@ class SupervisorService {
           ]);
           await storage.updateAgentRun(jobId, {
             status: 'completed', terminalState: 'completed',
+            endedAt: new Date(),
             metadata: { verdict: 'router_clarify', router: decision, awaiting: 'user_input', original_message: rawMsg },
           }).catch(() => {});
           console.log(`[ROUTER] Handled as CLARIFY: "${decision.clarify_question.substring(0, 80)}"`);
@@ -1492,6 +1497,8 @@ class SupervisorService {
             userId: task.user_id,
             conversationId: task.conversation_id,
           }).catch(() => {});
+          taskExecutionStartedEmitted = true;
+          await emitTaskExecutionCompleted('router_clarify');
           return;
         }
 
