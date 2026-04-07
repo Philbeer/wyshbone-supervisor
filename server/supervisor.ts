@@ -1458,7 +1458,7 @@ class SupervisorService {
             }),
           ]);
           await storage.updateAgentRun(jobId, {
-            status: 'clarifying', terminalState: null,
+            status: 'completed', terminalState: 'completed',
             metadata: { verdict: 'router_clarify', router: decision, awaiting: 'user_input', original_message: rawMsg },
           }).catch(() => {});
           console.log(`[ROUTER] Handled as CLARIFY: "${decision.clarify_question.substring(0, 80)}"`);
