@@ -1342,6 +1342,7 @@ class SupervisorService {
     console.log('[QID-TRACE]', 'step1:processChatTask_computed', missionQueryId);
 
     let effectiveMsg = rawMsg;
+    let _routerHandledSearch = false;
 
     // ═══ CONVERSATION ROUTER (replaces classifier → gate → clarify chain) ═══
     if (process.env.CONVERSATION_ROUTER_ENABLED === 'true') {
@@ -1500,6 +1501,7 @@ class SupervisorService {
           effectiveMsg = rawMsg;
           console.log(`[ROUTER] ITERATE — rewritten to: "${rawMsg}"`);
           // Fall through to mission extraction below
+          _routerHandledSearch = true;
         }
 
         // === HANDLE SEARCH ===
@@ -1510,6 +1512,7 @@ class SupervisorService {
           effectiveMsg = rawMsg;
           console.log(`[ROUTER] SEARCH — using: "${rawMsg}"`);
           // Fall through to mission extraction below
+          _routerHandledSearch = true;
         }
 
         // For SEARCH, ITERATE, and failed DISCUSS: skip the old classifier/gate chain
@@ -1523,13 +1526,17 @@ class SupervisorService {
     }
     // ═══ END CONVERSATION ROUTER ═══
 
+    if (_routerHandledSearch) {
+      console.log(`[ROUTER_BYPASS] Router handled SEARCH/ITERATE — skipping classifier, state, shadow, vague resolver, constraint gate, smart clarify. Proceeding directly to mission extraction with: "${effectiveMsg.substring(0, 100)}"`);
+    }
+
     // ═══ MESSAGE CLASSIFIER ═══
     // Fast classification to avoid burning 20+ LLM calls on "hi" or "thanks"
     let isClarifyResponse = !!(requestData.clarify_answer || requestData.continuation_of_run || requestData._constraint_gate_resolved);
 
     let classifiedMessageClass: string = 'search'; // default
 
-    if (!isClarifyResponse && !missionQueryId) {
+    if (!isClarifyResponse && !missionQueryId && !_routerHandledSearch) {
       const { classifyMessage: classifyMsg } = await import('./supervisor/message-classifier');
       const classification = classifyMsg(rawMsg);
       classifiedMessageClass = classification.messageClass;
@@ -1633,7 +1640,7 @@ class SupervisorService {
     }
 
     // ═══ CONVERSATION STATE ═══
-    const CONV_STATE_ENABLED = process.env.CONVERSATION_STATE_ENABLED === 'true';
+    const CONV_STATE_ENABLED = process.env.CONVERSATION_STATE_ENABLED === 'true' && !_routerHandledSearch;
     let convState: any = null;
     let suggestedPhase: string = 'idle';
 
@@ -1872,44 +1879,52 @@ class SupervisorService {
     // If the user's message is short/vague AND we have recent search history,
     // rewrite the query to include the most recent search context explicitly.
     // This is more reliable than hoping the LLM reads embedded instructions.
-    effectiveMsg = rawMsg;
-    if (userContext.recentSearches && userContext.recentSearches.length > 0) {
-      const msgLower = rawMsg.toLowerCase().trim();
-      console.log(`[CROSS_SESSION_DEBUG] rawMsg="${rawMsg}" recentSearches=${userContext.recentSearches?.length ?? 0}`);
-      const vaguePatterns = [
-        /^(now\s+)?find\s+(some|more|them)\s+(in|near|around)\s+/i,
-        /^(same|that)\s+(search|again|one)\s+(in|for|but)\s+/i,
-        /^(try|do)\s+(that|this|the same|it)\s+(in|for|near)\s+/i,
-        /^(more|some)\s+(in|near|around)\s+/i,
-        /^find\s+(some|more)\s+in\s+/i,
-      ];
-      const isVague = vaguePatterns.some(p => p.test(msgLower));
+    if (!_routerHandledSearch) {
+      effectiveMsg = rawMsg;
+      if (userContext.recentSearches && userContext.recentSearches.length > 0) {
+        const msgLower = rawMsg.toLowerCase().trim();
+        console.log(`[CROSS_SESSION_DEBUG] rawMsg="${rawMsg}" recentSearches=${userContext.recentSearches?.length ?? 0}`);
+        const vaguePatterns = [
+          /^(now\s+)?find\s+(some|more|them)\s+(in|near|around)\s+/i,
+          /^(same|that)\s+(search|again|one)\s+(in|for|but)\s+/i,
+          /^(try|do)\s+(that|this|the same|it)\s+(in|for|near)\s+/i,
+          /^(more|some)\s+(in|near|around)\s+/i,
+          /^find\s+(some|more)\s+in\s+/i,
+        ];
+        const isVague = vaguePatterns.some(p => p.test(msgLower));
 
-      if (isVague) {
-        const mostRecent = userContext.recentSearches[0];
-        // Extract location from the vague message
-        const locationMatch = msgLower.match(/(?:in|near|around)\s+(.+?)[\s.!?]*$/i);
-        const newLocation = locationMatch ? locationMatch[1].trim() : null;
+        if (isVague) {
+          const mostRecent = userContext.recentSearches[0];
+          // Extract location from the vague message
+          const locationMatch = msgLower.match(/(?:in|near|around)\s+(.+?)[\s.!?]*$/i);
+          const newLocation = locationMatch ? locationMatch[1].trim() : null;
 
-        if (newLocation && mostRecent.query) {
-          // Try to extract the entity type from the most recent search
-          // e.g. "find shoe shops in London" → "shoe shops"
-          const entityMatch = mostRecent.query.match(/(?:find\s+)?(.+?)\s+(?:in|near|around)\s+/i);
-          const entityType = entityMatch ? entityMatch[1].trim() : mostRecent.query;
+          if (newLocation && mostRecent.query) {
+            // Try to extract the entity type from the most recent search
+            // e.g. "find shoe shops in London" → "shoe shops"
+            const entityMatch = mostRecent.query.match(/(?:find\s+)?(.+?)\s+(?:in|near|around)\s+/i);
+            const entityType = entityMatch ? entityMatch[1].trim() : mostRecent.query;
 
-          effectiveMsg = `find ${entityType} in ${newLocation}`;
-          console.log(`[CROSS_SESSION] Vague reference resolved: "${rawMsg}" → "${effectiveMsg}" (based on most recent search: "${mostRecent.query}")`);
+            effectiveMsg = `find ${entityType} in ${newLocation}`;
+            console.log(`[CROSS_SESSION] Vague reference resolved: "${rawMsg}" → "${effectiveMsg}" (based on most recent search: "${mostRecent.query}")`);
+          }
         }
-      }
+      } // end of recentSearches check
+    } else {
+      console.log(`[ROUTER_BYPASS] Skipping cross-session vague resolver — router already resolved query to: "${effectiveMsg}"`);
     }
 
     let shadowResult: { ran: boolean; extraction: any; error: string | null } = { ran: false, extraction: null, error: null };
     let shadowProbeError: string | null = null;
-    try {
-      shadowResult = await runIntentExtractorShadow(effectiveMsg, jobId, task.user_id, task.conversation_id, conversationContextStr);
-    } catch (e: any) {
-      shadowProbeError = e.message;
-      console.warn(`[INTENT_EXTRACTOR_SHADOW] top-level error (non-fatal): ${e.message}`);
+    if (!_routerHandledSearch) {
+      try {
+        shadowResult = await runIntentExtractorShadow(effectiveMsg, jobId, task.user_id, task.conversation_id, conversationContextStr);
+      } catch (e: any) {
+        shadowProbeError = e.message;
+        console.warn(`[INTENT_EXTRACTOR_SHADOW] top-level error (non-fatal): ${e.message}`);
+      }
+    } else {
+      console.log(`[ROUTER_BYPASS] Skipping intent extractor shadow — router already classified`);
     }
 
     await emitProbe('intent_extractor_after_probe', task.user_id, jobId, task.conversation_id, {
@@ -1927,19 +1942,21 @@ class SupervisorService {
     // intentNarrative = null because the LLM cannot extract a complete intent from one word.
     // The rawMsg restoration at the constraint_gate block (further down) happens AFTER
     // mission extraction already ran, so we fix it here before extraction starts.
-    if (isClarifyResponse && task.conversation_id) {
-      // For constraint_gate continuations: peek at the pending contract (non-destructive —
-      // getPendingContract only deletes on TTL expiry, not on every read).
-      const earlyPending = getPendingContract(task.conversation_id);
-      if (earlyPending?.originalMessage && earlyPending.originalMessage !== rawMsg) {
-        console.log(`[INTENT_FIX] Restoring rawMsg for mission extraction from pending contract: "${earlyPending.originalMessage.substring(0, 80)}" (was: "${rawMsg.substring(0, 40)}")`);
-        rawMsg = earlyPending.originalMessage;
-      } else if (((requestData as any).original_user_message || (requestData as any).original_message) && String((requestData as any).original_user_message || (requestData as any).original_message) !== rawMsg) {
-        // Client may send original_user_message or original_message in request_data for clarify continuations
-        const origMsg = String((requestData as any).original_user_message || (requestData as any).original_message);
-        if (origMsg.length > rawMsg.length) {
-          console.log(`[INTENT_FIX] Restoring rawMsg for mission extraction from requestData.original_message: "${origMsg.substring(0, 80)}" (was: "${rawMsg.substring(0, 40)}")`);
-          rawMsg = origMsg;
+    if (!_routerHandledSearch) {
+      if (isClarifyResponse && task.conversation_id) {
+        // For constraint_gate continuations: peek at the pending contract (non-destructive —
+        // getPendingContract only deletes on TTL expiry, not on every read).
+        const earlyPending = getPendingContract(task.conversation_id);
+        if (earlyPending?.originalMessage && earlyPending.originalMessage !== rawMsg) {
+          console.log(`[INTENT_FIX] Restoring rawMsg for mission extraction from pending contract: "${earlyPending.originalMessage.substring(0, 80)}" (was: "${rawMsg.substring(0, 40)}")`);
+          rawMsg = earlyPending.originalMessage;
+        } else if (((requestData as any).original_user_message || (requestData as any).original_message) && String((requestData as any).original_user_message || (requestData as any).original_message) !== rawMsg) {
+          // Client may send original_user_message or original_message in request_data for clarify continuations
+          const origMsg = String((requestData as any).original_user_message || (requestData as any).original_message);
+          if (origMsg.length > rawMsg.length) {
+            console.log(`[INTENT_FIX] Restoring rawMsg for mission extraction from requestData.original_message: "${origMsg.substring(0, 80)}" (was: "${rawMsg.substring(0, 40)}")`);
+            rawMsg = origMsg;
+          }
         }
       }
     }
@@ -2654,6 +2671,9 @@ class SupervisorService {
     }
 
 
+    if (_routerHandledSearch) {
+      console.log(`[ROUTER_BYPASS] Skipping constraint gate + smart clarify — router confirmed searchable`);
+    } else {
     console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=constraint_gate`);
     // OUTER CONSTRAINT GATE — runs BEFORE executeTowerLoopChat
     const outerGateMsg = String((task.request_data as any).user_message || '').trim();
@@ -2918,6 +2938,7 @@ class SupervisorService {
         }
       }
     }
+    } // end of else (_routerHandledSearch bypass for constraint gate + smart clarify)
 
     const executionSource = useMissionExecution && activeMissionPlan && missionResult?.ok && missionResult.mission
       ? 'mission' as const
