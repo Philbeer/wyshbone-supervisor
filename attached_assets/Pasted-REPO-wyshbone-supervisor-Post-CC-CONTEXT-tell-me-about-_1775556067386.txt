@@ -1,0 +1,71 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: "tell me about the first one" after a search in the same chat still runs the full pipeline instead of the reviewing handler. The in-memory conversation state should have `lastDelivery` set after the first search, but it appears to be missing. Two fixes: DB warmup (safety net) + extra logging (diagnosis).
+
+## Fix 1: DB warmup for lastDelivery
+
+In `server/supervisor.ts`, find the conversation state block (search for `═══ CONVERSATION STATE ═══` around line 1416). After `convState = getConversationState(task.conversation_id);`, add:
+
+```typescript
+        // Warm up lastDelivery from DB if the in-memory state is missing it
+        if (convState && !convState.lastDelivery && task.conversation_id) {
+          try {
+            const { getConversationContext } = await import('./supervisor/conversation-context');
+            const ctx = await getConversationContext(task.conversation_id);
+            if (ctx.leads.length > 0 && ctx.lastDeliveryRunId) {
+              const { setLastDelivery: setLD } = await import('./supervisor/conversation-state');
+              setLD(task.conversation_id, {
+                runId: ctx.lastDeliveryRunId,
+                leadCount: ctx.leads.length,
+                entityType: '',
+                location: '',
+                missionConfig: null,
+              });
+              // Reload the state after the warmup
+              convState = getConversationState(task.conversation_id);
+              console.log(`[CONV_STATE_WARMUP] Recovered lastDelivery from DB: ${ctx.leads.length} leads, runId=${ctx.lastDeliveryRunId}`);
+            } else {
+              console.log(`[CONV_STATE_WARMUP] No leads in DB for conversation — lastDelivery stays null`);
+            }
+          } catch (warmupErr: any) {
+            console.warn(`[CONV_STATE_WARMUP] Failed (non-fatal): ${warmupErr.message}`);
+          }
+        }
+```
+
+Place this BEFORE the `hasLastDelivery` assignment.
+
+## Fix 2: Extra logging
+
+Also in the conversation state block, AFTER the `suggestPhase` call, add detailed logging:
+
+Find the existing log line:
+```typescript
+console.log(`[CONV_STATE] conversation=${task.conversation_id.slice(0, 8)} phase=${suggestedPhase} lastDelivery=${hasLastDelivery} turn=${convState.turnCount} msg="${rawMsg.slice(0, 40)}"`);
+```
+
+Add after it:
+```typescript
+        // Extra diagnostic logging
+        console.log(`[CONV_STATE_DEBUG] classifiedMessageClass=${isClarifyResponse ? 'clarify_response' : classifiedMessageClass} currentPhase=${convState.phase} hasLastDelivery=${hasLastDelivery} lastDeliveryRunId=${convState.lastDelivery?.runId?.slice(0,12) || 'null'} isClarifyResponse=${isClarifyResponse}`);
+```
+
+This will show us in the console exactly what `suggestPhase` received and why it returned what it did.
+
+## Fix 3: Fix the Haiku model name in result-discussion.ts
+
+In `server/supervisor/result-discussion.ts`, find the model name being used for the LLM call. It's probably `claude-3-5-haiku-20241022` which returns 404. 
+
+Check what model `server/supervisor/rescue-llm.ts` uses (search for `RESCUE_LLM_MODEL`). Use the same model name. If rescue-llm uses `claude-3-5-haiku-20241022`, try changing both to `claude-3-haiku-20240307`.
+
+Alternatively, use the env variable pattern: `process.env.DISCUSSION_LLM_MODEL || process.env.RESCUE_LLM_MODEL || 'claude-3-haiku-20240307'`
+
+## Verification
+
+After deploying, start a NEW chat:
+1. "find pubs in arundel" → wait for results
+2. Check console for: `[CONV_STATE] Delivery complete — now in reviewing phase`
+3. "tell me about the first one"
+4. Check console for: `[CONV_STATE_DEBUG]` line — should show `classifiedMessageClass=followup hasLastDelivery=true`
+5. If `hasLastDelivery=false` but `[CONV_STATE_WARMUP]` shows "Recovered lastDelivery from DB" → the warmup saved us
+6. Should see `[CONV_STATE] Handled as result discussion` and the response appears quickly
