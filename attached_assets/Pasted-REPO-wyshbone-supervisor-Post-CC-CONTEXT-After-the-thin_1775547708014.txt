@@ -1,0 +1,221 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: After the thin pipe refactor, the UI no longer has an LLM call. All messages come to the Supervisor. The Supervisor handles clear queries well (mission extractor → execute), but for complex/vague queries where the mission is incomplete, it falls back to blunt constraint gate questions like "Where should I search?" or "What type of businesses?"
+
+We're adding a "smart clarification" LLM layer that fires when the constraint gate would ask a canned question. It reads URL content, conversation context, and user profile to produce a contextual, helpful clarification message — like a knowledgeable assistant guiding the user to a searchable query.
+
+IMPORTANT: This is NOT a general chatbot. It ONLY fires when the mission extractor produced an incomplete mission. Clear queries ("find pubs in arundel") skip it entirely. It replaces the constraint gate's MESSAGE, not its LOGIC.
+
+## Task 1: Create `server/supervisor/smart-clarify.ts`
+
+Create a new file with a single exported function. Follow the same LLM call pattern used in `server/supervisor/rescue-llm.ts` (the `callAnthropicHaiku` function). You can import and reuse that function directly, or create a similar one using GPT-4o-mini via the existing OpenAI client in the project.
+
+```typescript
+/**
+ * Smart Clarification — Context-aware clarification for incomplete missions
+ * 
+ * Fires when the mission extractor produces an incomplete mission (missing
+ * entity type, location, or key constraints). Reads URL content and
+ * conversation context to produce a helpful, contextual clarification
+ * instead of a blunt "what type of businesses?" question.
+ *
+ * Uses the existing pending contract system — no new state management.
+ */
+
+export interface SmartClarifyInput {
+  userMessage: string;
+  conversationContext: string | null;  // Recent messages including URL content
+  partialMission: {
+    entity_category?: string;
+    location_text?: string;
+    constraints?: Array<{ type: string; field: string; value: string }>;
+  } | null;
+  missingFields: string[];  // What the constraint gate identified as missing
+  urlContent: string | null;  // URL content fetched by the UI (if any)
+  userProfile?: {
+    companyName?: string;
+    companyDomain?: string;
+    inferredIndustry?: string;
+    primaryObjective?: string;
+  } | null;
+}
+
+export interface SmartClarifyResult {
+  clarification_message: string;
+  inferred_context: {
+    product_description?: string;
+    suggested_sectors?: string[];
+    suggested_locations?: string[];
+  };
+  still_missing: string[];
+  can_proceed_without: boolean;
+  proposed_query?: string;  // If enough context to suggest a concrete search
+}
+```
+
+The function `generateSmartClarification(input: SmartClarifyInput): Promise<SmartClarifyResult>` should:
+
+1. Check feature flag: `if (process.env.SMART_CLARIFY_ENABLED !== 'true') throw new Error('Smart clarification disabled');`
+
+2. Build a system prompt:
+```
+You are a clarification assistant for Wyshbone, a business lead finder. A user has asked to find businesses but their request is incomplete. Your job is to:
+
+1. Read any URL content or conversation context to understand what the user's product/service does
+2. Suggest relevant business sectors or types that might be interested
+3. Ask what's still missing (usually a location or specific sector)
+4. Be helpful and specific — don't just ask "what type of businesses?"
+
+You must respond with a JSON object only (no markdown, no backticks):
+{
+  "clarification_message": "Your helpful message to the user. Can include sector suggestions based on URL analysis. Must end with a specific question about what's missing. Keep it concise — 2-3 sentences max.",
+  "inferred_context": {
+    "product_description": "One sentence describing the user's product/service if a URL was analysed, or null",
+    "suggested_sectors": ["sector1", "sector2", "sector3"] or null if no URL to analyse,
+    "suggested_locations": ["location hint"] or null
+  },
+  "still_missing": ["location"] or ["entity_type"] or ["location", "entity_type"],
+  "can_proceed_without": false,
+  "proposed_query": "A concrete search query if you have enough to suggest one, or null"
+}
+
+RULES:
+- Keep clarification_message to 2-3 sentences. Be concise and direct.
+- If you analysed a URL, briefly mention what the product does and suggest 2-3 relevant sectors
+- Always ask specifically for what's missing — don't be vague
+- If the user's company/product is clear, frame suggestions in terms of who would BUY their product
+- If location is missing, ask "Where should I search?" not "Can you tell me a location?"
+- Never apologise or say "I'm not sure"
+```
+
+3. Build a user prompt with the input data:
+```
+User's message: "${input.userMessage}"
+
+${input.urlContent ? `URL CONTENT FETCHED:\n${input.urlContent.slice(0, 3000)}` : 'No URL content available.'}
+
+${input.conversationContext ? `CONVERSATION CONTEXT:\n${input.conversationContext.slice(0, 2000)}` : 'No conversation history.'}
+
+PARTIAL MISSION EXTRACTION:
+- Entity type: ${input.partialMission?.entity_category || 'MISSING'}
+- Location: ${input.partialMission?.location_text || 'MISSING'}
+- Constraints: ${JSON.stringify(input.partialMission?.constraints || [])}
+
+WHAT'S MISSING: ${input.missingFields.join(', ')}
+
+${input.userProfile?.companyName ? `USER'S COMPANY: ${input.userProfile.companyName}` : ''}
+${input.userProfile?.inferredIndustry ? `USER'S INDUSTRY: ${input.userProfile.inferredIndustry}` : ''}
+```
+
+4. Call the LLM (use the same `callAnthropicHaiku` from rescue-llm.ts, or the OpenAI client for GPT-4o-mini — either works, choose whichever is simpler to import). Parse the JSON response.
+
+5. Validate the response has `clarification_message` (required). If parsing fails, throw an error (the caller will fall back to canned message).
+
+6. Add a console log: `[SMART_CLARIFY] Generated: "${result.clarification_message.slice(0, 80)}" missing=[${result.still_missing}] inferred=${!!result.inferred_context.product_description}`
+
+7. Add a circuit breaker (same pattern as rescue-llm.ts): max 20 calls per 5 minutes. If breaker is open, throw an error.
+
+## Task 2: Wire into supervisor.ts
+
+In `server/supervisor.ts`, find the section where the constraint gate fires and stores a pending contract. This is the block that starts with checking if the constraint gate says `can_execute=false` (search for `storePendingContract` — there should be a block around line 1650-1700 that does this for first-time messages, not follow-ups).
+
+Specifically, find the code block that looks like:
+
+```typescript
+if (!resolvedContract.can_execute) {
+  storePendingContract(task.conversation_id, pendingConstraint.originalMessage, resolvedContract, jobId);
+  const clarifyMsg = buildConstraintGateMessage(resolvedContract);
+  // ... insert message, update task ...
+}
+```
+
+There are TWO places where `buildConstraintGateMessage` is called — one for follow-up resolution (the pending contract path) and one for first-time constraint gate. We want to enhance the FIRST-TIME path (not the follow-up resolution path).
+
+Find the first-time constraint gate section. It's in the section AFTER mission extraction and the constraint gate's `preExecutionConstraintGateFromIntent()` call. Look for where `storePendingContract` is called with the ORIGINAL message (not a follow-up).
+
+BEFORE the `buildConstraintGateMessage` call, add:
+
+```typescript
+// Smart clarification: generate context-aware message instead of canned question
+let clarifyMsg: string;
+if (process.env.SMART_CLARIFY_ENABLED === 'true') {
+  try {
+    const { generateSmartClarification } = await import('./supervisor/smart-clarify');
+    const smartResult = await generateSmartClarification({
+      userMessage: rawMsg,
+      conversationContext: conversationContextStr ?? null,
+      partialMission: missionResult?.mission ?? null,
+      missingFields: gateContract.constraints
+        .filter((c: any) => !c.can_execute)
+        .map((c: any) => c.type),
+      urlContent: (requestData as any).url_content ?? null,
+      userProfile: userContext?.profile ?? null,
+    });
+    clarifyMsg = smartResult.clarification_message;
+    
+    // Store inferred context in the contract for follow-up resolution
+    (gateContract as any)._inferred_context = smartResult.inferred_context;
+    if (smartResult.proposed_query) {
+      (gateContract as any)._proposed_query = smartResult.proposed_query;
+    }
+    
+    console.log(`[SMART_CLARIFY] Used smart clarification for runId=${jobId}: "${clarifyMsg.slice(0, 80)}"`);
+  } catch (smartErr: any) {
+    console.warn(`[SMART_CLARIFY] Failed (using canned fallback): ${smartErr.message}`);
+    clarifyMsg = buildConstraintGateMessage(gateContract);
+  }
+} else {
+  clarifyMsg = buildConstraintGateMessage(gateContract);
+}
+```
+
+Replace the variable name `gateContract` with whatever the actual variable is called in the code (it might be `contract` or `constraintContract` — check the surrounding code).
+
+NOTE: The variable name for the constraint contract varies. Search for the `buildConstraintGateMessage` call and use the same variable it's already using.
+
+## Task 3: Use inferred context in follow-up resolution
+
+In `server/supervisor/constraint-gate.ts`, find the `resolveFollowUp` function. After it resolves constraints from the user's follow-up answer, add a section that enriches the entity description with inferred context:
+
+```typescript
+// If smart clarification inferred product context, enrich the entity description
+const inferredCtx = (contract as any)._inferred_context;
+if (inferredCtx?.product_description) {
+  const entityConstraint = resolved.constraints.find(c => 
+    c.type === 'entity_type' || c.type === 'entity_description' || c.type === 'ENTITY_TYPE'
+  );
+  if (entityConstraint && entityConstraint.value) {
+    entityConstraint.value = `${entityConstraint.value} (specifically: businesses interested in ${inferredCtx.product_description})`;
+    console.log(`[SMART_CLARIFY] Enriched entity constraint with product context: "${entityConstraint.value.slice(0, 100)}"`);
+  }
+}
+```
+
+Add this BEFORE the final `return resolved;` in `resolveFollowUp`.
+
+## Task 4: Add feature flag
+
+Add `SMART_CLARIFY_ENABLED=false` to the Replit Secrets. We'll flip it to `true` for testing.
+
+## DO NOT change:
+
+- The mission extractor
+- The rescue LLM (leave it as-is — it handles different cases)
+- The constraint gate's classification logic (what's missing, what can be inferred)
+- The pending contract system
+- The message classifier
+- The chat response handler
+
+## After deployment:
+
+1. Set `SMART_CLARIFY_ENABLED=true` in Secrets
+2. Restart the server
+3. Test: "I have dataledger.uk, find leads that might want to sign up"
+   → Should get a contextual response mentioning the product and suggesting sectors
+   → Should ask "Where should I search?"
+4. Answer: "Kent"
+   → Should resolve and execute with DataLedger context
+5. Test: "find pubs in arundel"
+   → Should NOT trigger smart clarification (mission complete, goes straight to execution)
+6. Test: "hi"
+   → Should get canned chat response (message classifier handles it before constraint gate)
