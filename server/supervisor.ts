@@ -1345,9 +1345,12 @@ class SupervisorService {
     // Fast classification to avoid burning 20+ LLM calls on "hi" or "thanks"
     let isClarifyResponse = !!(requestData.clarify_answer || requestData.continuation_of_run || requestData._constraint_gate_resolved);
 
+    let classifiedMessageClass: string = 'search'; // default
+
     if (!isClarifyResponse && !missionQueryId) {
       const { classifyMessage: classifyMsg } = await import('./supervisor/message-classifier');
       const classification = classifyMsg(rawMsg);
+      classifiedMessageClass = classification.messageClass;
       console.log(`[MESSAGE_CLASSIFIER] class=${classification.messageClass} confidence=${classification.confidence} reason=${classification.reason} msg="${rawMsg.substring(0, 60)}"`);
 
       if (classification.messageClass === 'chat') {
@@ -1426,7 +1429,7 @@ class SupervisorService {
         const timeSinceLastActivity = Date.now() - convState.lastActivityAt;
 
         suggestedPhase = suggestPhase({
-          messageClass: isClarifyResponse ? 'search' : 'search',
+          messageClass: isClarifyResponse ? 'clarify_response' : classifiedMessageClass,
           currentPhase: convState.phase,
           hasLastDelivery,
           hasPendingContract: false,
