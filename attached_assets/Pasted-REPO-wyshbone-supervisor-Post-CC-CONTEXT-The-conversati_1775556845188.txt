@@ -1,0 +1,85 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: The conversation state machine isn't reliably setting `lastDelivery`, so the reviewing handler never fires for "tell me about the first one." The full search pipeline runs instead, taking minutes.
+
+BYPASS FIX: Route directly from the message classifier's `followup` detection to the result discussion handler — no conversation state needed.
+
+Find in `server/supervisor.ts` the message classifier block where `classification.messageClass === 'followup'` is handled (around line 1395). Currently it loads conversation context but then falls through to the pipeline. Change it to handle the discussion directly:
+
+Find this block:
+```typescript
+      if (classification.messageClass === 'followup' && task.conversation_id) {
+        try {
+          const { getConversationContext, resolveLeadReference } = await import('./supervisor/conversation-context');
+          const ctx = await getConversationContext(task.conversation_id);
+          if (ctx.leads.length > 0) {
+            console.log(`[CONVERSATION_CONTEXT] Loaded ${ctx.leads.length} leads from last delivery in conversation ${task.conversation_id}`);
+            (requestData as any)._conversation_context = ctx;
+          }
+        } catch (ctxErr: any) {
+          console.warn(`[CONVERSATION_CONTEXT] Failed to load context (non-fatal): ${ctxErr.message}`);
+        }
+      }
+```
+
+REPLACE with:
+```typescript
+      if (classification.messageClass === 'followup' && task.conversation_id) {
+        try {
+          const { getConversationContext, resolveLeadReference } = await import('./supervisor/conversation-context');
+          const ctx = await getConversationContext(task.conversation_id);
+          if (ctx.leads.length > 0) {
+            console.log(`[CONVERSATION_CONTEXT] Loaded ${ctx.leads.length} leads from last delivery in conversation ${task.conversation_id}`);
+            (requestData as any)._conversation_context = ctx;
+            
+            // DIRECT RESULT DISCUSSION: If we have leads and the message is a followup,
+            // handle it immediately without going through the full pipeline.
+            // This is the "fast path" for "tell me about the first one" etc.
+            try {
+              const { handleResultDiscussion } = await import('./supervisor/result-discussion');
+              const result = await handleResultDiscussion({
+                conversationId: task.conversation_id,
+                userId: task.user_id,
+                rawMessage: rawMsg,
+                jobId,
+                taskId: task.id,
+              });
+              
+              if (supabase) {
+                await supabase.from('supervisor_tasks').update({
+                  status: 'completed',
+                  result: { message_id: result.messageId, conversation_phase: 'reviewing', referenced_lead: result.referencedLead },
+                }).eq('id', task.id);
+              }
+              
+              await storage.updateAgentRun(jobId, {
+                status: 'completed',
+                terminalState: 'completed',
+                endedAt: new Date(),
+                metadata: { verdict: 'result_discussion', conversation_phase: 'reviewing' },
+              }).catch(() => {});
+              
+              console.log(`[FOLLOWUP_FAST_PATH] Handled followup as result discussion — ${ctx.leads.length} leads, referenced=${result.referencedLead?.name || 'none'}`);
+              await emitTaskExecutionCompleted('result_discussion_fast_path');
+              return;
+            } catch (discussErr: any) {
+              console.warn(`[FOLLOWUP_FAST_PATH] Result discussion failed (falling through to pipeline): ${discussErr.message}`);
+              // Fall through to normal pipeline
+            }
+          }
+        } catch (ctxErr: any) {
+          console.warn(`[CONVERSATION_CONTEXT] Failed to load context (non-fatal): ${ctxErr.message}`);
+        }
+      }
+```
+
+This is the simplest possible fix:
+- Message classified as `followup` → check DB for leads → if leads exist → handle as result discussion → RETURN immediately
+- No conversation state needed
+- No warmup needed
+- No suggestPhase needed
+- Just: are there leads? Is it a followup? → discuss the results
+
+The LLM call in `handleResultDiscussion` is ~2 seconds. If it fails, the fallback response (name + address + website) is instant. Either way, the user gets a response in 2-3 seconds instead of minutes.
+
+Also fix the Haiku model: In `server/supervisor/result-discussion.ts`, find the model name and check what rescue-llm.ts uses. If rescue-llm uses `claude-3-5-haiku-20241022`, that model is returning 404. Try `claude-3-haiku-20240307` instead.
