@@ -1479,18 +1479,42 @@ class SupervisorService {
           await emitTaskExecutionCompleted('result_discussion');
           return;
         } catch (err: any) {
-          console.warn(`[CONV_STATE] Result discussion failed (falling through to pipeline): ${err.message}`);
-          // Fall through to normal pipeline
+          console.warn(`[CONV_STATE] Result discussion failed: ${err.message}`);
+          // Don't fall through silently — tell the user we didn't follow that
+          const fallbackMsg = "I'm not sure I understood that. You can ask about a specific result by number (e.g. 'tell me about #3'), ask me to refine the results (e.g. 'which have a website?'), or start a new search.";
+          const fallbackMsgId = randomUUID();
+          if (supabase) {
+            await Promise.all([
+              supabase.from('messages').insert({
+                id: fallbackMsgId,
+                conversation_id: task.conversation_id,
+                role: 'assistant',
+                content: fallbackMsg,
+                source: 'supervisor',
+                metadata: { supervisor_task_id: task.id, run_id: jobId, conversation_phase: 'reviewing', fallback: true },
+                created_at: Date.now(),
+              }),
+              supabase.from('supervisor_tasks').update({
+                status: 'completed',
+                result: { message_id: fallbackMsgId, fallback: true },
+              }).eq('id', task.id),
+            ]);
+          }
+          await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'review_fallback' } }).catch(() => {});
+          await emitTaskExecutionCompleted('review_fallback');
+          return;
         }
       }
 
       // ITERATING: User wants to modify previous search
       if (suggestedPhase === 'iterating' && convState.lastDelivery && !isClarifyResponse) {
+        let iterationMatched = false;
         try {
           const { buildIteratedQuery } = await import('./supervisor/search-iteration');
           const iteration = buildIteratedQuery(rawMsg, convState.lastDelivery, convState.accumulatedContext);
 
           if (iteration) {
+            iterationMatched = true;
             console.log(`[CONV_STATE] Search iteration: ${iteration.changeDescription} → "${iteration.modifiedMessage}"`);
             // Rewrite the message with the iterated query, then fall through to normal pipeline
             rawMsg = iteration.modifiedMessage;
@@ -1501,6 +1525,35 @@ class SupervisorService {
           // Fall through to normal pipeline with modified (or original) message
         } catch (err: any) {
           console.warn(`[CONV_STATE] Search iteration failed (falling through): ${err.message}`);
+        }
+
+        // If we suggested 'iterating' but couldn't parse the modification,
+        // don't silently fall through — ask the user to clarify
+        if (!iterationMatched) {
+          const prevEntity = convState.lastDelivery.entityType || 'the same type';
+          const prevLocation = convState.lastDelivery.location || 'the same area';
+          const iterFallbackMsg = `I can see you want to modify your previous search for ${prevEntity} in ${prevLocation}, but I'm not sure what to change. You can say things like "now try Brighton" (change location), "find accountants instead" (change business type), or just tell me exactly what you'd like to search for.`;
+          const iterFallbackId = randomUUID();
+          if (supabase) {
+            await Promise.all([
+              supabase.from('messages').insert({
+                id: iterFallbackId,
+                conversation_id: task.conversation_id,
+                role: 'assistant',
+                content: iterFallbackMsg,
+                source: 'supervisor',
+                metadata: { supervisor_task_id: task.id, run_id: jobId, conversation_phase: 'iterating', fallback: true },
+                created_at: Date.now(),
+              }),
+              supabase.from('supervisor_tasks').update({
+                status: 'completed',
+                result: { message_id: iterFallbackId, fallback: true },
+              }).eq('id', task.id),
+            ]);
+          }
+          await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'iteration_fallback' } }).catch(() => {});
+          await emitTaskExecutionCompleted('iteration_fallback');
+          return;
         }
       }
     }
@@ -2231,6 +2284,46 @@ class SupervisorService {
         }
       } catch (e: any) {
         console.warn(`[CONSTRAINT_GATE] Failed to recover pending contract from DB (non-fatal): ${e.message}`);
+      }
+    }
+
+    // ═══ MINIMUM VIABILITY GUARD ═══
+    // If the message is extremely short (< 4 chars) or is a common filler word,
+    // don't waste an LLM call on mission extraction — just ask what they want.
+    const FILLER_WORDS = /^(any|all|yes|no|ok|sure|yep|nah|nope|hmm|um|eh|lol|k|y|n)\s*[.!?]*$/i;
+    if (!isClarifyResponse && !missionQueryId && (rawMsg.trim().length < 4 || FILLER_WORDS.test(rawMsg.trim()))) {
+      // Check: is there a pending contract? If so, these short answers ARE clarify responses
+      // and should flow through. But if there's no pending contract, they're just noise.
+      if (!pendingConstraint) {
+        const viabilityMsg = "I didn't quite catch that. What would you like me to search for? Try something like 'find accountants in Kent' or 'search for web design agencies in Brighton'.";
+        const viabilityMsgId = randomUUID();
+
+        await Promise.all([
+          supabase!.from('supervisor_tasks').update({
+            status: 'completed',
+            result: { response: viabilityMsg.substring(0, 200), message_id: viabilityMsgId, classifier: 'minimum_viability_guard' },
+          }).eq('id', task.id),
+          supabase!.from('messages').insert({
+            id: viabilityMsgId,
+            conversation_id: task.conversation_id,
+            role: 'assistant',
+            content: viabilityMsg,
+            source: 'supervisor',
+            metadata: { supervisor_task_id: task.id, run_id: jobId, minimum_viability_guard: true },
+            created_at: Date.now(),
+          }),
+        ]);
+
+        await storage.updateAgentRun(jobId, {
+          status: 'completed',
+          terminalState: 'completed',
+          endedAt: new Date(),
+          metadata: { verdict: 'minimum_viability_guard', raw_message: rawMsg },
+        }).catch(() => {});
+
+        console.log(`[VIABILITY_GUARD] Blocked ultra-short/filler message: "${rawMsg}" — asked for clarification`);
+        await emitTaskExecutionCompleted('minimum_viability_guard');
+        return;
       }
     }
 
