@@ -1,0 +1,204 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: Final step. `conversation-state.ts`, `result-discussion.ts`, and `search-iteration.ts` are created. Now we wire them into processChatTask.
+
+TASK: Modify `server/supervisor.ts` in three places. Also add a feature flag.
+
+## Place 1: Load state after message classifier
+
+Find the message classifier block in processChatTask. Search for `[MESSAGE_CLASSIFIER]` — it's around line 1344. AFTER the message classifier runs and BEFORE the line that says `console.log('[SUPERVISOR] Executing task...')`, add:
+
+```typescript
+// ═══ CONVERSATION STATE ═══
+const CONV_STATE_ENABLED = process.env.CONVERSATION_STATE_ENABLED === 'true';
+let convState: any = null;
+let suggestedPhase: string = 'idle';
+
+if (CONV_STATE_ENABLED) {
+  try {
+    const { getConversationState, suggestPhase } = await import('./supervisor/conversation-state');
+    
+    convState = getConversationState(task.conversation_id);
+    const hasLastDelivery = !!convState.lastDelivery;
+    const timeSinceLastActivity = Date.now() - convState.lastActivityAt;
+    
+    suggestedPhase = suggestPhase({
+      messageClass: classification.messageClass,
+      currentPhase: convState.phase,
+      hasLastDelivery,
+      hasPendingContract: !!pendingConstraint,
+      timeSinceLastActivity,
+      rawMessage: rawMsg,
+    });
+    
+    if (suggestedPhase !== convState.phase) {
+      const { updateConversationPhase } = await import('./supervisor/conversation-state');
+      updateConversationPhase(task.conversation_id, suggestedPhase);
+    }
+    
+    console.log(`[CONV_STATE] conversation=${task.conversation_id.slice(0, 8)} phase=${suggestedPhase} lastDelivery=${hasLastDelivery} turn=${convState.turnCount} msg="${rawMsg.slice(0, 40)}"`);
+  } catch (stateErr: any) {
+    console.warn(`[CONV_STATE] State loading failed (non-fatal): ${stateErr.message}`);
+  }
+}
+```
+
+NOTE: The variable `pendingConstraint` might not be defined yet at this point in the code. Check where `getPendingContract` is called. If it's AFTER this insertion point, use `false` for `hasPendingContract` here and that's fine — the pending contract handling later in the code will still work correctly.
+
+## Place 2: Route based on state (reviewing + iterating)
+
+IMMEDIATELY after the Place 1 code, add the state-aware routing:
+
+```typescript
+// ═══ STATE-AWARE ROUTING ═══
+if (CONV_STATE_ENABLED && convState) {
+  
+  // REVIEWING: User is discussing delivered results
+  if (suggestedPhase === 'reviewing' && !isClarifyResponse) {
+    try {
+      const { handleResultDiscussion } = await import('./supervisor/result-discussion');
+      const result = await handleResultDiscussion({
+        conversationId: task.conversation_id,
+        userId: task.user_id,
+        rawMessage: rawMsg,
+        jobId,
+        taskId: task.id,
+      });
+      
+      // Mark task complete
+      if (supabase) {
+        await supabase.from('supervisor_tasks').update({
+          status: 'completed',
+          result: { message_id: result.messageId, conversation_phase: 'reviewing', referenced_lead: result.referencedLead },
+        }).eq('id', task.id);
+      }
+      
+      await storage.updateAgentRun(jobId, {
+        status: 'completed',
+        terminalState: 'completed',
+        endedAt: new Date(),
+        metadata: { verdict: 'result_discussion', conversation_phase: 'reviewing' },
+      }).catch(() => {});
+      
+      console.log(`[CONV_STATE] Handled as result discussion`);
+      await emitTaskExecutionCompleted('result_discussion');
+      return;
+    } catch (err: any) {
+      console.warn(`[CONV_STATE] Result discussion failed (falling through to pipeline): ${err.message}`);
+      // Fall through to normal pipeline
+    }
+  }
+  
+  // ITERATING: User wants to modify previous search
+  if (suggestedPhase === 'iterating' && convState.lastDelivery && !isClarifyResponse) {
+    try {
+      const { buildIteratedQuery } = await import('./supervisor/search-iteration');
+      const iteration = buildIteratedQuery(rawMsg, convState.lastDelivery, convState.accumulatedContext);
+      
+      if (iteration) {
+        console.log(`[CONV_STATE] Search iteration: ${iteration.changeDescription} → "${iteration.modifiedMessage}"`);
+        // Rewrite the message with the iterated query, then fall through to normal pipeline
+        rawMsg = iteration.modifiedMessage;
+        effectiveMsg = iteration.modifiedMessage;
+        // Update phase
+        const { updateConversationPhase } = await import('./supervisor/conversation-state');
+        updateConversationPhase(task.conversation_id, 'executing');
+      }
+      // Fall through to normal pipeline with modified (or original) message
+    } catch (err: any) {
+      console.warn(`[CONV_STATE] Search iteration failed (falling through): ${err.message}`);
+    }
+  }
+}
+```
+
+IMPORTANT: Check that `isClarifyResponse`, `rawMsg`, `effectiveMsg`, `emitTaskExecutionCompleted`, `supabase`, `storage`, `jobId`, `task` are all in scope at this point. They should be — they're defined earlier in processChatTask. If `effectiveMsg` is defined LATER (after the cross-session resolver), just set `rawMsg` and the cross-session resolver will use it.
+
+## Place 3: Update state after delivery
+
+This is the trickiest part. We need to find WHERE the Supervisor completes a successful delivery and transitions to reviewing.
+
+Search for where the agent_run is marked as completed after a successful mission execution. Look for patterns like:
+- `status: 'completed'` AND `terminalState: 'completed'`
+- OR search for `emitDeliverySummary`
+- OR search for `DELIVERY` in the mission execution result handling
+
+There are likely MULTIPLE places where a run completes (mission execution, refine, etc.). The main one for search results is after `executeMissionWithReloop` or `executeMissionDrivenPlan` returns.
+
+Find the section after mission execution completes successfully. It's probably inside a block that checks the execution result and marks the run as completed. Add AFTER the run is marked completed:
+
+```typescript
+// Update conversation state to reviewing after successful delivery
+if (CONV_STATE_ENABLED) {
+  try {
+    const { updateConversationPhase, setLastDelivery } = await import('./supervisor/conversation-state');
+    
+    setLastDelivery(task.conversation_id, {
+      runId: jobId,
+      leadCount: executionResult?.delivered_count ?? executionResult?.total_found ?? 0,
+      entityType: missionResult?.mission?.entity_category || earlyParsedGoal?.business_type || '',
+      location: missionResult?.mission?.location_text || earlyParsedGoal?.location || '',
+      missionConfig: missionResult?.mission || null,
+    });
+    
+    updateConversationPhase(task.conversation_id, 'reviewing');
+    console.log(`[CONV_STATE] Delivery complete — now in reviewing phase`);
+  } catch (stateErr: any) {
+    console.warn(`[CONV_STATE] Failed to update state after delivery (non-fatal): ${stateErr.message}`);
+  }
+}
+```
+
+NOTE: The variable `executionResult` might be named differently. Look at what the mission execution function returns and what variables hold the result. Common names: `executionResult`, `missionExecResult`, `result`, `execResult`. Use whatever is in scope. If `delivered_count` isn't available, use `0` — the important thing is that `lastDelivery` is set so the reviewing state works.
+
+Also: add this to the refine results handler (`handleRefineResults`) at the end, after it completes:
+```typescript
+if (CONV_STATE_ENABLED) {
+  try {
+    const { updateConversationPhase } = await import('./supervisor/conversation-state');
+    updateConversationPhase(task.conversation_id, 'reviewing');
+  } catch (e: any) {}
+}
+```
+
+## Place 4: Update state when smart clarification fires
+
+Find BOTH smart clarification blocks (the constraint gate trigger AND the quality trigger). In each, after the smart clarification message is sent and the pending contract is stored, add:
+
+```typescript
+if (CONV_STATE_ENABLED) {
+  try {
+    const { updateConversationPhase } = await import('./supervisor/conversation-state');
+    updateConversationPhase(task.conversation_id, 'exploring', {
+      accumulatedContext: {
+        originalUserMessage: rawMsg,
+        ...(smartResult.inferred_context?.product_description ? { productDescription: smartResult.inferred_context.product_description } : {}),
+        ...(smartResult.inferred_context?.suggested_sectors ? { suggestedSectors: smartResult.inferred_context.suggested_sectors } : {}),
+      },
+    });
+  } catch (e: any) {}
+}
+```
+
+## Feature flag
+
+Add `CONVERSATION_STATE_ENABLED=false` to Replit Secrets. Flip to `true` when ready to test.
+
+## DO NOT change:
+- The mission extractor
+- The constraint gate  
+- The smart clarification module
+- The message classifier
+- The delivery/execution pipeline
+- The refine handler logic (only add state update at the end)
+
+## Verification
+
+1. Set `CONVERSATION_STATE_ENABLED=true` and restart
+2. "find pubs in arundel" → check console for `[CONV_STATE] phase: idle → idle` then after delivery `phase: idle → reviewing`
+3. "tell me about the first one" → console shows `phase: reviewing` → result discussion fires → LLM responds about lead #1
+4. "now try Brighton" → console shows `iterating` → query rewritten to "find pubs in Brighton" → executes
+5. "hi" → phase resets or stays, canned response
+6. Wait 30+ minutes → phase resets to idle
+
+Check console for `[CONV_STATE]`, `[RESULT_DISCUSSION]`, `[SEARCH_ITERATION]` log lines.
