@@ -1,0 +1,62 @@
+REPO: wyshbone-supervisor-Post-CC
+CONTEXT: The UI no longer makes an LLM call. It sends all messages to the Supervisor as tasks. The Supervisor needs to handle two things it didn't before:
+
+URL content that the UI saves to the messages table (it probably already picks this up via conversation context loading)
+Refine detection from raw messages (currently the UI set task_type=refine_results, now it does this deterministically but we should also handle it if the UI misses it)
+
+TASK: Minor additions to ensure the Supervisor handles the expanded responsibility.
+Change 1: Ensure URL content from messages table is in context
+In server/supervisor.ts, find the conversation context loading section (around line 1416 in processChatTask where it loads recentMsgs). Verify that system-role messages are included. The current query is:
+typescriptconst { data: recentMsgs } = await supabase
+  .from('messages')
+  .select('role, content')
+  .eq('conversation_id', task.conversation_id)
+  .order('created_at', { ascending: false })
+  .limit(6);
+This already loads all roles including system. But increase the limit from 6 to 10 to ensure URL content messages are included even in longer conversations:
+Change .limit(6) to .limit(10).
+Change 2: Use url_content from request_data if available
+After the conversation context loading, add a fallback for URL content passed directly by the UI:
+typescript// If the UI passed URL content in request_data, append it to conversation context
+const uiUrlContent = (requestData as any).url_content;
+if (uiUrlContent && typeof uiUrlContent === 'string' && uiUrlContent.length > 0) {
+  conversationContextStr = (conversationContextStr || '') + '\n\nURL CONTENT (fetched by UI):\n' + uiUrlContent.slice(0, 5000);
+  console.log(`[URL_CONTEXT] Appended ${uiUrlContent.length} chars of UI-fetched URL content to conversation context`);
+}
+Change 3: Handle monitor_request classification → create_monitor task type
+The message classifier already detects monitor_request. But currently, the task_type is set by the UI. Now the Supervisor should also route monitor_request classification to handleCreateMonitor.
+Find the message classifier handling block (around line 1344). After the chat class handling, add:
+typescriptif (classification.messageClass === 'monitor_request') {
+  console.log(`[MESSAGE_CLASSIFIER] Monitor request detected — routing to handleCreateMonitor`);
+  await this.handleCreateMonitor(task, jobId, clientRequestId);
+  await emitTaskExecutionCompleted('monitor_classified');
+  return;
+}
+This ensures that even if the UI sends task_type='find_prospects' but the message says "monitor this weekly", the Supervisor correctly routes it.
+Change 4: Improve chat responses
+The current canned chat responses are very generic. Since the chat LLM is gone, these are now the PRIMARY conversational responses. Make them slightly better:
+Find the chatResponses array and replace with:
+typescriptconst chatResponses = [
+  "Hey! Tell me what kind of businesses you're looking for and where — for example, 'find web design agencies in Brighton' or 'search for accountants in Kent'.",
+  "Hi there! I can find businesses, leads, and prospects for you. Just tell me what you need and where.",
+  "Hello! Ready to search. What type of businesses are you looking for, and in which area?",
+];
+What NOT to change
+
+Mission extractor, constraint gate, rescue LLM, evidence mode — all stay as-is
+The full pipeline — unchanged
+handleRefineResults — unchanged (the UI still sends task_type=refine_results)
+
+Verification
+
+Send "I have dataledger.uk, find leads" through the chat
+Check Supervisor console — should see URL content in conversation context
+Constraint gate should fire asking for location (not the UI LLM asking about sectors)
+Answer "UK" → should execute the search with DataLedger context
+
+
+Cost savings
+This change saves one GPT-4o API call per user message. At ~$0.01-0.03 per call, that's significant at scale. The Supervisor's GPT-4o-mini mission extractor is much cheaper.
+Risk assessment
+RiskLikelihoodMitigationDeterministic router misclassifiesLowDefault is find_prospects, Supervisor handles everythingChat detection too aggressiveLowOnly matches very short greeting patternsRefine detection misses edge casesMediumSupervisor can still detect via followup classificationUsers miss the "sector suggestions"LowSupervisor's constraint gate asks directly for what's missingURL content not in Supervisor contextLowDouble-saved: messages table + request_data
+The default fallback is always find_prospects → full Supervisor pipeline. So even if the deterministic router gets something wrong, the Supervisor handles it. This is the key insight: the Supervisor's default behaviour is "try to search", which is the right default for almost everything.
