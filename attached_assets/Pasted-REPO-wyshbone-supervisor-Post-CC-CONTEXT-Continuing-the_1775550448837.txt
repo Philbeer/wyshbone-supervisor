@@ -1,0 +1,118 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: Continuing the conversation machine. `server/supervisor/conversation-state.ts` is created. Now we build the two handlers that make the reviewing and iterating states work.
+
+TASK: Create two new files.
+
+## FILE 1: `server/supervisor/result-discussion.ts`
+
+This handles messages when the user is reviewing delivered results — "tell me about #3", "which ones have a website?", "why did you include Baltic Fleet?".
+
+It loads the delivered leads, resolves references, and calls an LLM (Haiku — fast + cheap) to generate a conversational response about the results.
+
+Exports one function:
+
+```typescript
+export interface ResultDiscussionInput {
+  conversationId: string;
+  userId: string;
+  rawMessage: string;
+  jobId: string;
+  taskId: string;
+}
+
+export interface ResultDiscussionOutput {
+  response: string;
+  referencedLead: { name: string; index: number } | null;
+  messageId: string;
+}
+
+export async function handleResultDiscussion(input: ResultDiscussionInput): Promise<ResultDiscussionOutput>
+```
+
+Implementation:
+
+1. Import `getConversationContext` and `resolveLeadReference` from `./conversation-context`.
+
+2. Load conversation context. If no leads found, return a message: "I don't have any previous results to discuss. What would you like me to search for?"
+
+3. Try `resolveLeadReference(ctx, rawMessage)` to see if the user is asking about a specific lead.
+
+4. If a specific lead is referenced AND `ctx.lastDeliveryRunId` exists, load artefacts for that run using `storage.getArtefactsByRunId(lastDeliveryRunId)`. Look for artefacts with type `verification_evidence`, `step_result`, or `leads_list`. In the payload, find the lead matching by name or placeId. Extract up to 2000 chars of JSON evidence for that lead.
+
+5. Build a lead summary string: all leads numbered, with name, address, website, phone.
+
+6. Call the Anthropic API (same pattern as `rescue-llm.ts` — use `ANTHROPIC_API_KEY`, model = `process.env.DISCUSSION_LLM_MODEL || 'claude-3-5-haiku-20241022'`).
+
+System prompt:
+```
+You are Wyshbone's results assistant. The user has search results and is asking about them. Be helpful, concise, and factual.
+
+RULES:
+- Only use information from the lead data and evidence provided. Do NOT make up details.
+- If asked about a specific lead, give what you know from the data.
+- If asked a general question ("which have websites?"), scan the lead list and answer.
+- Keep responses to 2-4 sentences. Be direct.
+- If you don't have enough information to answer, say so honestly.
+- You can suggest next actions: "Would you like me to search for more like this?" or "I can refine these results if you tell me what to filter by."
+```
+
+User prompt: Include the lead summary, any referenced lead info, evidence context, and the user's raw message.
+
+7. If the LLM call fails, fall back to a basic response: if a lead was referenced, give its name/address/website/phone. If not, give a generic "I have N results, ask about a specific one by number."
+
+8. Save the response as a message to the `messages` table (role='assistant', source='supervisor', metadata includes `conversation_phase: 'reviewing'` and any `referenced_lead`).
+
+9. Log: `[RESULT_DISCUSSION] Responded about lead #N "name" — M chars`
+
+10. Return the response, referenced lead, and messageId.
+
+Add a circuit breaker: max 10 discussion calls per 5 minutes (same pattern as rescue-llm.ts). If breaker is open, use the fallback response.
+
+## FILE 2: `server/supervisor/search-iteration.ts`
+
+This handles "now try Manchester" or "same but accountants" — modifying a previous search. Purely deterministic — no LLM needed.
+
+Exports one function:
+
+```typescript
+import type { AccumulatedContext, LastDelivery } from './conversation-state';
+
+export interface IterationResult {
+  modifiedMessage: string;     // The rewritten query
+  changeDescription: string;   // Human-readable description of what changed
+  changeType: 'location' | 'entity' | 'constraint' | 'mixed';
+}
+
+export function buildIteratedQuery(
+  rawMessage: string,
+  lastDelivery: LastDelivery,
+  accumulatedContext: AccumulatedContext,
+): IterationResult | null
+```
+
+Implementation:
+
+1. Extract `prevEntity` from `lastDelivery.entityType || accumulatedContext.entityType || ''` and `prevLocation` from `lastDelivery.location || accumulatedContext.location || ''`.
+
+2. Check LOCATION CHANGE patterns (in order):
+   - `/\b(?:now |same |do |try )(?:in |near |around )?([A-Z][a-zA-Z\s,]+)/i`
+   - `/\b(?:what about|how about) ([A-Z][a-zA-Z\s,]+)/i`
+   - `/\b(?:try|find|search|do) (?:in |near )([A-Z][a-zA-Z\s,]+)/i`
+   
+   If matched, extract the new location. Make sure it's not just the entity type repeated. Return `{ modifiedMessage: "find ${prevEntity} in ${newLocation}", changeDescription: "Changed location...", changeType: 'location' }`.
+
+3. Check ENTITY CHANGE patterns:
+   - `/\b(?:try|find|search for|look for) (.+?)(?:\s+instead|\s+in\b|\s*$)/i`
+   - `/\b(?:same but) (.+?)(?:\s+in\b|\s*$)/i`
+   - `/\b(.+?)\s+instead\b/i`
+   
+   If matched, extract new entity (must be 2-50 chars). Return `{ modifiedMessage: "find ${newEntity} in ${prevLocation}", changeType: 'entity' }`.
+
+4. Check COMBINED pattern: `/\b(?:find|search for|look for) (.+?) (?:in|near|around) ([A-Z][a-zA-Z\s,]+)/i`. If matched, return the raw message as-is (it's already a complete query).
+
+5. If nothing matched, return `null` (caller falls through to normal pipeline).
+
+Strip trailing punctuation from extracted values. Log: `[SEARCH_ITERATION] ${changeType}: "${rawMessage}" → "${modifiedMessage}"`
+
+Do NOT modify supervisor.ts yet — that's prompt 3.
