@@ -2349,6 +2349,109 @@ class SupervisorService {
       }
     }
 
+    // Smart clarification trigger 2: mission quality check
+    // Even if constraint gate says can_execute=true, if the mission is thin/vague,
+    // the smart clarification should fire to help the user refine their query.
+    // This produces the rich mission intent card and better search results.
+    if (
+      process.env.SMART_CLARIFY_ENABLED === 'true' &&
+      useMissionExecution &&
+      missionResult?.ok &&
+      missionResult.mission
+    ) {
+      const mission = missionResult.mission;
+      const hasKeyDiscriminator = !!(mission.key_discriminator && mission.key_discriminator.trim().length > 10);
+      const hasExcludingCriteria = !!(mission.excluding_criteria && mission.excluding_criteria.trim().length > 5);
+      const hasEntityDescription = !!(mission.entity_description && mission.entity_description.trim().length > 20);
+
+      // Mission is "thin" if it's missing the rich fields that power the intent card
+      const isThinMission = !hasKeyDiscriminator && !hasExcludingCriteria && !hasEntityDescription;
+
+      // Also check: did the user provide a URL? URL queries are almost always complex enough
+      // to benefit from smart clarification
+      const hasUrl = /https?:\/\//.test(rawMsg);
+
+      // Also check: is the entity_category very generic?
+      const genericEntityPatterns = /^(businesses|companies|organisations|organizations|leads|prospects|firms|entities)\b/i;
+      const isGenericEntity = genericEntityPatterns.test(mission.entity_category || '');
+
+      const shouldSmartClarify = isThinMission && (hasUrl || isGenericEntity);
+
+      if (shouldSmartClarify) {
+        console.log(`[SMART_CLARIFY_QUALITY] Thin mission detected — triggering smart clarification despite can_execute=true. entity="${mission.entity_category}" hasKeyDisc=${hasKeyDiscriminator} hasExcl=${hasExcludingCriteria} hasDesc=${hasEntityDescription} hasUrl=${hasUrl} isGeneric=${isGenericEntity}`);
+
+        try {
+          const { generateSmartClarification } = await import('./supervisor/smart-clarify');
+          const smartResult = await generateSmartClarification({
+            userMessage: rawMsg,
+            conversationContext: conversationContextStr ?? null,
+            partialMission: missionResult.mission,
+            missingFields: ['specificity'],
+            urlContent: (requestData as any).url_content ?? null,
+            userProfile: userContext?.profile ?? null,
+          });
+
+          // Store as pending contract so the follow-up flows through existing system
+          const thinMissionContract = {
+            can_execute: false,
+            stop_recommended: false,
+            why_blocked: 'Mission is too vague for good results — asking for clarification',
+            clarify_questions: [smartResult.clarification_message],
+            constraints: earlyParsedGoal?.constraints || [],
+            _inferred_context: smartResult.inferred_context,
+            _proposed_query: smartResult.proposed_query,
+          };
+
+          storePendingContract(task.conversation_id, rawMsg, thinMissionContract as any, jobId);
+
+          const clarifyMsg = sanitizeMessageContent(smartResult.clarification_message);
+          const messageId = randomUUID();
+
+          await Promise.all([
+            supabase!.from('supervisor_tasks').update({
+              status: 'completed',
+              result: { response: clarifyMsg.substring(0, 200), message_id: messageId, clarify_gate: 'smart_clarify_quality' },
+            }).eq('id', task.id),
+            supabase!.from('messages').insert({
+              id: messageId,
+              conversation_id: task.conversation_id,
+              role: 'assistant',
+              content: clarifyMsg,
+              source: 'supervisor',
+              metadata: {
+                supervisor_task_id: task.id,
+                run_id: jobId,
+                clarify_gate: 'smart_clarify_quality',
+                smart_clarify: true,
+                inferred_context: smartResult.inferred_context,
+                mode: 'clarify',
+              },
+              created_at: Date.now(),
+            }),
+          ]);
+
+          await storage.updateAgentRun(jobId, {
+            status: 'clarifying',
+            terminalState: null,
+            metadata: {
+              verdict: 'smart_clarify_quality',
+              original_message: rawMsg,
+              constraint_contract: thinMissionContract,
+              thin_mission: true,
+              entity_category: mission.entity_category,
+            },
+          }).catch(() => {});
+
+          console.log(`[SMART_CLARIFY_QUALITY] Asked for clarification: "${clarifyMsg.slice(0, 80)}" runId=${jobId}`);
+          await emitTaskExecutionCompleted('smart_clarify_quality');
+          return;
+        } catch (smartErr: any) {
+          console.warn(`[SMART_CLARIFY_QUALITY] Failed (proceeding with thin mission): ${smartErr.message}`);
+          // Fall through to execute with thin mission — still better than failing
+        }
+      }
+    }
+
     const executionSource = useMissionExecution && activeMissionPlan && missionResult?.ok && missionResult.mission
       ? 'mission' as const
       : 'legacy' as const;
