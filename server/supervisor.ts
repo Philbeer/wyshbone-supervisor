@@ -1341,6 +1341,188 @@ class SupervisorService {
     }
     console.log('[QID-TRACE]', 'step1:processChatTask_computed', missionQueryId);
 
+    let effectiveMsg = rawMsg;
+
+    // ═══ CONVERSATION ROUTER (replaces classifier → gate → clarify chain) ═══
+    if (process.env.CONVERSATION_ROUTER_ENABLED === 'true') {
+      try {
+        const { routeConversation } = await import('./supervisor/conversation-router');
+
+        // Load conversation history
+        let routerHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+        if (task.conversation_id && supabase) {
+          const { data: msgs } = await supabase
+            .from('messages')
+            .select('role, content')
+            .eq('conversation_id', task.conversation_id)
+            .order('created_at', { ascending: false })
+            .limit(15);
+          if (msgs) {
+            routerHistory = msgs.reverse().map((m: any) => ({
+              role: m.role as 'user' | 'assistant',
+              content: String(m.content || ''),
+            }));
+          }
+        }
+
+        // Load previous results context
+        let routerPreviousResults = { exists: false, count: 0, entityType: null as string | null, location: null as string | null, lastSearchRunId: null as string | null };
+        if (task.conversation_id) {
+          try {
+            const { getConversationContext } = await import('./supervisor/conversation-context');
+            const ctx = await getConversationContext(task.conversation_id);
+            if (ctx.leads.length > 0) {
+              routerPreviousResults = {
+                exists: true,
+                count: ctx.leads.length,
+                entityType: ctx.entityType || null,
+                location: ctx.location || null,
+                lastSearchRunId: ctx.lastDeliveryRunId || null,
+              };
+            }
+          } catch (ctxErr: any) {
+            console.warn(`[ROUTER] Context load failed (non-fatal): ${ctxErr.message}`);
+          }
+        }
+
+        const routerInput = {
+          currentMessage: rawMsg,
+          conversationHistory: routerHistory,
+          previousResults: routerPreviousResults,
+          urlContent: (requestData as any).url_content || null,
+          userSearchHistory: userContext.recentSearches?.map((s: any) => ({ query: s.query, delivered: s.delivered })) || null,
+        };
+
+        const decision = await routeConversation(routerInput);
+
+        // Log the decision as an artefact
+        createArtefact({
+          runId: jobId,
+          type: 'diagnostic',
+          title: `Router: ${decision.route} (${decision.confidence.toFixed(2)})`,
+          summary: decision.reasoning,
+          payload: { ...decision as any, diagnostic_type: 'conversation_router' },
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch(() => {});
+
+        // === HANDLE CHAT ===
+        if (decision.route === 'CHAT' && decision.chat_response) {
+          const messageId = randomUUID();
+          await Promise.all([
+            supabase!.from('supervisor_tasks').update({
+              status: 'completed',
+              result: { response: decision.chat_response.substring(0, 200), message_id: messageId, router: 'chat' },
+            }).eq('id', task.id),
+            supabase!.from('messages').insert({
+              id: messageId,
+              conversation_id: task.conversation_id,
+              role: 'assistant',
+              content: decision.chat_response,
+              source: 'supervisor',
+              metadata: { supervisor_task_id: task.id, run_id: jobId, router_decision: decision },
+              created_at: Date.now(),
+            }),
+          ]);
+          await storage.updateAgentRun(jobId, {
+            status: 'completed', terminalState: 'completed', endedAt: new Date(),
+            metadata: { verdict: 'router_chat', router: decision },
+          }).catch(() => {});
+          console.log(`[ROUTER] Handled as CHAT — done`);
+          return;
+        }
+
+        // === HANDLE CLARIFY ===
+        if (decision.route === 'CLARIFY' && decision.clarify_question) {
+          const messageId = randomUUID();
+          await Promise.all([
+            supabase!.from('supervisor_tasks').update({
+              status: 'completed',
+              result: { response: decision.clarify_question.substring(0, 200), message_id: messageId, router: 'clarify' },
+            }).eq('id', task.id),
+            supabase!.from('messages').insert({
+              id: messageId,
+              conversation_id: task.conversation_id,
+              role: 'assistant',
+              content: decision.clarify_question,
+              source: 'supervisor',
+              metadata: {
+                supervisor_task_id: task.id, run_id: jobId,
+                router_decision: decision,
+                clarify_gate: 'conversation_router',
+                smart_clarify: true,
+                mode: 'clarify',
+              },
+              created_at: Date.now(),
+            }),
+          ]);
+          await storage.updateAgentRun(jobId, {
+            status: 'clarifying', terminalState: null,
+            metadata: { verdict: 'router_clarify', router: decision, awaiting: 'user_input', original_message: rawMsg },
+          }).catch(() => {});
+          console.log(`[ROUTER] Handled as CLARIFY: "${decision.clarify_question.substring(0, 80)}"`);
+          return;
+        }
+
+        // === HANDLE DISCUSS ===
+        if (decision.route === 'DISCUSS') {
+          try {
+            const { handleResultDiscussion } = await import('./supervisor/result-discussion');
+            const result = await handleResultDiscussion({
+              conversationId: task.conversation_id,
+              userId: task.user_id,
+              rawMessage: rawMsg,
+              jobId,
+              taskId: task.id,
+            });
+            if (supabase) {
+              await supabase.from('supervisor_tasks').update({
+                status: 'completed',
+                result: { message_id: result.messageId, router: 'discuss' },
+              }).eq('id', task.id);
+            }
+            await storage.updateAgentRun(jobId, {
+              status: 'completed', terminalState: 'completed', endedAt: new Date(),
+              metadata: { verdict: 'router_discuss', router: decision },
+            }).catch(() => {});
+            console.log(`[ROUTER] Handled as DISCUSS — done`);
+            return;
+          } catch (discussErr: any) {
+            console.warn(`[ROUTER] DISCUSS handler failed: ${discussErr.message} — falling through to pipeline`);
+          }
+        }
+
+        // === HANDLE ITERATE ===
+        if (decision.route === 'ITERATE' && decision.entity && decision.location) {
+          // Rewrite rawMsg to the full iterated query, then fall through to the search pipeline
+          const constraintStr = decision.constraints.length > 0 ? ' ' + decision.constraints.join(' ') : '';
+          rawMsg = `find ${decision.entity} in ${decision.location}${constraintStr}`;
+          effectiveMsg = rawMsg;
+          console.log(`[ROUTER] ITERATE — rewritten to: "${rawMsg}"`);
+          // Fall through to mission extraction below
+        }
+
+        // === HANDLE SEARCH ===
+        if (decision.route === 'SEARCH' && decision.entity && decision.location) {
+          // Rewrite rawMsg to a clean search query, then fall through to mission extraction
+          const constraintStr = decision.constraints.length > 0 ? ' ' + decision.constraints.join(' ') : '';
+          rawMsg = `find ${decision.entity} in ${decision.location}${constraintStr}`;
+          effectiveMsg = rawMsg;
+          console.log(`[ROUTER] SEARCH — using: "${rawMsg}"`);
+          // Fall through to mission extraction below
+        }
+
+        // For SEARCH, ITERATE, and failed DISCUSS: skip the old classifier/gate chain
+        // and jump straight to mission extraction. The old code below this block
+        // will still run but the message is now clean and well-formed.
+
+      } catch (routerErr: any) {
+        console.error(`[ROUTER] Router failed (${routerErr.message}) — falling through to existing pipeline`);
+        // If the router fails entirely, the existing pipeline runs as before
+      }
+    }
+    // ═══ END CONVERSATION ROUTER ═══
+
     // ═══ MESSAGE CLASSIFIER ═══
     // Fast classification to avoid burning 20+ LLM calls on "hi" or "thanks"
     let isClarifyResponse = !!(requestData.clarify_answer || requestData.continuation_of_run || requestData._constraint_gate_resolved);
@@ -1690,7 +1872,7 @@ class SupervisorService {
     // If the user's message is short/vague AND we have recent search history,
     // rewrite the query to include the most recent search context explicitly.
     // This is more reliable than hoping the LLM reads embedded instructions.
-    let effectiveMsg = rawMsg;
+    effectiveMsg = rawMsg;
     if (userContext.recentSearches && userContext.recentSearches.length > 0) {
       const msgLower = rawMsg.toLowerCase().trim();
       console.log(`[CROSS_SESSION_DEBUG] rawMsg="${rawMsg}" recentSearches=${userContext.recentSearches?.length ?? 0}`);

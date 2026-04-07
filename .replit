@@ -64,6 +64,7 @@ INTENT_EXTRACTOR_MODE = "off"
 INTENT_EXTRACTOR_PROBE = "true"
 LOGS_API_KEY = "wyshbone-logs-2026"
 SMART_CLARIFY_ENABLED = "false"
+CONVERSATION_ROUTER_ENABLED = "true"
 
 [postMerge]
 path = "scripts/post-merge.sh"
