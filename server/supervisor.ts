@@ -1405,6 +1405,41 @@ class SupervisorService {
           if (ctx.leads.length > 0) {
             console.log(`[CONVERSATION_CONTEXT] Loaded ${ctx.leads.length} leads from last delivery in conversation ${task.conversation_id}`);
             (requestData as any)._conversation_context = ctx;
+
+            // DIRECT RESULT DISCUSSION: If we have leads and the message is a followup,
+            // handle it immediately without going through the full pipeline.
+            // This is the "fast path" for "tell me about the first one" etc.
+            try {
+              const { handleResultDiscussion } = await import('./supervisor/result-discussion');
+              const result = await handleResultDiscussion({
+                conversationId: task.conversation_id,
+                userId: task.user_id,
+                rawMessage: rawMsg,
+                jobId,
+                taskId: task.id,
+              });
+
+              if (supabase) {
+                await supabase.from('supervisor_tasks').update({
+                  status: 'completed',
+                  result: { message_id: result.messageId, conversation_phase: 'reviewing', referenced_lead: result.referencedLead },
+                }).eq('id', task.id);
+              }
+
+              await storage.updateAgentRun(jobId, {
+                status: 'completed',
+                terminalState: 'completed',
+                endedAt: new Date(),
+                metadata: { verdict: 'result_discussion', conversation_phase: 'reviewing' },
+              }).catch(() => {});
+
+              console.log(`[FOLLOWUP_FAST_PATH] Handled followup as result discussion — ${ctx.leads.length} leads, referenced=${result.referencedLead?.name || 'none'}`);
+              await emitTaskExecutionCompleted('result_discussion_fast_path');
+              return;
+            } catch (discussErr: any) {
+              console.warn(`[FOLLOWUP_FAST_PATH] Result discussion failed (falling through to pipeline): ${discussErr.message}`);
+              // Fall through to normal pipeline
+            }
           }
         } catch (ctxErr: any) {
           console.warn(`[CONVERSATION_CONTEXT] Failed to load context (non-fatal): ${ctxErr.message}`);

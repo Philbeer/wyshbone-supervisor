@@ -115,7 +115,7 @@ async function callAnthropicHaiku(systemPrompt: string, userPrompt: string): Pro
     throw new Error('ANTHROPIC_API_KEY not set — cannot call rescue LLM');
   }
 
-  const model = process.env.RESCUE_LLM_MODEL || 'claude-3-5-haiku-20241022';
+  const model = process.env.RESCUE_LLM_MODEL || 'claude-3-haiku-20240307';
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
