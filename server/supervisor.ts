@@ -1191,6 +1191,13 @@ class SupervisorService {
     });
 
     console.log(`[REFINE_HANDLER] Done runId=${jobId} task=${task.id} matches=${matchingLeads.length}/${refineResult.totalChecked}`);
+
+    if (process.env.CONVERSATION_STATE_ENABLED === 'true') {
+      try {
+        const { updateConversationPhase } = await import('./supervisor/conversation-state');
+        updateConversationPhase(task.conversation_id, 'reviewing');
+      } catch (e: any) {}
+    }
   }
 
   private async processChatTask(task: SupervisorTask) {
@@ -1402,6 +1409,99 @@ class SupervisorService {
       }
       if (classification.messageClass !== 'search') {
         console.log(`[MESSAGE_CLASSIFIER] Non-search class "${classification.messageClass}" — proceeding to pipeline`);
+      }
+    }
+
+    // ═══ CONVERSATION STATE ═══
+    const CONV_STATE_ENABLED = process.env.CONVERSATION_STATE_ENABLED === 'true';
+    let convState: any = null;
+    let suggestedPhase: string = 'idle';
+
+    if (CONV_STATE_ENABLED) {
+      try {
+        const { getConversationState, suggestPhase } = await import('./supervisor/conversation-state');
+
+        convState = getConversationState(task.conversation_id);
+        const hasLastDelivery = !!convState.lastDelivery;
+        const timeSinceLastActivity = Date.now() - convState.lastActivityAt;
+
+        suggestedPhase = suggestPhase({
+          messageClass: isClarifyResponse ? 'search' : 'search',
+          currentPhase: convState.phase,
+          hasLastDelivery,
+          hasPendingContract: false,
+          timeSinceLastActivity,
+          rawMessage: rawMsg,
+        });
+
+        if (suggestedPhase !== convState.phase) {
+          const { updateConversationPhase } = await import('./supervisor/conversation-state');
+          updateConversationPhase(task.conversation_id, suggestedPhase);
+        }
+
+        console.log(`[CONV_STATE] conversation=${task.conversation_id.slice(0, 8)} phase=${suggestedPhase} lastDelivery=${hasLastDelivery} turn=${convState.turnCount} msg="${rawMsg.slice(0, 40)}"`);
+      } catch (stateErr: any) {
+        console.warn(`[CONV_STATE] State loading failed (non-fatal): ${stateErr.message}`);
+      }
+    }
+
+    // ═══ STATE-AWARE ROUTING ═══
+    if (CONV_STATE_ENABLED && convState) {
+
+      // REVIEWING: User is discussing delivered results
+      if (suggestedPhase === 'reviewing' && !isClarifyResponse) {
+        try {
+          const { handleResultDiscussion } = await import('./supervisor/result-discussion');
+          const result = await handleResultDiscussion({
+            conversationId: task.conversation_id,
+            userId: task.user_id,
+            rawMessage: rawMsg,
+            jobId,
+            taskId: task.id,
+          });
+
+          // Mark task complete
+          if (supabase) {
+            await supabase.from('supervisor_tasks').update({
+              status: 'completed',
+              result: { message_id: result.messageId, conversation_phase: 'reviewing', referenced_lead: result.referencedLead },
+            }).eq('id', task.id);
+          }
+
+          await storage.updateAgentRun(jobId, {
+            status: 'completed',
+            terminalState: 'completed',
+            endedAt: new Date(),
+            metadata: { verdict: 'result_discussion', conversation_phase: 'reviewing' },
+          }).catch(() => {});
+
+          console.log(`[CONV_STATE] Handled as result discussion`);
+          await emitTaskExecutionCompleted('result_discussion');
+          return;
+        } catch (err: any) {
+          console.warn(`[CONV_STATE] Result discussion failed (falling through to pipeline): ${err.message}`);
+          // Fall through to normal pipeline
+        }
+      }
+
+      // ITERATING: User wants to modify previous search
+      if (suggestedPhase === 'iterating' && convState.lastDelivery && !isClarifyResponse) {
+        try {
+          const { buildIteratedQuery } = await import('./supervisor/search-iteration');
+          const iteration = buildIteratedQuery(rawMsg, convState.lastDelivery, convState.accumulatedContext);
+
+          if (iteration) {
+            console.log(`[CONV_STATE] Search iteration: ${iteration.changeDescription} → "${iteration.modifiedMessage}"`);
+            // Rewrite the message with the iterated query, then fall through to normal pipeline
+            rawMsg = iteration.modifiedMessage;
+            // Update phase
+            const { updateConversationPhase } = await import('./supervisor/conversation-state');
+            updateConversationPhase(task.conversation_id, 'executing');
+          }
+          // Fall through to normal pipeline with modified (or original) message
+        } catch (err: any) {
+          console.warn(`[CONV_STATE] Search iteration failed (falling through): ${err.message}`);
+        }
       }
     }
 
@@ -2315,6 +2415,19 @@ class SupervisorService {
             }
 
             console.log(`[SMART_CLARIFY] Used smart clarification for runId=${jobId}: "${outerGateClarifyMsg.slice(0, 80)}"`);
+
+            if (CONV_STATE_ENABLED) {
+              try {
+                const { updateConversationPhase } = await import('./supervisor/conversation-state');
+                updateConversationPhase(task.conversation_id, 'exploring', {
+                  accumulatedContext: {
+                    originalUserMessage: rawMsg,
+                    ...(smartResult.inferred_context?.product_description ? { productDescription: smartResult.inferred_context.product_description } : {}),
+                    ...(smartResult.inferred_context?.suggested_sectors ? { suggestedSectors: smartResult.inferred_context.suggested_sectors } : {}),
+                  },
+                });
+              } catch (e: any) {}
+            }
           } catch (smartErr: any) {
             console.warn(`[SMART_CLARIFY] Failed (using canned fallback): ${smartErr.message}`);
             outerGateClarifyMsg = buildConstraintGateMessage(outerGateResult);
@@ -2444,6 +2557,19 @@ class SupervisorService {
 
           console.log(`[SMART_CLARIFY_QUALITY] Asked for clarification: "${clarifyMsg.slice(0, 80)}" runId=${jobId}`);
           await emitTaskExecutionCompleted('smart_clarify_quality');
+
+          if (CONV_STATE_ENABLED) {
+            try {
+              const { updateConversationPhase } = await import('./supervisor/conversation-state');
+              updateConversationPhase(task.conversation_id, 'exploring', {
+                accumulatedContext: {
+                  originalUserMessage: rawMsg,
+                  ...(smartResult.inferred_context?.product_description ? { productDescription: smartResult.inferred_context.product_description } : {}),
+                  ...(smartResult.inferred_context?.suggested_sectors ? { suggestedSectors: smartResult.inferred_context.suggested_sectors } : {}),
+                },
+              });
+            } catch (e: any) {}
+          }
           return;
         } catch (smartErr: any) {
           console.warn(`[SMART_CLARIFY_QUALITY] Failed (proceeding with thin mission): ${smartErr.message}`);
@@ -2956,6 +3082,26 @@ class SupervisorService {
     console.log(`[FINAL_MESSAGE] final_message_created run_id=${jobId} conversation_id=${task.conversation_id} message_id=${messageResult.data.id} task_status=${taskStatus} status=${runFailed ? 'FAIL' : 'OK'}`);
 
     await emitTaskExecutionCompleted('run_completed', { runFailed, leadCount: leadIds.length });
+
+    // Update conversation state to reviewing after successful delivery
+    if (CONV_STATE_ENABLED && !runFailed) {
+      try {
+        const { updateConversationPhase, setLastDelivery } = await import('./supervisor/conversation-state');
+
+        setLastDelivery(task.conversation_id, {
+          runId: jobId,
+          leadCount: towerResult.deliverySummary?.delivered_total_count ?? towerResult.leads.length ?? 0,
+          entityType: missionResult?.mission?.entity_category || earlyParsedGoal?.business_type || '',
+          location: missionResult?.mission?.location_text || earlyParsedGoal?.location || '',
+          missionConfig: missionResult?.mission || null,
+        });
+
+        updateConversationPhase(task.conversation_id, 'reviewing');
+        console.log(`[CONV_STATE] Delivery complete — now in reviewing phase`);
+      } catch (stateErr: any) {
+        console.warn(`[CONV_STATE] Failed to update state after delivery (non-fatal): ${stateErr.message}`);
+      }
+    }
 
     try {
       const ds = towerResult.deliverySummary;

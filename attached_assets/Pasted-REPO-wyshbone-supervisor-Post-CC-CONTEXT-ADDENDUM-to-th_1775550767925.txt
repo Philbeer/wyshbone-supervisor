@@ -1,0 +1,161 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: ADDENDUM to the conversation machine prompt 3 (wiring). Deploy this AFTER prompt 3, or include it in the same session.
+
+PRINCIPLE: The system must NEVER go dumb. If it doesn't understand a message, it must say so and ask for clarification. Garbage results are worse than admitting confusion.
+
+TASK: Two changes.
+
+## Change 1: Add graceful fallback to the conversation state routing
+
+In `server/supervisor.ts`, find the state-aware routing block you just added (search for `STATE-AWARE ROUTING`). 
+
+The REVIEWING handler has a catch block that says `// Fall through to normal pipeline`. Change this so that instead of silently falling through, it responds with a helpful message:
+
+Find:
+```typescript
+    } catch (err: any) {
+      console.warn(`[CONV_STATE] Result discussion failed (falling through to pipeline): ${err.message}`);
+      // Fall through to normal pipeline
+    }
+```
+
+Replace with:
+```typescript
+    } catch (err: any) {
+      console.warn(`[CONV_STATE] Result discussion failed: ${err.message}`);
+      // Don't fall through silently — tell the user we didn't follow that
+      const fallbackMsg = "I'm not sure I understood that. You can ask about a specific result by number (e.g. 'tell me about #3'), ask me to refine the results (e.g. 'which have a website?'), or start a new search.";
+      const fallbackMsgId = randomUUID();
+      if (supabase) {
+        await Promise.all([
+          supabase.from('messages').insert({
+            id: fallbackMsgId,
+            conversation_id: task.conversation_id,
+            role: 'assistant',
+            content: fallbackMsg,
+            source: 'supervisor',
+            metadata: { supervisor_task_id: task.id, run_id: jobId, conversation_phase: 'reviewing', fallback: true },
+            created_at: Date.now(),
+          }),
+          supabase.from('supervisor_tasks').update({
+            status: 'completed',
+            result: { message_id: fallbackMsgId, fallback: true },
+          }).eq('id', task.id),
+        ]);
+      }
+      await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'review_fallback' } }).catch(() => {});
+      await emitTaskExecutionCompleted('review_fallback');
+      return;
+    }
+```
+
+Do the same for the ITERATING handler's implicit fall-through. After the iteration block, if we're still in the iterating phase but `buildIteratedQuery` returned null (no pattern matched), add:
+
+Find the end of the iterating block. After the try/catch for iteration, add:
+
+```typescript
+// If we suggested 'iterating' but couldn't parse the modification,
+// don't silently fall through — ask the user to clarify
+if (CONV_STATE_ENABLED && suggestedPhase === 'iterating' && convState?.lastDelivery) {
+  const prevEntity = convState.lastDelivery.entityType || 'the same type';
+  const prevLocation = convState.lastDelivery.location || 'the same area';
+  const iterFallbackMsg = `I can see you want to modify your previous search for ${prevEntity} in ${prevLocation}, but I'm not sure what to change. You can say things like "now try Brighton" (change location), "find accountants instead" (change business type), or just tell me exactly what you'd like to search for.`;
+  const iterFallbackId = randomUUID();
+  if (supabase) {
+    await Promise.all([
+      supabase.from('messages').insert({
+        id: iterFallbackId,
+        conversation_id: task.conversation_id,
+        role: 'assistant',
+        content: iterFallbackMsg,
+        source: 'supervisor',
+        metadata: { supervisor_task_id: task.id, run_id: jobId, conversation_phase: 'iterating', fallback: true },
+        created_at: Date.now(),
+      }),
+      supabase.from('supervisor_tasks').update({
+        status: 'completed',
+        result: { message_id: iterFallbackId, fallback: true },
+      }).eq('id', task.id),
+    ]);
+  }
+  await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'iteration_fallback' } }).catch(() => {});
+  await emitTaskExecutionCompleted('iteration_fallback');
+  return;
+}
+```
+
+Place this AFTER the iterating try/catch block and BEFORE the code falls through to the normal pipeline.
+
+IMPORTANT: Only trigger this fallback if `buildIteratedQuery` returned null AND we're in iterating phase. If `buildIteratedQuery` returned a result, the code already rewrote `rawMsg` and falls through to the normal pipeline — that's correct behaviour, don't intercept it.
+
+## Change 2: Add a minimum viability check on mission extraction
+
+In the Supervisor's message classifier handler, find where the message classifier says `messageClass === 'chat'` and returns a canned response (search for `chatResponses` — around line 1348).
+
+AFTER the chat handler and AFTER the followup/monitor handlers, but BEFORE the mission extraction begins, add a safety net for ultra-short or gibberish messages that somehow got past the chat classifier:
+
+```typescript
+// ═══ MINIMUM VIABILITY GUARD ═══
+// If the message is extremely short (< 3 chars) or is a common filler word,
+// don't waste an LLM call on mission extraction — just ask what they want.
+const FILLER_WORDS = /^(any|all|yes|no|ok|sure|yep|nah|nope|hmm|um|eh|lol|k|y|n)\s*[.!?]*$/i;
+if (!isClarifyResponse && !missionQueryId && rawMsg.trim().length < 4 || FILLER_WORDS.test(rawMsg.trim())) {
+  // Check: is there a pending contract? If so, these short answers ARE clarify responses
+  // and should flow through. But if there's no pending contract, they're just noise.
+  if (!pendingConstraint) {
+    const viabilityMsg = "I didn't quite catch that. What would you like me to search for? Try something like 'find accountants in Kent' or 'search for web design agencies in Brighton'.";
+    const viabilityMsgId = randomUUID();
+    
+    await Promise.all([
+      supabase!.from('supervisor_tasks').update({
+        status: 'completed',
+        result: { response: viabilityMsg.substring(0, 200), message_id: viabilityMsgId, classifier: 'minimum_viability_guard' },
+      }).eq('id', task.id),
+      supabase!.from('messages').insert({
+        id: viabilityMsgId,
+        conversation_id: task.conversation_id,
+        role: 'assistant',
+        content: viabilityMsg,
+        source: 'supervisor',
+        metadata: { supervisor_task_id: task.id, run_id: jobId, minimum_viability_guard: true },
+        created_at: Date.now(),
+      }),
+    ]);
+    
+    await storage.updateAgentRun(jobId, {
+      status: 'completed',
+      terminalState: 'completed',
+      endedAt: new Date(),
+      metadata: { verdict: 'minimum_viability_guard', raw_message: rawMsg },
+    }).catch(() => {});
+    
+    console.log(`[VIABILITY_GUARD] Blocked ultra-short/filler message: "${rawMsg}" — asked for clarification`);
+    await emitTaskExecutionCompleted('minimum_viability_guard');
+    return;
+  }
+}
+```
+
+Place this AFTER the message classifier chat/followup/monitor handling, and BEFORE the mission extraction. It must be AFTER the `pendingConstraint` check (the pending contract recovery block) so that `pendingConstraint` is available.
+
+NOTE: Be careful with operator precedence in the condition. Use parentheses:
+```typescript
+if (!isClarifyResponse && !missionQueryId && (rawMsg.trim().length < 4 || FILLER_WORDS.test(rawMsg.trim()))) {
+```
+
+## What this guarantees
+
+After these changes, the system NEVER goes dumb:
+
+| Situation | What happens |
+|-----------|-------------|
+| User says "any" with no context | Viability guard: "I didn't catch that. What would you like to search for?" |
+| Result discussion LLM fails | Graceful fallback: "I'm not sure I understood. You can ask about #3, refine, or start a new search." |
+| "now try Manchester" but pattern doesn't match | Iteration fallback: "I can see you want to modify your search. You can say 'now try Brighton' or..." |
+| Mission extractor produces garbage | Existing rescue LLM catches it → self-heals or asks |
+| Constraint gate blocks | Smart clarification asks a good contextual question |
+| Smart clarification fails | Falls back to canned constraint gate message |
+| Everything fails | The Supervisor always writes SOME message to the conversation — the user never sees silence |
+
+The principle: **every code path ends with a message to the user.** No silent failures, no garbage results, no "going dumb."
