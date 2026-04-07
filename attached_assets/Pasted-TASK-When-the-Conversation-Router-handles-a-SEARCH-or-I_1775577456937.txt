@@ -1,0 +1,245 @@
+TASK: When the Conversation Router handles a SEARCH or ITERATE route, skip the redundant old decision chain and go straight to mission extraction. This saves 10-30 seconds and removes 2 unnecessary LLM calls per search.
+
+IMPORTANT: Do NOT delete any existing code. Only ADD bypass logic using a flag variable. The old code must still run when CONVERSATION_ROUTER_ENABLED is false, or when the router fails.
+
+NO NEW SECRETS NEEDED — this uses the existing CONVERSATION_ROUTER_ENABLED flag.
+
+== WHAT TO CHANGE ==
+
+Only ONE file changes: server/supervisor.ts
+
+== THE PROBLEM ==
+
+Right now, when the router returns SEARCH or ITERATE, it rewrites rawMsg and effectiveMsg to a clean query like "find pubs in Arundel", but then the OLD decision chain still runs:
+- Message classifier (regex, redundant — router already classified)  
+- Conversation state + phase detection (regex, redundant — router already decided)
+- State-aware routing / result discussion / iteration (redundant — router already handled)
+- Intent extractor shadow (LLM call, redundant — wastes tokens and 3-5 seconds)
+- Cross-session vague reference resolver (regex, redundant — router already resolved)
+- Constraint gate outer check (regex, redundant — router already confirmed searchable)
+- Smart clarify quality check (LLM call, redundant — router already confirmed no clarification needed)
+
+These add 10-30 seconds of unnecessary processing after the router has already made the decision.
+
+== THE FIX ==
+
+Add a boolean flag `_routerHandledSearch` that is set to true when the router successfully routes to SEARCH or ITERATE. Then wrap each redundant block in an `if (!_routerHandledSearch)` check so it's skipped.
+
+== STEP BY STEP ==
+
+STEP 1: Add the flag variable
+
+Find this line (it's right before the router block, around line 1345):
+```
+let effectiveMsg = rawMsg;
+```
+
+Add immediately after it:
+```typescript
+    let _routerHandledSearch = false;
+```
+
+STEP 2: Set the flag in the router's SEARCH and ITERATE handlers
+
+Inside the router block, find the ITERATE handler:
+```
+        // === HANDLE ITERATE ===
+        if (decision.route === 'ITERATE' && decision.entity && decision.location) {
+```
+
+At the END of that if-block (after `console.log`), add:
+```typescript
+          _routerHandledSearch = true;
+```
+
+Find the SEARCH handler:
+```
+        // === HANDLE SEARCH ===
+        if (decision.route === 'SEARCH' && decision.entity && decision.location) {
+```
+
+At the END of that if-block (after `console.log`), add:
+```typescript
+          _routerHandledSearch = true;
+```
+
+STEP 3: Skip the message classifier when router handled it
+
+Find the MESSAGE CLASSIFIER section:
+```
+    // ═══ MESSAGE CLASSIFIER ═══
+    // Fast classification to avoid burning 20+ LLM calls on "hi" or "thanks"
+    let isClarifyResponse = !!(requestData.clarify_answer || requestData.continuation_of_run || requestData._constraint_gate_resolved);
+
+    let classifiedMessageClass: string = 'search'; // default
+
+    if (!isClarifyResponse && !missionQueryId) {
+```
+
+Change that last line to:
+```typescript
+    if (!isClarifyResponse && !missionQueryId && !_routerHandledSearch) {
+```
+
+This means: when the router already handled the message as SEARCH/ITERATE, skip the entire message classifier block (including its chat handling, monitor routing, and followup fast-path). The router already did all of that.
+
+STEP 4: Skip conversation state phase detection when router handled it
+
+Find the CONVERSATION STATE section:
+```
+    // ═══ CONVERSATION STATE ═══
+    const CONV_STATE_ENABLED = process.env.CONVERSATION_STATE_ENABLED === 'true';
+```
+
+Change it to:
+```typescript
+    // ═══ CONVERSATION STATE ═══
+    const CONV_STATE_ENABLED = process.env.CONVERSATION_STATE_ENABLED === 'true' && !_routerHandledSearch;
+```
+
+This skips the entire conversation state block (phase detection, state-aware routing, iteration handling, review handling) when the router already made the decision.
+
+STEP 5: Skip the intent extractor shadow when router handled it
+
+Find the intent extractor shadow call:
+```
+    let shadowResult: { ran: boolean; extraction: any; error: string | null } = { ran: false, extraction: null, error: null };
+    let shadowProbeError: string | null = null;
+    try {
+      shadowResult = await runIntentExtractorShadow(effectiveMsg, jobId, task.user_id, task.conversation_id, conversationContextStr);
+```
+
+Wrap the try block:
+```typescript
+    let shadowResult: { ran: boolean; extraction: any; error: string | null } = { ran: false, extraction: null, error: null };
+    let shadowProbeError: string | null = null;
+    if (!_routerHandledSearch) {
+      try {
+        shadowResult = await runIntentExtractorShadow(effectiveMsg, jobId, task.user_id, task.conversation_id, conversationContextStr);
+      } catch (e: any) {
+        shadowProbeError = e.message;
+        console.warn(`[INTENT_EXTRACTOR_SHADOW] top-level error (non-fatal): ${e.message}`);
+      }
+    } else {
+      console.log(`[ROUTER_BYPASS] Skipping intent extractor shadow — router already classified`);
+    }
+```
+
+STEP 6: Skip the cross-session vague reference resolver when router handled it
+
+Find this block:
+```
+    // ── Cross-session vague reference resolver ──
+    // If the user's message is short/vague AND we have recent search history,
+```
+
+The block starts with `effectiveMsg = rawMsg;` and ends with a closing brace. Wrap it:
+
+Find the line:
+```
+    effectiveMsg = rawMsg;
+    if (userContext.recentSearches && userContext.recentSearches.length > 0) {
+```
+
+Change to:
+```typescript
+    if (!_routerHandledSearch) {
+      effectiveMsg = rawMsg;
+      if (userContext.recentSearches && userContext.recentSearches.length > 0) {
+```
+
+And find the closing of that entire vague resolver block and add an else clause after it:
+```typescript
+      } // end of recentSearches check
+    } else {
+      console.log(`[ROUTER_BYPASS] Skipping cross-session vague resolver — router already resolved query to: "${effectiveMsg}"`);
+    }
+```
+
+STEP 7: Skip the INTENT_FIX block when router handled it
+
+Find:
+```
+    // INTENT_FIX: On clarification continuations, rawMsg is the clarification answer
+```
+
+Wrap the entire isClarifyResponse block:
+```typescript
+    if (!_routerHandledSearch) {
+      // INTENT_FIX: On clarification continuations...
+      if (isClarifyResponse && task.conversation_id) {
+        // ... existing code unchanged ...
+      }
+    }
+```
+
+STEP 8: Skip the constraint gate outer check when router handled it
+
+Find the constraint gate section. Search for:
+```
+    [STAGE] runId=${jobId} crid=${clientRequestId} stage=constraint_gate
+```
+
+or search for:
+```
+    stage=constraint_gate
+```
+
+There should be a block that calls `preExecutionConstraintGate` or `preExecutionConstraintGateFromIntent`. Wrap it so it's skipped when the router handled the search:
+
+Find where the constraint gate decision is made (the block that checks `outerGateResult.can_execute` and potentially calls smart clarify or rescue LLM). The entire section from `stage=constraint_gate` to where it decides to either proceed to execution or clarify should be wrapped:
+
+Before the constraint gate line, add:
+```typescript
+    if (_routerHandledSearch) {
+      console.log(`[ROUTER_BYPASS] Skipping constraint gate + smart clarify — router confirmed searchable`);
+    } else {
+```
+
+And close the else block after the constraint gate + smart clarify section ends (before the execution stage).
+
+STEP 9: Add a summary log
+
+Right after the router block ends (after `// ═══ END CONVERSATION ROUTER ═══`), add:
+```typescript
+    if (_routerHandledSearch) {
+      console.log(`[ROUTER_BYPASS] Router handled SEARCH/ITERATE — skipping classifier, state, shadow, vague resolver, constraint gate, smart clarify. Proceeding directly to mission extraction with: "${effectiveMsg.substring(0, 100)}"`);
+    }
+```
+
+== WHAT THIS ACHIEVES ==
+
+When CONVERSATION_ROUTER_ENABLED=true AND the router returns SEARCH or ITERATE:
+- Skips: message classifier, conversation state, state-aware routing, intent extractor shadow (saves 1 LLM call), cross-session vague resolver, INTENT_FIX, constraint gate, smart clarify quality check (saves 1 LLM call)
+- Keeps: mission extraction (3-pass LLM pipeline), mission planner, search pipeline, Tower, delivery
+- Saves: ~10-30 seconds per search, 2 LLM calls per search
+
+When CONVERSATION_ROUTER_ENABLED=false OR the router fails:
+- Everything runs exactly as before. Zero changes to the fallback path.
+
+== TESTING ==
+
+After making these changes, test in the chat:
+
+1. Type "find pubs in arundel" — should see these logs:
+   - [ROUTER] route=SEARCH ...
+   - [ROUTER_BYPASS] Router handled SEARCH/ITERATE — skipping classifier, state, shadow...
+   - [MISSION_EXTRACTOR] Pass 1 complete ...
+   - (NO [MESSAGE_CLASSIFIER], NO [CONV_STATE], NO [INTENT_EXTRACTOR_SHADOW])
+
+2. Type "hi" — should see:
+   - [ROUTER] Fast path: route=CHAT ...
+   - (Returns immediately, no pipeline at all)
+
+3. Type "find companies in kent" — should see:
+   - [ROUTER] route=CLARIFY ...
+   - (Returns with clarification question in ~2 seconds)
+
+== CRITICAL RULES ==
+
+- Do NOT delete any existing code
+- Do NOT modify any existing code except adding the `&& !_routerHandledSearch` conditions
+- Do NOT touch any files other than server/supervisor.ts
+- Do NOT touch the mission extractor, search pipeline, Tower, or delivery code
+- The _routerHandledSearch flag is ONLY set inside the router block when CONVERSATION_ROUTER_ENABLED=true
+- If the router is disabled or fails, _routerHandledSearch stays false and everything runs as before
