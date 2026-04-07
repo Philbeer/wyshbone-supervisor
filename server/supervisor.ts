@@ -1430,6 +1430,21 @@ class SupervisorService {
             metadata: { verdict: 'router_chat', router: decision },
           }).catch(() => {});
           console.log(`[ROUTER] Handled as CHAT — done`);
+          // Signal UI poller to stop
+          this.postArtefactToUI({
+            runId: jobId,
+            clientRequestId,
+            type: 'combined_delivery',
+            payload: {
+              status: 'CHAT',
+              leads: [],
+              message: decision.chat_response,
+              router_verdict: 'chat',
+              run_complete: true,
+            },
+            userId: task.user_id,
+            conversationId: task.conversation_id,
+          }).catch(() => {});
           return;
         }
 
@@ -1462,6 +1477,21 @@ class SupervisorService {
             metadata: { verdict: 'router_clarify', router: decision, awaiting: 'user_input', original_message: rawMsg },
           }).catch(() => {});
           console.log(`[ROUTER] Handled as CLARIFY: "${decision.clarify_question.substring(0, 80)}"`);
+          // Signal UI poller to stop
+          this.postArtefactToUI({
+            runId: jobId,
+            clientRequestId,
+            type: 'combined_delivery',
+            payload: {
+              status: 'CLARIFY',
+              leads: [],
+              message: decision.clarify_question,
+              router_verdict: 'clarify',
+              run_complete: true,
+            },
+            userId: task.user_id,
+            conversationId: task.conversation_id,
+          }).catch(() => {});
           return;
         }
 
