@@ -1,0 +1,49 @@
+INVESTIGATION ONLY — DO NOT CHANGE ANY CODE. Just investigate and report back.When the Conversation Router handles a CLARIFY route, the UI keeps showing thinking dots and the user can't type. I need you to investigate the supervisor side and report what you find.Please investigate these specific things and report your findings:
+Find the router's CLARIFY handler in server/supervisor.ts (search for ROUTER] Handled as CLARIFY). Report:
+
+What exact status does it set on supervisor_tasks?
+What exact status and terminalState does it set on agent_run?
+Does it call return after handling, or could execution fall through to mission extraction?
+
+
+
+Find the bridgeRunToUI method. Report:
+
+What does it send to the UI?
+Is it called BEFORE the router block runs? If so, does it tell the UI "this run is executing" before the router has a chance to say "actually it's done"?
+What URL does it POST to?
+
+
+
+Search for postArtefactToUI in supervisor.ts. Report:
+
+Does the router's CLARIFY handler call postArtefactToUI?
+Does the router's CHAT handler call postArtefactToUI?
+What artefact types does the UI typically receive that signal "run is done"? (search for combined_delivery and final_delivery to see how normal search completions signal the UI)
+
+
+
+Find the existing message classifier's CHAT handler (search for [MESSAGE_CLASSIFIER] Handled as chat). Report:
+
+How does it signal completion to the UI?
+Does it call postArtefactToUI or any other UI notification?
+Compare exactly what it does versus what the router's CLARIFY handler does
+
+
+
+Search for /api/afr/stream in the codebase. Report:
+
+What does this endpoint return?
+How does it determine if a run is still active or complete?
+What does it look for in agent_runs to decide the run is done?
+
+
+
+Check the server console logs. After typing "find pubs" in the chat, do you see:
+
+[ROUTER] Handled as CLARIFY — confirming the router handled it
+Any logs AFTER that line that suggest execution continued into mission extraction?
+Any errors?
+
+
+Report all findings. Do not make any code changes.
