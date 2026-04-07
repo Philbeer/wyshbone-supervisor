@@ -1,0 +1,50 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: The conversation state machine never fires the reviewing or iterating handlers because the `suggestPhase` call passes hardcoded `messageClass: 'search'` instead of the actual classification result. Both branches of the ternary say 'search':
+
+```typescript
+messageClass: isClarifyResponse ? 'search' : 'search',  // BUG
+```
+
+This means suggestPhase never sees 'followup', 'chat', or any other class — it always thinks the message is a search, so it never transitions to 'reviewing' or 'iterating'.
+
+FIX: Two changes needed.
+
+## Change 1: Capture classification result in outer scope
+
+In `server/supervisor.ts`, find the message classifier section (search for `MESSAGE_CLASSIFIER`). Just BEFORE the `if (!isClarifyResponse && !missionQueryId)` block, add a variable declaration:
+
+```typescript
+let classifiedMessageClass: string = 'search'; // default
+```
+
+Then INSIDE the classifier block, after `const classification = classifyMsg(rawMsg);`, add:
+
+```typescript
+classifiedMessageClass = classification.messageClass;
+```
+
+## Change 2: Use the captured classification in suggestPhase
+
+Find the line (around line 1420):
+```typescript
+messageClass: isClarifyResponse ? 'search' : 'search',
+```
+
+Change it to:
+```typescript
+messageClass: isClarifyResponse ? 'clarify_response' : classifiedMessageClass,
+```
+
+This way:
+- If it's a clarify response → messageClass is 'clarify_response'
+- Otherwise → messageClass is whatever the classifier detected (search, followup, chat, monitor_request, etc.)
+
+## Verification
+
+After this fix:
+1. "find pubs in arundel" → classifiedMessageClass='search' → suggestPhase sees 'search' → normal pipeline
+2. After results: "tell me about the first one" → classifiedMessageClass='followup' → suggestPhase sees 'followup' + hasLastDelivery=true → returns 'reviewing' → result discussion handler fires
+3. "now try Brighton" → suggestPhase sees ITERATION_PATTERNS match → returns 'iterating' → search iteration handler fires
+
+This is a one-line variable declaration + one-line assignment + one-line fix. Restart the Supervisor after deploying.
