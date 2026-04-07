@@ -1,0 +1,94 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: We're building a conversation state machine inside the Supervisor. Currently every message is treated independently. The state machine tracks where the conversation is (exploring, clarifying, executing, reviewing results, iterating on a search) and routes messages differently based on state.
+
+TASK: Create `server/supervisor/conversation-state.ts`.
+
+This file manages per-conversation state in memory (no DB persistence for MVP — if the server restarts, state resets to idle, which is fine).
+
+```typescript
+/**
+ * Conversation State Machine
+ * 
+ * Tracks the phase of each conversation so the Supervisor can interpret
+ * messages in context. "tell me about #3" means something completely
+ * different when you just delivered results (reviewing) vs when you're
+ * exploring what to search for.
+ */
+
+export type ConversationPhase = 
+  | 'idle'           // No active task, waiting for user
+  | 'exploring'      // Smart clarification is guiding the user to a query
+  | 'clarifying'     // Constraint gate asked for a specific missing field
+  | 'executing'      // Search/task is running
+  | 'reviewing'      // Results delivered, user can discuss/iterate/refine
+  | 'iterating';     // User modifying a previous search
+
+export interface AccumulatedContext {
+  urlContent?: string;
+  productDescription?: string;
+  suggestedSectors?: string[];
+  userSector?: string;
+  location?: string;
+  entityType?: string;
+  additionalConstraints?: string[];
+  originalUserMessage?: string;
+}
+
+export interface LastDelivery {
+  runId: string;
+  leadCount: number;
+  entityType: string;
+  location: string;
+  missionConfig: any;
+}
+
+export interface ConversationState {
+  phase: ConversationPhase;
+  conversationId: string;
+  accumulatedContext: AccumulatedContext;
+  lastDelivery: LastDelivery | null;
+  lastActivityAt: number;
+  phaseEnteredAt: number;
+  turnCount: number;
+}
+```
+
+Implement these functions:
+
+1. **In-memory state store**: Use a `Map<string, ConversationState>`. Add a cleanup interval that runs every 15 minutes, deleting states older than 1 hour (based on `lastActivityAt`).
+
+2. **`getConversationState(conversationId: string): ConversationState`** — returns existing state or creates a new one with phase='idle'.
+
+3. **`updateConversationPhase(conversationId, newPhase, extra?)`** — updates the phase, bumps `lastActivityAt` and `turnCount`, sets `phaseEnteredAt` if phase actually changed. `extra` is an optional partial with `accumulatedContext` and/or `lastDelivery` to merge. Log: `[CONV_STATE] ${id.slice(0,8)} phase: ${old} → ${new} (turn ${n})`
+
+4. **`mergeAccumulatedContext(conversationId, context)`** — merges partial AccumulatedContext into existing.
+
+5. **`setLastDelivery(conversationId, delivery)`** — sets the lastDelivery field.
+
+6. **`resetConversationState(conversationId)`** — deletes the state.
+
+7. **`suggestPhase(input: PhaseDetectionInput): ConversationPhase`** — the core routing logic. Input:
+```typescript
+export interface PhaseDetectionInput {
+  messageClass: string;       // From message classifier
+  currentPhase: ConversationPhase;
+  hasLastDelivery: boolean;
+  hasPendingContract: boolean;
+  timeSinceLastActivity: number;
+  rawMessage: string;
+}
+```
+
+Rules for suggestPhase:
+- If `timeSinceLastActivity > 30 minutes` → return 'idle' (timeout)
+- If `hasPendingContract` → return 'clarifying'
+- If current phase is 'exploring' or 'clarifying' and messageClass !== 'chat' → return 'executing' (user answered, time to run)
+- If `hasLastDelivery`:
+  - Check ITERATION_PATTERNS (regex array): `/now (?:try|find|search|do)/i`, `/same (?:but|in|for)/i`, `/(?:try|find) .+ instead/i`, `/(?:what about|how about) [A-Z]/i`, `/change .+ to/i` → return 'iterating'
+  - Check RESULT_QUESTION_PATTERNS (regex array): `/tell me (?:more|about)/i`, `/the (?:first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))/i`, `/number \d+|#\d+/i`, `/how did you|what evidence/i`, `/contact (?:info|details)/i`, `/(?:their|its) (?:website|email|phone)/i` → return 'reviewing'
+  - If messageClass === 'followup' → return 'reviewing'
+  - If messageClass === 'search' and NO iteration pattern matched → return 'idle' (genuinely new search)
+- Default: return current phase
+
+Do NOT create any other files yet. Do NOT modify supervisor.ts yet.
