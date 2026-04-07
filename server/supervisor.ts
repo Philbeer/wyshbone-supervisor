@@ -1346,9 +1346,9 @@ class SupervisorService {
       if (classification.messageClass === 'chat') {
         // Respond conversationally without running the pipeline
         const chatResponses = [
-          "Hey! I'm ready to help you find leads. Try something like 'find 10 web design agencies in Brighton' or 'search for craft breweries in Sussex'.",
-          "Hi there! What would you like me to search for today?",
-          "Hello! Tell me what kind of businesses you're looking for and where, and I'll get searching.",
+          "Hey! Tell me what kind of businesses you're looking for and where — for example, 'find web design agencies in Brighton' or 'search for accountants in Kent'.",
+          "Hi there! I can find businesses, leads, and prospects for you. Just tell me what you need and where.",
+          "Hello! Ready to search. What type of businesses are you looking for, and in which area?",
         ];
         const chatResponse = chatResponses[Math.floor(Math.random() * chatResponses.length)];
         const messageId = randomUUID();
@@ -1378,6 +1378,13 @@ class SupervisorService {
 
         console.log(`[MESSAGE_CLASSIFIER] Handled as chat — no pipeline triggered. runId=${jobId}`);
         await emitTaskExecutionCompleted('chat_classified');
+        return;
+      }
+
+      if (classification.messageClass === 'monitor_request') {
+        console.log(`[MESSAGE_CLASSIFIER] Monitor request detected — routing to handleCreateMonitor`);
+        await this.handleCreateMonitor(task, jobId, clientRequestId);
+        await emitTaskExecutionCompleted('monitor_classified');
         return;
       }
 
@@ -1417,14 +1424,21 @@ class SupervisorService {
           .select('role, content')
           .eq('conversation_id', task.conversation_id)
           .order('created_at', { ascending: false })
-          .limit(6);
+          .limit(10);
         if (recentMsgs && recentMsgs.length > 0) {
           const reversed = recentMsgs.reverse() as Array<{ role: string; content: string }>;
-          conversationContextStr = buildConversationContextString(reversed, 6);
+          conversationContextStr = buildConversationContextString(reversed, 10);
         }
       } catch (ctxErr: any) {
         console.warn(`[INTENT_EXTRACTOR_SHADOW] conversation context fetch failed (non-fatal): ${ctxErr.message}`);
       }
+    }
+
+    // If the UI passed URL content in request_data, append it to conversation context
+    const uiUrlContent = (requestData as any).url_content;
+    if (uiUrlContent && typeof uiUrlContent === 'string' && uiUrlContent.length > 0) {
+      conversationContextStr = (conversationContextStr || '') + '\n\nURL CONTENT (fetched by UI):\n' + uiUrlContent.slice(0, 5000);
+      console.log(`[URL_CONTEXT] Appended ${uiUrlContent.length} chars of UI-fetched URL content to conversation context`);
     }
 
     // Append cross-session search history to context
