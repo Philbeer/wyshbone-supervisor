@@ -2292,7 +2292,36 @@ class SupervisorService {
 
         storePendingContract(task.conversation_id, outerGateMsg, outerGateResult, jobId);
 
-        const outerGateClarifyMsg = buildConstraintGateMessage(outerGateResult);
+        // Smart clarification: generate context-aware message instead of canned question
+        let outerGateClarifyMsg: string;
+        if (process.env.SMART_CLARIFY_ENABLED === 'true' && !outerGateResult.stop_recommended) {
+          try {
+            const { generateSmartClarification } = await import('./supervisor/smart-clarify');
+            const smartResult = await generateSmartClarification({
+              userMessage: rawMsg,
+              conversationContext: conversationContextStr ?? null,
+              partialMission: missionResult?.mission ?? null,
+              missingFields: outerGateResult.constraints
+                .filter((c: any) => !c.can_execute)
+                .map((c: any) => c.type),
+              urlContent: (requestData as any).url_content ?? null,
+              userProfile: userContext?.profile ?? null,
+            });
+            outerGateClarifyMsg = smartResult.clarification_message;
+
+            (outerGateResult as any)._inferred_context = smartResult.inferred_context;
+            if (smartResult.proposed_query) {
+              (outerGateResult as any)._proposed_query = smartResult.proposed_query;
+            }
+
+            console.log(`[SMART_CLARIFY] Used smart clarification for runId=${jobId}: "${outerGateClarifyMsg.slice(0, 80)}"`);
+          } catch (smartErr: any) {
+            console.warn(`[SMART_CLARIFY] Failed (using canned fallback): ${smartErr.message}`);
+            outerGateClarifyMsg = buildConstraintGateMessage(outerGateResult);
+          }
+        } else {
+          outerGateClarifyMsg = buildConstraintGateMessage(outerGateResult);
+        }
         const outerGateMessageId = randomUUID();
 
         await Promise.all([

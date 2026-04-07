@@ -960,6 +960,21 @@ export function resolveFollowUp(
   });
 
   const gateResult = buildGateState(updatedConstraints, noProxy || mustBeCertain);
+
+  // If smart clarification inferred product context, enrich the entity description
+  const inferredCtx = (existingContract as any)._inferred_context;
+  if (inferredCtx?.product_description) {
+    const entityConstraint = gateResult.constraints.find((c: any) =>
+      c.type === 'entity_type' || c.type === 'entity_description' || c.type === 'ENTITY_TYPE'
+    ) as any;
+    if (entityConstraint && entityConstraint.value) {
+      entityConstraint.value = `${entityConstraint.value} (specifically: businesses interested in ${inferredCtx.product_description})`;
+      console.log(`[SMART_CLARIFY] Enriched entity constraint with product context: "${entityConstraint.value.slice(0, 100)}"`);
+    }
+    // Carry inferred context forward so downstream resolution can use it
+    (gateResult as any)._inferred_context = inferredCtx;
+  }
+
   if (mustBeCertain) {
     return applyCertaintyGate(gateResult);
   }
