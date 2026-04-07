@@ -52,7 +52,7 @@ async function callDiscussionLLM(systemPrompt: string, userPrompt: string): Prom
     throw new Error('ANTHROPIC_API_KEY not set — cannot call discussion LLM');
   }
 
-  const model = process.env.DISCUSSION_LLM_MODEL || 'claude-3-5-haiku-20241022';
+  const model = process.env.DISCUSSION_LLM_MODEL || process.env.RESCUE_LLM_MODEL || 'claude-3-haiku-20240307';
 
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

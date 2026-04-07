@@ -1425,6 +1425,32 @@ class SupervisorService {
         const { getConversationState, suggestPhase } = await import('./supervisor/conversation-state');
 
         convState = getConversationState(task.conversation_id);
+
+        // Warm up lastDelivery from DB if the in-memory state is missing it
+        if (convState && !convState.lastDelivery && task.conversation_id) {
+          try {
+            const { getConversationContext } = await import('./supervisor/conversation-context');
+            const ctx = await getConversationContext(task.conversation_id);
+            if (ctx.leads.length > 0 && ctx.lastDeliveryRunId) {
+              const { setLastDelivery: setLD } = await import('./supervisor/conversation-state');
+              setLD(task.conversation_id, {
+                runId: ctx.lastDeliveryRunId,
+                leadCount: ctx.leads.length,
+                entityType: '',
+                location: '',
+                missionConfig: null,
+              });
+              // Reload the state after the warmup
+              convState = getConversationState(task.conversation_id);
+              console.log(`[CONV_STATE_WARMUP] Recovered lastDelivery from DB: ${ctx.leads.length} leads, runId=${ctx.lastDeliveryRunId}`);
+            } else {
+              console.log(`[CONV_STATE_WARMUP] No leads in DB for conversation — lastDelivery stays null`);
+            }
+          } catch (warmupErr: any) {
+            console.warn(`[CONV_STATE_WARMUP] Failed (non-fatal): ${warmupErr.message}`);
+          }
+        }
+
         const hasLastDelivery = !!convState.lastDelivery;
         const timeSinceLastActivity = Date.now() - convState.lastActivityAt;
 
@@ -1443,6 +1469,8 @@ class SupervisorService {
         }
 
         console.log(`[CONV_STATE] conversation=${task.conversation_id.slice(0, 8)} phase=${suggestedPhase} lastDelivery=${hasLastDelivery} turn=${convState.turnCount} msg="${rawMsg.slice(0, 40)}"`);
+        // Extra diagnostic logging
+        console.log(`[CONV_STATE_DEBUG] classifiedMessageClass=${isClarifyResponse ? 'clarify_response' : classifiedMessageClass} currentPhase=${convState.phase} hasLastDelivery=${hasLastDelivery} lastDeliveryRunId=${convState.lastDelivery?.runId?.slice(0,12) || 'null'} isClarifyResponse=${isClarifyResponse}`);
       } catch (stateErr: any) {
         console.warn(`[CONV_STATE] State loading failed (non-fatal): ${stateErr.message}`);
       }
