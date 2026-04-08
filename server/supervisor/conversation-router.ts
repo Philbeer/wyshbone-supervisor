@@ -132,9 +132,13 @@ function buildRouterUserMessage(input: RouterInput): string {
 
   if (input.conversationHistory.length > 0) {
     parts.push('CONVERSATION HISTORY:');
-    for (const msg of input.conversationHistory) {
+    const historyLength = input.conversationHistory.length;
+    for (let i = 0; i < historyLength; i++) {
+      const msg = input.conversationHistory[i];
       const role = msg.role === 'user' ? 'user' : 'assistant';
-      const content = msg.content.length > 300 ? msg.content.substring(0, 300) + '...' : msg.content;
+      // Last 3 messages get more context — the user is most likely responding to these
+      const limit = (historyLength - i) <= 3 ? 800 : 300;
+      const content = msg.content.length > limit ? msg.content.substring(0, limit) + '...' : msg.content;
       parts.push(`[${role}] ${content}`);
     }
     parts.push('');
