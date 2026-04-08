@@ -1,0 +1,46 @@
+BUG FIX: "ok" (2 characters) is caught by the length < 3 fast path in the conversation router, returning a canned greeting without reading the conversation context. This means "ok" after the system suggests actions gets "What are you looking for?" instead of following through.
+In server/supervisor/conversation-router.ts, find the tryFastPath function. Find this block:
+typescriptif (trimmed.length < 3) {
+    return {
+      route: 'CHAT', entity: null, location: null, constraints: [],
+      clarify_question: null,
+      chat_response: "Could you tell me what you're looking for? I need a type of business and a location — for example, 'find plumbers in Bristol'.",
+      iteration_change: null, referenced_result: null,
+      confidence: 0.99, reasoning: 'very short input',
+    };
+  }
+This function only receives message — it doesn't know whether previous results exist. But the caller routeConversation has the full input object. Move the short-message check into routeConversation so it can check for conversation context.
+Replace the entire tryFastPath function and update routeConversation:
+typescriptfunction tryFastPath(message: string, hasPreviousResults: boolean): RouterDecision | null {
+  const trimmed = message.trim();
+
+  // Only fast-path very short messages when there's NO conversation context
+  // "ok" after system suggestions needs the LLM to understand context
+  if (trimmed.length < 3 && !hasPreviousResults) {
+    return {
+      route: 'CHAT', entity: null, location: null, constraints: [],
+      clarify_question: null,
+      chat_response: "Could you tell me what you're looking for? I need a type of business and a location — for example, 'find plumbers in Bristol'.",
+      iteration_change: null, referenced_result: null,
+      confidence: 0.99, reasoning: 'very short input, no context',
+    };
+  }
+
+  for (const p of INSTANT_CHAT) {
+    if (p.test(trimmed)) {
+      return {
+        route: 'CHAT', entity: null, location: null, constraints: [],
+        clarify_question: null,
+        chat_response: "Hey! I can find businesses and leads for you. What are you looking for and where? For example, 'find cafes in Brighton'.",
+        iteration_change: null, referenced_result: null,
+        confidence: 0.98, reasoning: 'greeting — fast path',
+      };
+    }
+  }
+
+  return null;
+}
+And update the call in routeConversation:
+typescriptconst fast = tryFastPath(input.currentMessage, input.previousResults.exists);
+This way: "ok" in a fresh chat with no results → fast-path CHAT. "ok" after results have been delivered → goes to LLM with full conversation context.
+Do NOT change any other files.
