@@ -1,0 +1,85 @@
+BUG FIX: The refine executor gets far fewer results than the main search pipeline for the same constraint. The main pipeline uses EVIDENCE_MODE=gpt4o_primary which sends ALL leads to GPT-4o with web search — GPT-4o searches TripAdvisor, Google reviews, event listings, etc. and finds 12/20 matches. The refine path crawls websites first (finds 2), then runs GPT-4o fallback on failures (finds 2 more) = 4 total. The refine path should use the same approach as the main pipeline.
+FILE: server/supervisor/refine-executor.ts
+The fix: Import and use batchGpt4oVerification from mission-executor.ts rather than doing website crawl + separate fallback. This is the exact same function the main pipeline uses.
+Step 1: Add import
+At the top of the file, add:
+typescriptimport { batchGpt4oVerification } from './mission-executor';
+If batchGpt4oVerification is not exported, export it from mission-executor.ts by changing async function batchGpt4oVerification to export async function batchGpt4oVerification.
+Step 2: Check the EVIDENCE_MODE
+The refine executor should respect the same EVIDENCE_MODE setting as the main pipeline. Add near the top of the file:
+typescriptconst EVIDENCE_MODE = (process.env.EVIDENCE_MODE || 'gpt4o_primary') as 'gpt4o_primary' | 'web_crawl_first';
+Step 3: Rewrite liveRefineWithFetch to use GPT-4o primary when that mode is active
+In the liveRefineWithFetch function, BEFORE the website crawl code, add a branch for gpt4o_primary mode. When EVIDENCE_MODE === 'gpt4o_primary', skip the website crawl entirely and send all leads to batchGpt4oVerification:
+typescript  // If gpt4o_primary mode, skip website crawl and go straight to GPT-4o verification
+  if (EVIDENCE_MODE === 'gpt4o_primary') {
+    console.log(`[REFINE_LIVE] EVIDENCE_MODE=gpt4o_primary — using GPT-4o verification for all ${withWebsite.length} leads`);
+    
+    // Build leads in the format batchGpt4oVerification expects
+    const discoveredLeads = withWebsite.map(l => ({
+      name: l.name,
+      address: l.address || '',
+      phone: l.phone || null,
+      website: l.website || null,
+      placeId: l.placeId || '',
+      source: 'refine',
+      lat: null as number | null,
+      lng: null as number | null,
+    }));
+
+    // Build the constraint in mission format
+    const missionConstraint = {
+      type: extracted.type as any,
+      field: 'website_content',
+      operator: 'contains' as any,
+      value: extracted.value,
+      hardness: 'hard' as const,
+    };
+
+    // Find the location from the leads (use the first address)
+    const location = (withWebsite[0]?.address || '').replace(/,\s*UK$/i, '').split(',').pop()?.trim() || 'UK';
+
+    const gpt4oResults = await batchGpt4oVerification(
+      discoveredLeads,
+      [missionConstraint],
+      location,
+      constraint,
+      runId,
+      userId,
+      conversationId,
+    );
+
+    // Process results
+    for (let i = 0; i < withWebsite.length; i++) {
+      const lead = withWebsite[i];
+      const leadResults = gpt4oResults.filter(r => r.leadIndex === i);
+      const verified = leadResults.some(r => r.verdict === 'verified');
+      
+      if (verified) {
+        const bestResult = leadResults.find(r => r.verdict === 'verified')!;
+        console.log(`[REFINE_LIVE] "${lead.name}" → VERIFIED via GPT-4o`);
+        matchingLeads.push({
+          ...lead,
+          refine_match: true,
+          refine_evidence: bestResult.snippets[0] || bestResult.towerReasoning || 'Verified via web search',
+        });
+      } else {
+        console.log(`[REFINE_LIVE] "${lead.name}" → NOT VERIFIED`);
+        nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_evidence' });
+      }
+    }
+
+    fetchedCount = withWebsite.length;
+    console.log(`[REFINE_LIVE] GPT-4o primary complete — ${matchingLeads.length}/${withWebsite.length} verified`);
+    return { matchingLeads, nonMatchingLeads, fetchedCount };
+  }
+Place this code AFTER the filtering of withWebsite / withoutWebsite but BEFORE the existing website crawl code. The return at the end ensures it skips the website crawl path entirely.
+Step 4: Keep the existing website crawl path as fallback
+The existing website crawl + extractConstraintLedEvidence code stays as-is — it's the fallback when EVIDENCE_MODE === 'web_crawl_first'.
+Step 5: Make sure batchGpt4oVerification is exported
+In server/supervisor/mission-executor.ts, find:
+async function batchGpt4oVerification(
+Change to:
+export async function batchGpt4oVerification(
+What this achieves:
+When EVIDENCE_MODE=gpt4o_primary (which is the current setting), the refine path now does EXACTLY what the main pipeline does — sends all 20 leads to GPT-4o with web search, which checks TripAdvisor, Google reviews, event listings, and the business's own website. Should find ~12 results matching, same as the single-query approach.
+Do NOT change any other files besides these two.
