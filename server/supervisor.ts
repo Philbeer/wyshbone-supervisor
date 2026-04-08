@@ -1524,6 +1524,23 @@ class SupervisorService {
               metadata: { verdict: 'router_discuss', router: decision },
             }).catch(() => {});
             console.log(`[ROUTER] Handled as DISCUSS — done`);
+            // Signal UI poller to stop
+            this.postArtefactToUI({
+              runId: jobId,
+              clientRequestId,
+              type: 'combined_delivery',
+              payload: {
+                status: 'DISCUSS',
+                leads: [],
+                message: 'Discussion complete',
+                router_verdict: 'discuss',
+                run_complete: true,
+              },
+              userId: task.user_id,
+              conversationId: task.conversation_id,
+            }).catch(() => {});
+            taskExecutionStartedEmitted = true;
+            await emitTaskExecutionCompleted('router_discuss');
             return;
           } catch (discussErr: any) {
             console.warn(`[ROUTER] DISCUSS handler failed: ${discussErr.message} — falling through to pipeline`);
