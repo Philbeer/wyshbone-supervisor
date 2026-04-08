@@ -1,0 +1,292 @@
+TASK: Rewrite the refine executor to use the same evidence verification pipeline as the main search. Currently when a user asks a follow-up like "which of those have live music?", the refine executor fetches only the homepage and does a basic check. The main search pipeline crawls 5 pages with intelligent page hints, uses synonym matching, and has a two-layer GPT-4o evidence judge. The refine executor should use the same system.
+FILE: server/supervisor/refine-executor.ts
+Step 1: Add imports
+At the top of the file, add these imports:
+typescriptimport { extractConstraintLedEvidence, getPageHintsForConstraint, type ConstraintContext, type ConstraintLedExtractionResult } from './constraint-led-extractor';
+Step 2: Add an LLM function to extract the constraint value from the user's natural language question
+The user says "which of those have live music?" but the evidence system needs a clean constraint value like "live music". Add this function:
+typescriptasync function extractConstraintValue(userQuestion: string): Promise<{ value: string; type: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    // Basic fallback: strip common question words
+    const cleaned = userQuestion
+      .replace(/^(which|what|do any|are there any|can you check|tell me|show me|find|list|any)\s+(of\s+)?(those|them|the results?|these)?\s*(that\s+|which\s+|who\s+)?(mention|have|offer|provide|include|feature|do|say|advertise|list|show)?\s*/i, '')
+      .replace(/\?+$/, '')
+      .replace(/\bon their (website|homepage|site|page)\b/gi, '')
+      .trim();
+    return { value: cleaned || userQuestion, type: 'attribute_check' };
+  }
+
+  const model = process.env.REFINE_LLM_MODEL || 'claude-3-haiku-20240307';
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 100,
+        temperature: 0,
+        system: 'Extract the specific thing the user wants to check for on a business website. Respond with JSON only.',
+        messages: [{
+          role: 'user',
+          content: `User question: "${userQuestion}"
+
+What specific attribute, feature, or content is the user looking for? Extract just the key thing to search for on the website.
+
+JSON only: {"value": "the thing to search for", "type": "attribute_check"}
+
+Examples:
+- "which of those mention live music?" → {"value": "live music", "type": "attribute_check"}
+- "do any of them do loft conversions?" → {"value": "loft conversions", "type": "attribute_check"}
+- "which ones mention eco homes or green building" → {"value": "eco homes or green building", "type": "website_evidence"}
+- "any of them have beer gardens?" → {"value": "beer garden", "type": "attribute_check"}
+- "which seem high end or premium" → {"value": "high end or premium", "type": "attribute_check"}`,
+        }],
+      }),
+    });
+
+    if (!resp.ok) throw new Error(`API ${resp.status}`);
+    const data = await resp.json() as any;
+    const text = data.content?.[0]?.text || '';
+    const cleaned = text.replace(/```json\s*/gi, '').replace(/```\s*$/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    console.log(`[REFINE_EXTRACT] "${userQuestion}" → constraint value: "${parsed.value}" type: "${parsed.type}"`);
+    return { value: parsed.value || userQuestion, type: parsed.type || 'attribute_check' };
+  } catch (err: any) {
+    console.warn(`[REFINE_EXTRACT] LLM extraction failed: ${err.message}`);
+    const cleaned = userQuestion
+      .replace(/^(which|what|do any|are there any|can you check|tell me|show me|find|list|any)\s+(of\s+)?(those|them|the results?|these)?\s*(that\s+|which\s+|who\s+)?(mention|have|offer|provide|include|feature|do|say|advertise|list|show)?\s*/i, '')
+      .replace(/\?+$/, '')
+      .replace(/\bon their (website|homepage|site|page)\b/gi, '')
+      .trim();
+    return { value: cleaned || userQuestion, type: 'attribute_check' };
+  }
+}
+Step 3: Rewrite liveRefineWithFetch to use the full evidence pipeline
+Replace the ENTIRE liveRefineWithFetch function with this version that:
+
+Extracts the constraint value from the question
+Builds proper page hints
+Crawls up to 5 pages per website (not just homepage)
+Uses extractConstraintLedEvidence (the same function the main pipeline uses)
+
+typescriptasync function liveRefineWithFetch(
+  leads: RefineLead[],
+  constraint: string,
+  sourceRunId: string,
+  runId: string,
+  userId: string,
+  conversationId: string | undefined,
+): Promise<{
+  matchingLeads: RefineMatchedLead[];
+  nonMatchingLeads: RefineNonMatchedLead[];
+  fetchedCount: number;
+}> {
+  const matchingLeads: RefineMatchedLead[] = [];
+  const nonMatchingLeads: RefineNonMatchedLead[] = [];
+
+  // Step 1: Extract the actual constraint value from the user's question
+  const extracted = await extractConstraintValue(constraint);
+  const constraintCtx: ConstraintContext = {
+    type: extracted.type,
+    field: 'website_content',
+    operator: 'contains',
+    value: extracted.value,
+    hardness: 'soft',
+  };
+
+  console.log(`[REFINE_LIVE] Constraint extracted: "${constraint}" → value="${extracted.value}" type="${extracted.type}"`);
+
+  // Step 2: Get page hints for this constraint (e.g., /events, /whats-on for "live music")
+  const pageHints = getPageHintsForConstraint(constraintCtx);
+  console.log(`[REFINE_LIVE] Page hints for "${extracted.value}": ${pageHints.join(', ') || 'none'}`);
+
+  const withWebsite = leads.filter(l => !!l.website);
+  const withoutWebsite = leads.filter(l => !l.website);
+
+  for (const lead of withoutWebsite) {
+    nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_website' });
+  }
+
+  if (withWebsite.length === 0) {
+    return { matchingLeads, nonMatchingLeads, fetchedCount: 0 };
+  }
+
+  console.log(`[REFINE_LIVE] Crawling ${withWebsite.length} websites (up to 5 pages each) for "${extracted.value}"`);
+
+  let fetchedCount = 0;
+  const cacheWrites: Promise<any>[] = [];
+  const BATCH_SIZE = 5;
+
+  // Process leads in batches of 5
+  for (let batchStart = 0; batchStart < withWebsite.length; batchStart += BATCH_SIZE) {
+    const batch = withWebsite.slice(batchStart, batchStart + BATCH_SIZE);
+    
+    const batchResults = await Promise.allSettled(
+      batch.map(async (lead) => {
+        const url = lead.website!;
+        
+        // Crawl up to 5 pages with page hints (same as main pipeline)
+        let pages: any[] = [];
+        try {
+          const envelope = await executeWebVisit(
+            { url, max_pages: 5, same_domain_only: true, ...(pageHints.length > 0 ? { page_hints: pageHints.slice(0, 6) } : {}) },
+            runId,
+          );
+          pages = (envelope.outputs as any)?.pages ?? [];
+        } catch (err: any) {
+          console.warn(`[REFINE_LIVE] Web visit failed for "${lead.name}": ${err.message}`);
+        }
+
+        if (pages.length === 0) {
+          return { lead, match: false, evidence: '', reason: 'fetch_failed', pages: [] };
+        }
+
+        fetchedCount++;
+
+        // Cache pages under the source run for future refinements
+        const cacheWrite = createArtefact({
+          runId: sourceRunId,
+          type: 'web_visit_pages',
+          title: `${lead.name} — ${extractDomain(url)}`,
+          summary: `${pages.length} page(s) crawled during refinement`,
+          payload: {
+            outputs: {
+              pages,
+              site_summary: `Crawled for lead: ${lead.name}`,
+              site_language: 'en',
+              crawl: { attempted_pages: 5, fetched_pages: pages.length, blocked: false, retryable: false, http_failures_count: 0 },
+            },
+          },
+          userId,
+          conversationId,
+        }).catch((err: any) =>
+          console.warn(`[REFINE_LIVE] Cache write failed for "${lead.name}": ${err.message}`),
+        );
+        cacheWrites.push(cacheWrite);
+
+        // Use the SAME evidence extraction as the main pipeline
+        const extraction = await extractConstraintLedEvidence(
+          pages,
+          constraintCtx,
+          [],
+          3,
+          lead.name,
+        );
+
+        if (!extraction.no_evidence && extraction.evidence_items.length > 0) {
+          const bestEvidence = extraction.evidence_items[0];
+          return {
+            lead,
+            match: true,
+            evidence: bestEvidence.direct_quote || bestEvidence.context_snippet || '',
+            reason: '',
+            pages,
+          };
+        } else {
+          return { lead, match: false, evidence: '', reason: 'no_evidence', pages };
+        }
+      }),
+    );
+
+    for (const settled of batchResults) {
+      if (settled.status === 'rejected') {
+        console.warn(`[REFINE_LIVE] Batch item threw: ${settled.reason}`);
+        continue;
+      }
+      const { lead, match, evidence, reason } = settled.value;
+      if (match) {
+        console.log(`[REFINE_LIVE] "${lead.name}" → MATCH for "${extracted.value}"`);
+        matchingLeads.push({ ...lead, refine_match: true, refine_evidence: evidence });
+      } else {
+        console.log(`[REFINE_LIVE] "${lead.name}" → NO MATCH for "${extracted.value}" (${reason})`);
+        nonMatchingLeads.push({ ...lead, refine_match: false, reason });
+      }
+    }
+  }
+
+  // Fire cache writes without blocking
+  Promise.allSettled(cacheWrites).catch(() => {});
+
+  console.log(`[REFINE_LIVE] Complete — fetched=${fetchedCount} matched=${matchingLeads.length}/${leads.length}`);
+  return { matchingLeads, nonMatchingLeads, fetchedCount };
+}
+Step 4: Update the cached artefact path in executeRefine to also use constraint-led extraction
+In the executeRefine function, find the cached artefact path (the else block after if (noCachedPages)). Replace the loop that calls llmCheckConstraint with:
+typescript    // Extract the actual constraint value
+    const extracted = await extractConstraintValue(constraint);
+    const constraintCtx: ConstraintContext = {
+      type: extracted.type,
+      field: 'website_content',
+      operator: 'contains',
+      value: extracted.value,
+      hardness: 'soft',
+    };
+
+    console.log(`[REFINE] Using cached pages — constraint: "${extracted.value}"`);
+
+    const CACHED_BATCH_SIZE = 5;
+    const cachedToCheck: { lead: RefineLead; pages: any[] }[] = [];
+
+    for (const lead of leads) {
+      const matchingArtefacts = webVisitArtefacts.filter(a => artefactMatchesLead(a, lead));
+      if (matchingArtefacts.length === 0) {
+        nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_cached_pages' });
+        continue;
+      }
+      const pages = matchingArtefacts.flatMap(a => a.payloadJson?.outputs?.pages ?? []);
+      cachedToCheck.push({ lead, pages });
+    }
+
+    for (let i = 0; i < cachedToCheck.length; i += CACHED_BATCH_SIZE) {
+      const batch = cachedToCheck.slice(i, i + CACHED_BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map(async ({ lead, pages }) => {
+          const extraction = await extractConstraintLedEvidence(pages, constraintCtx, [], 3, lead.name);
+          return { lead, extraction };
+        }),
+      );
+
+      for (const settled of batchResults) {
+        if (settled.status === 'rejected') continue;
+        const { lead, extraction } = settled.value;
+        if (!extraction.no_evidence && extraction.evidence_items.length > 0) {
+          const bestEvidence = extraction.evidence_items[0];
+          console.log(`[REFINE] "${lead.name}" → MATCH for "${extracted.value}"`);
+          matchingLeads.push({ ...lead, refine_match: true, refine_evidence: bestEvidence.direct_quote || bestEvidence.context_snippet || '' });
+        } else {
+          console.log(`[REFINE] "${lead.name}" → NO MATCH for "${extracted.value}"`);
+          nonMatchingLeads.push({ ...lead, refine_match: false });
+        }
+      }
+    }
+Step 5: Update the message templates to use the extracted constraint value instead of the raw question
+Find all the message templates in executeRefine and replace "${constraint}" with a reference to the extracted value. Since extracted is scoped inside each path, you'll need to make it available. The simplest way: extract the constraint value ONCE at the top of executeRefine, before the if (noCachedPages) branch:
+Add near the top of executeRefine, after the let liveFetched = false; line:
+typescript  const extracted = await extractConstraintValue(constraint);
+  const constraintValue = extracted.value;
+Then in all message templates, use constraintValue instead of constraint. For example:
+The no-matches messages should say:
+typescriptmessage = `I checked ${fetchedCount} websites — none of the ${leads.length} results appear to have ${constraintValue} based on their website content.`;
+The matches-found messages should say:
+typescriptconst matchNames = matchingLeads.slice(0, 3).map(l => l.name).join(', ');
+const andMore = matchingLeads.length > 3 ? ` and ${matchingLeads.length - 3} more` : '';
+message = `Found ${matchingLeads.length} of ${leads.length} with ${constraintValue}: ${matchNames}${andMore}.`;
+Step 6: Remove the now-unused llmCheckConstraint and fallbackKeywordCheck functions
+Since we're now using extractConstraintLedEvidence (the main pipeline's evidence system), the llmCheckConstraint and fallbackKeywordCheck functions are no longer needed. Delete them both.
+What this achieves:
+"which of those have live music?" now does:
+
+Extracts "live music" from the question (LLM, 1s)
+Gets page hints: /events, /whats-on, /live-music, /entertainment, /gigs
+Crawls up to 5 pages per pub (not just homepage)
+Uses synonym matching: live music, live band, gigs, music night, open mic, acoustic
+Two-layer evidence extraction: keyword scan → GPT-4o judge
+Returns matches with real quotes and source URLs
+
+Exactly the same quality as if the user had said "find pubs in arundel that have live music" in the first place.
+Do NOT change any other files. Only server/supervisor/refine-executor.ts.
