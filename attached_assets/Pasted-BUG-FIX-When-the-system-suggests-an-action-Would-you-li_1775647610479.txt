@@ -1,0 +1,29 @@
+BUG FIX: When the system suggests an action ("Would you like me to search for more?") and the user says "yes please" or "ok" or "go ahead", the router doesn't follow through — it routes as DISCUSS or CHAT instead of performing the suggested action.
+Two changes needed in server/supervisor/conversation-router.ts:
+Fix 1: Remove affirmatives from the INSTANT_CHAT fast path
+The fast path catches "ok", "okay", "sure" as instant CHAT responses, skipping the LLM entirely. But these words are often affirmative responses to a system suggestion, which need conversation context to interpret correctly.
+Find this regex in the INSTANT_CHAT array:
+typescript/^(thanks|thank you|cheers|ta|ok|okay|cool|nice|got it|bye|goodbye|later)[\s!.?]*$/i,
+Replace with:
+typescript/^(thanks|thank you|cheers|ta|bye|goodbye|later)[\s!.?]*$/i,
+This removes ok, okay, cool, nice, got it from the fast path so they go to the LLM, which can read conversation context.
+Fix 2: Add affirmative follow-through rule to the router system prompt
+In the ROUTER_SYSTEM_PROMPT string, add this new rule in the ## CRITICAL RULES section, after rule 11:
+12. AFFIRMATIVE FOLLOW-THROUGH: If the user's message is a short affirmative (yes, yes please, ok, sure, go ahead, do it, go for it, please do, yeah, yep) AND the previous assistant message offered to perform an action, treat the user's message as a request to perform that action:
+   - If the assistant offered to run a new search or find more results → route as SEARCH or ITERATE (carry forward entity + location from the previous search context)
+   - If the assistant offered to refine or filter results → route as DISCUSS
+   - If the assistant offered to draft an email or do outreach → route as ITERATE with the appropriate action
+   The key insight: "yes please" after "Would you like me to search for West Sussex nonprofits?" means SEARCH for West Sussex nonprofits — not DISCUSS existing results.
+Also add examples to the ITERATE section:
+- Previous assistant: "Would you like me to search for other organizations in West Sussex?" User: "yes please" → ITERATE, entity=same as before, location="West Sussex", iteration_change="user confirmed suggested search"
+- Previous assistant: "I could try searching for West Sussex nonprofits?" User: "go ahead" → SEARCH, entity="nonprofits", location="West Sussex"
+And add examples to the CHAT section showing what NOT to do:
+- "yes please" (when previous assistant offered to search) → NOT CHAT — this is an affirmative to a search offer → SEARCH or ITERATE
+Fix 3: Also remove "yes please" from being caught as bare command
+In the tryFastPath function, add a guard: if input.previousResults.exists is true AND the message is a short affirmative, do NOT use the fast path — let the LLM handle it with conversation context.
+After the existing fast path checks, add this before return null:
+typescript  // Don't fast-path affirmatives when there's conversation context
+  // "yes please" after "Would you like me to search more?" needs LLM to understand
+  // (This is handled by the LLM via rule 12 in the system prompt)
+Actually, the fast paths already only match specific patterns and "yes please" doesn't match any of them, so this is just a comment for clarity. The main fix is in the system prompt (Fix 2) and the INSTANT_CHAT cleanup (Fix 1).
+Do NOT change any other files.
