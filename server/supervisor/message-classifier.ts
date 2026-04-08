@@ -10,7 +10,7 @@ export interface ClassificationResult {
 
 const CHAT_PATTERNS = [
   /^(hi|hello|hey|howdy|morning|afternoon|evening|yo|sup)\b/i,
-  /^(thanks|thank you|cheers|ta|bye|goodbye|see you|later)\b/i,
+  /^(thanks|thank you|cheers|ta)\b/i,
   /^(what can you do|how do you work|help|what are you|who are you|tell me about yourself)/i,
   /^(bye|goodbye|see you|later|cya|ttyl)\b/i,
 ];
