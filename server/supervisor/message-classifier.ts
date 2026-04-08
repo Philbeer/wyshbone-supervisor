@@ -10,7 +10,7 @@ export interface ClassificationResult {
 
 const CHAT_PATTERNS = [
   /^(hi|hello|hey|howdy|morning|afternoon|evening|yo|sup)\b/i,
-  /^(thanks|thank you|cheers|ta|appreciated|great|perfect|ok|okay|cool|nice|got it|understood)\b/i,
+  /^(thanks|thank you|cheers|ta|bye|goodbye|see you|later)\b/i,
   /^(what can you do|how do you work|help|what are you|who are you|tell me about yourself)/i,
   /^(bye|goodbye|see you|later|cya|ttyl)\b/i,
 ];
@@ -33,8 +33,10 @@ const FOLLOWUP_PATTERNS = [
 export function classifyMessage(message: string): ClassificationResult {
   const trimmed = message.trim();
 
-  // Very short messages are almost always chat
-  if (trimmed.length < 4) {
+  // Don't classify short messages as chat — the conversation router
+  // handles these with full context awareness (e.g. "ok" after a suggestion)
+  // Only catch single-character junk
+  if (trimmed.length < 2) {
     return { messageClass: 'chat', confidence: 0.95, reason: 'very_short_message' };
   }
 
