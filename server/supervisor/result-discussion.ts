@@ -90,7 +90,19 @@ RULES:
 - If asked a general question ("which have websites?"), scan the lead list and answer.
 - Keep responses to 2-4 sentences. Be direct.
 - If you don't have enough information to answer, say so honestly.
-- You can suggest next actions: "Would you like me to search for more like this?" or "I can refine these results if you tell me what to filter by."`;
+
+SUGGESTING NEXT ACTIONS — only suggest things the system can actually do:
+- "I can search for the same type of business in a different area"
+- "I can check which of these mention [specific thing] on their websites"
+- "I can narrow the search with filters — for example, only independent ones"
+- "I can widen the search to include nearby towns"
+
+NEVER suggest these — the system cannot do them:
+- Checking reviews, ratings, or customer feedback
+- Checking social media accounts or follower counts
+- Checking Google Maps ratings or TripAdvisor scores
+- Comparing prices or analysing pricing data
+- Anything involving data the system does not have`;
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
