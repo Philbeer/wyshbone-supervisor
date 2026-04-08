@@ -338,6 +338,94 @@ async function liveRefineWithFetch(
     }
   }
 
+  // ── GPT-4o web search fallback for leads with no evidence ──
+  const noEvidenceLeads = nonMatchingLeads.filter(l => l.reason === 'no_evidence');
+
+  if (noEvidenceLeads.length > 0) {
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (openaiKey) {
+      console.log(`[REFINE_FALLBACK] Running GPT-4o web search fallback for ${noEvidenceLeads.length} leads with no website evidence`);
+
+      const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
+      const FALLBACK_BATCH = 5;
+
+      for (let fi = 0; fi < noEvidenceLeads.length; fi += FALLBACK_BATCH) {
+        const fbBatch = noEvidenceLeads.slice(fi, fi + FALLBACK_BATCH);
+
+        const fbResults = await Promise.allSettled(
+          fbBatch.map(async (lead) => {
+            const prompt = `Search for "${lead.name}". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${extracted.value}" is genuinely true for this specific business.
+
+Respond with JSON only, no markdown fences:
+{"business_found": true/false, "constraint_met": true/false, "confidence": "high"/"medium"/"low", "reasoning": "one sentence", "source_url": "URL or null"}
+
+IMPORTANT:
+- constraint_met means "${extracted.value}" IS genuinely true for this business
+- Check review sites, event listings, social media — not just the business's own website
+- If the business exists but does NOT match, set business_found=true, constraint_met=false`;
+
+            const resp = await fetch('https://api.openai.com/v1/responses', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${openaiKey}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                model: fallbackModel,
+                input: prompt,
+                tools: [{ type: 'web_search' }],
+                store: false,
+              }),
+            });
+
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+            const data = await resp.json();
+            let content = '';
+            if (Array.isArray(data.output)) {
+              for (const item of data.output) {
+                if (item.type === 'message' && Array.isArray(item.content)) {
+                  for (const block of item.content) {
+                    if (block.type === 'output_text') content += block.text;
+                  }
+                }
+              }
+            }
+            if (!content && data.output_text) content = data.output_text;
+
+            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) throw new Error('No JSON');
+            const parsed = JSON.parse(jsonMatch[0]);
+            return { lead, parsed };
+          }),
+        );
+
+        for (const settled of fbResults) {
+          if (settled.status === 'rejected') continue;
+          const { lead, parsed } = settled.value;
+
+          if (parsed.business_found && parsed.constraint_met) {
+            console.log(`[REFINE_FALLBACK] "${lead.name}" → VERIFIED via web search (${parsed.confidence}): ${(parsed.reasoning || '').substring(0, 100)}`);
+            const idx = nonMatchingLeads.findIndex(l => l.name === lead.name);
+            if (idx >= 0) nonMatchingLeads.splice(idx, 1);
+            matchingLeads.push({
+              ...lead,
+              refine_match: true,
+              refine_evidence: parsed.reasoning || `Verified via web search (${parsed.confidence})`,
+            });
+          } else {
+            console.log(`[REFINE_FALLBACK] "${lead.name}" → NOT VERIFIED: ${(parsed.reasoning || '').substring(0, 100)}`);
+          }
+        }
+      }
+
+      console.log(`[REFINE_FALLBACK] After fallback: ${matchingLeads.length} total matches`);
+    } else {
+      console.warn(`[REFINE_FALLBACK] OPENAI_API_KEY not set — skipping web search fallback`);
+    }
+  }
+  // ── end GPT-4o fallback ──
+
   // Fire cache writes without blocking
   Promise.allSettled(cacheWrites).catch(() => {});
 
@@ -460,10 +548,98 @@ export async function executeRefine(
           matchingLeads.push({ ...lead, refine_match: true, refine_evidence: bestEvidence.direct_quote || bestEvidence.context_snippet || '' });
         } else {
           console.log(`[REFINE] "${lead.name}" → NO MATCH for "${constraintValue}"`);
-          nonMatchingLeads.push({ ...lead, refine_match: false });
+          nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_evidence' });
         }
       }
     }
+
+    // ── GPT-4o web search fallback for leads with no evidence ──
+    const noEvidenceCached = nonMatchingLeads.filter(l => l.reason === 'no_evidence');
+
+    if (noEvidenceCached.length > 0) {
+      const openaiKey = process.env.OPENAI_API_KEY;
+      if (openaiKey) {
+        console.log(`[REFINE_FALLBACK] Running GPT-4o web search fallback for ${noEvidenceCached.length} leads with no cached evidence`);
+
+        const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
+        const FALLBACK_BATCH = 5;
+
+        for (let fi = 0; fi < noEvidenceCached.length; fi += FALLBACK_BATCH) {
+          const fbBatch = noEvidenceCached.slice(fi, fi + FALLBACK_BATCH);
+
+          const fbResults = await Promise.allSettled(
+            fbBatch.map(async (lead) => {
+              const prompt = `Search for "${lead.name}". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${constraintValue}" is genuinely true for this specific business.
+
+Respond with JSON only, no markdown fences:
+{"business_found": true/false, "constraint_met": true/false, "confidence": "high"/"medium"/"low", "reasoning": "one sentence", "source_url": "URL or null"}
+
+IMPORTANT:
+- constraint_met means "${constraintValue}" IS genuinely true for this business
+- Check review sites, event listings, social media — not just the business's own website
+- If the business exists but does NOT match, set business_found=true, constraint_met=false`;
+
+              const resp = await fetch('https://api.openai.com/v1/responses', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${openaiKey}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  model: fallbackModel,
+                  input: prompt,
+                  tools: [{ type: 'web_search' }],
+                  store: false,
+                }),
+              });
+
+              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+              const data = await resp.json();
+              let content = '';
+              if (Array.isArray(data.output)) {
+                for (const item of data.output) {
+                  if (item.type === 'message' && Array.isArray(item.content)) {
+                    for (const block of item.content) {
+                      if (block.type === 'output_text') content += block.text;
+                    }
+                  }
+                }
+              }
+              if (!content && data.output_text) content = data.output_text;
+
+              const jsonMatch = content.match(/\{[\s\S]*\}/);
+              if (!jsonMatch) throw new Error('No JSON');
+              const parsed = JSON.parse(jsonMatch[0]);
+              return { lead, parsed };
+            }),
+          );
+
+          for (const settled of fbResults) {
+            if (settled.status === 'rejected') continue;
+            const { lead, parsed } = settled.value;
+
+            if (parsed.business_found && parsed.constraint_met) {
+              console.log(`[REFINE_FALLBACK] "${lead.name}" → VERIFIED via web search (${parsed.confidence}): ${(parsed.reasoning || '').substring(0, 100)}`);
+              const idx = nonMatchingLeads.findIndex(l => l.name === lead.name);
+              if (idx >= 0) nonMatchingLeads.splice(idx, 1);
+              matchingLeads.push({
+                ...lead,
+                refine_match: true,
+                refine_evidence: parsed.reasoning || `Verified via web search (${parsed.confidence})`,
+              });
+            } else {
+              console.log(`[REFINE_FALLBACK] "${lead.name}" → NOT VERIFIED: ${(parsed.reasoning || '').substring(0, 100)}`);
+            }
+          }
+        }
+
+        console.log(`[REFINE_FALLBACK] After fallback: ${matchingLeads.length} total matches`);
+      } else {
+        console.warn(`[REFINE_FALLBACK] OPENAI_API_KEY not set — skipping web search fallback`);
+      }
+    }
+    // ── end GPT-4o fallback ──
 
     if (matchingLeads.length === 0) {
       message = `I checked ${leads.length} websites — none of the ${leads.length} results appear to have ${constraintValue} based on their website content.`;

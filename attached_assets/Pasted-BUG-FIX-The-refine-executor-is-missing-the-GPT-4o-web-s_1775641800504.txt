@@ -1,0 +1,107 @@
+BUG FIX: The refine executor is missing the GPT-4o web search fallback that the main search pipeline uses. When a user asks "which of those have live music?" as a follow-up, the refine path only checks the actual websites. The main pipeline ALSO uses GPT-4o with web search to verify businesses where the website crawl found no evidence — checking TripAdvisor, Google reviews, local listings, Facebook events etc. This is why a single query "find pubs in arundel that have live music" finds ~8 results but the follow-up "which of those have live music" only finds 2.
+FILE: server/supervisor/refine-executor.ts
+Add a GPT-4o web search fallback after the website evidence extraction
+In the liveRefineWithFetch function, after all the batch processing is done (after the for (let batchStart...) loop completes), add a GPT-4o fallback step for any leads that had no evidence found. This is the same pattern used in mission-executor.ts in the GPT-4o fallback section.
+Add this code AFTER the batch processing loop and BEFORE the Promise.allSettled(cacheWrites) line:
+typescript  // ── GPT-4o web search fallback for leads with no evidence ──
+  const noEvidenceLeads = nonMatchingLeads.filter(l => l.reason === 'no_evidence');
+  
+  if (noEvidenceLeads.length > 0) {
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (openaiKey) {
+      console.log(`[REFINE_FALLBACK] Running GPT-4o web search fallback for ${noEvidenceLeads.length} leads with no website evidence`);
+      
+      const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
+      const FALLBACK_BATCH = 5;
+      
+      for (let fi = 0; fi < noEvidenceLeads.length; fi += FALLBACK_BATCH) {
+        const fbBatch = noEvidenceLeads.slice(fi, fi + FALLBACK_BATCH);
+        
+        const fbResults = await Promise.allSettled(
+          fbBatch.map(async (lead) => {
+            const prompt = `Search for "${lead.name}" in "Arundel". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${extracted.value}" is genuinely true for this specific business.
+
+Respond with JSON only, no markdown fences:
+{"business_found": true/false, "constraint_met": true/false, "confidence": "high"/"medium"/"low", "reasoning": "one sentence", "source_url": "URL or null"}
+
+IMPORTANT:
+- constraint_met means "${extracted.value}" IS genuinely true for this business
+- Check review sites, event listings, social media — not just the business's own website
+- If the business exists but does NOT match, set business_found=true, constraint_met=false`;
+
+            const resp = await fetch('https://api.openai.com/v1/responses', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${openaiKey}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                model: fallbackModel,
+                input: prompt,
+                tools: [{ type: 'web_search' }],
+                store: false,
+              }),
+            });
+
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+            const data = await resp.json();
+            let content = '';
+            if (Array.isArray(data.output)) {
+              for (const item of data.output) {
+                if (item.type === 'message' && Array.isArray(item.content)) {
+                  for (const block of item.content) {
+                    if (block.type === 'output_text') content += block.text;
+                  }
+                }
+              }
+            }
+            if (!content && data.output_text) content = data.output_text;
+
+            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) throw new Error('No JSON');
+            const parsed = JSON.parse(jsonMatch[0]);
+            return { lead, parsed };
+          }),
+        );
+
+        for (const settled of fbResults) {
+          if (settled.status === 'rejected') continue;
+          const { lead, parsed } = settled.value;
+          
+          if (parsed.business_found && parsed.constraint_met) {
+            console.log(`[REFINE_FALLBACK] "${lead.name}" → VERIFIED via web search (${parsed.confidence}): ${(parsed.reasoning || '').substring(0, 100)}`);
+            // Remove from nonMatchingLeads and add to matchingLeads
+            const idx = nonMatchingLeads.findIndex(l => l.name === lead.name);
+            if (idx >= 0) nonMatchingLeads.splice(idx, 1);
+            matchingLeads.push({
+              ...lead,
+              refine_match: true,
+              refine_evidence: parsed.reasoning || `Verified via web search (${parsed.confidence})`,
+            });
+          } else {
+            console.log(`[REFINE_FALLBACK] "${lead.name}" → NOT VERIFIED: ${(parsed.reasoning || '').substring(0, 100)}`);
+          }
+        }
+      }
+      
+      console.log(`[REFINE_FALLBACK] After fallback: ${matchingLeads.length} total matches`);
+    } else {
+      console.warn(`[REFINE_FALLBACK] OPENAI_API_KEY not set — skipping web search fallback`);
+    }
+  }
+  // ── end GPT-4o fallback ──
+Important: Make sure extracted (from extractConstraintValue) is accessible in this scope. If it's not, you may need to pass it as a parameter to liveRefineWithFetch or move the extraction to the top of that function.
+Also add the same fallback to the cached artefact path
+In the executeRefine function, after the cached artefact batch processing loop, add the same GPT-4o fallback block. The pattern is identical — check nonMatchingLeads for leads with reason === 'no_evidence', run GPT-4o web search on each, promote any verified ones to matchingLeads.
+What this achieves:
+The refine path now matches the main pipeline exactly:
+
+Extract constraint value from question ("live music")
+Crawl up to 5 pages with intelligent page hints
+Use synonym matching + two-layer evidence extraction
+GPT-4o web search fallback for any leads without website evidence
+Return verified matches with evidence quotes
+
+This should bring the follow-up results from 2 up to ~8, matching the initial search quality.
+Do NOT change any other files.
