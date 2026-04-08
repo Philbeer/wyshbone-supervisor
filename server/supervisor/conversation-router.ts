@@ -285,7 +285,7 @@ function parseRouterResponse(raw: string): RouterDecision {
 
 const INSTANT_CHAT = [
   /^(hi|hello|hey|howdy|morning|afternoon|evening|yo|sup)[\s!.?]*$/i,
-  /^(thanks|thank you|cheers|ta|ok|okay|cool|nice|got it|bye|goodbye|later)[\s!.?]*$/i,
+  /^(thanks|thank you|cheers|ta|bye|goodbye|later)[\s!.?]*$/i,
 ];
 
 const INSTANT_UNCLEAR = [
