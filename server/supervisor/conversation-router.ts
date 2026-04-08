@@ -288,11 +288,6 @@ const INSTANT_CHAT = [
   /^(thanks|thank you|cheers|ta|bye|goodbye|later)[\s!.?]*$/i,
 ];
 
-const INSTANT_UNCLEAR = [
-  /^(find|search|look for|get me|show me)[\s!.?]*$/i,
-  /^(any|anything|something|stuff)[\s!.?]*$/i,
-];
-
 function tryFastPath(message: string): RouterDecision | null {
   const trimmed = message.trim();
 
@@ -314,18 +309,6 @@ function tryFastPath(message: string): RouterDecision | null {
         chat_response: "Hey! I can find businesses and leads for you. What are you looking for and where? For example, 'find cafes in Brighton'.",
         iteration_change: null, referenced_result: null,
         confidence: 0.98, reasoning: 'greeting — fast path',
-      };
-    }
-  }
-
-  for (const p of INSTANT_UNCLEAR) {
-    if (p.test(trimmed)) {
-      return {
-        route: 'CHAT', entity: null, location: null, constraints: [],
-        clarify_question: null,
-        chat_response: "What would you like me to find? I need a type of business and a location — for example, 'find electricians in Cardiff'.",
-        iteration_change: null, referenced_result: null,
-        confidence: 0.95, reasoning: 'bare command — fast path',
       };
     }
   }
