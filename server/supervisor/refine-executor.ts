@@ -40,21 +40,95 @@ function extractDomain(url: string): string {
   }
 }
 
-function checkConstraint(
+function fallbackKeywordCheck(
   pageText: string,
   constraint: string,
-): { match: boolean; snippet?: string } {
+): { match: boolean; reasoning: string; snippet: string } {
   const text = pageText.toLowerCase();
-  const words = constraint.toLowerCase().split(/\s+/).filter(Boolean);
+  const cleaned = constraint
+    .replace(/^(which|what|do any|are there any|can you check|tell me|show me|find|list)\s+(of\s+)?(those|them|the results?|these)?\s*(that\s+|which\s+|who\s+)?(mention|have|offer|provide|include|feature|do)?\s*/i, '')
+    .replace(/\?+$/, '')
+    .replace(/\bon their (website|homepage|site)\b/gi, '')
+    .trim();
 
-  const allPresent = words.every(w => text.includes(w));
-  if (!allPresent) return { match: false };
+  const words = cleaned.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  if (words.length === 0) return { match: false, reasoning: 'no keywords extracted', snippet: '' };
 
-  const idx = text.indexOf(words[0]);
-  const start = Math.max(0, idx - 100);
-  const end = Math.min(text.length, idx + 200);
-  const snippet = pageText.substring(start, end).trim();
-  return { match: true, snippet: `...${snippet}...` };
+  const threshold = words.length <= 2 ? words.length : words.length - 1;
+  const foundWords = words.filter(w => text.includes(w));
+
+  if (foundWords.length >= threshold) {
+    const idx = text.indexOf(foundWords[0]);
+    const start = Math.max(0, idx - 100);
+    const end = Math.min(text.length, idx + 200);
+    return { match: true, reasoning: `Keywords found: ${foundWords.join(', ')}`, snippet: pageText.substring(start, end).trim() };
+  }
+
+  return { match: false, reasoning: `Keywords not found: ${words.join(', ')}`, snippet: '' };
+}
+
+async function llmCheckConstraint(
+  pageText: string,
+  leadName: string,
+  userQuestion: string,
+): Promise<{ match: boolean; reasoning: string; snippet: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return fallbackKeywordCheck(pageText, userQuestion);
+  }
+
+  const model = process.env.REFINE_LLM_MODEL || 'claude-3-haiku-20240307';
+  const truncatedPage = pageText.substring(0, 8000);
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 300,
+      temperature: 0,
+      system: `You check whether a business's website content answers a user's question. Respond with JSON only, no other text.`,
+      messages: [{
+        role: 'user',
+        content: `Business: "${leadName}"
+
+Website content (truncated):
+${truncatedPage}
+
+User's question about this business: "${userQuestion}"
+
+Does the website content contain information that answers or relates to the user's question?
+
+Respond with JSON only:
+{"match": true/false, "reasoning": "one sentence why", "snippet": "the relevant quote from the website, or empty string"}`,
+      }],
+    }),
+  });
+
+  if (!resp.ok) {
+    console.warn(`[REFINE_LLM] API error for "${leadName}": ${resp.status}`);
+    return fallbackKeywordCheck(pageText, userQuestion);
+  }
+
+  const data = await resp.json() as any;
+  const text = data.content?.[0]?.text || '';
+
+  try {
+    const cleaned = text.replace(/```json\s*/gi, '').replace(/```\s*$/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    return {
+      match: !!parsed.match,
+      reasoning: parsed.reasoning || '',
+      snippet: parsed.snippet || '',
+    };
+  } catch {
+    console.warn(`[REFINE_LLM] Failed to parse response for "${leadName}": ${text.substring(0, 100)}`);
+    return fallbackKeywordCheck(pageText, userQuestion);
+  }
 }
 
 function normalizeArtefact(raw: any): any {
@@ -202,6 +276,9 @@ async function liveRefineWithFetch(
   // Process results sequentially (no concurrency issues writing to shared arrays)
   const cacheWrites: Promise<any>[] = [];
 
+  // Collect successfully fetched leads for batched LLM checks
+  const toCheck: { lead: RefineLead; pages: any[]; url: string }[] = [];
+
   for (const settled of fetchSettled) {
     if (settled.status === 'rejected') {
       // Find which lead this was — not directly available but we warned in executeWebVisit
@@ -240,16 +317,34 @@ async function liveRefineWithFetch(
     );
     cacheWrites.push(cacheWrite);
 
-    // Constraint check against all text from the fetched page(s)
-    const fullText = pages.map((p: any) => (typeof p.text_clean === 'string' ? p.text_clean : '')).join(' ');
-    const result = checkConstraint(fullText, constraint);
+    toCheck.push({ lead, pages, url });
+  }
 
-    if (result.match) {
-      console.log(`[REFINE_LIVE] "${lead.name}" → MATCH for "${constraint}"`);
-      matchingLeads.push({ ...lead, refine_match: true, refine_evidence: result.snippet ?? '' });
-    } else {
-      console.log(`[REFINE_LIVE] "${lead.name}" → NO MATCH for "${constraint}"`);
-      nonMatchingLeads.push({ ...lead, refine_match: false });
+  // Run LLM constraint checks in batches of 5 (concurrency limit)
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < toCheck.length; i += BATCH_SIZE) {
+    const batch = toCheck.slice(i, i + BATCH_SIZE);
+    const batchResults = await Promise.allSettled(
+      batch.map(async ({ lead, pages }) => {
+        const fullText = pages.map((p: any) => (typeof p.text_clean === 'string' ? p.text_clean : '')).join(' ');
+        const result = await llmCheckConstraint(fullText, lead.name, constraint);
+        return { lead, result };
+      }),
+    );
+
+    for (const settled of batchResults) {
+      if (settled.status === 'rejected') {
+        console.warn(`[REFINE_LIVE] LLM check threw: ${settled.reason}`);
+        continue;
+      }
+      const { lead, result } = settled.value;
+      if (result.match) {
+        console.log(`[REFINE_LIVE] "${lead.name}" → MATCH for "${constraint}"`);
+        matchingLeads.push({ ...lead, refine_match: true, refine_evidence: result.snippet || result.reasoning || '' });
+      } else {
+        console.log(`[REFINE_LIVE] "${lead.name}" → NO MATCH for "${constraint}"`);
+        nonMatchingLeads.push({ ...lead, refine_match: false });
+      }
     }
   }
 
@@ -336,6 +431,8 @@ export async function executeRefine(
     }
   } else {
     // ── Cached artefact path ─────────────────────────────────────────────────
+    const cachedToCheck: { lead: RefineLead; fullText: string }[] = [];
+
     for (const lead of leads) {
       const matchingArtefacts = webVisitArtefacts.filter(a => artefactMatchesLead(a, lead));
 
@@ -346,14 +443,33 @@ export async function executeRefine(
       }
 
       const fullText = matchingArtefacts.map(buildPageText).join(' ');
-      const result = checkConstraint(fullText, constraint);
+      cachedToCheck.push({ lead, fullText });
+    }
 
-      if (result.match) {
-        console.log(`[REFINE] "${lead.name}" → MATCH for "${constraint}"`);
-        matchingLeads.push({ ...lead, refine_match: true, refine_evidence: result.snippet ?? '' });
-      } else {
-        console.log(`[REFINE] "${lead.name}" → NO MATCH for "${constraint}"`);
-        nonMatchingLeads.push({ ...lead, refine_match: false });
+    // Run LLM constraint checks in batches of 5 (concurrency limit)
+    const CACHED_BATCH_SIZE = 5;
+    for (let i = 0; i < cachedToCheck.length; i += CACHED_BATCH_SIZE) {
+      const batch = cachedToCheck.slice(i, i + CACHED_BATCH_SIZE);
+      const batchResults = await Promise.allSettled(
+        batch.map(async ({ lead, fullText }) => {
+          const result = await llmCheckConstraint(fullText, lead.name, constraint);
+          return { lead, result };
+        }),
+      );
+
+      for (const settled of batchResults) {
+        if (settled.status === 'rejected') {
+          console.warn(`[REFINE] LLM check threw: ${settled.reason}`);
+          continue;
+        }
+        const { lead, result } = settled.value;
+        if (result.match) {
+          console.log(`[REFINE] "${lead.name}" → MATCH for "${constraint}"`);
+          matchingLeads.push({ ...lead, refine_match: true, refine_evidence: result.snippet || result.reasoning || '' });
+        } else {
+          console.log(`[REFINE] "${lead.name}" → NO MATCH for "${constraint}"`);
+          nonMatchingLeads.push({ ...lead, refine_match: false });
+        }
       }
     }
 
