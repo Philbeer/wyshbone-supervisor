@@ -1,0 +1,128 @@
+BUG FIX: The refine executor in server/supervisor/refine-executor.ts uses a checkConstraint function that does naive keyword matching — it splits the user's entire question into words and checks if ALL of them appear on the page. So "which of those mention live music?" looks for "which", "of", "those", "mention", "live", "music" — which never matches anything.
+This is the wrong approach. The rest of the system uses LLM calls to understand intent (the conversation router, the mission extractor, the GPT-4o verification in mission-executor.ts). The refine executor should do the same.
+What to change:
+Replace the checkConstraint function with an LLM-based check. The existing batchGpt4oVerification function in server/supervisor/mission-executor.ts already does this pattern — it sends each business + constraint to an LLM and gets a semantic yes/no. Use the same approach.
+Step 1: Add an LLM-based constraint checker
+Add a new async function in refine-executor.ts that takes the page text and the user's question, sends them to Claude Haiku (cheap and fast), and returns whether the page content satisfies the user's question:
+typescriptasync function llmCheckConstraint(
+  pageText: string,
+  leadName: string,
+  userQuestion: string,
+): Promise<{ match: boolean; reasoning: string; snippet: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    // Fallback to simple keyword check if no API key
+    return fallbackKeywordCheck(pageText, userQuestion);
+  }
+
+  const model = process.env.REFINE_LLM_MODEL || 'claude-3-haiku-20240307';
+  const truncatedPage = pageText.substring(0, 8000);
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 300,
+      temperature: 0,
+      system: `You check whether a business's website content answers a user's question. Respond with JSON only, no other text.`,
+      messages: [{
+        role: 'user',
+        content: `Business: "${leadName}"
+
+Website content (truncated):
+${truncatedPage}
+
+User's question about this business: "${userQuestion}"
+
+Does the website content contain information that answers or relates to the user's question?
+
+Respond with JSON only:
+{"match": true/false, "reasoning": "one sentence why", "snippet": "the relevant quote from the website, or empty string"}`,
+      }],
+    }),
+  });
+
+  if (!resp.ok) {
+    console.warn(`[REFINE_LLM] API error for "${leadName}": ${resp.status}`);
+    return fallbackKeywordCheck(pageText, userQuestion);
+  }
+
+  const data = await resp.json() as any;
+  const text = data.content?.[0]?.text || '';
+  
+  try {
+    const cleaned = text.replace(/```json\s*/gi, '').replace(/```\s*$/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    return {
+      match: !!parsed.match,
+      reasoning: parsed.reasoning || '',
+      snippet: parsed.snippet || '',
+    };
+  } catch {
+    console.warn(`[REFINE_LLM] Failed to parse response for "${leadName}": ${text.substring(0, 100)}`);
+    return fallbackKeywordCheck(pageText, userQuestion);
+  }
+}
+Step 2: Add a simple fallback for when no API key is available
+Rename the existing checkConstraint function to fallbackKeywordCheck and keep it as a fallback:
+typescriptfunction fallbackKeywordCheck(
+  pageText: string,
+  constraint: string,
+): { match: boolean; reasoning: string; snippet: string } {
+  const text = pageText.toLowerCase();
+  // Extract likely keywords — strip common question words
+  const cleaned = constraint
+    .replace(/^(which|what|do any|are there any|can you check|tell me|show me|find|list)\s+(of\s+)?(those|them|the results?|these)?\s*(that\s+|which\s+|who\s+)?(mention|have|offer|provide|include|feature|do)?\s*/i, '')
+    .replace(/\?+$/, '')
+    .replace(/\bon their (website|homepage|site)\b/gi, '')
+    .trim();
+  
+  const words = cleaned.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  if (words.length === 0) return { match: false, reasoning: 'no keywords extracted', snippet: '' };
+  
+  const threshold = words.length <= 2 ? words.length : words.length - 1;
+  const foundWords = words.filter(w => text.includes(w));
+  
+  if (foundWords.length >= threshold) {
+    const idx = text.indexOf(foundWords[0]);
+    const start = Math.max(0, idx - 100);
+    const end = Math.min(text.length, idx + 200);
+    return { match: true, reasoning: `Keywords found: ${foundWords.join(', ')}`, snippet: pageText.substring(start, end).trim() };
+  }
+  
+  return { match: false, reasoning: `Keywords not found: ${words.join(', ')}`, snippet: '' };
+}
+Step 3: Update the live fetch path to use the LLM checker
+In the liveRefineWithFetch function, find where it calls checkConstraint:
+typescriptconst result = checkConstraint(fullText, constraint);
+Replace with:
+typescriptconst result = await llmCheckConstraint(fullText, lead.name, constraint);
+Make sure the containing function/callback is async (it already should be).
+Step 4: Update the cached artefact path to use the LLM checker
+In the executeRefine function, in the cached artefact path (the else block), find:
+typescriptconst result = checkConstraint(fullText, constraint);
+Replace with:
+typescriptconst result = await llmCheckConstraint(fullText, lead.name, constraint);
+Step 5: Update the match evidence to include reasoning
+Where matching leads are created, include the reasoning:
+Find:
+typescriptmatchingLeads.push({ ...lead, refine_match: true, refine_evidence: result.snippet ?? '' });
+Replace with:
+typescriptmatchingLeads.push({ ...lead, refine_match: true, refine_evidence: result.snippet || result.reasoning || '' });
+Do this in BOTH the live fetch path and the cached artefact path.
+Step 6: Add concurrency control
+The LLM calls should run in parallel but with a concurrency limit. In the liveRefineWithFetch function, the page fetches already run in parallel. The LLM checks should too, but cap at 5 concurrent calls. Use the same pattern as batchGpt4oVerification in mission-executor.ts — process in batches of 5.
+What this achieves:
+
+"which of those mention live music?" → LLM reads each pub's website and semantically checks for live music mentions, events, gig listings etc.
+"only ones that do loft conversions" → LLM checks for loft conversion services
+"any of them mention eco homes or green building" → LLM checks for sustainability/eco content
+Cost: ~$0.001 per check (Haiku) × 20 leads = $0.02 per refinement. Trivial.
+
+No new secrets needed — it uses the existing ANTHROPIC_API_KEY. Optional: add REFINE_LLM_MODEL secret if you want to override the model (default: claude-3-haiku-20240307).
+Do NOT change any other files.
