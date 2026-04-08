@@ -83,6 +83,7 @@ Examples (when previous search exists):
 - Previous: "gyms in Birmingham". User: "actually make that personal trainers" → ITERATE, entity="personal trainers", location="Birmingham", iteration_change="entity: gyms → personal trainers"
 - Previous: "restaurants in Cambridge". User: "no, go back to restaurants but make it Italian" → ITERATE, entity="Italian restaurants", location="Cambridge"
 - User: "not bristol actually bath" → ITERATE, keep same entity, location="Bath", iteration_change="location: Bristol → Bath"
+- Previous assistant: "I can widen the search to include nearby towns." User: "yes please" → ITERATE, entity=same as last search, location=wider area around last search location, iteration_change="user accepted suggestion to widen search"
 
 ### CHAT
 Greetings, gibberish, off-topic, or anything that is not a search intent.
@@ -94,6 +95,8 @@ Examples:
 - "what can you do" → CHAT ("I find businesses and leads! Tell me a type of business and a location — like 'find cafes in Brighton'.")
 - "any" → CHAT ("Could you tell me what you're looking for? I need a type of business and a location.")
 - "find" → CHAT ("What would you like me to find? Give me a business type and location, like 'find restaurants in Manchester'.")
+What NOT to route as CHAT:
+- "yes please" (when previous assistant offered to search more) → NOT CHAT and NOT DISCUSS — this is an affirmative to a search offer → ITERATE or SEARCH
 
 ## CRITICAL RULES
 
@@ -108,6 +111,7 @@ Examples:
 9. DISCUSS and ITERATE only valid when previous results exist. Otherwise → SEARCH or CLARIFY.
 10. For ITERATE, include the COMPLETE new search params, not just the delta.
 11. Keep all responses concise. clarify_question: 1-2 sentences. chat_response: 1-3 sentences.
+12. AFFIRMATIVE RESPONSES: If the user sends a short affirmative like "yes", "yes please", "ok", "sure", "go ahead", "do it", "go for it" — read the previous assistant message in the conversation history. If the assistant offered to perform a specific action (search wider, refine results, try a different area), treat the user's message as a request to perform that action and route accordingly. "yes please" after "Would you like me to search nearby towns?" = ITERATE with a wider location. Do NOT route short affirmatives as DISCUSS — they are instructions to act, not requests to talk about results.
 
 ## OUTPUT FORMAT
 
