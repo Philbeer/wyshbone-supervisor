@@ -292,16 +292,18 @@ const INSTANT_CHAT = [
   /^(thanks|thank you|cheers|ta|bye|goodbye|later)[\s!.?]*$/i,
 ];
 
-function tryFastPath(message: string): RouterDecision | null {
+function tryFastPath(message: string, hasPreviousResults: boolean): RouterDecision | null {
   const trimmed = message.trim();
 
-  if (trimmed.length < 3) {
+  // Only fast-path very short messages when there's NO conversation context
+  // "ok" after system suggestions needs the LLM to understand context
+  if (trimmed.length < 3 && !hasPreviousResults) {
     return {
       route: 'CHAT', entity: null, location: null, constraints: [],
       clarify_question: null,
       chat_response: "Could you tell me what you're looking for? I need a type of business and a location — for example, 'find plumbers in Bristol'.",
       iteration_change: null, referenced_result: null,
-      confidence: 0.99, reasoning: 'very short input',
+      confidence: 0.99, reasoning: 'very short input, no context',
     };
   }
 
@@ -327,7 +329,7 @@ export async function routeConversation(input: RouterInput): Promise<RouterDecis
   const startTime = Date.now();
 
   // Fast path — no LLM needed
-  const fast = tryFastPath(input.currentMessage);
+  const fast = tryFastPath(input.currentMessage, input.previousResults.exists);
   if (fast) {
     console.log(`[ROUTER] Fast path: route=${fast.route} (${Date.now() - startTime}ms)`);
     return fast;
