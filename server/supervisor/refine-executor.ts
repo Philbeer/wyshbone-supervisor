@@ -4,6 +4,9 @@ import { logAFREvent } from './afr-logger';
 import { supabase } from '../supabase';
 import { executeWebVisit } from './web-visit';
 import { extractConstraintLedEvidence, getPageHintsForConstraint, type ConstraintContext, type ConstraintLedExtractionResult } from './constraint-led-extractor';
+import { batchGpt4oVerification } from './mission-executor';
+
+const EVIDENCE_MODE = (process.env.EVIDENCE_MODE || 'gpt4o_primary') as 'gpt4o_primary' | 'web_crawl_first';
 
 export interface RefineLead {
   name: string;
@@ -245,9 +248,68 @@ async function liveRefineWithFetch(
     return { matchingLeads, nonMatchingLeads, fetchedCount: 0 };
   }
 
-  console.log(`[REFINE_LIVE] Crawling ${withWebsite.length} websites (up to 5 pages each) for "${extracted.value}"`);
-
   let fetchedCount = 0;
+
+  // If gpt4o_primary mode, skip website crawl and go straight to GPT-4o verification
+  if (EVIDENCE_MODE === 'gpt4o_primary') {
+    console.log(`[REFINE_LIVE] EVIDENCE_MODE=gpt4o_primary — using GPT-4o verification for all ${withWebsite.length} leads`);
+
+    const discoveredLeads = withWebsite.map(l => ({
+      name: l.name,
+      address: l.address || '',
+      phone: l.phone || null,
+      website: l.website || null,
+      placeId: l.placeId || '',
+      source: 'refine',
+      lat: null as number | null,
+      lng: null as number | null,
+    }));
+
+    const missionConstraint = {
+      type: extracted.type as any,
+      field: 'website_content',
+      operator: 'contains' as any,
+      value: extracted.value,
+      hardness: 'hard' as const,
+    };
+
+    const location = (withWebsite[0]?.address || '').replace(/,\s*UK$/i, '').split(',').pop()?.trim() || 'UK';
+
+    const gpt4oResults = await batchGpt4oVerification(
+      discoveredLeads,
+      [missionConstraint],
+      location,
+      constraint,
+      runId,
+      userId,
+      conversationId,
+    );
+
+    for (let i = 0; i < withWebsite.length; i++) {
+      const lead = withWebsite[i];
+      const leadResults = gpt4oResults.filter(r => r.leadIndex === i);
+      const verified = leadResults.some(r => r.evidenceFound);
+
+      if (verified) {
+        const bestResult = leadResults.find(r => r.evidenceFound)!;
+        console.log(`[REFINE_LIVE] "${lead.name}" → VERIFIED via GPT-4o`);
+        matchingLeads.push({
+          ...lead,
+          refine_match: true,
+          refine_evidence: bestResult.snippets[0] || bestResult.towerReasoning || 'Verified via web search',
+        });
+      } else {
+        console.log(`[REFINE_LIVE] "${lead.name}" → NOT VERIFIED`);
+        nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_evidence' });
+      }
+    }
+
+    fetchedCount = withWebsite.length;
+    console.log(`[REFINE_LIVE] GPT-4o primary complete — ${matchingLeads.length}/${withWebsite.length} verified`);
+    return { matchingLeads, nonMatchingLeads, fetchedCount };
+  }
+
+  console.log(`[REFINE_LIVE] Crawling ${withWebsite.length} websites (up to 5 pages each) for "${extracted.value}"`);
   const cacheWrites: Promise<any>[] = [];
   const BATCH_SIZE = 5;
 

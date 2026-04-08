@@ -638,7 +638,7 @@ export async function executeMissionWithReloop(
   }
 }
 
-async function batchGpt4oVerification(
+export async function batchGpt4oVerification(
   leads: DiscoveredLead[],
   constraints: MissionConstraint[],
   location: string,
