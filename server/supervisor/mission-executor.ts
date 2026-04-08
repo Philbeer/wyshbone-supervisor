@@ -42,7 +42,7 @@ import { executeGpt4oPrimaryPath, type Gpt4oSearchContext } from './gpt4o-search
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './query-shape-key';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
-const RUN_EXECUTION_TIMEOUT_MS_DEFAULT = 300_000;
+const RUN_EXECUTION_TIMEOUT_MS_DEFAULT = 120_000;
 const MAX_TOOL_CALLS_DEFAULT = 150;
 const MAX_REPLANS_DEFAULT = 2;
 const HARD_CAP_MAX_REPLANS = 10;
@@ -2782,6 +2782,13 @@ IMPORTANT:
     const target = relationshipPredicate.relationship_target || 'the specified entity';
     const predicate = relationshipPredicate.detected_predicate || 'works with';
     chatResponse = `I found organisations associated with ${target}, but could not verify that they ${predicate} ${target}. No relationship evidence could be confirmed. All results are candidates only.`;
+  }
+  if (runTimedOut) {
+    if (finalLeads.length > 0) {
+      chatResponse = `This search took longer than expected. Here are the partial results I found.`;
+    } else {
+      chatResponse = `I couldn't find enough results for this query in time. This may be an unusual or rare business type in this area — try broadening your search.`;
+    }
   }
 
   console.log(`[MISSION_EXEC] ===== Mission-driven execution complete =====`);
