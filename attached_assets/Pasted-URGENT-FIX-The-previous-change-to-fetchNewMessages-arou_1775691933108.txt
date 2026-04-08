@@ -1,0 +1,33 @@
+URGENT FIX: The previous change to fetchNewMessages (around line 2288) is causing DUPLICATE chat bubbles. The append-only approach adds DB messages that already exist in state under a different ID.
+The problem: When user sends "find pubs", handleSend adds it with a local UUID. The DB stores it with a server-assigned UUID. The poller sees the server UUID as "new" and appends a duplicate.
+REVERT Change 1 and replace with this approach. In the fetchNewMessages function, keep the existing DB fetch logic but change the dedup check to match by content + role as well as by ID:
+typescriptconst fetchNewMessages = async () => {
+    // ... existing DB fetch code stays the same ...
+    
+    setMessages(prev => {
+        const existingIds = new Set(prev.map(m => m.id));
+        // Also build a content-based dedup set for user messages
+        const existingContentKeys = new Set(
+            prev.filter(m => m.role === 'user' || m.role === 'assistant')
+                .map(m => `${m.role}::${(m.content || '').substring(0, 100)}`)
+        );
+        
+        const newFromDb = dbMapped.filter(m => {
+            // Skip if ID already exists
+            if (existingIds.has(m.id)) return false;
+            // Skip if same content+role already exists (catches ID mismatch dupes)
+            const contentKey = `${m.role}::${(m.content || '').substring(0, 100)}`;
+            if (existingContentKeys.has(contentKey)) return false;
+            // Skip special React-only message types
+            if (m.id?.startsWith('ds-') || m.id?.startsWith('in-') || 
+                (m as any).isActivityTicker || (m as any).isIntentNarrative) return false;
+            return true;
+        });
+        
+        if (newFromDb.length === 0) return prev; // No changes — skip re-render
+        return [...prev, ...newFromDb];
+    });
+};
+The key addition is existingContentKeys — it matches on role::content_prefix which catches the case where the same message exists twice under different IDs.
+Also make sure the poller does NOT do a full array rebuild or sort. Keep it as append-only with this improved dedup. The existing array order from other setMessages calls is correct.
+Do NOT change any other parts of the file. Only change the fetchNewMessages function.
