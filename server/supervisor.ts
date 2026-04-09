@@ -3265,7 +3265,26 @@ class SupervisorService {
             supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: fallbackQ.substring(0, 200), message_id: messageId, rescue_llm: 'self_heal_failed' } }).eq('id', task.id),
             supabase!.from('messages').insert({ id: messageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeSupervisorMessage(fallbackQ), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, rescue_llm: 'self_heal_failed', clarify_gate: 'rescue_llm', mode: 'clarify' }, created_at: Date.now() }).select().single(),
           ]);
-          await storage.updateAgentRun(jobId, { status: 'clarifying', terminalState: null, metadata: { verdict: 'rescue_self_heal_failed', awaiting: 'user_input' } }).catch(() => {});
+          // Send a friendly message so the user isn't left hanging
+          const rescueFailMsg = "I had trouble processing that request. Could you try rephrasing it? For example, instead of modifying the previous search, try a fresh search like 'find plumbers in central London'.";
+          const rescueFailMsgId = randomUUID();
+          if (supabase) {
+            await supabase.from('messages').insert({
+              id: rescueFailMsgId,
+              conversation_id: task.conversation_id,
+              role: 'assistant',
+              content: rescueFailMsg,
+              source: 'supervisor',
+              metadata: { supervisor_task_id: task.id, run_id: jobId, rescue_self_heal_failed: true },
+              created_at: Date.now(),
+            }).catch((e: any) => console.warn(`[RESCUE] Failed to insert fallback message: ${e.message}`));
+
+            await supabase.from('supervisor_tasks').update({
+              status: 'completed',
+              result: { message_id: rescueFailMsgId, rescue_self_heal_failed: true },
+            }).eq('id', task.id).catch(() => {});
+          }
+          await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'rescue_self_heal_failed', rescue_exhausted: true } }).catch(() => {});
           await emitTaskExecutionCompleted('rescue_self_heal_failed');
           return;
         }

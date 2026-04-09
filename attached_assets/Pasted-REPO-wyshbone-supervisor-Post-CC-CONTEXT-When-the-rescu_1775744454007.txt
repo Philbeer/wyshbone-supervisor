@@ -1,0 +1,59 @@
+REPO: wyshbone-supervisor-Post-CC
+
+CONTEXT: When the rescue LLM's self-heal fails, the run gets stuck in status='clarifying' with terminalState=null. The UI poller only stops on terminal states (completed/failed), so it spins forever. The user sees no response and the spinner never stops. This is a one-line fix with a small addition.
+
+DO NOT change any other code. This is a surgical fix in server/supervisor.ts only.
+
+═══════════════════════════════════════════════════════════
+TASK: Fix the stuck spinner when rescue self-heal fails
+═══════════════════════════════════════════════════════════
+
+In server/supervisor.ts, find this code (around line 3268):
+
+```typescript
+await storage.updateAgentRun(jobId, { status: 'clarifying', terminalState: null, metadata: { verdict: 'rescue_self_heal_failed', awaiting: 'user_input' } }).catch(() => {});
+await emitTaskExecutionCompleted('rescue_self_heal_failed');
+```
+
+Replace it with:
+
+```typescript
+// Send a friendly message so the user isn't left hanging
+const rescueFailMsg = "I had trouble processing that request. Could you try rephrasing it? For example, instead of modifying the previous search, try a fresh search like 'find plumbers in central London'.";
+const rescueFailMsgId = randomUUID();
+if (supabase) {
+  await supabase.from('messages').insert({
+    id: rescueFailMsgId,
+    conversation_id: task.conversation_id,
+    role: 'assistant',
+    content: rescueFailMsg,
+    source: 'supervisor',
+    metadata: { supervisor_task_id: task.id, run_id: jobId, rescue_self_heal_failed: true },
+    created_at: Date.now(),
+  }).catch((e: any) => console.warn(`[RESCUE] Failed to insert fallback message: ${e.message}`));
+
+  await supabase.from('supervisor_tasks').update({
+    status: 'completed',
+    result: { message_id: rescueFailMsgId, rescue_self_heal_failed: true },
+  }).eq('id', task.id).catch(() => {});
+}
+await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'rescue_self_heal_failed', rescue_exhausted: true } }).catch(() => {});
+await emitTaskExecutionCompleted('rescue_self_heal_failed');
+```
+
+═══════════════════════════════════════════════════════════
+WHAT THIS CHANGES
+═══════════════════════════════════════════════════════════
+
+BEFORE: Run stays in status='clarifying' with terminalState=null. UI spinner goes forever. User sees nothing.
+
+AFTER: A friendly "try rephrasing" message is sent, task is marked completed, run gets terminalState='completed'. The UI poller stops, the user sees the message, and they can try again.
+
+═══════════════════════════════════════════════════════════
+VERIFICATION
+═══════════════════════════════════════════════════════════
+
+1. The app should start without errors
+2. To test: trigger a rescue self-heal failure (send a very complex iterate after a long input, e.g. the plumber scenario)
+3. The user should see a helpful "try rephrasing" message instead of an infinite spinner
+4. The run should show as completed in the AFR, not stuck in clarifying
