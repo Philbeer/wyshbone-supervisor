@@ -1596,7 +1596,7 @@ class SupervisorService {
       classifiedMessageClass = classification.messageClass;
       console.log(`[MESSAGE_CLASSIFIER] class=${classification.messageClass} confidence=${classification.confidence} reason=${classification.reason} msg="${rawMsg.substring(0, 60)}"`);
 
-      if (classification.messageClass === 'chat') {
+      if (classification.messageClass === 'chat' && process.env.CONVERSATION_ROUTER_ENABLED !== 'true') {
         // Respond conversationally without running the pipeline
         const chatResponses = [
           "Hey! Tell me what kind of businesses you're looking for and where — for example, 'find web design agencies in Brighton' or 'search for accountants in Kent'.",
