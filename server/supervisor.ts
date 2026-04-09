@@ -1436,7 +1436,7 @@ class SupervisorService {
           this.postArtefactToUI({
             runId: jobId,
             clientRequestId,
-            type: 'combined_delivery',
+            type: 'diagnostic',
             payload: {
               status: 'CHAT',
               leads: [],
@@ -1486,7 +1486,7 @@ class SupervisorService {
           this.postArtefactToUI({
             runId: jobId,
             clientRequestId,
-            type: 'combined_delivery',
+            type: 'diagnostic',
             payload: {
               status: 'CLARIFY',
               leads: [],
@@ -1528,7 +1528,7 @@ class SupervisorService {
             this.postArtefactToUI({
               runId: jobId,
               clientRequestId,
-              type: 'combined_delivery',
+              type: 'diagnostic',
               payload: {
                 status: 'DISCUSS',
                 leads: [],
