@@ -9,6 +9,7 @@
 
 import { getConversationContext, resolveLeadReference } from './conversation-context';
 import { storage } from '../storage';
+import { callLLMText } from './llm-failover';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -42,42 +43,6 @@ function isCircuitBroken(): boolean {
 
 function recordDiscussionCall(): void {
   _discussionCallTimestamps.push(Date.now());
-}
-
-// ─── Anthropic Haiku call ─────────────────────────────────────────────────────
-
-async function callDiscussionLLM(systemPrompt: string, userPrompt: string): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY not set — cannot call discussion LLM');
-  }
-
-  const model = process.env.DISCUSSION_LLM_MODEL || process.env.RESCUE_LLM_MODEL || 'claude-3-haiku-20240307';
-
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 400,
-      temperature: 0,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    }),
-  });
-
-  if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`Anthropic API ${resp.status}: ${body.substring(0, 200)}`);
-  }
-
-  const data = await resp.json() as { content: Array<{ type: string; text?: string }> };
-  const textBlock = data.content?.find((b) => b.type === 'text');
-  return textBlock?.text || '';
 }
 
 // ─── System prompt ────────────────────────────────────────────────────────────
@@ -185,7 +150,11 @@ export async function handleResultDiscussion(
   } else {
     try {
       recordDiscussionCall();
-      response = await callDiscussionLLM(DISCUSSION_SYSTEM_PROMPT, userPrompt);
+      response = await callLLMText(DISCUSSION_SYSTEM_PROMPT, userPrompt, 'discussion', {
+        anthropicModel: process.env.DISCUSSION_LLM_MODEL || process.env.RESCUE_LLM_MODEL || 'claude-3-haiku-20240307',
+        maxTokens: 400,
+        timeoutMs: 15_000,
+      });
     } catch (err: any) {
       console.error(`[RESULT_DISCUSSION] LLM call failed: ${err.message}`);
       response = buildFallbackResponse(resolvedLead, ctx.leads.length);

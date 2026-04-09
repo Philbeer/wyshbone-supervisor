@@ -8,6 +8,8 @@
  * Performance target: 2-5 seconds for the routing decision.
  */
 
+import { callLLMText } from './llm-failover';
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type Route = 'SEARCH' | 'CLARIFY' | 'DISCUSS' | 'ITERATE' | 'CHAT';
@@ -178,56 +180,6 @@ function buildRouterUserMessage(input: RouterInput): string {
 }
 
 
-// ─── LLM Call ───────────────────────────────────────────────────────────────
-
-async function callRouterLLM(systemPrompt: string, userPrompt: string): Promise<string> {
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  if (anthropicKey) {
-    const model = process.env.ROUTER_LLM_MODEL || 'claude-3-5-haiku-20241022';
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': anthropicKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 500,
-        temperature: 0,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userPrompt }],
-      }),
-    });
-    if (!resp.ok) {
-      const body = await resp.text();
-      throw new Error(`Router LLM ${resp.status}: ${body.substring(0, 200)}`);
-    }
-    const data = await resp.json() as { content: Array<{ type: string; text?: string }> };
-    const textBlock = data.content?.find((b: any) => b.type === 'text');
-    return textBlock?.text || '';
-  }
-
-  const openaiKey = process.env.OPENAI_API_KEY;
-  if (openaiKey) {
-    const { default: OpenAI } = await import('openai');
-    const client = new OpenAI({ apiKey: openaiKey });
-    const response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature: 0,
-      max_tokens: 500,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    });
-    return response.choices[0]?.message?.content || '';
-  }
-
-  throw new Error('No LLM API key for router');
-}
-
-
 // ─── Response Parser ────────────────────────────────────────────────────────
 
 function parseRouterResponse(raw: string): RouterDecision {
@@ -344,7 +296,11 @@ export async function routeConversation(input: RouterInput): Promise<RouterDecis
 
   let rawResponse: string;
   try {
-    rawResponse = await callRouterLLM(ROUTER_SYSTEM_PROMPT, userMessage);
+    rawResponse = await callLLMText(ROUTER_SYSTEM_PROMPT, userMessage, 'router', {
+      anthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-3-5-haiku-20241022',
+      openaiModel: 'gpt-4o-mini',
+      timeoutMs: parseInt(process.env.ROUTER_TIMEOUT_MS || '15000', 10),
+    });
   } catch (err: any) {
     console.error(`[ROUTER] LLM failed (${Date.now() - startTime}ms): ${err.message}`);
     // Fallback: let existing pipeline handle it
