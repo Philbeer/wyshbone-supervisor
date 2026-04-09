@@ -1,0 +1,40 @@
+SIMPLIFICATION: The message classifier in server/supervisor/message-classifier.ts is mostly redundant now that the conversation router handles all routing. Strip it down to only the two things the router can't handle: outreach and monitor detection.
+Replace the entire classifyMessage function with:
+typescriptexport function classifyMessage(message: string): ClassificationResult {
+  const trimmed = message.trim();
+
+  // Single-character junk
+  if (trimmed.length < 2) {
+    return { messageClass: 'chat', confidence: 0.95, reason: 'very_short_message' };
+  }
+
+  // Outreach requests — the conversation router doesn't handle these
+  for (const pattern of OUTREACH_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { messageClass: 'outreach_request', confidence: 0.8, reason: 'outreach_pattern_match' };
+    }
+  }
+
+  // Monitor requests — the conversation router doesn't handle these
+  for (const pattern of MONITOR_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { messageClass: 'monitor_request', confidence: 0.8, reason: 'monitor_pattern_match' };
+    }
+  }
+
+  // Everything else goes to the conversation router via the search pipeline
+  return { messageClass: 'search', confidence: 0.6, reason: 'default_to_router' };
+}
+Remove CHAT_PATTERNS and FOLLOWUP_PATTERNS arrays entirely — the conversation router handles all of these with full context.
+Also in server/supervisor.ts, find where classification.messageClass === 'chat' is handled (around line 1599). This block currently intercepts chat messages before they reach the conversation router. Remove or bypass this block so that greetings, farewells, and short messages all flow through to the conversation router where CONVERSATION_ROUTER_ENABLED=true sends them to the LLM with full conversation context.
+Specifically, change the chat handler from:
+typescriptif (classification.messageClass === 'chat') {
+    // ... handles as chat, returns early
+}
+To:
+typescriptif (classification.messageClass === 'chat' && process.env.CONVERSATION_ROUTER_ENABLED !== 'true') {
+    // ... only handle as legacy chat when router is disabled
+}
+This means: when the router is enabled (which it always is now), "chat" classified messages fall through to the router. When the router is disabled (fallback), the old behaviour is preserved.
+Do NOT change the outreach or monitor handlers — those should stay as they are.
+Do NOT change any other files.
