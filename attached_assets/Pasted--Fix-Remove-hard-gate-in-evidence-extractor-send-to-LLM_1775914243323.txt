@@ -1,0 +1,142 @@
+# Fix: Remove hard gate in evidence extractor — send to LLM when keywords find nothing
+
+## Problem
+In `server/supervisor/constraint-led-extractor.ts`, in the `extractConstraintLedEvidence` function, when the Layer 1 keyword scan finds zero matches, it returns `no_evidence` immediately and the LLM never sees the page content. This means pubs that describe cask ale indirectly (brand names, menu photos, "our ales" etc.) are rejected without the LLM ever getting a chance to judge.
+
+The synonym expansion fix (already deployed) helps but doesn't catch everything — some websites simply don't contain any of the synonym phrases as literal text.
+
+## The Fix
+
+Find this block in `extractConstraintLedEvidence` (it's inside the `if (openaiKey && leadName)` block, after the Layer 1 keyword scan loop):
+
+```typescript
+if (windows.length === 0) {
+  console.log(`[EVIDENCE_EXTRACT_L1] "${leadName}" + "${constraintValue}" → 0 keyword hits — no_evidence`);
+  return {
+    evidence_items: [],
+    pages_scanned: pagesWithText,
+    constraint,
+    no_evidence: true,
+    extraction_method: 'keyword_sentence',
+    phrase_targets: phraseTargets,
+  };
+}
+```
+
+Replace that ENTIRE block with:
+
+```typescript
+if (windows.length === 0) {
+  console.log(`[EVIDENCE_EXTRACT_L1] "${leadName}" + "${constraintValue}" → 0 keyword hits — trying LLM with full page content`);
+  
+  // Instead of returning no_evidence, send the first 2-3 pages to the LLM
+  // and let it judge semantically whether the business offers this
+  const fallbackPages = sortedPages.slice(0, 3);
+  const fallbackTexts: string[] = [];
+  
+  for (const page of fallbackPages) {
+    const text = getPageText(page);
+    if (text && text.trim().length >= 50) {
+      // Take first 1500 chars of each page to keep token cost low
+      fallbackTexts.push(text.substring(0, 1500));
+    }
+  }
+  
+  if (fallbackTexts.length > 0) {
+    try {
+      const { default: OpenAI } = await import('openai');
+      const client = new OpenAI({ apiKey: openaiKey });
+      
+      const fallbackResponse = await Promise.race([
+        client.chat.completions.create({
+          model: process.env.EVIDENCE_JUDGE_MODEL ?? 'gpt-4o-mini',
+          temperature: 0.1,
+          max_tokens: 300,
+          response_format: { type: 'json_object' },
+          messages: [
+            {
+              role: 'system',
+              content: `You are judging whether a business offers or provides "${constraintValue}". You will receive text from their website. Look for ANY evidence — direct mentions, synonyms, related terms, brand names, menu items, or descriptions that indicate they offer this.\n\nBe reasonably inclusive — if a pub lists specific ale brands or says "real ales" and the constraint is "cask ale", that counts. But don't force a match from nothing.\n\nRespond with JSON: {"match": true/false, "evidence_sentence": "one sentence summary of evidence found or null", "confidence": "high"/"medium"/"low"}`,
+            },
+            {
+              role: 'user',
+              content: JSON.stringify({ 
+                business_name: leadName, 
+                constraint: constraintValue,
+                website_content: fallbackTexts 
+              }),
+            },
+          ],
+        }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Fallback LLM timeout')), 8000)),
+      ]);
+      
+      const fbRaw = fallbackResponse.choices[0]?.message?.content?.trim() || '';
+      const fbCleaned = fbRaw.replace(/```json\n?|\n?```/g, '').trim();
+      const fbParsed = JSON.parse(fbCleaned);
+      
+      if (fbParsed.match && fbParsed.evidence_sentence) {
+        console.log(`[EVIDENCE_EXTRACT_FALLBACK_LLM] "${leadName}" + "${constraintValue}" → MATCH via full-page LLM: ${fbParsed.evidence_sentence.substring(0, 100)}`);
+        
+        const fbUrl = fallbackPages[0]?.url || '';
+        const fbSourceType = classifySourceType(fbUrl);
+        
+        return {
+          evidence_items: [{
+            source_url: fbUrl,
+            page_title: fallbackPages[0]?.title || '',
+            constraint_type: constraint.type,
+            constraint_value: constraintValue,
+            matched_phrase: constraintValue,
+            direct_quote: fbParsed.evidence_sentence.substring(0, 250),
+            context_snippet: fbParsed.evidence_sentence.substring(0, 300),
+            constraint_match_reason: `LLM semantic judge found evidence of "${constraintValue}" on website content (no keyword match).`,
+            source_type: fbSourceType,
+            source_tier: mapSourceTypeToTier(fbSourceType),
+            confidence_score: fbParsed.confidence === 'high' ? 0.80 : fbParsed.confidence === 'medium' ? 0.60 : 0.40,
+            quote: fbParsed.evidence_sentence.substring(0, 250),
+            url: fbUrl,
+            match_reason: `LLM semantic: "${constraintValue}"`,
+            confidence: fbParsed.confidence || 'medium',
+            keyword_matched: null,
+          }],
+          pages_scanned: pagesWithText,
+          constraint,
+          no_evidence: false,
+          extraction_method: 'keyword_sentence',
+          phrase_targets: phraseTargets,
+        };
+      } else {
+        console.log(`[EVIDENCE_EXTRACT_FALLBACK_LLM] "${leadName}" + "${constraintValue}" → NO MATCH via full-page LLM`);
+      }
+    } catch (fbErr: any) {
+      console.warn(`[EVIDENCE_EXTRACT_FALLBACK_LLM] Failed for "${leadName}": ${(fbErr as Error).message}`);
+    }
+  }
+  
+  // If we get here, both keyword scan AND LLM fallback found nothing
+  return {
+    evidence_items: [],
+    pages_scanned: pagesWithText,
+    constraint,
+    no_evidence: true,
+    extraction_method: 'no_match',
+    phrase_targets: phraseTargets,
+  };
+}
+```
+
+## What this does
+- When Layer 1 keywords find nothing, instead of giving up, sends the first 2-3 pages (1500 chars each) to GPT-4o-mini
+- The LLM judges semantically: "does this website content indicate this business offers cask ale?"
+- Catches brand names, indirect descriptions, menu items — anything a human would recognise
+- 8-second timeout so it doesn't block forever
+- If the LLM also finds nothing, THEN returns no_evidence
+
+## File to modify
+`server/supervisor/constraint-led-extractor.ts` — one block replacement inside `extractConstraintLedEvidence`
+
+## Test
+1. "find pubs in Brighton that serve cask ale"
+2. Should find significantly more than 0-1 pubs
+3. Check logs for `[EVIDENCE_EXTRACT_FALLBACK_LLM]` to see semantic matches
