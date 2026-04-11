@@ -169,6 +169,8 @@ export function getPageHintsForConstraint(constraint: ConstraintContext): string
   return hints;
 }
 
+const _synonymCache = new Map<string, string[]>();
+
 const SYNONYM_MAP: Record<string, string[]> = {
   'live music': ['live music', 'live band', 'acoustic', 'live entertainment', 'live gig', 'live performance', 'music night', 'open mic'],
   'dog friendly': ['dog friendly', 'dogs welcome', 'dog-friendly', 'pet friendly', 'pets welcome', 'four-legged', 'canine'],
@@ -855,14 +857,69 @@ export async function extractConstraintLedEvidence(
   const openaiKey = process.env.OPENAI_API_KEY;
   if (openaiKey && leadName) {
     try {
-      // LAYER 1 — Semantic phrase scanning (no LLM)
-      const SYNONYM_MAP: Record<string, string[]> = {
-        'live music':     ['live music', 'gig', 'gigs', 'band', 'bands', 'music night', 'entertainment', 'live act'],
-        'vegan options':  ['vegan', 'plant-based', 'vegan menu', 'vegan options'],
-        'spa facilities': ['spa', 'wellness', 'treatment', 'spa facilities'],
-      };
+      // LAYER 1 — Semantic phrase scanning with LLM-expanded synonyms
+      // The hardcoded SYNONYM_MAP is removed. Instead, we use a quick LLM call
+      // to generate relevant search terms for ANY constraint value.
 
-      const l1Phrases = (SYNONYM_MAP[constraintValue.toLowerCase()] ?? [constraintValue]).map(p => p.toLowerCase());
+      let l1Phrases: string[] = [constraintValue.toLowerCase()];
+
+      try {
+        const cacheKey = constraintValue.toLowerCase();
+        if (_synonymCache.has(cacheKey)) {
+          l1Phrases = _synonymCache.get(cacheKey)!;
+          console.log(`[EVIDENCE_SYNONYM] Cache hit for "${constraintValue}" — ${l1Phrases.length} phrases`);
+        } else {
+          const synonymModel = process.env.SYNONYM_EXPANSION_MODEL || 'claude-3-haiku-20240307';
+          const anthropicKey = process.env.ANTHROPIC_API_KEY;
+
+          if (anthropicKey) {
+            const synResp = await fetch('https://api.anthropic.com/v1/messages', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': anthropicKey,
+                'anthropic-version': '2023-06-01',
+              },
+              body: JSON.stringify({
+                model: synonymModel,
+                max_tokens: 200,
+                temperature: 0,
+                system: 'You generate search terms for finding evidence on business websites. Given a concept, return a JSON array of 8-15 alternative phrases, synonyms, related terms, and well-known brand names that indicate the same thing. Include both formal and informal terms. Return JSON only, no markdown.',
+                messages: [{
+                  role: 'user',
+                  content: `Generate search phrases for: "${constraintValue}"
+          
+Example: "beer garden" → ["beer garden", "garden", "outdoor seating", "patio", "terrace", "alfresco", "outside area", "garden area"]
+
+Example: "cask ale" → ["cask ale", "real ale", "traditional ale", "hand-pulled", "hand pump", "cask-conditioned", "cask beer", "real ales", "Harvey's", "Timothy Taylor", "London Pride", "cask marque"]
+
+Now do: "${constraintValue}"
+Return JSON array only: ["term1", "term2", ...]`,
+                }],
+              }),
+            });
+
+            if (synResp.ok) {
+              const synData = await synResp.json() as any;
+              const synText = synData.content?.[0]?.text || '';
+              const synCleaned = synText.replace(/```json\s*/gi, '').replace(/```\s*$/g, '').trim();
+              const synParsed = JSON.parse(synCleaned);
+              if (Array.isArray(synParsed) && synParsed.length > 0) {
+                l1Phrases = synParsed.map((s: string) => s.toLowerCase());
+                // Ensure the original value is always included
+                if (!l1Phrases.includes(constraintValue.toLowerCase())) {
+                  l1Phrases.unshift(constraintValue.toLowerCase());
+                }
+                console.log(`[EVIDENCE_SYNONYM] "${constraintValue}" expanded to ${l1Phrases.length} phrases: ${l1Phrases.slice(0, 6).join(', ')}...`);
+              }
+            }
+          }
+          _synonymCache.set(cacheKey, l1Phrases);
+        }
+      } catch (synErr: any) {
+        console.warn(`[EVIDENCE_SYNONYM] Synonym expansion failed (using original value): ${synErr.message}`);
+        // Falls back to just [constraintValue] — no worse than before
+      }
 
       type WindowEntry = { text: string; url: string; source_type: SourceType; pageIdx: number; matchPos: number };
       const windows: WindowEntry[] = [];
@@ -897,13 +954,100 @@ export async function extractConstraintLedEvidence(
       console.log(`[EVIDENCE_EXTRACT_L1] "${leadName}" + "${constraintValue}" → phrases=${JSON.stringify(l1Phrases)} windows=${windows.length}/${pagesWithText} pages`);
 
       if (windows.length === 0) {
-        console.log(`[EVIDENCE_EXTRACT_L1] "${leadName}" + "${constraintValue}" → 0 keyword hits — no_evidence`);
+        console.log(`[EVIDENCE_EXTRACT_L1] "${leadName}" + "${constraintValue}" → 0 keyword hits — trying LLM with full page content`);
+
+        // Instead of returning no_evidence, send the first 2-3 pages to the LLM
+        // and let it judge semantically whether the business offers this
+        const fallbackPages = sortedPages.slice(0, 3);
+        const fallbackTexts: string[] = [];
+
+        for (const page of fallbackPages) {
+          const text = getPageText(page);
+          if (text && text.trim().length >= 50) {
+            // Take first 1500 chars of each page to keep token cost low
+            fallbackTexts.push(text.substring(0, 1500));
+          }
+        }
+
+        if (fallbackTexts.length > 0 && openaiKey && leadName) {
+          try {
+            const { default: OpenAI } = await import('openai');
+            const client = new OpenAI({ apiKey: openaiKey });
+
+            const fallbackResponse = await Promise.race([
+              client.chat.completions.create({
+                model: process.env.EVIDENCE_JUDGE_MODEL ?? 'gpt-4o-mini',
+                temperature: 0.1,
+                max_tokens: 300,
+                response_format: { type: 'json_object' },
+                messages: [
+                  {
+                    role: 'system',
+                    content: `You are judging whether a business offers or provides "${constraintValue}". You will receive text from their website. Look for ANY evidence — direct mentions, synonyms, related terms, brand names, menu items, or descriptions that indicate they offer this.\n\nBe reasonably inclusive — if a pub lists specific ale brands or says "real ales" and the constraint is "cask ale", that counts. But don't force a match from nothing.\n\nRespond with JSON: {"match": true/false, "evidence_sentence": "one sentence summary of evidence found or null", "confidence": "high"/"medium"/"low"}`,
+                  },
+                  {
+                    role: 'user',
+                    content: JSON.stringify({
+                      business_name: leadName,
+                      constraint: constraintValue,
+                      website_content: fallbackTexts,
+                    }),
+                  },
+                ],
+              }),
+              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Fallback LLM timeout')), 8000)),
+            ]);
+
+            const fbRaw = fallbackResponse.choices[0]?.message?.content?.trim() || '';
+            const fbCleaned = fbRaw.replace(/```json\n?|\n?```/g, '').trim();
+            const fbParsed = JSON.parse(fbCleaned);
+
+            if (fbParsed.match && fbParsed.evidence_sentence) {
+              console.log(`[EVIDENCE_EXTRACT_FALLBACK_LLM] "${leadName}" + "${constraintValue}" → MATCH via full-page LLM: ${fbParsed.evidence_sentence.substring(0, 100)}`);
+
+              const fbUrl = fallbackPages[0]?.url || '';
+              const fbSourceType = classifySourceType(fbUrl);
+
+              return {
+                evidence_items: [{
+                  source_url: fbUrl,
+                  page_title: fallbackPages[0]?.title || '',
+                  constraint_type: constraint.type,
+                  constraint_value: constraintValue,
+                  matched_phrase: constraintValue,
+                  direct_quote: fbParsed.evidence_sentence.substring(0, 250),
+                  context_snippet: fbParsed.evidence_sentence.substring(0, 300),
+                  constraint_match_reason: `LLM semantic judge found evidence of "${constraintValue}" on website content (no keyword match).`,
+                  source_type: fbSourceType,
+                  source_tier: mapSourceTypeToTier(fbSourceType),
+                  confidence_score: fbParsed.confidence === 'high' ? 0.80 : fbParsed.confidence === 'medium' ? 0.60 : 0.40,
+                  quote: fbParsed.evidence_sentence.substring(0, 250),
+                  url: fbUrl,
+                  match_reason: `LLM semantic: "${constraintValue}"`,
+                  confidence: fbParsed.confidence || 'medium',
+                  keyword_matched: null,
+                }],
+                pages_scanned: pagesWithText,
+                constraint,
+                no_evidence: false,
+                extraction_method: 'keyword_sentence',
+                phrase_targets: phraseTargets,
+              };
+            } else {
+              console.log(`[EVIDENCE_EXTRACT_FALLBACK_LLM] "${leadName}" + "${constraintValue}" → NO MATCH via full-page LLM`);
+            }
+          } catch (fbErr: any) {
+            console.warn(`[EVIDENCE_EXTRACT_FALLBACK_LLM] Failed for "${leadName}": ${fbErr.message}`);
+          }
+        }
+
+        // If we get here, both keyword scan AND LLM fallback found nothing
         return {
           evidence_items: [],
           pages_scanned: pagesWithText,
           constraint,
           no_evidence: true,
-          extraction_method: 'keyword_sentence',
+          extraction_method: 'no_match',
           phrase_targets: phraseTargets,
         };
       }
