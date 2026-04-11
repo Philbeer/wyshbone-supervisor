@@ -3443,6 +3443,16 @@ class SupervisorService {
       }
     }
 
+    // Override response if API billing errors caused empty results
+    const { getLastBillingError, clearBillingError } = await import('./supervisor/api-error-detector');
+    const billingError = getLastBillingError();
+    if (billingError && towerResult.leads.length === 0) {
+      const providerName = billingError.provider === 'openai' ? 'OpenAI' : 'Anthropic';
+      console.error(`[SUPERVISOR] Overriding response — billing error detected: ${billingError.message}`);
+      response = `⚠️ I couldn't verify any results because the ${providerName} API returned an error (${billingError.status}). This is likely a billing/credits issue, not a search quality problem. Please check your API credits and try again.`;
+      clearBillingError();
+    }
+
     if (monitorCreated && !response.includes('monitoring')) {
       const monitorNote = missionModeResolved === 'alert_on_change'
         ? `\n\nI've also set up ongoing monitoring for this. I'll alert you when there are changes or new results.`

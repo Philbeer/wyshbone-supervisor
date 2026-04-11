@@ -1,0 +1,188 @@
+# Fix: Surface API billing/credit errors to user instead of silent failure
+
+## Problem
+When the OpenAI API runs out of credits, all GPT-4o verification calls silently fail. The error gets caught, logged as "no evidence," and the user sees "0 verified results" — as if no pubs matched. The user has no idea the real reason is a billing issue, and wastes time debugging search quality when the fix is just adding $10 of credit.
+
+This affects:
+- `batchGpt4oVerification` in `server/supervisor/mission-executor.ts` — main evidence verification
+- GPT-4o fallback blocks in `mission-executor.ts` — the fallback verification for bot-blocked sites
+- `extractConstraintLedEvidence` in `server/supervisor/constraint-led-extractor.ts` — the LLM judge calls
+- `extractConstraintValue` in `server/supervisor/refine-executor.ts` — refine constraint extraction
+- `generatePlacesQueries` in `mission-executor.ts` — query generation
+- `filterByEntityExclusions` in `mission-executor.ts` — exclusion filter
+- Any other OpenAI or Anthropic API call that catches errors silently
+
+## The Fix
+
+### 1. Create a shared API error detector
+
+Create a new file `server/supervisor/api-error-detector.ts`:
+
+```typescript
+// Tracks API billing/auth errors during a run so the user can be notified
+
+let _lastBillingError: { provider: string; status: number; message: string; timestamp: number } | null = null;
+
+export function detectBillingError(
+  provider: 'openai' | 'anthropic',
+  statusCode: number,
+  errorBody: string,
+): boolean {
+  // OpenAI billing errors
+  if (provider === 'openai' && (statusCode === 402 || statusCode === 429)) {
+    _lastBillingError = {
+      provider,
+      status: statusCode,
+      message: statusCode === 402
+        ? 'OpenAI API credits exhausted — add credits at platform.openai.com/billing'
+        : 'OpenAI API rate limit hit — may be temporary',
+      timestamp: Date.now(),
+    };
+    return true;
+  }
+  
+  // OpenAI insufficient_quota error (can come as 400 or 403)
+  if (provider === 'openai' && errorBody.includes('insufficient_quota')) {
+    _lastBillingError = {
+      provider,
+      status: statusCode,
+      message: 'OpenAI API credits exhausted — add credits at platform.openai.com/billing',
+      timestamp: Date.now(),
+    };
+    return true;
+  }
+  
+  // Anthropic billing errors
+  if (provider === 'anthropic' && (statusCode === 402 || statusCode === 429)) {
+    _lastBillingError = {
+      provider,
+      status: statusCode,
+      message: statusCode === 402
+        ? 'Anthropic API credits exhausted'
+        : 'Anthropic API rate limit hit',
+      timestamp: Date.now(),
+    };
+    return true;
+  }
+  
+  return false;
+}
+
+export function getLastBillingError(): typeof _lastBillingError {
+  // Only return errors from the last 10 minutes
+  if (_lastBillingError && Date.now() - _lastBillingError.timestamp < 600_000) {
+    return _lastBillingError;
+  }
+  return null;
+}
+
+export function clearBillingError(): void {
+  _lastBillingError = null;
+}
+```
+
+### 2. Add detection to batchGpt4oVerification
+
+In `server/supervisor/mission-executor.ts`, in the `batchGpt4oVerification` function, find the error handling for failed API calls. Currently it just logs and continues:
+
+```typescript
+if (!resp.ok) {
+  const errText = await resp.text().catch(() => '');
+  throw new Error(`HTTP ${resp.status}: ${errText.substring(0, 100)}`);
+}
+```
+
+After the `resp.ok` check, add billing detection:
+
+```typescript
+if (!resp.ok) {
+  const errText = await resp.text().catch(() => '');
+  // Detect billing/quota errors
+  const { detectBillingError } = await import('./api-error-detector');
+  detectBillingError('openai', resp.status, errText);
+  throw new Error(`HTTP ${resp.status}: ${errText.substring(0, 100)}`);
+}
+```
+
+### 3. Add detection to GPT-4o fallback blocks
+
+Search `mission-executor.ts` for all `fetch('https://api.openai.com/v1/responses'` calls. There are at least 3 (batchGpt4oVerification, GPT-4o fallback, discovery cascade). Add the same billing detection after each `if (!resp.ok)` check.
+
+Also search for `fetch('https://api.openai.com/v1/chat/completions'` — the evidence judge in constraint-led-extractor uses this via the OpenAI SDK. Add detection there too.
+
+### 4. Check for billing errors before delivery
+
+In `mission-executor.ts`, in the `executeMissionDrivenPlan` function, just BEFORE the delivery summary is built (search for `=== Phase: FINAL_DELIVERY ===`), add:
+
+```typescript
+// Check if API billing errors caused verification failures
+const { getLastBillingError } = await import('./api-error-detector');
+const billingError = getLastBillingError();
+if (billingError && evidenceResults.filter(r => r.evidenceFound).length === 0) {
+  console.error(`[MISSION_EXEC] API billing error detected during run — all verification likely failed due to: ${billingError.message}`);
+  
+  // Create a diagnostic artefact so the UI can show it
+  await createArtefact({
+    runId,
+    type: 'diagnostic',
+    title: `API Error: ${billingError.message}`,
+    summary: `Verification results may be incomplete — ${billingError.provider} API returned ${billingError.status}. Evidence checks likely failed due to billing issues, not actual search quality.`,
+    payload: {
+      diagnostic_type: 'api_billing_error',
+      provider: billingError.provider,
+      status: billingError.status,
+      message: billingError.message,
+      evidence_checks_attempted: evidenceResults.length,
+      evidence_found: evidenceResults.filter(r => r.evidenceFound).length,
+      likely_cause: 'api_credits_exhausted',
+    },
+    userId,
+    conversationId,
+  }).catch(() => {});
+}
+```
+
+### 5. Surface in the supervisor's response message
+
+In `server/supervisor.ts`, in the `processChatTask` function, after the mission execution completes, check for billing errors and modify the response message:
+
+Find where the supervisor writes the final message to the messages table. Before that write, add:
+
+```typescript
+const { getLastBillingError, clearBillingError } = await import('./supervisor/api-error-detector');
+const billingError = getLastBillingError();
+
+if (billingError && result.leads.length === 0) {
+  // Override the "no results found" message with the real reason
+  const billingMsg = `⚠️ I couldn't verify any results because the ${billingError.provider === 'openai' ? 'OpenAI' : 'Anthropic'} API returned an error (${billingError.status}). This is likely a billing/credits issue, not a search quality problem. Please check your API credits and try again.`;
+  
+  // Use billingMsg instead of the normal response
+  clearBillingError();
+}
+```
+
+### 6. Also detect Anthropic API errors
+
+In `constraint-led-extractor.ts`, the synonym expansion uses Anthropic's API. Add detection there too:
+
+```typescript
+const synResp = await fetch('https://api.anthropic.com/v1/messages', { ... });
+if (!synResp.ok) {
+  const { detectBillingError } = await import('./api-error-detector');
+  detectBillingError('anthropic', synResp.status, await synResp.text().catch(() => ''));
+  throw new Error(`API ${synResp.status}`);
+}
+```
+
+## Test
+
+1. Set OpenAI credits to $0 (or use an expired key)
+2. Run "find pubs in Brighton that serve cask ale"
+3. Instead of "0 verified results" → should see "⚠️ I couldn't verify results because the OpenAI API returned an error (402). This is likely a billing issue."
+4. Top up credits, run again → should work normally
+
+## Files to modify
+- NEW: `server/supervisor/api-error-detector.ts`
+- `server/supervisor/mission-executor.ts` — add detection in batchGpt4oVerification, GPT-4o fallback, discovery cascade, and pre-delivery check
+- `server/supervisor.ts` — add billing error override in response message
+- `server/supervisor/constraint-led-extractor.ts` — add detection in Anthropic API calls

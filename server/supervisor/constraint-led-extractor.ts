@@ -899,7 +899,11 @@ Return JSON array only: ["term1", "term2", ...]`,
               }),
             });
 
-            if (synResp.ok) {
+            if (!synResp.ok) {
+              const errBody = await synResp.text().catch(() => '');
+              const { detectBillingError } = await import('./api-error-detector');
+              detectBillingError('anthropic', synResp.status, errBody);
+            } else {
               const synData = await synResp.json() as any;
               const synText = synData.content?.[0]?.text || '';
               const synCleaned = synText.replace(/```json\s*/gi, '').replace(/```\s*$/g, '').trim();

@@ -707,6 +707,8 @@ IMPORTANT:
 
       if (!resp.ok) {
         const errText = await resp.text().catch(() => '');
+        const { detectBillingError } = await import('./api-error-detector');
+        detectBillingError('openai', resp.status, errText);
         throw new Error(`HTTP ${resp.status}: ${errText.substring(0, 100)}`);
       }
 
@@ -2428,6 +2430,30 @@ IMPORTANT:
   });
 
   console.log(`[MISSION_EXEC] === Phase: FINAL_DELIVERY ===`);
+
+  // Check if API billing errors caused verification failures
+  const { getLastBillingError } = await import('./api-error-detector');
+  const billingError = getLastBillingError();
+  if (billingError && evidenceResults.filter(r => r.evidenceFound).length === 0) {
+    console.error(`[MISSION_EXEC] API billing error detected during run — all verification likely failed due to: ${billingError.message}`);
+    await createArtefact({
+      runId,
+      type: 'diagnostic',
+      title: `API Error: ${billingError.message}`,
+      summary: `Verification results may be incomplete — ${billingError.provider} API returned ${billingError.status}. Evidence checks likely failed due to billing issues, not actual search quality.`,
+      payload: {
+        diagnostic_type: 'api_billing_error',
+        provider: billingError.provider,
+        status: billingError.status,
+        message: billingError.message,
+        evidence_checks_attempted: evidenceResults.length,
+        evidence_found: evidenceResults.filter(r => r.evidenceFound).length,
+        likely_cause: 'api_credits_exhausted',
+      },
+      userId,
+      conversationId,
+    }).catch(() => {});
+  }
 
   const hasEvidenceConstraints = evidenceConstraints.length > 0 || relationshipConstraints.length > 0;
   const evidenceSummary = evidenceResults.length > 0
