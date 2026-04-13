@@ -1,0 +1,78 @@
+# FIX: Chat Conversation Continuity in Router
+
+REPO: wyshbone-supervisor-Post-CC
+
+## THE PROBLEM
+
+The conversation router correctly routes the first CHAT message (e.g. "tell me about the wine society"). But follow-up questions in the same chat exchange (e.g. "how much is membership?") get misrouted as SEARCH or CLARIFY because the router has no rule for chat continuity.
+
+The router has rules for search result continuity (DISCUSS, ITERATE) but nothing equivalent for chat continuity. This is a structural gap — it affects ANY follow-up question after a chat exchange, not just specific queries.
+
+## THE FIX
+
+Edit `server/supervisor/conversation-router.ts`. In the `ROUTER_SYSTEM_PROMPT` constant, make TWO changes:
+
+### Change 1: Update the CHAT route description
+
+Find this line:
+```
+### CHAT
+Greetings, gibberish, off-topic, general knowledge questions, or anything that is NOT a search/lead-finding intent.
+```
+
+Replace it with:
+```
+### CHAT
+Greetings, gibberish, off-topic, general knowledge questions, conversational follow-ups to a previous CHAT exchange, or anything that is NOT a search/lead-finding intent.
+```
+
+### Change 2: Add a new critical rule
+
+After rule 12 (the AFFIRMATIVE RESPONSES rule), add rule 13:
+
+```
+13. CHAT CONTINUITY: If the CONVERSATION HISTORY shows the last exchange was a CHAT (the assistant gave a conversational/informational answer, NOT search results), then short follow-up questions from the user are almost certainly CHAT continuations. Examples: after chatting about an organisation, "how much is membership?", "where are they based?", "do they deliver?", "what do they sell?", "when were they founded?" are all CHAT — the user is asking follow-up questions about the topic being discussed, not requesting a business search. Read the conversation history to determine whether the user is in a CHAT flow or a SEARCH flow. Only route away from CHAT if the user gives a clear, explicit search instruction with entity + location.
+```
+
+### Change 3: Add CHAT continuity examples
+
+In the CHAT examples section, after the existing examples and before the "What NOT to route as CHAT:" line, add:
+
+```
+CHAT CONTINUITY examples (when the previous exchange was a CHAT, not search results):
+- Previous: assistant explained about The Wine Society. User: "how much is membership?" → CHAT (follow-up about the topic being discussed)
+- Previous: assistant discussed wine pairing. User: "what about with fish?" → CHAT (continuing the conversation)
+- Previous: assistant explained what Wyshbone can do. User: "can you do that for restaurants?" → CHAT (asking about capabilities, not requesting a search — no location given)
+- Previous: assistant chatted about an industry. User: "that's interesting, tell me more" → CHAT
+- Previous: assistant gave a CHAT response. User: "where are they based?" → CHAT (follow-up about the topic)
+```
+
+## WHAT NOT TO CHANGE
+
+- Do NOT change the parseRouterResponse function
+- Do NOT change the buildRouterUserMessage function
+- Do NOT change the routeConversation function
+- Do NOT change any other file — this is ONLY a prompt text change in the ROUTER_SYSTEM_PROMPT constant
+
+## WHY THIS IS A PROPER FIX
+
+The router already handles continuity for search flows:
+- DISCUSS = follow-up about search results
+- ITERATE = modification of a previous search
+
+This fix adds the equivalent for chat flows:
+- CHAT continuity = follow-up about a chat topic
+
+It's the same pattern applied consistently. Without it, every multi-turn chat conversation breaks on the second message.
+
+## VERIFICATION
+
+After the change, test in order in a SINGLE conversation:
+
+1. "tell me about the wine society" → should route as CHAT ✓ (already works)
+2. "how much is membership?" → should route as CHAT (was broken, should now work)
+3. "do they deliver?" → should route as CHAT (follow-up)
+4. "what wines do they have under £10?" → should route as CHAT (follow-up about the topic)
+5. "find wine merchants in Sussex" → should route as SEARCH (explicit search with entity + location — this must NOT be caught by chat continuity)
+
+Test 5 is critical — it confirms the fix doesn't over-capture. The rule says "only route away from CHAT if the user gives a clear, explicit search instruction with entity + location" which "find wine merchants in Sussex" clearly is.
