@@ -1,0 +1,162 @@
+import { callLLMText } from './llm-failover';
+
+// ─── Public types ─────────────────────────────────────────────────────────────
+
+export interface ChatHandlerInput {
+  conversationId: string;
+  userId: string;
+  rawMessage: string;
+  jobId: string;
+  taskId: string;
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
+  urlContent?: string | null;
+  previousResultsSummary?: string | null;
+}
+
+export interface ChatHandlerOutput {
+  response: string;
+  messageId: string;
+}
+
+// ─── Circuit breaker — max 10 chat calls per 5 minutes ───────────────────────
+
+const _chatCallTimestamps: number[] = [];
+const CIRCUIT_BREAKER_WINDOW_MS = 5 * 60 * 1000;
+const CIRCUIT_BREAKER_MAX_CALLS = 10;
+
+function isCircuitBroken(): boolean {
+  const cutoff = Date.now() - CIRCUIT_BREAKER_WINDOW_MS;
+  while (_chatCallTimestamps.length > 0 && _chatCallTimestamps[0] < cutoff) {
+    _chatCallTimestamps.shift();
+  }
+  return _chatCallTimestamps.length >= CIRCUIT_BREAKER_MAX_CALLS;
+}
+
+function recordChatCall(): void {
+  _chatCallTimestamps.push(Date.now());
+}
+
+// ─── System prompt ────────────────────────────────────────────────────────────
+
+const CHAT_SYSTEM_PROMPT = `You are Wyshbone, a business intelligence assistant that finds and verifies businesses for users. You are helpful, knowledgeable, and direct.
+
+WHAT YOU CAN DO:
+- Answer general knowledge questions about any topic — business, marketing, industries, food, wine, technology, anything the user asks
+- Discuss and give opinions on business strategy, lead generation, B2B approaches
+- If previous search results exist in the conversation, discuss them, offer insights, suggest next steps
+- If URL content has been shared, discuss what was found on that website
+- Explain what Wyshbone can do and how to use it
+
+WHAT YOU MUST NOT DO:
+- Never fabricate business names, addresses, phone numbers, websites, or contact details
+- Never pretend to search or claim you have found businesses — if the user wants a search, tell them to ask you to find [business type] in [location] and you will run a proper search
+- Never make up facts you are not confident about — say "I'm not sure" if you don't know
+
+HOW TO REDIRECT TO SEARCH:
+When the user expresses intent to find businesses but hasn't given enough detail, or when a general conversation naturally leads to a search opportunity, suggest it naturally. For example:
+- "I could search for wine merchants in your area if you tell me where — just say something like 'find wine merchants in Sussex'."
+- "Want me to look for some? Just give me a business type and location."
+
+TONE:
+- Professional but warm. Not corporate, not overly casual.
+- Concise — aim for 2-5 sentences for simple queries, longer for complex topics.
+- Think knowledgeable colleague, not customer support script.
+- Match the user's energy — if they are brief, be brief. If they ask a detailed question, give a detailed answer.
+
+CONTEXT AWARENESS:
+- You may receive previous conversation messages, search results, and URL content. Use this context naturally.
+- If the user references "the results" or "those businesses", and result context is provided, discuss them.
+- If no context is available, just have a normal conversation.`;
+
+// ─── Main handler ─────────────────────────────────────────────────────────────
+
+export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOutput> {
+  const { conversationId, rawMessage, conversationHistory, urlContent, previousResultsSummary } = input;
+
+  // 1. Build user prompt with context
+  const parts: string[] = [];
+
+  if (conversationHistory.length > 0) {
+    parts.push('CONVERSATION HISTORY:');
+    const recentHistory = conversationHistory.slice(-8);
+    for (const msg of recentHistory) {
+      const role = msg.role === 'user' ? 'User' : 'Wyshbone';
+      const content = msg.content.length > 500 ? msg.content.substring(0, 500) + '...' : msg.content;
+      parts.push(`${role}: ${content}`);
+    }
+    parts.push('');
+  }
+
+  if (previousResultsSummary) {
+    parts.push('PREVIOUS SEARCH RESULTS IN THIS CONVERSATION:');
+    parts.push(previousResultsSummary);
+    parts.push('');
+  }
+
+  if (urlContent) {
+    parts.push('URL CONTENT (from a link the user shared):');
+    parts.push(urlContent.substring(0, 3000));
+    parts.push('');
+  }
+
+  parts.push(`User: ${rawMessage}`);
+
+  const userPrompt = parts.join('\n');
+
+  // 2. Call LLM with circuit breaker
+  let response: string;
+
+  if (isCircuitBroken()) {
+    console.warn('[CHAT_HANDLER] Circuit breaker OPEN — using fallback');
+    response = "I'm a bit busy right now. I can find businesses for you — just tell me a business type and location, like 'find cafes in Brighton'.";
+  } else {
+    try {
+      recordChatCall();
+      response = await callLLMText(CHAT_SYSTEM_PROMPT, userPrompt, 'chat', {
+        anthropicModel: process.env.CHAT_LLM_MODEL || 'claude-3-5-haiku-20241022',
+        maxTokens: 1024,
+        temperature: 0.7,
+        timeoutMs: 15_000,
+      });
+    } catch (err: any) {
+      console.error(`[CHAT_HANDLER] LLM call failed: ${err.message}`);
+      response = "I can find businesses and leads for you. Just tell me what you're looking for and where — for example, 'find web designers in Manchester'.";
+    }
+  }
+
+  // 3. Save message to DB
+  const messageId = await saveChatMessage(conversationId, response);
+
+  console.log(`[CHAT_HANDLER] Responded — ${response.length} chars, conversation=${conversationId.slice(0, 8)}`);
+
+  return { response, messageId };
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+async function saveChatMessage(conversationId: string, content: string): Promise<string> {
+  const { randomUUID } = await import('crypto');
+  const messageId = randomUUID();
+
+  try {
+    const { supabase } = await import('../supabase');
+    if (!supabase) return messageId;
+
+    await supabase.from('messages').insert({
+      id: messageId,
+      conversation_id: conversationId,
+      role: 'assistant',
+      content,
+      source: 'supervisor',
+      metadata: {
+        conversation_phase: 'chatting',
+        handler: 'chat',
+      },
+      created_at: Date.now(),
+    });
+  } catch (err: any) {
+    console.error(`[CHAT_HANDLER] Failed to save message (non-fatal): ${err.message}`);
+  }
+
+  return messageId;
+}

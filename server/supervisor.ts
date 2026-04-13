@@ -1410,52 +1410,110 @@ class SupervisorService {
         }).catch(() => {});
 
         // === HANDLE CHAT ===
-        if (decision.route === 'CHAT' && decision.chat_response) {
-          const messageId = randomUUID();
-          await Promise.all([
-            supabase!.from('supervisor_tasks').update({
-              status: 'completed',
-              result: { response: decision.chat_response.substring(0, 200), message_id: messageId, router: 'chat' },
-            }).eq('id', task.id),
-            supabase!.from('messages').insert({
-              id: messageId,
-              conversation_id: task.conversation_id,
-              role: 'assistant',
-              content: decision.chat_response,
-              source: 'supervisor',
-              metadata: { supervisor_task_id: task.id, run_id: jobId, router_decision: decision },
-              created_at: Date.now(),
-            }),
-          ]);
-          await storage.updateAgentRun(jobId, {
-            status: 'completed', terminalState: 'completed', endedAt: new Date(),
-            metadata: { verdict: 'router_chat', router: decision },
-          }).catch(() => {});
-          console.log(`[ROUTER] Handled as CHAT — done`);
-          // Signal UI poller to stop
-          const _chatUiResult = await this.postArtefactToUI({
-            runId: jobId,
-            clientRequestId,
-            type: 'diagnostic',
-            payload: {
-              status: 'CHAT',
-              leads: [],
-              message: decision.chat_response,
-              router_verdict: 'chat',
-              run_complete: true,
-            },
-            userId: task.user_id,
-            conversationId: task.conversation_id,
-          }).catch((err: any) => {
-            console.error(`[ROUTER] CRITICAL: Failed to signal UI that run is complete: ${err.message}`);
-            return null;
-          });
-          if (!_chatUiResult) {
-            console.error(`[ROUTER] UI may hang — run_complete signal failed for runId=${jobId}`);
+        if (decision.route === 'CHAT') {
+          try {
+            const { handleChat } = await import('./supervisor/chat-handler');
+
+            // Build a summary of previous results if they exist
+            let previousResultsSummary: string | null = null;
+            if (routerPreviousResults.exists) {
+              try {
+                const { getConversationContext } = await import('./supervisor/conversation-context');
+                const ctx = await getConversationContext(task.conversation_id);
+                if (ctx.leads.length > 0) {
+                  previousResultsSummary = ctx.leads
+                    .map((l) => {
+                      const parts = [`${l.index}. ${l.name}`, l.address];
+                      if (l.website) parts.push(`Website: ${l.website}`);
+                      return parts.join(' | ');
+                    })
+                    .join('\n');
+                }
+              } catch (ctxErr: any) {
+                console.warn(`[CHAT] Context load for chat failed (non-fatal): ${ctxErr.message}`);
+              }
+            }
+
+            const chatResult = await handleChat({
+              conversationId: task.conversation_id,
+              userId: task.user_id,
+              rawMessage: rawMsg,
+              jobId,
+              taskId: task.id,
+              conversationHistory: routerHistory,
+              urlContent: (requestData as any).url_content || null,
+              previousResultsSummary,
+            });
+
+            // Mark task complete
+            if (supabase) {
+              await supabase.from('supervisor_tasks').update({
+                status: 'completed',
+                result: { message_id: chatResult.messageId, router: 'chat', handler: 'chat_handler' },
+              }).eq('id', task.id);
+            }
+
+            await storage.updateAgentRun(jobId, {
+              status: 'completed', terminalState: 'completed', endedAt: new Date(),
+              metadata: { verdict: 'chat_handler', router: decision },
+            }).catch(() => {});
+
+            console.log(`[ROUTER] Handled as CHAT via chat-handler — done`);
+
+            this.postArtefactToUI({
+              runId: jobId,
+              clientRequestId,
+              type: 'diagnostic',
+              payload: {
+                status: 'CHAT',
+                leads: [],
+                message: chatResult.response,
+                router_verdict: 'chat',
+                run_complete: true,
+              },
+              userId: task.user_id,
+              conversationId: task.conversation_id,
+            }).catch((err: any) => {
+              console.error(`[ROUTER] CRITICAL: Failed to signal UI that run is complete: ${err.message}`);
+            });
+
+            taskExecutionStartedEmitted = true;
+            await emitTaskExecutionCompleted('chat_handler');
+            return;
+          } catch (chatErr: any) {
+            console.error(`[CHAT] Chat handler failed: ${chatErr.message} — falling back to router response`);
+            if (decision.chat_response) {
+              const messageId = randomUUID();
+              await Promise.all([
+                supabase!.from('supervisor_tasks').update({
+                  status: 'completed',
+                  result: { response: decision.chat_response.substring(0, 200), message_id: messageId, router: 'chat', fallback: true },
+                }).eq('id', task.id),
+                supabase!.from('messages').insert({
+                  id: messageId,
+                  conversation_id: task.conversation_id,
+                  role: 'assistant',
+                  content: decision.chat_response,
+                  source: 'supervisor',
+                  metadata: { supervisor_task_id: task.id, run_id: jobId, router_decision: decision, chat_handler_fallback: true },
+                  created_at: Date.now(),
+                }),
+              ]);
+              await storage.updateAgentRun(jobId, {
+                status: 'completed', terminalState: 'completed', endedAt: new Date(),
+                metadata: { verdict: 'router_chat_fallback', router: decision },
+              }).catch(() => {});
+              this.postArtefactToUI({
+                runId: jobId, clientRequestId,
+                type: 'diagnostic',
+                payload: { status: 'CHAT', leads: [], message: decision.chat_response, router_verdict: 'chat', run_complete: true },
+                userId: task.user_id, conversationId: task.conversation_id,
+              }).catch(() => {});
+              taskExecutionStartedEmitted = true;
+              await emitTaskExecutionCompleted('router_chat_fallback');
+              return;
+            }
           }
-          taskExecutionStartedEmitted = true;
-          await emitTaskExecutionCompleted('router_chat');
-          return;
         }
 
         // === HANDLE CLARIFY ===
