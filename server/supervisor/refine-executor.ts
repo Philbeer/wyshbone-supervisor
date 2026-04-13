@@ -1,4 +1,4 @@
-import { getCurrentDatePreamble } from './current-context';
+import { getCurrentDatePreamble, getTemporalVerificationRules } from './current-context';
 import { storage } from '../storage';
 import { createArtefact } from './artefacts';
 import { logAFREvent } from './afr-logger';
@@ -411,6 +411,7 @@ async function liveRefineWithFetch(
 
       const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
       const FALLBACK_BATCH = 5;
+      const refineCutoffDate1 = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
       for (let fi = 0; fi < noEvidenceLeads.length; fi += FALLBACK_BATCH) {
         const fbBatch = noEvidenceLeads.slice(fi, fi + FALLBACK_BATCH);
@@ -418,6 +419,8 @@ async function liveRefineWithFetch(
         const fbResults = await Promise.allSettled(
           fbBatch.map(async (lead) => {
             const prompt = `${getCurrentDatePreamble()}
+
+${getTemporalVerificationRules(refineCutoffDate1)}
 
 Search for "${lead.name}". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${extracted.value}" is genuinely true for this specific business.
 
@@ -427,8 +430,7 @@ Respond with JSON only, no markdown fences:
 IMPORTANT:
 - constraint_met means "${extracted.value}" IS genuinely true for this business
 - Check review sites, event listings, social media — not just the business's own website
-- If the business exists but does NOT match, set business_found=true, constraint_met=false
-- For time-based constraints like "opened recently" or "last 12 months", use today's date above to determine whether any dates found are within the required window`;
+- If the business exists but does NOT match, set business_found=true, constraint_met=false`;
 
             const resp = await fetch('https://api.openai.com/v1/responses', {
               method: 'POST',
@@ -629,6 +631,7 @@ export async function executeRefine(
 
         const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
         const FALLBACK_BATCH = 5;
+        const refineCutoffDate2 = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
         for (let fi = 0; fi < noEvidenceCached.length; fi += FALLBACK_BATCH) {
           const fbBatch = noEvidenceCached.slice(fi, fi + FALLBACK_BATCH);
@@ -636,6 +639,8 @@ export async function executeRefine(
           const fbResults = await Promise.allSettled(
             fbBatch.map(async (lead) => {
               const prompt = `${getCurrentDatePreamble()}
+
+${getTemporalVerificationRules(refineCutoffDate2)}
 
 Search for "${lead.name}". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${constraintValue}" is genuinely true for this specific business.
 
@@ -645,8 +650,7 @@ Respond with JSON only, no markdown fences:
 IMPORTANT:
 - constraint_met means "${constraintValue}" IS genuinely true for this business
 - Check review sites, event listings, social media — not just the business's own website
-- If the business exists but does NOT match, set business_found=true, constraint_met=false
-- For time-based constraints like "opened recently" or "last 12 months", use today's date above to determine whether any dates found are within the required window`;
+- If the business exists but does NOT match, set business_found=true, constraint_met=false`;
 
               const resp = await fetch('https://api.openai.com/v1/responses', {
                 method: 'POST',

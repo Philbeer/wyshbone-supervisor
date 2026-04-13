@@ -1,4 +1,4 @@
-import { getCurrentDatePreamble } from './current-context';
+import { getCurrentDatePreamble, getTemporalVerificationRules } from './current-context';
 
 export interface ConstraintContext {
   type: string;
@@ -1028,6 +1028,7 @@ Return JSON array only: ["term1", "term2", ...]`;
         }
 
         if (fallbackTexts.length > 0 && openaiKey && leadName) {
+          const cutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
           try {
             const { default: OpenAI } = await import('openai');
             const client = new OpenAI({ apiKey: openaiKey });
@@ -1041,7 +1042,7 @@ Return JSON array only: ["term1", "term2", ...]`;
                 messages: [
                   {
                     role: 'system',
-                    content: `TODAY'S DATE IS: ${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}). Use this to evaluate any time-based constraints. "Last 12 months" means after ${new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}.
+                    content: `TODAY'S DATE IS: ${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}). ${getTemporalVerificationRules(cutoffDate)}
 
 You are judging whether a business "${constraintValue}". You will receive text from their website.
 ${entityType ? `
@@ -1157,6 +1158,7 @@ Respond with JSON: {"match": true/false, "evidence_sentence": "one sentence summ
       // LAYER 2 — gpt-4o judges the windows
       const { default: OpenAI } = await import('openai');
       const client = new OpenAI({ apiKey: openaiKey });
+      const layer2CutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
       const extracts = windows.map(w => w.text);
 
@@ -1170,7 +1172,7 @@ Respond with JSON: {"match": true/false, "evidence_sentence": "one sentence summ
         messages: [
           {
             role: 'system',
-            content: `TODAY'S DATE IS: ${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}). Use this to evaluate any time-based constraints. "Last 12 months" means after ${new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}.
+            content: `TODAY'S DATE IS: ${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}). ${getTemporalVerificationRules(layer2CutoffDate)}
 
 You are an evidence judge for a business lead finder. You will receive short extracts from a business website.
 ${entityType ? `

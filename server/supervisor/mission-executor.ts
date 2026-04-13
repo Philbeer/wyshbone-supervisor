@@ -1,4 +1,4 @@
-import { getCurrentDatePreamble } from './current-context';
+import { getCurrentDatePreamble, getTemporalVerificationRules } from './current-context';
 import type { StructuredMission, MissionConstraint, MissionExtractionTrace, EvidenceRequirement, IntentNarrative } from './mission-schema';
 import { defaultEvidenceRequirement } from './mission-schema';
 import { extractConstraintLedEvidence, type ConstraintLedExtractionResult, type EvidenceItem, getPageHintsForConstraint } from './constraint-led-extractor';
@@ -675,8 +675,11 @@ export async function batchGpt4oVerification(
       const constraintValue = typeof task.constraint.value === 'string'
         ? task.constraint.value
         : String(task.constraint.value ?? '');
+      const batchCutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
       const prompt = `${getCurrentDatePreamble()}
+
+${getTemporalVerificationRules(batchCutoffDate)}
 
 Search for "${task.lead.name}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${constraintValue}".
 
@@ -692,8 +695,7 @@ Respond with JSON only, no markdown fences, no other text:
 IMPORTANT:
 - business_found means you found information about this specific business
 - constraint_met means the constraint "${constraintValue}" IS genuinely true for this business
-- If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false
-- For time-based constraints like "opened recently" or "last 12 months", use today's date above to evaluate whether any dates found are within the required window`;
+- If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false`;
 
       const model = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
       const resp = await fetch('https://api.openai.com/v1/responses', {
@@ -1846,7 +1848,9 @@ Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "re
           try {
             const fbTodayStr = `${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })})`;
             const fbCutoffStr = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-            const fbPrompt = `TODAY'S DATE IS: ${fbTodayStr}. Use this when evaluating time-based constraints. "Last 12 months" means after ${fbCutoffStr}.
+            const fbPrompt = `TODAY'S DATE IS: ${fbTodayStr}.
+
+${getTemporalVerificationRules(fbCutoffStr)}
 
 Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${er.constraintValue}".
 
@@ -1863,8 +1867,7 @@ IMPORTANT:
 - business_found means you found information about this specific business
 - constraint_met means the constraint "${er.constraintValue}" IS genuinely true for this business
 - If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false
-- A business that merely MENTIONS or USES something is NOT the same as a business that MANUFACTURES or PROVIDES it
-- For time-based constraints like "opened recently" or "opened in the last 12 months", use today's date to calculate whether any dates found are within the required window`;
+- A business that merely MENTIONS or USES something is NOT the same as a business that MANUFACTURES or PROVIDES it`;
 
             const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
             console.log(`[GPT4O_FALLBACK] Using model: ${fallbackModel}`);

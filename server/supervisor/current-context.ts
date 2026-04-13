@@ -17,6 +17,26 @@ export function getCurrentDatePreamble(): string {
   return `TODAY'S DATE: ${readable} (${iso}). Current year: ${currentYear}. "Last 12 months" = after ${oneYearAgo}.`;
 }
 
+export function getTemporalVerificationRules(cutoffDate: string): string {
+  return `TEMPORAL VERIFICATION RULES (apply when constraint involves time, recency, or "opened recently"):
+1. Find the OPENING or ESTABLISHMENT date of the business. This is the ONLY date that matters.
+2. Check: is that opening date AFTER ${cutoffDate}? If yes → constraint met. If no → constraint NOT met.
+3. These are NOT valid evidence of recent opening:
+   - A recent website UPDATE or redesign (businesses update sites regardless of age)
+   - A recent MOVE or relocation (moving to new premises ≠ opening a new business)
+   - "Operating for over 12 months" (this means the business is OLD, not new)
+   - Recent Google reviews (old businesses get new reviews too)
+   - A recent Companies House filing update (routine annual filings)
+   - The current year appearing anywhere on the website (copyright notices, blog posts)
+4. These ARE valid evidence of recent opening:
+   - "Opened in [date after ${cutoffDate}]" or "Established [date after ${cutoffDate}]"
+   - "Grand opening" or "Now open" with a date after ${cutoffDate}
+   - "New micropub" or "newly opened" with supporting date evidence
+   - First Google reviews appearing only after ${cutoffDate}
+5. If the opening date is BEFORE ${cutoffDate}, the constraint is NOT met regardless of any other recent activity.
+6. If no opening date can be found, the constraint is NOT met (cannot verify without evidence).`;
+}
+
 export function getCurrentContextPreamble(): string {
   const datePreamble = getCurrentDatePreamble();
   const currentYear = new Date().getFullYear();
