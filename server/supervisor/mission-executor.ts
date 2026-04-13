@@ -25,7 +25,9 @@ import { judgeArtefact } from './tower-artefact-judge';
 import { requestSemanticVerification, type TowerSemanticStatus } from './tower-semantic-verify';
 import {
   emitDeliverySummary,
+  buildDeliverySummaryPayload,
   type DeliverySummaryPayload,
+  type DeliverySummaryInput,
   type PlanVersionEntry,
   type SoftRelaxation,
   type MatchEvidenceItem,
@@ -2924,35 +2926,40 @@ IMPORTANT:
     };
   });
 
-  let dsPayload: Awaited<ReturnType<typeof emitDeliverySummary>> | null = null;
-  if (!ctx.suppressDeliverySummary) {
-    dsPayload = await emitDeliverySummary({
-      runId,
-      userId,
-      conversationId,
-      originalUserGoal: rawUserInput,
-      requestedCount,
-      hardConstraints,
-      softConstraints,
-      planVersions: dsPlanVersions,
-      softRelaxations: dsSoftRelaxations,
-      leads: dsLeads,
-      finalVerdict,
-      finalAction, // PHASE_3: pass Tower action to delivery summary
-      stopReason: null,
-      relationshipContext: relationshipPredicate.requires_relationship_evidence
-        ? {
-            requires_relationship_evidence: true,
-            detected_predicate: relationshipPredicate.detected_predicate,
-            relationship_target: relationshipPredicate.relationship_target,
-            verified_relationship_count: evidenceResults.filter(
-              r => r.constraintType === 'relationship_check' && r.evidenceFound,
-            ).length,
-          }
-        : undefined,
-      verificationPolicy: plan.verification_policy.verification_policy,
-      verificationPolicyReason: plan.verification_policy.reason,
-    });
+  const dsInput: DeliverySummaryInput = {
+    runId,
+    userId,
+    conversationId,
+    originalUserGoal: rawUserInput,
+    requestedCount,
+    hardConstraints,
+    softConstraints,
+    planVersions: dsPlanVersions,
+    softRelaxations: dsSoftRelaxations,
+    leads: dsLeads,
+    finalVerdict,
+    finalAction, // PHASE_3: pass Tower action to delivery summary
+    stopReason: null,
+    relationshipContext: relationshipPredicate.requires_relationship_evidence
+      ? {
+          requires_relationship_evidence: true,
+          detected_predicate: relationshipPredicate.detected_predicate,
+          relationship_target: relationshipPredicate.relationship_target,
+          verified_relationship_count: evidenceResults.filter(
+            r => r.constraintType === 'relationship_check' && r.evidenceFound,
+          ).length,
+        }
+      : undefined,
+    verificationPolicy: plan.verification_policy.verification_policy,
+    verificationPolicyReason: plan.verification_policy.reason,
+  };
+
+  let dsPayload: DeliverySummaryPayload | null = null;
+  if (ctx.suppressDeliverySummary) {
+    dsPayload = buildDeliverySummaryPayload(dsInput);
+    console.log(`[DELIVERY_SUMMARY] Suppressed artefact emission (re-loop mode) — payload built with ${dsPayload.delivered_exact_count} exact leads`);
+  } else {
+    dsPayload = await emitDeliverySummary(dsInput);
   }
 
   await logAFREvent({

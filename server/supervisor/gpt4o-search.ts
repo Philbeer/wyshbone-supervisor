@@ -12,7 +12,9 @@ import { getCurrentDatePreamble } from './current-context';
 import { judgeArtefact } from './tower-artefact-judge';
 import {
   emitDeliverySummary,
+  buildDeliverySummaryPayload,
   type DeliverySummaryPayload,
+  type DeliverySummaryInput,
   type PlanVersionEntry,
   type SoftRelaxation,
 } from './delivery-summary';
@@ -644,25 +646,30 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     };
   });
 
-  let dsPayload: Awaited<ReturnType<typeof emitDeliverySummary>> | null = null;
-  if (!ctx.suppressDeliverySummary) {
-    dsPayload = await emitDeliverySummary({
-      runId,
-      userId,
-      conversationId,
-      originalUserGoal: rawUserInput,
-      requestedCount,
-      hardConstraints,
-      softConstraints,
-      planVersions: dsPlanVersions,
-      softRelaxations: dsSoftRelaxations,
-      leads: dsLeads,
-      finalVerdict,
-      finalAction,
-      stopReason: null,
-      verificationPolicy,
-      verificationPolicyReason,
-    });
+  const dsInput: DeliverySummaryInput = {
+    runId,
+    userId,
+    conversationId,
+    originalUserGoal: rawUserInput,
+    requestedCount,
+    hardConstraints,
+    softConstraints,
+    planVersions: dsPlanVersions,
+    softRelaxations: dsSoftRelaxations,
+    leads: dsLeads,
+    finalVerdict,
+    finalAction,
+    stopReason: null,
+    verificationPolicy,
+    verificationPolicyReason,
+  };
+
+  let dsPayload: DeliverySummaryPayload | null = null;
+  if (ctx.suppressDeliverySummary) {
+    dsPayload = buildDeliverySummaryPayload(dsInput);
+    console.log(`[DELIVERY_SUMMARY] Suppressed artefact emission (re-loop mode) — payload built with ${dsPayload.delivered_exact_count} exact leads`);
+  } else {
+    dsPayload = await emitDeliverySummary(dsInput);
   }
 
   await logAFREvent({

@@ -1,0 +1,124 @@
+# BUG FIX: suppressDeliverySummary must suppress artefact, NOT data
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## ROOT CAUSE
+
+The suppressDeliverySummary flag was applied as:
+```typescript
+let dsPayload = null;
+if (!ctx.suppressDeliverySummary) {
+  dsPayload = await emitDeliverySummary({...});  // builds payload AND creates artefact
+}
+```
+
+When suppressed, `dsPayload` is null. But downstream code uses `dsPayload` to build the return value:
+```typescript
+return {
+  deliverySummary: dsPayload,                    // null → no delivery data
+  leads: dsPayload?.delivered_exact.map(...) || []  // null → 0 leads returned
+};
+```
+
+This means the executor returns 0 leads. The accumulator gets nothing. deliveredLeads is 0. The canonical delivery_summary never fires because its guard checks `deliveredLeads.length > 0`.
+
+## THE FIX
+
+Change BOTH locations to use `buildDeliverySummaryPayload` (build data) without `emitDeliverySummary` (create artefact).
+
+### In `server/supervisor/mission-executor.ts`:
+
+Find the suppressed block (around line 2927):
+```typescript
+let dsPayload: Awaited<ReturnType<typeof emitDeliverySummary>> | null = null;
+if (!ctx.suppressDeliverySummary) {
+  dsPayload = await emitDeliverySummary({
+```
+
+Replace with:
+```typescript
+import { buildDeliverySummaryPayload } from './delivery-summary';
+// ... (add to existing imports at top of file)
+
+// Then at the call site:
+let dsPayload: DeliverySummaryPayload | null = null;
+const dsInput = {
+  runId: ctx.runId,
+  userId: ctx.userId,
+  conversationId: ctx.conversationId,
+  originalUserGoal: ctx.rawUserInput,
+  requestedCount: requestedCount,
+  hardConstraints: hardConstraintLabels,
+  softConstraints: softConstraintLabels,
+  planVersions: planVersions,
+  softRelaxations: softRelaxations,
+  leads: dsLeads,
+  finalVerdict: finalVerdict,
+  finalAction: finalAction,
+  stopReason: stopReason,
+  // ... (keep all existing fields from the current emitDeliverySummary call)
+};
+
+if (ctx.suppressDeliverySummary) {
+  // Build the data but don't create artefact — re-loop will emit its own canonical
+  dsPayload = buildDeliverySummaryPayload(dsInput);
+  console.log(`[DELIVERY_SUMMARY] Suppressed artefact emission (re-loop mode) — payload built with ${dsPayload.delivered_exact_count} exact leads`);
+} else {
+  dsPayload = await emitDeliverySummary(dsInput);
+}
+```
+
+### In `server/supervisor/gpt4o-search.ts`:
+
+Same pattern. Find the suppressed block (around line 647):
+```typescript
+let dsPayload: Awaited<ReturnType<typeof emitDeliverySummary>> | null = null;
+if (!ctx.suppressDeliverySummary) {
+  dsPayload = await emitDeliverySummary({
+```
+
+Replace with the same pattern:
+```typescript
+import { buildDeliverySummaryPayload } from './delivery-summary';
+// ... (add to existing imports)
+
+// At the call site:
+const dsInput = {
+  runId: ctx.runId,
+  userId: ctx.userId,
+  conversationId: ctx.conversationId,
+  // ... (keep all existing fields)
+};
+
+if (ctx.suppressDeliverySummary) {
+  dsPayload = buildDeliverySummaryPayload(dsInput);
+  console.log(`[DELIVERY_SUMMARY] Suppressed artefact emission (re-loop mode) — payload built with ${dsPayload.delivered_exact_count} exact leads`);
+} else {
+  dsPayload = await emitDeliverySummary(dsInput);
+}
+```
+
+NOTE: `buildDeliverySummaryPayload` is already exported from `delivery-summary.ts`. It builds the full payload without creating an artefact. This is exactly what we need.
+
+## WHAT THIS FIXES
+
+1. ✅ Per-loop executors still BUILD the full delivery payload (with leads, evidence, etc.)
+2. ✅ Per-loop executors DON'T create delivery_summary artefacts (no race condition)
+3. ✅ The rawResult.deliverySummary is populated (not null) → merge works → mergedExact has leads
+4. ✅ The canonical emitDeliverySummary in loop-skeleton fires and creates ONE delivery_summary
+5. ✅ The canonical uses PASS verdict when leads exist (not STOP)
+6. ✅ Breadcrumbs updated by milestone event after canonical
+
+## TESTING
+
+1. "find micropubs in Sussex that opened in the last 3 years" — 3 runs, all must show leads in card
+2. Check AFR: exactly ONE delivery_summary artefact per run (the canonical), NOT zero, NOT three
+3. Breadcrumbs show correct count matching supervisor message
+4. "find pubs that serve cask ale in Sussex" — regression: single-loop queries still work (no suppressDeliverySummary set)
+
+## CRITICAL
+
+- `buildDeliverySummaryPayload` is a SYNCHRONOUS function that returns the payload directly (not a Promise)
+- The import already exists in delivery-summary.ts: `export function buildDeliverySummaryPayload(input: DeliverySummaryInput): DeliverySummaryPayload`
+- Do NOT change ANY other code in the executors — only the emitDeliverySummary guard
+- The dsInput object must include ALL the same fields as the current emitDeliverySummary call — copy them exactly
