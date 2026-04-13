@@ -886,19 +886,67 @@ export async function runReloop(params: {
   // Fix C: fallback — if merge produced nothing but we have verified entities, build from accumulator
   if (mergedExact.length === 0 && deliveredLeads.length > 0) {
     console.warn(`[RELOOP_SKELETON] Merge found 0 delivered_exact but ${deliveredLeads.length} verified leads exist — building from entity accumulator`);
-    for (const lead of deliveredLeads) {
+    for (let i = 0; i < deliveredLeads.length; i++) {
+      const lead = deliveredLeads[i];
+      const entity = allEntities.find(e => e.name === lead.name);
+
       mergedExact.push({
+        index: i + 1,
         entity_id: lead.placeId || `lead:${lead.name}`,
         name: lead.name,
-        address: lead.address,
+        address: lead.address || '',
+        phone: lead.phone || null,
+        website: lead.website || null,
+        place_id: lead.placeId || null,
+        found_in_plan_version: 1,
         match_level: 'exact',
         soft_violations: [],
         match_valid: true,
-        match_summary: `Found via ${lead.source || 'search'}`,
-        source: lead.source,
+        match_summary: `Found via ${lead.source || 'web search'}`,
+        match_basis: [{
+          constraint_type: 'web_search',
+          constraint_value: normalizedGoal,
+          valid: true,
+          reason: `Verified via ${lead.source || 'web search'}`,
+        }],
+        match_evidence: entity?.evidence && Array.isArray(entity.evidence) && entity.evidence.length > 0
+          ? entity.evidence.map((e: any) => ({
+              constraint_type: 'web_search',
+              source_url: e.source_url || e.url || lead.website || null,
+              source_type: lead.source || 'gpt4o_web_search',
+              quote: e.text || e.snippet || e.quote || e.evidence || null,
+              matched_phrase: normalizedGoal,
+              confidence: 0.7,
+              verification_status: 'verified',
+            }))
+          : [{
+              constraint_type: 'web_search',
+              source_url: lead.website || null,
+              source_type: lead.source || 'gpt4o_web_search',
+              quote: null,
+              matched_phrase: normalizedGoal,
+              confidence: 0.7,
+              verification_status: 'verified',
+            }],
+        supporting_evidence: entity?.evidence && Array.isArray(entity.evidence)
+          ? entity.evidence.map((e: any) => ({
+              entity_name: lead.name,
+              constraint_type: 'web_search',
+              constraint_value: normalizedGoal,
+              source_url: e.source_url || e.url || lead.website || null,
+              source_type: lead.source || 'gpt4o_web_search',
+              quote: e.text || e.snippet || e.quote || e.evidence || null,
+              matched_phrase: normalizedGoal,
+              context_snippet: e.snippet || e.text || null,
+              verification_status: 'verified',
+              confidence: 0.7,
+            }))
+          : [],
+        constraint_verdicts: [],
+        source: lead.source || 'gpt4o_web_search',
       });
     }
-    console.log(`[RELOOP_SKELETON] Fallback built ${mergedExact.length} delivered_exact entries from entity accumulator`);
+    console.log(`[RELOOP_SKELETON] Fallback built ${mergedExact.length} delivered_exact entries with full UI fields`);
   }
 
   const lastDs = allDeliverySummaries[allDeliverySummaries.length - 1];

@@ -33,17 +33,23 @@ export async function gpt4oAdapter(input: ExecutorInput): Promise<ExecutorOutput
 
   const timeMs = Date.now() - startTime;
 
-  const entities: ExecutorEntity[] = result.leads.map(lead => ({
-    name: lead.name,
-    address: lead.address,
-    phone: lead.phone,
-    website: lead.website,
-    placeId: lead.placeId,
-    source: 'gpt4o_web_search',
-    verified: true,
-    verificationStatus: result.towerVerdict ?? 'unknown',
-    evidence: [],
-  }));
+  const entities: ExecutorEntity[] = result.leads.map(lead => {
+    const dsLeads = (result.deliverySummary as any)?.delivered_exact || [];
+    const dsLead = dsLeads.find((dl: any) => dl.name === lead.name);
+    const matchEvidence = dsLead?.match_evidence || dsLead?.supporting_evidence || [];
+
+    return {
+      name: lead.name,
+      address: lead.address,
+      phone: lead.phone,
+      website: lead.website,
+      placeId: lead.placeId,
+      source: 'gpt4o_web_search',
+      verified: true,
+      verificationStatus: result.towerVerdict ?? 'unknown',
+      evidence: matchEvidence,
+    };
+  });
 
   const searchQueriesExhausted = (result.deliverySummary as any)?.rounds_performed >= 3;
 
