@@ -1,0 +1,132 @@
+# FIX: Add current date awareness to all LLM prompts
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE PROBLEM
+
+The LLM models used (claude-3-5-haiku, gpt-4o-mini) have training cutoffs around early-mid 2024. They don't know today's date, who the current PM is, or any recent events. This causes temporal verification to fail ("opened in 2023" accepted as "recent") and chat responses to give outdated information.
+
+## THE FIX
+
+Add a dynamic date/context preamble to the key system prompts. This is a simple string prepended to existing prompts — no logic changes.
+
+### Step 1: Create a shared context utility
+
+Create a new file `server/supervisor/current-context.ts`:
+
+```typescript
+/**
+ * Dynamic context preamble for LLM prompts.
+ * Provides current date and basic facts so models with older training cutoffs
+ * can reason about time and avoid confidently stating outdated information.
+ */
+
+export function getCurrentDatePreamble(): string {
+  const now = new Date();
+  const readable = now.toLocaleDateString('en-GB', { 
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' 
+  });
+  const iso = now.toISOString().split('T')[0];
+  const oneYearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000)
+    .toISOString().split('T')[0];
+  const currentYear = now.getFullYear();
+
+  return `TODAY'S DATE: ${readable} (${iso}). Current year: ${currentYear}. "Last 12 months" = after ${oneYearAgo}.`;
+}
+
+export function getCurrentContextPreamble(): string {
+  const datePreamble = getCurrentDatePreamble();
+  const currentYear = new Date().getFullYear();
+
+  return `${datePreamble}
+
+IMPORTANT: Your training data may be outdated. If asked about current events, leaders, or recent developments, acknowledge that your information may not be current and suggest the user verify. Do not confidently state facts about events after early 2024.
+
+Basic current context (${currentYear}):
+- UK Prime Minister: Keir Starmer (Labour, since July 2024)
+- US President: Donald Trump (since January 2025)
+- UK currency: GBP. EU currency: EUR.
+- This app (Wyshbone) is a B2B lead generation tool based in the UK.`;
+}
+```
+
+### Step 2: Add date preamble to evidence judge prompts (constraint-led-extractor.ts)
+
+Import the utility:
+```typescript
+import { getCurrentDatePreamble } from './current-context';
+```
+
+Prepend `getCurrentDatePreamble()` to:
+- The Layer 2 judge system prompt (~line 1112)
+- The zero-hit fallback system prompt (~line 1027)
+
+Example:
+```typescript
+content: `${getCurrentDatePreamble()}\n\nYou are an evidence judge for a business lead finder...`
+```
+
+### Step 3: Add date preamble to mission extractor prompts (mission-extractor.ts)
+
+Import and prepend `getCurrentDatePreamble()` to:
+- Pass 1 system prompt
+- Pass 2 system prompt
+- Pass 3 system prompt (key_discriminator generation)
+
+### Step 4: Add full context to chat handler (chat-handler.ts)
+
+Import and prepend `getCurrentContextPreamble()` (the full version with PM etc.) to the `CHAT_SYSTEM_PROMPT`. The chat handler is the one that needs to answer general knowledge questions, so it gets the richer context:
+
+```typescript
+import { getCurrentContextPreamble } from './current-context';
+
+const CHAT_SYSTEM_PROMPT = `${getCurrentContextPreamble()}
+
+You are Wyshbone, a business intelligence assistant...`
+```
+
+### Step 5: Add date preamble to conversation router (conversation-router.ts)
+
+Import and prepend `getCurrentDatePreamble()` to `ROUTER_SYSTEM_PROMPT`. Not critical but costs nothing and ensures the router can handle time-aware messages correctly.
+
+### Step 6: Add date preamble to synonym expansion (constraint-led-extractor.ts)
+
+In the Haiku synonym expansion call, prepend the date so it generates current-year synonyms:
+
+```typescript
+system: `${getCurrentDatePreamble()} You generate search terms for finding evidence on business websites...`
+```
+
+### Step 7: Add date preamble to GPT-4o verification (mission-executor.ts)
+
+In the GPT-4o web search verification prompts, prepend the date.
+
+### Step 8: Add date preamble to location verification (mission-executor.ts)
+
+In the batch location verification Haiku call, prepend the date (not critical but free).
+
+## WHAT THIS ACHIEVES
+
+- **Temporal verification**: "Opened in May 2023" is correctly rejected for "last 12 months" queries because the LLM knows today is 2026
+- **Chat responses**: "Who's the PM?" gets "Keir Starmer" instead of an outdated answer or "I don't know"
+- **Synonym expansion**: Generates "est. 2026" and "est. 2025" instead of "est. 2024"
+- **General awareness**: The LLM knows the current year for any date-related reasoning
+
+## UPDATING THE CONTEXT
+
+The `getCurrentContextPreamble()` function contains a small block of basic facts (PM, President). This should be updated when major changes happen (elections, etc.). It's one file, one function — easy to maintain.
+
+## TESTING
+
+1. Chat: "what year is it?" — should say 2026
+2. Chat: "who is the UK prime minister?" — should say Keir Starmer
+3. Search: "micropubs that opened in the last 12 months in Sussex" — should reject 2023 openings
+4. Search: "pubs in Arundel" — should still work (date doesn't affect non-temporal queries)
+
+## CRITICAL RULES
+
+1. Use `new Date()` for all date calculations — never hardcode dates
+2. The basic facts block (PM, President) IS hardcoded — that's intentional, update it when needed
+3. Keep the preamble SHORT — it's prepended to every prompt, don't add essays
+4. The date preamble goes on ALL prompts; the full context (with PM etc.) only goes on the chat handler
+5. Do NOT change any prompt logic — just prepend the context string

@@ -9,6 +9,7 @@
  */
 
 import { callLLMText } from './llm-failover';
+import { getCurrentDatePreamble } from './current-context';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -43,7 +44,9 @@ export interface RouterInput {
 
 // ─── System Prompt ──────────────────────────────────────────────────────────
 
-const ROUTER_SYSTEM_PROMPT = `You are the conversation router for Wyshbone, a B2B lead generation app that finds businesses for users. You read the full conversation and decide what should happen next.
+const ROUTER_SYSTEM_PROMPT = `${getCurrentDatePreamble()}
+
+You are the conversation router for Wyshbone, a B2B lead generation app that finds businesses for users. You read the full conversation and decide what should happen next.
 
 Return ONLY a JSON object. No markdown, no backticks, no commentary.
 

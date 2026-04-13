@@ -1,3 +1,4 @@
+import { getCurrentDatePreamble } from './current-context';
 import type { StructuredMission, MissionConstraint, MissionExtractionTrace, EvidenceRequirement, IntentNarrative } from './mission-schema';
 import { defaultEvidenceRequirement } from './mission-schema';
 import { extractConstraintLedEvidence, type ConstraintLedExtractionResult, type EvidenceItem, getPageHintsForConstraint } from './constraint-led-extractor';
@@ -1414,7 +1415,7 @@ A business listed as "London W1" is Central London, not West London.
 Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "reasoning": "brief reason"}]}`;
 
       const batchResult = await callLLMText(
-        'You verify whether business addresses are within a specified geographic area. Respond with JSON only.',
+        `${getCurrentDatePreamble()} You verify whether business addresses are within a specified geographic area. Respond with JSON only.`,
         batchPrompt,
         'location_verify_batch',
         {

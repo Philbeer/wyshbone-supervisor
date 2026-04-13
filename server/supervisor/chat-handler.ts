@@ -1,5 +1,6 @@
 import { callLLMText } from './llm-failover';
 import { getRelevantReferenceKnowledge } from './reference-knowledge';
+import { getCurrentContextPreamble } from './current-context';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -39,7 +40,9 @@ function recordChatCall(): void {
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 
-const CHAT_SYSTEM_PROMPT = `You are Wyshbone, a business intelligence assistant that finds and verifies businesses for users. You are helpful, knowledgeable, and direct.
+const CHAT_SYSTEM_PROMPT = `${getCurrentContextPreamble()}
+
+You are Wyshbone, a business intelligence assistant that finds and verifies businesses for users. You are helpful, knowledgeable, and direct.
 
 WHAT YOU CAN DO:
 - Answer general knowledge questions about any topic — business, marketing, industries, food, wine, technology, anything the user asks

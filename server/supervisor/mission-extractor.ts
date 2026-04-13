@@ -1,3 +1,4 @@
+import { getCurrentDatePreamble } from './current-context';
 import {
   type StructuredMission,
   type MissionExtractionTrace,
@@ -843,7 +844,7 @@ export async function extractStructuredMission(
   let pass1RawResult = '';
   const pass1Start = Date.now();
   try {
-    pass1RawResult = await callLLM(model, PASS1_SYSTEM_PROMPT, pass1Prompt);
+    pass1RawResult = await callLLM(model, `${getCurrentDatePreamble()}\n\n${PASS1_SYSTEM_PROMPT}`, pass1Prompt);
   } catch (err: any) {
     const duration = Date.now() - pass1Start;
     const trace: MissionExtractionTrace = {
@@ -917,7 +918,7 @@ Produce the intent narrative JSON for this search.`;
 
   const pass3Start = Date.now();
   try {
-    pass3RawJson = await callLLM(model, PASS3_SYSTEM_PROMPT, pass3Prompt);
+    pass3RawJson = await callLLM(model, `${getCurrentDatePreamble()}\n\n${PASS3_SYSTEM_PROMPT}`, pass3Prompt);
     pass3DurationMs = Date.now() - pass3Start;
     const pass3Cleaned = cleanJsonResponse(pass3RawJson);
     const pass3Parsed = JSON.parse(pass3Cleaned);
@@ -981,7 +982,7 @@ Convert this semantic interpretation into the structured mission JSON schema:
   let pass2RawResponse = '';
   const pass2Start = Date.now();
   try {
-    pass2RawResponse = await callLLM(model, PASS2_SYSTEM_PROMPT, pass2Prompt);
+    pass2RawResponse = await callLLM(model, `${getCurrentDatePreamble()}\n\n${PASS2_SYSTEM_PROMPT}`, pass2Prompt);
   } catch (err: any) {
     const pass2Duration = Date.now() - pass2Start;
     const totalDuration = pass1Duration + pass3DurationMs + pass2Duration;

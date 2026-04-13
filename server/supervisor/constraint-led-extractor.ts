@@ -1,3 +1,5 @@
+import { getCurrentDatePreamble } from './current-context';
+
 export interface ConstraintContext {
   type: string;
   field: string;
@@ -900,7 +902,7 @@ export async function extractConstraintLedEvidence(
                 model: synonymModel,
                 max_tokens: 200,
                 temperature: 0,
-                system: 'You generate search terms for finding evidence on business websites. Given a concept, return a JSON array of 8-15 terms including: (1) direct synonyms and alternative phrases, (2) well-known brand names or specific examples, (3) inferential signal phrases — words or phrases that would IMPLY the concept even if it\'s not stated directly. For example, "independent" might be signalled by "family-run", "owner-operated", "est. 2005", "boutique". Return JSON only, no markdown.',
+                system: `${getCurrentDatePreamble()} You generate search terms for finding evidence on business websites. Given a concept, return a JSON array of 8-15 terms including: (1) direct synonyms and alternative phrases, (2) well-known brand names or specific examples, (3) inferential signal phrases — words or phrases that would IMPLY the concept even if it's not stated directly. For example, "independent" might be signalled by "family-run", "owner-operated", "est. 2005", "boutique". Return JSON only, no markdown.`,
                 messages: [{
                   role: 'user',
                   content: (() => {
