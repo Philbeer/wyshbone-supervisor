@@ -1,0 +1,166 @@
+# HARDENING: Make the LLM conversation router the sole routing authority
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## CONTEXT
+
+The Supervisor has a well-built LLM-powered conversation router in `server/supervisor/conversation-router.ts` that uses Claude Haiku to classify every message into SEARCH, CLARIFY, DISCUSS, ITERATE, or CHAT. This router correctly handles edge cases like "tell me about wine" (CHAT) vs "find wine merchants in Surrey" (SEARCH).
+
+However, the router is gated behind `CONVERSATION_ROUTER_ENABLED=true` and there are still legacy regex-based classification layers that run alongside or before it. These need to be cleaned up so the LLM router is the ONLY routing decision-maker.
+
+## WHAT TO DO
+
+### Step 1: Verify CONVERSATION_ROUTER_ENABLED is set
+
+Check Replit Secrets. If `CONVERSATION_ROUTER_ENABLED` is not set to `true`, add it:
+```
+CONVERSATION_ROUTER_ENABLED=true
+```
+
+This is the single most important step. Without this, the conversation router never runs.
+
+### Step 2: Remove tryFastPath from conversation-router.ts
+
+In `server/supervisor/conversation-router.ts`, find the `tryFastPath` function (around line 251) and the `INSTANT_CHAT` array (around line 245).
+
+**Delete:**
+- The entire `INSTANT_CHAT` array
+- The entire `tryFastPath` function
+- The call to `tryFastPath` in `routeConversation` (around line 288)
+
+The `routeConversation` function should go straight to building context and calling the LLM. No fast paths, no regex, no exceptions.
+
+**Before (current code):**
+```typescript
+export async function routeConversation(input: RouterInput): Promise<RouterDecision> {
+  const startTime = Date.now();
+
+  // Fast path — no LLM needed
+  const fast = tryFastPath(input.currentMessage, input.previousResults.exists);
+  if (fast) {
+    console.log(`[ROUTER] Fast path: route=${fast.route} (${Date.now() - startTime}ms)`);
+    return fast;
+  }
+
+  // Build context and call LLM
+  ...
+```
+
+**After:**
+```typescript
+export async function routeConversation(input: RouterInput): Promise<RouterDecision> {
+  const startTime = Date.now();
+
+  // ALL messages go through the LLM router — no fast paths, no regex
+  // Build context and call LLM
+  ...
+```
+
+### Step 3: Make the conversation router unconditional in supervisor.ts
+
+In `server/supervisor.ts`, the conversation router block starts with:
+```typescript
+if (process.env.CONVERSATION_ROUTER_ENABLED === 'true') {
+```
+
+Change this to always run. Remove the `if` guard entirely — the router should ALWAYS execute. If you want a safety valve, make it opt-OUT instead of opt-in:
+
+```typescript
+if (process.env.CONVERSATION_ROUTER_DISABLED !== 'true') {
+```
+
+This way the router runs by default, and you'd have to explicitly disable it.
+
+### Step 4: Remove the old message-classifier fallback for chat
+
+In `server/supervisor.ts`, after the conversation router block, there's a section that runs `classifyMessage` from `message-classifier.ts`:
+
+```typescript
+if (!isClarifyResponse && !missionQueryId && !_routerHandledSearch) {
+  const { classifyMessage: classifyMsg } = await import('./supervisor/message-classifier');
+  const classification = classifyMsg(rawMsg);
+  classifiedMessageClass = classification.messageClass;
+  ...
+  if (classification.messageClass === 'chat' && process.env.CONVERSATION_ROUTER_ENABLED !== 'true') {
+    // Handle chat without pipeline
+```
+
+Since the conversation router is now always-on:
+- The `CONVERSATION_ROUTER_ENABLED !== 'true'` condition in the chat handler means it will NEVER fire (which is correct — the router already handled CHAT)
+- The message-classifier still runs for `monitor_request` and `followup` detection, which is fine for now
+- But add a log line so you know when it fires: `console.log('[MESSAGE_CLASSIFIER] Still running as secondary check (router is primary)')`
+
+### Step 5: Ensure terminal states properly close runs
+
+When the conversation router handles CHAT or CLARIFY, the current code calls:
+- `storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', ... })`
+- `this.postArtefactToUI(...)` with `run_complete: true`
+
+Verify these are both executing. The UI needs `run_complete: true` in the diagnostic payload to know the run is done and to reset its polling state. If the `postArtefactToUI` call is failing silently, the UI will hang.
+
+Add explicit error handling:
+```typescript
+const uiSignalResult = await this.postArtefactToUI({
+  runId: jobId,
+  clientRequestId,
+  type: 'diagnostic',
+  payload: {
+    status: 'CHAT',
+    leads: [],
+    message: decision.chat_response,
+    router_verdict: 'chat',
+    run_complete: true,
+  },
+  userId: task.user_id,
+  conversationId: task.conversation_id,
+}).catch((err) => {
+  console.error(`[ROUTER] CRITICAL: Failed to signal UI that run is complete: ${err.message}`);
+  return null;
+});
+
+if (!uiSignalResult) {
+  console.error(`[ROUTER] UI may hang — run_complete signal failed for runId=${jobId}`);
+}
+```
+
+### Step 6: Add a general knowledge / chat response to the router prompt
+
+The current CHAT examples in the router system prompt are all "I don't know what you want" redirects. Add examples that show the router can give brief, helpful general knowledge answers before redirecting:
+
+In the `ROUTER_SYSTEM_PROMPT` in `conversation-router.ts`, update the CHAT section examples:
+
+```
+### CHAT
+Greetings, gibberish, off-topic, general knowledge questions, or anything that is NOT a search/lead-finding intent.
+Set route="CHAT" and chat_response=a friendly response. For general knowledge questions, give a brief helpful answer (1-2 sentences) then redirect to what Wyshbone does.
+Examples:
+- "hi" → CHAT ("Hey! I can find businesses and leads for you. What are you looking for and where?")
+- "tell me about wine" → CHAT ("Wine is a fascinating world! But I'm a business finder — I can help you find wine merchants, vineyards, or wine bars. Just tell me a location!")
+- "what is AI" → CHAT ("AI is technology that enables machines to perform tasks that typically require human intelligence. I'm an AI-powered business finder — want me to find some businesses for you?")
+- "what can you do" → CHAT ("I find businesses and leads! Tell me a type of business and a location — like 'find cafes in Brighton'.")
+```
+
+This way "tell me about wine" gets a useful response that also guides the user back to Wyshbone's purpose.
+
+## TESTING
+
+After applying these changes, test with:
+
+1. `"tell me about wine"` → Should route as CHAT with a helpful response (NOT "what type of businesses?")
+2. `"can you tell me about wine"` → Same as above
+3. `"hi"` → CHAT greeting
+4. `"find pubs in arundel"` → SEARCH with entity="pubs" location="Arundel"
+5. `"find wine merchants in Surrey"` → SEARCH with entity="wine merchants" location="Surrey"
+6. `"find companies in kent"` → CLARIFY (entity too vague)
+7. `"sdfghjkl"` → CHAT (gibberish)
+
+Check the Live Activity panel — every message should show the LLM router decision, never `deterministic_router` or `model: "none"`.
+
+## CRITICAL RULES
+
+1. Do NOT add new regex patterns anywhere — we are REMOVING all regex routing
+2. Do NOT add new env variables — simplify, don't add complexity
+3. The LLM router must be the ONLY thing that decides routing
+4. Every test message must produce at least a diagnostic artefact showing the router decision
+5. The `tryFastPath` function must be completely removed, not just disabled
+6. Keep the LLM fallback (the try/catch in routeConversation that returns a default SEARCH route if the LLM fails) — that's a safety net, not a regex
