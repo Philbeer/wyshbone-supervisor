@@ -1,0 +1,51 @@
+# BUG FIX: GPT-4o re-loop and batch verification missing date awareness
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE BUG
+
+Loop 1 (Google Places + website evidence) correctly rejects old micropubs because the evidence judge prompts have the date. But when Loop 1 returns 0 results, the re-loop fires Loop 2 (GPT-4o web search) which has NO date in its verification prompts. GPT-4o searches the web, finds micropubs from 2023, and verifies them as "recent" because it doesn't know today is 2026.
+
+## WHICH FILES NEED THE DATE
+
+Use the shared utility that was already created:
+
+```typescript
+import { getCurrentDatePreamble } from './current-context';
+```
+
+Then prepend `getCurrentDatePreamble()` to the verification prompts in EACH of these files:
+
+### Fix 1: `server/supervisor/gpt4o-search.ts`
+
+This is the re-loop's GPT-4o web search path. Find ALL prompts that ask GPT-4o to verify constraints (search for `constraint_met` or `business_found` in the file). Prepend the date to each prompt:
+
+```typescript
+const prompt = `${getCurrentDatePreamble()}\n\nSearch for "${leadName}" in "${location}"...`
+```
+
+### Fix 2: `server/supervisor/mission-executor.ts` — batch GPT-4o verification (~line 684)
+
+The `batchGpt4oVerification` function has its own prompt. Find the prompt that contains `constraint_met` around line 684. Prepend the date:
+
+```typescript
+const prompt = `${getCurrentDatePreamble()}\n\nSearch for "${task.lead.name}" in "${location}"...`
+```
+
+Note: The GPT-4o FALLBACK prompt at line ~1846 already has the date (from Prompt 13). Only the BATCH verification prompt at ~684 is missing it.
+
+### Fix 3: `server/supervisor/refine-executor.ts` — refine verification (~lines 422 and 637)
+
+The refine executor has TWO verification prompts. Find both (search for `constraint_met` in the file). Prepend the date to each.
+
+## THAT'S IT
+
+Three files, prepend `getCurrentDatePreamble()` to every GPT-4o verification prompt that asks about constraints. The utility already exists from the previous prompt — just import and use it.
+
+## TESTING
+
+"find micropubs that opened in Sussex in the last 12 months" — Loop 1 should return 0 (correct). Loop 2 (re-loop) should ALSO return 0 because it now knows 2023 is not within the last 12 months. The system should honestly report "no micropubs found that opened recently" rather than delivering old ones.
+
+## WHY THIS MATTERS
+
+Every path that can verify a constraint needs to know today's date. The primary path was fixed, but the re-loop and refine paths were missed. This is the same principle as the EARLY_EXIT_VERDICTS pattern — when you add something to one path, check ALL paths.

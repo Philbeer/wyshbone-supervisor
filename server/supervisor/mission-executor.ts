@@ -676,7 +676,9 @@ export async function batchGpt4oVerification(
         ? task.constraint.value
         : String(task.constraint.value ?? '');
 
-      const prompt = `Search for "${task.lead.name}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${constraintValue}".
+      const prompt = `${getCurrentDatePreamble()}
+
+Search for "${task.lead.name}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${constraintValue}".
 
 Respond with JSON only, no markdown fences, no other text:
 {
@@ -690,7 +692,8 @@ Respond with JSON only, no markdown fences, no other text:
 IMPORTANT:
 - business_found means you found information about this specific business
 - constraint_met means the constraint "${constraintValue}" IS genuinely true for this business
-- If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false`;
+- If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false
+- For time-based constraints like "opened recently" or "last 12 months", use today's date above to evaluate whether any dates found are within the required window`;
 
       const model = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
       const resp = await fetch('https://api.openai.com/v1/responses', {

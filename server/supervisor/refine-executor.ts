@@ -1,3 +1,4 @@
+import { getCurrentDatePreamble } from './current-context';
 import { storage } from '../storage';
 import { createArtefact } from './artefacts';
 import { logAFREvent } from './afr-logger';
@@ -416,7 +417,9 @@ async function liveRefineWithFetch(
 
         const fbResults = await Promise.allSettled(
           fbBatch.map(async (lead) => {
-            const prompt = `Search for "${lead.name}". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${extracted.value}" is genuinely true for this specific business.
+            const prompt = `${getCurrentDatePreamble()}
+
+Search for "${lead.name}". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${extracted.value}" is genuinely true for this specific business.
 
 Respond with JSON only, no markdown fences:
 {"business_found": true/false, "constraint_met": true/false, "confidence": "high"/"medium"/"low", "reasoning": "one sentence", "source_url": "URL or null"}
@@ -424,7 +427,8 @@ Respond with JSON only, no markdown fences:
 IMPORTANT:
 - constraint_met means "${extracted.value}" IS genuinely true for this business
 - Check review sites, event listings, social media — not just the business's own website
-- If the business exists but does NOT match, set business_found=true, constraint_met=false`;
+- If the business exists but does NOT match, set business_found=true, constraint_met=false
+- For time-based constraints like "opened recently" or "last 12 months", use today's date above to determine whether any dates found are within the required window`;
 
             const resp = await fetch('https://api.openai.com/v1/responses', {
               method: 'POST',
@@ -631,7 +635,9 @@ export async function executeRefine(
 
           const fbResults = await Promise.allSettled(
             fbBatch.map(async (lead) => {
-              const prompt = `Search for "${lead.name}". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${constraintValue}" is genuinely true for this specific business.
+              const prompt = `${getCurrentDatePreamble()}
+
+Search for "${lead.name}". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${constraintValue}" is genuinely true for this specific business.
 
 Respond with JSON only, no markdown fences:
 {"business_found": true/false, "constraint_met": true/false, "confidence": "high"/"medium"/"low", "reasoning": "one sentence", "source_url": "URL or null"}
@@ -639,7 +645,8 @@ Respond with JSON only, no markdown fences:
 IMPORTANT:
 - constraint_met means "${constraintValue}" IS genuinely true for this business
 - Check review sites, event listings, social media — not just the business's own website
-- If the business exists but does NOT match, set business_found=true, constraint_met=false`;
+- If the business exists but does NOT match, set business_found=true, constraint_met=false
+- For time-based constraints like "opened recently" or "last 12 months", use today's date above to determine whether any dates found are within the required window`;
 
               const resp = await fetch('https://api.openai.com/v1/responses', {
                 method: 'POST',

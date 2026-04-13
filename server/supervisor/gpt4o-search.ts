@@ -8,6 +8,7 @@
  */
 
 import { createArtefact } from './artefacts';
+import { getCurrentDatePreamble } from './current-context';
 import { judgeArtefact } from './tower-artefact-judge';
 import {
   emitDeliverySummary,
@@ -82,7 +83,9 @@ function buildSearchPrompt(ctx: Gpt4oSearchContext, angle: string): string {
     ? `\nSearch angle: ${angle}\n`
     : '';
 
-  return `You are a research assistant finding specific entities. Search the web thoroughly.${angleNote}
+  return `${getCurrentDatePreamble()}
+
+You are a research assistant finding specific entities. Search the web thoroughly.${angleNote}
 TASK: Find ${entityDesc} in ${ctx.location} that match the following search. ${constraintText}
 Location: ${ctx.location}, ${ctx.country}
 
