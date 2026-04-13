@@ -1,0 +1,83 @@
+# BUG FIX: Temporal evidence judge accepts wrong date signals
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE BUG
+
+The evidence judge has today's date but still accepts wrong temporal evidence:
+- "Opened February 2022, most recent update February 2026" → LLM sees "2026" and says verified. WRONG — it opened in 2022.
+- "Operational for over 12 months, reviews from July 2024" → LLM matches "12 months" as a phrase. WRONG — opened 2+ years ago.
+- "Moved to new location in February 2026" → LLM sees recent date. WRONG — moving is not opening.
+
+## ROOT CAUSE
+
+The date preamble says "Use this to evaluate any time-based constraints" but doesn't teach the LLM WHAT to evaluate. The LLM pattern-matches on any recent date instead of specifically checking the OPENING date.
+
+## THE FIX
+
+In every prompt that has the date preamble, REPLACE the current vague instruction with explicit temporal reasoning rules. Find and update these in:
+
+1. `constraint-led-extractor.ts` — Layer 2 judge (~line 1044) and fallback (~line 1173)
+2. `mission-executor.ts` — batch verification (~line 696) and GPT-4o fallback (~line 1849)  
+3. `refine-executor.ts` — both verification prompts (~lines 431 and 649)
+4. `gpt4o-search.ts` — all verification prompts
+
+### Replace the current date instruction
+
+Current (in all files):
+```
+Use this to evaluate any time-based constraints. "Last 12 months" means after [cutoff date].
+```
+
+Replace with:
+```
+TEMPORAL VERIFICATION RULES (apply when constraint involves time, recency, or "opened recently"):
+1. Find the OPENING or ESTABLISHMENT date of the business. This is the ONLY date that matters.
+2. Check: is that opening date AFTER ${cutoffDate}? If yes → constraint met. If no → constraint NOT met.
+3. These are NOT valid evidence of recent opening:
+   - A recent website UPDATE or redesign (businesses update sites regardless of age)
+   - A recent MOVE or relocation (moving to new premises ≠ opening a new business)
+   - "Operating for over 12 months" (this means the business is OLD, not new)
+   - Recent Google reviews (old businesses get new reviews too)
+   - A recent Companies House filing update (routine annual filings)
+   - The current year appearing anywhere on the website (copyright notices, blog posts)
+4. These ARE valid evidence of recent opening:
+   - "Opened in [date after ${cutoffDate}]" or "Established [date after ${cutoffDate}]"
+   - "Grand opening" or "Now open" with a date after ${cutoffDate}
+   - "New micropub" or "newly opened" with supporting date evidence
+   - First Google reviews appearing only after ${cutoffDate}
+5. If the opening date is BEFORE ${cutoffDate}, the constraint is NOT met regardless of any other recent activity.
+6. If no opening date can be found, the constraint is NOT met (cannot verify without evidence).
+```
+
+### IMPORTANT: Generate the cutoff date dynamically
+
+The cutoff should be calculated from the constraint value. For "last 12 months":
+
+```typescript
+const cutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+```
+
+For "last 6 months":
+```typescript
+const cutoffDate = new Date(Date.now() - 182 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+```
+
+Pass this into the prompt so the LLM has the exact cutoff.
+
+## TESTING
+
+Run "find micropubs in Sussex that opened in the last 12 months" and check each result:
+
+- A business that opened in 2022 should be REJECTED (even if it had a 2026 website update)
+- A business that moved in 2026 but opened in 2019 should be REJECTED
+- A business that says "operational for over 12 months" should be REJECTED (it's old)
+- A business that says "Opened December 2025" should be ACCEPTED (after April 2025 cutoff)
+- BeerBelly Micropub (December 2025) should PASS ✓
+
+## CRITICAL RULES
+
+1. ONLY the opening/establishment date matters for temporal constraints
+2. The explicit "NOT valid" list in the prompt is essential — the LLM needs negative examples
+3. No opening date found = constraint NOT met (fail closed for temporal)
+4. This fix goes in ALL files that have the date preamble — same list as Prompt 13b
