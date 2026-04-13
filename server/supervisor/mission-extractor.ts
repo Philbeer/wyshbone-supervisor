@@ -276,11 +276,13 @@ For all other constraint types, set synonyms to null.
 
 INFERENTIAL CONSTRAINT RULE:
 When the user's query includes a characteristic that is typically INFERRED rather than explicitly stated (such as "independent", "family-run", "boutique", "local", "high-end", "budget", "artisan", "specialist"), set "reasoning_mode": "inferential" on the constraint. For direct evidence constraints (specific products, services, facilities explicitly stated on websites), set "reasoning_mode": "direct" or omit the field.
+TEMPORAL CONSTRAINTS are also inferential — a business website will rarely say "we opened recently". Instead, look for temporal signals. Always set "reasoning_mode": "inferential" on time_constraint constraints and populate synonyms with temporal signal phrases (see time_constraint section below).
 For inferential constraints, the synonyms array should include SIGNAL PHRASES — words or phrases that would imply the characteristic, not just synonyms for it.
 Examples:
   value: "independent" → reasoning_mode: "inferential", synonyms: ["independently owned", "family-run", "owner-operated", "family business", "established by", "founded by", "boutique", "locally owned", "not a chain"]
   value: "family-run" → reasoning_mode: "inferential", synonyms: ["family business", "family owned", "run by the family", "family name", "father and son", "husband and wife", "generations"]
   value: "high-end" → reasoning_mode: "inferential", synonyms: ["luxury", "premium", "upmarket", "exclusive", "fine dining", "bespoke", "artisan", "award-winning"]
+  value: "recent" (time_constraint) → reasoning_mode: "inferential", synonyms: ["now open", "grand opening", "just opened", "newly opened", "est. 2025", "est. 2026", "new opening", "under new management"]
 
 ALLOWED OPERATORS PER TYPE — you MUST only use operators from this list:
 
@@ -324,10 +326,11 @@ attribute_check: ${JSON.stringify(ATTRIBUTE_CHECK_OPERATORS)}
 time_constraint: ${JSON.stringify(TIME_CONSTRAINT_OPERATORS)}
   field: the relevant date field (e.g. "opening_date", "established_date")
   value: the time window description
+  SYNONYMS FOR TIME CONSTRAINTS: For time_constraint values like "recent" or "within the last 6 months", populate the synonyms array with temporal signal phrases — words or phrases that would appear on a business website or in Google review data to indicate recency. These are used by the evidence pipeline to find temporal signals even when exact phrases like "opened recently" don't appear.
   Examples:
-    "opened within the last 6 months" → { "type": "time_constraint", "field": "opening_date", "operator": "within_last", "value": "6 months", "hardness": "hard" }
-    "opened recently" → { "type": "time_constraint", "field": "opening_date", "operator": "within_last", "value": "recent", "hardness": "hard" }
-    "established before 2020" → { "type": "time_constraint", "field": "established_date", "operator": "before", "value": "2020", "hardness": "hard" }
+    "opened within the last 6 months" → { "type": "time_constraint", "field": "opening_date", "operator": "within_last", "value": "6 months", "hardness": "hard", "synonyms": ["now open", "grand opening", "just opened", "newly opened", "est. 2025", "est. 2026", "new opening", "under new management", "opening 2025", "opening 2026", "welcome to our new"] }
+    "opened recently" → { "type": "time_constraint", "field": "opening_date", "operator": "within_last", "value": "recent", "hardness": "hard", "synonyms": ["now open", "grand opening", "just opened", "newly opened", "est. 2025", "est. 2026", "new opening", "under new management", "opening 2025", "opening 2026", "welcome to our new"] }
+    "established before 2020" → { "type": "time_constraint", "field": "established_date", "operator": "before", "value": "2020", "hardness": "hard", "synonyms": ["est. 19", "since 19", "founded 19", "established 19", "serving since", "trading since", "over 20 years"] }
 
 status_check: ${JSON.stringify(STATUS_CHECK_OPERATORS)}
   field: the status aspect (e.g. "service_offered", "operating_status", "availability")
@@ -567,6 +570,9 @@ RULES:
   If the user's constraint is a characteristic that businesses may not explicitly state (e.g. "independent", "family-run", "boutique", "high-end", "local"), generate a key_discriminator that describes INFERENTIAL SIGNALS a reasonable person would look for, not just direct statements. For example:
   - "independent hairdressers" → "appears independently owned — signals include: owner's name in business name or on website, single location, no franchise or chain branding, personal/local tone. A business that is part of a known chain (Toni & Guy, Supercuts, Rush) is NOT independent."
   - "family-run restaurants" → "appears to be a family business — signals include: family names on website, 'family' in business name, multi-generational references, personal ownership claims."
+  If the user's constraint involves TIME (opened recently, new, established before X, etc.), generate a key_discriminator that describes TEMPORAL SIGNALS:
+  - "opened recently" → "appears to have opened within the last 12 months — signals include: 'now open' or 'grand opening' messaging, establishment date of 2025 or 2026, Google reviews only from recent months, modern website with no historical content, 'under new management' or 'formerly known as' references. A business with reviews going back several years is NOT recently opened."
+  - "established before 2000" → "appears to have been established before 2000 — signals include: 'est.' date before 2000, 'since 19XX' references, historical photos, long trading history mentioned."
   KEY_DISCRIMINATOR EXAMPLES:
   User: "pubs that serve cask ale"
   BAD: "serves cask ale as a primary offering — not just a selection of beers that may include cask ale"

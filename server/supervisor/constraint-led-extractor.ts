@@ -908,6 +908,10 @@ export async function extractConstraintLedEvidence(
 Example: "cask ale" → ["cask ale", "real ale", "traditional ale", "hand-pulled", "hand pump", "cask-conditioned", "cask beer", "real ales", "Harvey's", "Timothy Taylor", "London Pride", "cask marque"]
 
 Example: "independent" → ["independent", "independently owned", "family-run", "owner-operated", "family business", "established by", "founded by", "est.", "sole proprietor", "boutique", "not a chain", "locally owned"]
+
+Example: "opened recently" → ["opened recently", "now open", "grand opening", "just opened", "newly opened", "new opening", "est. 2025", "est. 2026", "established 2025", "established 2026", "opening soon", "we're open", "doors are open", "welcome to our new", "under new management", "formerly known as", "opening day", "first anniversary"]
+
+Example: "new" → ["new", "newly opened", "just opened", "now open", "brand new", "opening 2025", "opening 2026", "launched", "debut", "inaugural"]
 ${entityType ? `
 Also include a few terms that signal this is genuinely a ${entityType} (not a related but wrong business type). For example, if searching for pubs: "opening hours", "bar menu", "ales on tap" signal a genuine pub; "brewing capacity", "wholesale", "distribution" signal a brewery (not a pub).
 ` : ''}
@@ -1047,6 +1051,15 @@ Look for TWO types of evidence:
    - A restaurant is "family-run" if: family names appear, "est. by the Johnsons", personal/warm tone
    - A venue is "high-end" if: premium pricing, luxury language, designer references
    - A business is "local" if: community emphasis, local sourcing, neighbourhood identity
+   - "Opened recently" / "new" → website says "now open", "grand opening 2025", "est. 2025/2026", modern template with no historical content, "welcome to our new [business]", "under new management". Google reviews starting only in the last 6-12 months is a strong signal.
+   - "Established" / "long-running" → "est. 1985", "serving since", "family-owned for 30 years", historical photos, references to decades of history
+   - "Closing" / "at risk" → "closing down", "last chance", "final weeks", "everything must go"
+
+For time constraints, combine multiple signals:
+- Strong: explicit date ("est. 2025"), "now open" messaging, Google reviews only from last 12 months
+- Medium: modern website, no historical content, "under new management"
+- Weak: no clear signals either way
+A business with 2+ medium signals or 1+ strong signal satisfies "opened recently". A business with Google reviews going back several years does NOT satisfy "opened recently".
 
 Be reasonably inclusive — accept genuine signals but don't force a match from nothing. If you infer the characteristic, briefly state what signals you're reading.${isInferential ? '\n\nIMPORTANT: This constraint is classified as INFERENTIAL — prioritise reading signals and indirect evidence over requiring explicit statements.' : ''}
 
@@ -1170,9 +1183,18 @@ There are two types of evidence:
    - "Local" → emphasis on community, local sourcing, neighbourhood references
    - "Boutique" → small scale, curated selection, personal service emphasis
    - "Specialist" → niche focus, depth of expertise in specific area
+   - "Opened recently" / "new" → website says "now open", "grand opening 2025", "est. 2025/2026", very modern template, "welcome to our new [business]", "under new management", no historical content older than 12 months. Google reviews starting only in the last 6-12 months is a strong signal.
+   - "Established" / "long-running" → "est. 1985", "serving since", "family-owned for 30 years", historical photos, references to decades of history
+   - "Closing" / "at risk" → "closing down", "last chance", "final weeks", "everything must go"
 
 For direct-evidence constraints (specific products, services, facilities), require explicit mention.
 For inferential constraints (characteristics, qualities, business type), accept reasonable inference from signals.
+
+For time constraints, combine multiple signals:
+- Strong: explicit date ("est. 2025"), "now open" messaging, Google reviews only from last 12 months
+- Medium: modern website, no historical content, "under new management"
+- Weak: no clear signals either way
+A business with 2+ medium signals or 1+ strong signal satisfies "opened recently". A business with Google reviews going back several years does NOT satisfy "opened recently".
 
 Rules:
 - Do not force a match from nothing — there must be SOME signal

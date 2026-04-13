@@ -1566,6 +1566,43 @@ Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "re
         }
       }
 
+      const timeConstraint = constraintsToVerify.find(c => c.type === 'time_constraint');
+      if (timeConstraint && (lead as any).reviews && Array.isArray((lead as any).reviews)) {
+        const reviews = (lead as any).reviews as any[];
+        const reviewDates = reviews
+          .map((r: any) => {
+            const ts = r.time ? new Date(r.time * 1000) : r.date ? new Date(r.date) : r.created_at ? new Date(r.created_at) : null;
+            return ts;
+          })
+          .filter((d: Date | null): d is Date => d !== null && !isNaN(d.getTime()))
+          .sort((a: Date, b: Date) => a.getTime() - b.getTime());
+
+        if (reviewDates.length > 0) {
+          const earliestReview = reviewDates[0];
+          const monthsAgo = (Date.now() - earliestReview.getTime()) / (1000 * 60 * 60 * 24 * 30);
+          const timeValue = typeof timeConstraint.value === 'string' ? timeConstraint.value : String(timeConstraint.value ?? '');
+
+          if (timeConstraint.operator === 'within_last' && monthsAgo <= 12) {
+            console.log(`[TIME_EVIDENCE] "${lead.name}" — earliest Google review is ${Math.round(monthsAgo)} months old — consistent with "${timeValue}"`);
+            (lead as any)._temporal_evidence = {
+              source: 'google_reviews',
+              earliest_review: earliestReview.toISOString(),
+              months_ago: Math.round(monthsAgo),
+              signal: `Earliest Google review is from ${Math.round(monthsAgo)} months ago, suggesting the business opened around that time.`,
+            };
+          } else if (timeConstraint.operator === 'within_last' && monthsAgo > 24) {
+            console.log(`[TIME_EVIDENCE] "${lead.name}" — earliest Google review is ${Math.round(monthsAgo)} months old — NOT consistent with "${timeValue}" (reviews go back too far)`);
+            (lead as any)._temporal_evidence = {
+              source: 'google_reviews',
+              earliest_review: earliestReview.toISOString(),
+              months_ago: Math.round(monthsAgo),
+              signal: `Earliest Google review is from ${Math.round(monthsAgo)} months ago — business appears to have been operating for longer than the time constraint requires.`,
+              contradicts: true,
+            };
+          }
+        }
+      }
+
       for (const constraint of constraintsToVerify) {
         const constraintValue = typeof constraint.value === 'string' ? constraint.value : String(constraint.value ?? '');
 
@@ -1587,7 +1624,16 @@ Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "re
         );
 
         const extractedQuotes = [...new Set(extraction.evidence_items.map(e => e.direct_quote))];
-        const keywordFound = extraction.evidence_items.length > 0;
+        let keywordFound = extraction.evidence_items.length > 0;
+
+        if (constraint.type === 'time_constraint') {
+          const temporalEvidence = (lead as any)._temporal_evidence as { source: string; signal: string; months_ago: number; contradicts?: boolean } | undefined;
+          if (temporalEvidence && !temporalEvidence.contradicts) {
+            extractedQuotes.push(temporalEvidence.signal);
+            keywordFound = true;
+            console.log(`[TIME_EVIDENCE] "${lead.name}" — injecting Google review temporal evidence into constraint result`);
+          }
+        }
 
         if (extraction.entity_type_mismatch) {
           console.log(`[ENTITY_TYPE_MISMATCH] Skipping "${lead.name}" — expected ${mission.entity_category}, got ${extraction.actual_entity_type || 'unknown'}`);
@@ -1601,11 +1647,19 @@ Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "re
         let towerConfidence: number | null = null;
         let towerReasoning: string | null = null;
 
-        const structuredEvidenceText = extraction.evidence_items.length > 0
+        let structuredEvidenceText = extraction.evidence_items.length > 0
           ? extraction.evidence_items.map((e, i) =>
               `[Evidence ${i + 1}] Source: ${e.source_url} | Quote: "${e.direct_quote}" | Context: ${e.context_snippet}`
             ).join('\n')
           : '';
+
+        if (constraint.type === 'time_constraint') {
+          const temporalEvidence = (lead as any)._temporal_evidence as { source: string; signal: string; months_ago: number; contradicts?: boolean } | undefined;
+          if (temporalEvidence) {
+            const reviewSignal = `[Google Review Evidence] ${temporalEvidence.signal}${temporalEvidence.contradicts ? ' (CONTRADICTS recency constraint)' : ''}`;
+            structuredEvidenceText = structuredEvidenceText ? `${structuredEvidenceText}\n${reviewSignal}` : reviewSignal;
+          }
+        }
 
         const hasSubstantialEvidence = structuredEvidenceText.length > 30 || extractedQuotes.length > 0 || keywordFound;
 
