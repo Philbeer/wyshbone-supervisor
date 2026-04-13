@@ -936,7 +936,33 @@ Return JSON array only: ["term1", "term2", ...]`,
         // Falls back to just [constraintValue] — no worse than before
       }
 
-      type WindowEntry = { text: string; url: string; source_type: SourceType; pageIdx: number; matchPos: number };
+      // Merge Pass 2 synonyms into l1Phrases (covers terms the Haiku call may have missed)
+      if (constraint.synonyms && Array.isArray(constraint.synonyms)) {
+        const existingLower = new Set(l1Phrases.map(p => p.toLowerCase()));
+        for (const syn of constraint.synonyms) {
+          const synLower = syn.toLowerCase().trim();
+          if (synLower && !existingLower.has(synLower)) {
+            l1Phrases.push(synLower);
+            existingLower.add(synLower);
+          }
+        }
+        console.log(`[EVIDENCE_SYNONYM] Merged ${constraint.synonyms.length} Pass 2 synonyms → l1Phrases now has ${l1Phrases.length} phrases`);
+      }
+
+      // Also merge classifiedTargets phrases (SYNONYM_MAP, entity patterns, hyphen variants)
+      {
+        const existingLower = new Set(l1Phrases.map(p => p.toLowerCase()));
+        for (const target of classifiedTargets) {
+          const phrase = (target.phrase || '').toLowerCase().trim();
+          if (phrase && !existingLower.has(phrase)) {
+            l1Phrases.push(phrase);
+            existingLower.add(phrase);
+          }
+        }
+        console.log(`[EVIDENCE_SYNONYM] Merged classifiedTargets → l1Phrases now has ${l1Phrases.length} phrases total`);
+      }
+
+      type WindowEntry = { text: string; url: string; source_type: SourceType; pageIdx: number; matchPos: number; matched_phrase: string };
       const windows: WindowEntry[] = [];
       let pagesWithText = 0;
 
@@ -958,7 +984,7 @@ Return JSON array only: ["term1", "term2", ...]`,
             if (!overlaps) {
               const start = Math.max(0, idx - 150);
               const end = Math.min(rawText.length, idx + 150);
-              windows.push({ text: rawText.substring(start, end).trim(), url: pageUrl, source_type: sourceType, pageIdx, matchPos: idx });
+              windows.push({ text: rawText.substring(start, end).trim(), url: pageUrl, source_type: sourceType, pageIdx, matchPos: idx, matched_phrase: phrase });
             }
             searchPos = idx + phrase.length;
           }
@@ -1120,7 +1146,7 @@ Return JSON array only: ["term1", "term2", ...]`,
             page_title: '',
             constraint_type: constraint.type,
             constraint_value: constraintValue,
-            matched_phrase: constraintValue,
+            matched_phrase: matchingWindow?.matched_phrase || constraintValue,
             direct_quote: sentence.substring(0, 250),
             context_snippet: sentence.substring(0, 300),
             constraint_match_reason: `LLM judge approved sentence as direct evidence of "${constraintValue}".`,

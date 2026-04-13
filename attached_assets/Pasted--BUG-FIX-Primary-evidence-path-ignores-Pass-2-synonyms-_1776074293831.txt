@@ -1,0 +1,103 @@
+# BUG FIX: Primary evidence path ignores Pass 2 synonyms
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE GAP (diagnosed by code audit)
+
+In `server/supervisor/constraint-led-extractor.ts`, the evidence matching has two paths:
+
+**Primary path** (OpenAI available — runs in production):
+- Uses `l1Phrases` from the `[EVIDENCE_SYNONYM]` Haiku LLM call
+- Does NOT use `classifiedTargets` or `constraint.synonyms`
+
+**Fallback path** (no OpenAI):
+- Uses `classifiedTargets` which DOES include `constraint.synonyms` from Pass 2
+
+The Pass 2 mission extractor now generates a `synonyms` array on each constraint (e.g. `["real ale", "hand-pulled ale", "cask conditioned", "cask beer", "traditional ale", "hand pump", "cask marque", "real ales"]`). But `classifiedTargets` — the only consumer of `constraint.synonyms` — is built at line ~856 and NEVER READ by the primary path. It's dead data in production.
+
+## THE FIX
+
+### In `extractConstraintLedEvidence`, around lines 875-933 where `l1Phrases` is assembled:
+
+After the Haiku synonym expansion call (success or failure), MERGE `constraint.synonyms` into `l1Phrases`:
+
+Find the section that looks like this (after the synonym expansion try/catch):
+
+```typescript
+// After the [EVIDENCE_SYNONYM] LLM call succeeds or fails, l1Phrases is set.
+// Now merge Pass 2 synonyms that the LLM might have missed:
+```
+
+Add this code AFTER the synonym expansion try/catch block, before `l1Phrases` is used in the Layer 1 loop:
+
+```typescript
+// Merge Pass 2 synonyms into l1Phrases (covers terms the Haiku call may have missed)
+if (constraint.synonyms && Array.isArray(constraint.synonyms)) {
+  const existingLower = new Set(l1Phrases.map(p => p.toLowerCase()));
+  for (const syn of constraint.synonyms) {
+    const synLower = syn.toLowerCase().trim();
+    if (synLower && !existingLower.has(synLower)) {
+      l1Phrases.push(synLower);
+      existingLower.add(synLower);
+    }
+  }
+  console.log(`[EVIDENCE_SYNONYM] Merged ${constraint.synonyms.length} Pass 2 synonyms → l1Phrases now has ${l1Phrases.length} phrases`);
+}
+```
+
+This ensures that even if the Haiku synonym expansion returns a narrow set (or fails entirely), the Pass 2 synonyms still get checked in the primary path.
+
+### Also merge `classifiedTargets` phrase values into `l1Phrases`
+
+Since `classifiedTargets` is already built at line ~856 and includes the hardcoded `SYNONYM_MAP` entries, entity expansion patterns, and hyphen variants, these should also feed into the primary path:
+
+```typescript
+// Also merge classifiedTargets phrases (SYNONYM_MAP, entity patterns, variants)
+if (classifiedTargets && Array.isArray(classifiedTargets)) {
+  const existingLower = new Set(l1Phrases.map(p => p.toLowerCase()));
+  for (const target of classifiedTargets) {
+    const phrase = (target.phrase || target.value || '').toLowerCase().trim();
+    if (phrase && !existingLower.has(phrase)) {
+      l1Phrases.push(phrase);
+      existingLower.add(phrase);
+    }
+  }
+  console.log(`[EVIDENCE_SYNONYM] Merged classifiedTargets → l1Phrases now has ${l1Phrases.length} phrases total`);
+}
+```
+
+### Update matched_phrase reporting
+
+In the Layer 1 loop (lines 952-966), the `matched_phrase` should report WHICH phrase from `l1Phrases` actually matched, not always the original constraint value. Check if it's using the loop variable `phrase` or the original `constraintValue`. It should use `phrase`:
+
+```typescript
+for (const phrase of l1Phrases) {
+  // ... indexOf matching ...
+  windows.push({ 
+    text: rawText.substring(start, end),
+    matched_phrase: phrase,  // ← should be the actual phrase that matched, not constraintValue
+    // ...
+  });
+}
+```
+
+## WHAT THIS ACHIEVES
+
+Before: Primary path searches with only Haiku-expanded phrases. If Haiku returns ["cask ale", "real ale", "hand-pulled"], that's all it checks. Brand names from Pass 2 (if any) are ignored.
+
+After: Primary path searches with Haiku phrases + Pass 2 synonyms + SYNONYM_MAP + variants. A pub website mentioning "hand pump" or "traditional ale" or "cask marque" gets found even if Haiku didn't think to include those terms.
+
+## TESTING
+
+1. Search "pubs that serve cask ale in Sussex"
+2. Check logs for `[EVIDENCE_SYNONYM] Merged` — should show phrases being merged
+3. Check the matched_phrase values in results — should see variety (not just "cask ale" every time)
+4. If possible, find a pub whose website says "real ale" but NOT "cask ale" — it should now be verified
+
+## CRITICAL RULES
+
+1. Do NOT change the fallback path — it already works correctly
+2. Do NOT remove the Haiku synonym expansion — keep it, just add the merge step after it
+3. Do NOT change how `classifiedTargets` is built — just READ it in the primary path too
+4. Deduplicate when merging (use Set to avoid checking the same phrase twice)
+5. Keep the console.log lines — they're essential for verifying the fix worked
