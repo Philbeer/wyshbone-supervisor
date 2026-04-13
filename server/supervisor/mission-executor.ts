@@ -1840,7 +1840,11 @@ Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "re
             console.log(`[GPT4O_FALLBACK] Website visit succeeded for "${er.leadName}" but no evidence found. Queued for GPT-4o verification fallback.`);
           }
           try {
-            const fbPrompt = `Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${er.constraintValue}".
+            const fbTodayStr = `${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })})`;
+            const fbCutoffStr = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+            const fbPrompt = `TODAY'S DATE IS: ${fbTodayStr}. Use this when evaluating time-based constraints. "Last 12 months" means after ${fbCutoffStr}.
+
+Search for "${er.leadName}" in "${location}". Find their website or any authoritative online source. Determine whether the following constraint is genuinely true for this specific business: "${er.constraintValue}".
 
 Respond with JSON only, no markdown fences, no other text:
 {
@@ -1855,7 +1859,8 @@ IMPORTANT:
 - business_found means you found information about this specific business
 - constraint_met means the constraint "${er.constraintValue}" IS genuinely true for this business
 - If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false
-- A business that merely MENTIONS or USES something is NOT the same as a business that MANUFACTURES or PROVIDES it`;
+- A business that merely MENTIONS or USES something is NOT the same as a business that MANUFACTURES or PROVIDES it
+- For time-based constraints like "opened recently" or "opened in the last 12 months", use today's date to calculate whether any dates found are within the required window`;
 
             const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
             console.log(`[GPT4O_FALLBACK] Using model: ${fallbackModel}`);

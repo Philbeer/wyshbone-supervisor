@@ -1,0 +1,74 @@
+# BUG FIX: Evidence judge doesn't know today's date — temporal verification fails
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE BUG
+
+When verifying "opened in the last 12 months", the evidence judge finds dates like "May 2023" and "November 2023" and accepts them as "recent" — because the LLM doesn't know today's date is April 2026. In the LLM's training data, 2023 IS recent. But relative to today, it's 3 years ago.
+
+## THE FIX
+
+Pass `new Date().toISOString()` into every evidence judge prompt that handles temporal constraints. This is a one-line addition to each prompt.
+
+### Fix 1: Layer 2 judge prompt (constraint-led-extractor.ts, ~line 1112)
+
+Find the Layer 2 system prompt. Add this line at the TOP of the prompt, before any other instructions:
+
+```
+TODAY'S DATE IS: ${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}). Use this to evaluate any time-based constraints. "Last 12 months" means after ${new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}.
+```
+
+This tells the LLM: "Today is 13 April 2026. Last 12 months means after 13 April 2025."
+
+### Fix 2: Zero-hit fallback prompt (constraint-led-extractor.ts, ~line 1027)
+
+Same addition at the top of the fallback system prompt.
+
+### Fix 3: GPT-4o verification prompt (mission-executor.ts)
+
+Find the GPT-4o web search verification prompt (the one that starts "Search for [business name]"). Add the same date line.
+
+### Fix 4: Haiku synonym expansion prompt (constraint-led-extractor.ts, ~line 900)
+
+When expanding synonyms for temporal values, include the current year:
+
+```
+Example: "opened recently" → ["opened recently", "now open", "grand opening", "just opened", "newly opened", "est. 2025", "est. 2026", "established 2025", "established 2026", "opened 2025", "opened 2026"]
+```
+
+But make this DYNAMIC — don't hardcode 2025/2026. Use:
+
+```typescript
+const currentYear = new Date().getFullYear();
+const lastYear = currentYear - 1;
+// In the prompt:
+`Example: "opened recently" → ["now open", "grand opening", "just opened", "est. ${currentYear}", "est. ${lastYear}", "opened ${currentYear}", "opened ${lastYear}"]`
+```
+
+### Fix 5: Key discriminator (mission-extractor.ts)
+
+In the Pass 3 system prompt, add the current date so the key_discriminator can reference specific date ranges:
+
+```
+Today's date is ${new Date().toISOString().split('T')[0]}. When generating key_discriminators for time constraints, use specific date references. For "opened in the last 12 months", the key_discriminator should say "opened after ${new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}" not just "opened recently."
+```
+
+## WHY THIS FIXES IT
+
+Before: LLM sees "Opened in November 2023" + constraint "last 12 months" → thinks 2023 is recent → VERIFIED
+
+After: LLM sees "Opened in November 2023" + constraint "last 12 months" + "Today is 13 April 2026, last 12 months means after 13 April 2025" → calculates November 2023 is 2.5 years ago → NOT VERIFIED
+
+## TESTING
+
+1. "find micropubs in Sussex that opened in the last 12 months" — should NOT include anything from 2023 or earlier. Only 2025-2026 openings should pass.
+2. "find restaurants that opened recently in Brighton" — same, only genuinely recent.
+3. "find pubs in Arundel" (no time constraint) — should still work as before, date doesn't affect non-temporal queries.
+
+## CRITICAL RULES
+
+1. EVERY prompt that judges temporal evidence MUST include today's date
+2. Use `new Date()` dynamically — never hardcode a date
+3. The date must be human-readable: "13 April 2026" not just an ISO string
+4. Include the calculated cutoff: "last 12 months means after 13 April 2025"
+5. This affects Layer 2, fallback, GPT-4o verification, and the key_discriminator

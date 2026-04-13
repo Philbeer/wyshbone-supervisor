@@ -903,20 +903,24 @@ export async function extractConstraintLedEvidence(
                 system: 'You generate search terms for finding evidence on business websites. Given a concept, return a JSON array of 8-15 terms including: (1) direct synonyms and alternative phrases, (2) well-known brand names or specific examples, (3) inferential signal phrases — words or phrases that would IMPLY the concept even if it\'s not stated directly. For example, "independent" might be signalled by "family-run", "owner-operated", "est. 2005", "boutique". Return JSON only, no markdown.',
                 messages: [{
                   role: 'user',
-                  content: `Generate search phrases for: "${constraintValue}"${entityType ? ` (for a ${entityType})` : ''}
+                  content: (() => {
+                    const currentYear = new Date().getFullYear();
+                    const lastYear = currentYear - 1;
+                    return `Generate search phrases for: "${constraintValue}"${entityType ? ` (for a ${entityType})` : ''}
 
 Example: "cask ale" → ["cask ale", "real ale", "traditional ale", "hand-pulled", "hand pump", "cask-conditioned", "cask beer", "real ales", "Harvey's", "Timothy Taylor", "London Pride", "cask marque"]
 
 Example: "independent" → ["independent", "independently owned", "family-run", "owner-operated", "family business", "established by", "founded by", "est.", "sole proprietor", "boutique", "not a chain", "locally owned"]
 
-Example: "opened recently" → ["opened recently", "now open", "grand opening", "just opened", "newly opened", "new opening", "est. 2025", "est. 2026", "established 2025", "established 2026", "opening soon", "we're open", "doors are open", "welcome to our new", "under new management", "formerly known as", "opening day", "first anniversary"]
+Example: "opened recently" → ["opened recently", "now open", "grand opening", "just opened", "newly opened", "new opening", "est. ${currentYear}", "est. ${lastYear}", "established ${currentYear}", "established ${lastYear}", "opened ${currentYear}", "opened ${lastYear}", "opening soon", "we're open", "doors are open", "welcome to our new", "under new management", "formerly known as", "opening day", "first anniversary"]
 
-Example: "new" → ["new", "newly opened", "just opened", "now open", "brand new", "opening 2025", "opening 2026", "launched", "debut", "inaugural"]
+Example: "new" → ["new", "newly opened", "just opened", "now open", "brand new", "opening ${currentYear}", "opening ${lastYear}", "launched", "debut", "inaugural"]
 ${entityType ? `
 Also include a few terms that signal this is genuinely a ${entityType} (not a related but wrong business type). For example, if searching for pubs: "opening hours", "bar menu", "ales on tap" signal a genuine pub; "brewing capacity", "wholesale", "distribution" signal a brewery (not a pub).
 ` : ''}
 Now do: "${constraintValue}"${entityType ? ` for a ${entityType}` : ''}
-Return JSON array only: ["term1", "term2", ...]`,
+Return JSON array only: ["term1", "term2", ...]`;
+                  })(),
                 }],
               }),
             });
@@ -1035,7 +1039,9 @@ Return JSON array only: ["term1", "term2", ...]`,
                 messages: [
                   {
                     role: 'system',
-                    content: `You are judging whether a business "${constraintValue}". You will receive text from their website.
+                    content: `TODAY'S DATE IS: ${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}). Use this to evaluate any time-based constraints. "Last 12 months" means after ${new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}.
+
+You are judging whether a business "${constraintValue}". You will receive text from their website.
 ${entityType ? `
 FIRST — verify this is actually a ${entityType}. Google Places sometimes returns related but wrong business types. Read the website content and decide:
 - Is this genuinely a ${entityType}?
@@ -1162,7 +1168,9 @@ Respond with JSON: {"match": true/false, "evidence_sentence": "one sentence summ
         messages: [
           {
             role: 'system',
-            content: `You are an evidence judge for a business lead finder. You will receive short extracts from a business website.
+            content: `TODAY'S DATE IS: ${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}). Use this to evaluate any time-based constraints. "Last 12 months" means after ${new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}.
+
+You are an evidence judge for a business lead finder. You will receive short extracts from a business website.
 ${entityType ? `
 FIRST — verify this is actually a ${entityType}. Google Places sometimes returns related but wrong business types. Read the extracts and decide:
 - Is this genuinely a ${entityType}?

@@ -905,7 +905,11 @@ export async function extractStructuredMission(
   let pass3RawJson = '';
   let pass3DurationMs = 0;
 
-  const pass3Prompt = `Original user message: "${userMessage}"
+  const pass3TodayStr = `${new Date().toISOString().split('T')[0]} (${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })})`;
+  const pass3CutoffStr = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const pass3Prompt = `TODAY'S DATE: ${pass3TodayStr}. When generating key_discriminators for time constraints, use specific date references. For "opened in the last 12 months", the key_discriminator should reference "opened after ${pass3CutoffStr}" not just "opened recently."
+
+Original user message: "${userMessage}"
 
 Pass 1 semantic interpretation: "${pass1Result}"
 ${truncatedContext ? `\nConversation context (prior turns):\n${truncatedContext}\n` : ''}
