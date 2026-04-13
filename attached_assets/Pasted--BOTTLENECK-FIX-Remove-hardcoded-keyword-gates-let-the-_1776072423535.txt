@@ -1,0 +1,228 @@
+# BOTTLENECK FIX: Remove hardcoded keyword gates — let the LLM decide
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## DESIGN PHILOSOPHY
+
+We don't want curve-fitted keyword lists. We want the LLM to use its semantic understanding. Hardcoded lists should only exist as a fast-path optimisation, never as a gate that prevents the LLM from seeing content.
+
+This is the same philosophy we applied to the routing fix: remove regex gates, let the LLM decide.
+
+---
+
+## FIX 1 — P0: key_discriminator too narrow (mission-extractor.ts)
+
+### File: server/supervisor/mission-extractor.ts
+
+### What's wrong
+
+Pass 3 generates a `key_discriminator` — "the single most important signal that separates a correct result from a plausible but wrong one." For "cask ale pubs" this produced: "serves cask ale as a primary offering — not just a selection of beers that may include cask ale."
+
+The Tower judge receives this and rejects pubs that DO serve cask ale but don't make it their "primary offering." This is the root cause of "found 20, verified 1."
+
+### What to change
+
+Find the `PASS3_SYSTEM_PROMPT` constant (or the Pass 3 system prompt, however it's named). Look for the instruction that asks for "the single most important signal that separates a correct result from a plausible but wrong one."
+
+Replace that instruction with:
+
+```
+Generate a key_discriminator — the MINIMUM signal that confirms a business meets the user's need. This should be INCLUSIVE, not exclusive.
+
+Rules for the key_discriminator:
+1. If the user asks for X, a business that offers X alongside other things is STILL a valid result. For example, if the user wants "pubs that serve cask ale", a pub that serves cask ale among other beers IS a match — it does not need to be their "primary offering."
+2. Frame it as a positive test: "has evidence of [thing the user wants]" — not "specialises in" or "is primarily known for."
+3. Add explicit INCLUSIONS: what counts as a match even if it's not the main focus.
+4. Only EXCLUDE businesses that clearly do NOT offer what the user wants at all.
+
+Example:
+User: "pubs that serve cask ale"
+BAD key_discriminator: "serves cask ale as a primary offering — not just a selection of beers that may include cask ale"
+GOOD key_discriminator: "has evidence of serving cask ale (e.g. mentions cask ale, real ale, hand-pulled ales, specific cask brands, or cask marque accreditation on their website or listings). A pub that serves cask ale alongside other drinks is a valid match."
+```
+
+Also check the output schema for Pass 3 — if `key_discriminator` is a single string, that's fine. But if there's an `entity_exclusions` array, make sure the Pass 3 prompt says: "entity_exclusions should only list businesses that CLEARLY do not match at all — not businesses that partially match."
+
+### Testing
+
+After this fix, search for "pubs that serve cask ale in Sussex." The key_discriminator in the intent_narrative artefact should say something inclusive like "has evidence of serving cask ale" — NOT "serves cask ale as a primary offering."
+
+---
+
+## FIX 2 — P1: SUBJECTIVE_TERMS_PATTERN hard gate (constraint-gate.ts)
+
+### File: server/supervisor/constraint-gate.ts
+
+### What's wrong
+
+Two large regex patterns — `SUBJECTIVE_TERMS_PATTERN` and `MEASURABLE_CRITERIA_PATTERN` — classify user terms as "measurable" (proceed) or "subjective" (block and ask for clarification). If a term matches SUBJECTIVE but not MEASURABLE, the gate blocks execution with `can_execute: false`.
+
+"Find me cool bars" gets blocked because "cool" matches SUBJECTIVE. "Good atmosphere" is blocked. But "good for studying" is special-cased as MEASURABLE. This is exactly the kind of regex gate the audit identified.
+
+### What to change
+
+**Option A (recommended — simplest):** Convert the SUBJECTIVE_TERMS_PATTERN from a HARD GATE to a SOFT WARNING.
+
+Find where `can_execute` is set to `false` because of a subjective term match. Change it so that:
+- The subjective term is still DETECTED (keep the regex for logging/diagnostics)
+- But `can_execute` remains `true`
+- Add the subjective term to a `warnings` array instead: `"Term '{term}' may be subjective — results may vary"`
+- The search proceeds, and the LLM (mission extractor) interprets "cool" as "trendy/hip" naturally
+
+This is a one-line change: wherever `can_execute = false` is set based on SUBJECTIVE_TERMS_PATTERN, change it to log a warning instead.
+
+**Option B (more thorough):** Replace the subjective/measurable classification entirely with an LLM call. Pass 1 of the mission extractor already interprets the user's intent semantically — it would naturally convert "cool bars" to "trendy/hip bars." Let it do its job.
+
+### Testing
+
+After this fix, "find me cool bars in Brighton" should proceed to search instead of asking "Could you be more specific about what you mean by 'cool'?"
+
+---
+
+## FIX 3 — P1: COMMON_ATTRIBUTE_SYNONYMS limited coverage (constraint-gate.ts)
+
+### File: server/supervisor/constraint-gate.ts
+
+### What's wrong
+
+`COMMON_ATTRIBUTE_SYNONYMS` is a hardcoded Record<string, string[]> with ~25 entries. `generateKeywordVariants()` uses it to expand keyword variants. "real ale" maps to ["cask ale", "hand-pulled", "traditional ale"] but misses specific brands (Harvey's, London Pride, Timothy Taylor). Any attribute not in this map gets only mechanical variants (plural/singular, hyphen/space swaps).
+
+### What to change
+
+Add an LLM-powered synonym expansion step. When `generateKeywordVariants()` is called:
+
+1. First, check the hardcoded `COMMON_ATTRIBUTE_SYNONYMS` map (keep as fast-path hint)
+2. If the attribute IS in the map, use those synonyms AND also call the LLM for additional ones
+3. If the attribute is NOT in the map, call the LLM to generate synonyms
+
+The LLM call should be a fast Haiku call with a simple prompt like:
+
+```
+You are generating search synonyms for evidence verification. Given the attribute "{attribute}" that a user is looking for in a business, list 5-10 alternative terms, phrases, or brand names that would indicate the business offers this.
+
+Return ONLY a JSON array of strings. No explanation.
+
+Example:
+Attribute: "cask ale"
+["real ale", "hand-pulled ale", "traditional ale", "cask marque", "Harvey's", "London Pride", "Timothy Taylor", "guest ales", "hand pump", "cask conditioned"]
+```
+
+Use `callLLMText` from `llm-failover.ts` with the router model (Haiku) and a short timeout (5s). If the LLM call fails, fall back to the hardcoded map only.
+
+Merge the LLM synonyms with the hardcoded ones (deduplicated) and return the combined list.
+
+### Important
+
+This LLM call happens ONCE per constraint at extraction time, not per-lead. So it adds ~2s to the pipeline but dramatically improves evidence matching across all 20+ leads.
+
+### Testing
+
+Search for "pubs that serve cask ale in Sussex." Check the constraint artefacts — the keyword variants should now include brand names and additional terms beyond the hardcoded list.
+
+---
+
+## FIX 4 — P2: PAGE_HINT_PATHS too narrow (web-visit.ts)
+
+### File: server/supervisor/web-visit.ts
+
+### What's wrong
+
+`PAGE_HINT_PATHS` maps page types to URL paths with only 5 categories and 2-4 paths each. A pub's cask ale info might be on /our-beers, /real-ales, /tap-list, or /cellar — none of which appear. The crawler still follows links from the homepage so it's not a hard gate, but relevant pages aren't prioritised.
+
+### What to change
+
+Add an LLM-generated page hints step. Before crawling, if the search has constraints that need website evidence:
+
+1. Call Haiku with a simple prompt:
+
+```
+A user is looking for businesses with this attribute: "{constraint_value}"
+The business type is: "{entity_type}"
+
+Suggest 5-8 URL path slugs where this information would most likely appear on a business's website. Return ONLY a JSON array of strings starting with "/".
+
+Example for "cask ale" on a "pub" website:
+["/beers", "/ales", "/our-beers", "/real-ale", "/drinks", "/cellar", "/tap-list", "/whats-on-tap"]
+```
+
+2. Merge the LLM-suggested paths with the existing hardcoded `PAGE_HINT_PATHS` for the relevant category
+3. Use the combined list as priority hints for the crawler
+
+This is a low-risk addition — it only affects which pages get crawled first, not whether the crawl succeeds.
+
+### Testing
+
+Search for "pubs that serve cask ale." Check the web-visit artefacts — the pages visited should include ale/beer-specific paths, not just /contact and /menu.
+
+---
+
+## FIX 5 — P0: Constraint-led extractor keyword gating (constraint-led-extractor.ts)
+
+### File: server/supervisor/constraint-led-extractor.ts
+
+### What's wrong (if not already fixed)
+
+The audit noted this as "in progress." The extractor uses a synonym map with only 3 entries for keyword matching. When verifying "cask ale" evidence on a website, it literally searches for "cask ale" and misses "real ale", "hand-pulled", etc.
+
+### Check first
+
+Check if `constraint-led-extractor.ts` already has LLM-powered synonym expansion. Search for:
+- `callLLMText` or `callLLM` imports
+- `synonym` in the file
+- Any recent changes (comments with dates)
+
+If the LLM synonym expansion is already implemented, skip this fix. If it's still using only the hardcoded map, apply Fix 3's synonym expansion approach here too — call Haiku once per constraint to generate synonyms, then use the expanded list for keyword matching.
+
+---
+
+## FIX 6 — P2: Pass 2 literal constraint value (mission-extractor.ts)
+
+### File: server/supervisor/mission-extractor.ts
+
+### What's wrong
+
+Pass 2 creates constraints like `{ type: "website_evidence", operator: "contains", value: "cask ale" }` — a literal string. This propagates downstream as a literal.
+
+### What to change
+
+In the Pass 2 output schema, add an optional `synonyms` array to the constraint schema:
+
+```json
+{
+  "type": "website_evidence",
+  "operator": "contains",
+  "value": "cask ale",
+  "synonyms": ["real ale", "hand-pulled ale", "cask conditioned", "traditional ale"]
+}
+```
+
+Update the Pass 2 system prompt to instruct the LLM:
+
+```
+For each website_evidence constraint, also generate a "synonyms" array containing 3-5 alternative terms or phrases that would indicate the same thing. These help downstream evidence matching find relevant content even when the exact phrase isn't used.
+```
+
+This means the LLM generates synonyms at extraction time (free — it's already running). Downstream consumers can then use both `value` and `synonyms` for matching.
+
+### Important
+
+This fix complements Fix 3 and Fix 5. Fix 3 adds LLM synonym expansion at the constraint-gate level, Fix 5 at the extractor level, and this fix embeds synonyms directly in the constraint schema so ALL downstream consumers benefit.
+
+---
+
+## EXECUTION ORDER
+
+1. **Fix 1** (key_discriminator) — highest impact, simplest change (prompt edit only)
+2. **Fix 2** (subjective terms soft gate) — high impact, one-line change
+3. **Fix 5** (constraint-led extractor) — check if already done, skip if so
+4. **Fix 6** (Pass 2 synonyms) — prompt edit, free since LLM already runs
+5. **Fix 3** (attribute synonyms LLM expansion) — moderate complexity, adds an LLM call
+6. **Fix 4** (page hint paths) — lowest priority, adds an LLM call
+
+## CRITICAL RULES
+
+1. Do NOT delete the hardcoded maps — keep them as fast-path hints alongside the LLM
+2. All new LLM calls should use `callLLMText` from `llm-failover.ts` with Haiku model and short timeouts (5-10s)
+3. All new LLM calls should have try/catch with fallback to the existing hardcoded behaviour
+4. Do NOT change the conversation router, the routing logic, or the intent card rendering — those are now working correctly
+5. Test with "pubs that serve cask ale in Sussex" — this is the benchmark query that exposed the bottlenecks
