@@ -1,4 +1,5 @@
 import { callLLMText } from './llm-failover';
+import { getRelevantReferenceKnowledge } from './reference-knowledge';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -46,6 +47,7 @@ WHAT YOU CAN DO:
 - If previous search results exist in the conversation, discuss them, offer insights, suggest next steps
 - If URL content has been shared, discuss what was found on that website
 - Explain what Wyshbone can do and how to use it
+- If reference knowledge about a specific organisation is provided, use it to answer questions about that organisation accurately and helpfully. You can discuss their products, services, history, membership, and features. Always base your answers on the reference data provided, not on assumptions.
 
 WHAT YOU MUST NOT DO:
 - Never fabricate business names, addresses, phone numbers, websites, or contact details
@@ -73,6 +75,12 @@ CONTEXT AWARENESS:
 export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOutput> {
   const { conversationId, rawMessage, conversationHistory, urlContent, previousResultsSummary } = input;
 
+  // Check for pre-loaded reference knowledge
+  const referenceKnowledge = getRelevantReferenceKnowledge(
+    rawMessage,
+    conversationHistory,
+  );
+
   // 1. Build user prompt with context
   const parts: string[] = [];
 
@@ -97,6 +105,13 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
     parts.push('URL CONTENT (from a link the user shared):');
     parts.push(urlContent.substring(0, 3000));
     parts.push('');
+  }
+
+  if (referenceKnowledge) {
+    parts.push('REFERENCE KNOWLEDGE (pre-loaded — use this to answer questions about this organisation):');
+    parts.push(referenceKnowledge);
+    parts.push('');
+    console.log(`[CHAT_HANDLER] Injected ${referenceKnowledge.length} chars of reference knowledge`);
   }
 
   parts.push(`User: ${rawMessage}`);
