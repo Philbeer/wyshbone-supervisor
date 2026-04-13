@@ -17,6 +17,7 @@ import {
   emitIntentResolved,
   emitResultsReady,
 } from '../protocol-logger';
+import { emitDeliverySummary } from '../delivery-summary';
 import { supabase } from '../../supabase';
 import { getExecutor, getAvailableExecutors } from './executor-registry';
 import { plan as plannerPlan } from './planner';
@@ -999,6 +1000,46 @@ export async function runReloop(params: {
     towerVerdict: combinedTowerVerdict,
     totalLoops,
   }).catch(() => {});
+
+  // ── Emit canonical delivery_summary for the combined delivery ──
+  // This supersedes the per-loop delivery_summary artefacts created by individual executors.
+  // The UI reads the LATEST delivery_summary artefact for the run, so this combined one
+  // will be the one rendered in the results card.
+  if (mergedExact.length > 0 || deliveredLeads.length > 0) {
+    try {
+      const canonicalDsLeads = mergedExact.map((lead: any) => ({
+        entity_id: lead.entity_id || lead.place_id || `lead:${lead.name}`,
+        name: lead.name,
+        address: lead.address || '',
+        found_in_plan_version: lead.found_in_plan_version || 1,
+        match_valid: lead.match_valid !== undefined ? lead.match_valid : true,
+        match_summary: lead.match_summary || `Found via search`,
+        match_basis: lead.match_basis || [],
+        supporting_evidence: lead.supporting_evidence || [],
+        match_evidence: lead.match_evidence || [],
+      }));
+
+      await emitDeliverySummary({
+        runId,
+        userId,
+        conversationId,
+        originalUserGoal: rawUserInput,
+        requestedCount,
+        hardConstraints,
+        softConstraints,
+        planVersions: [{ version: 1, changes_made: ['Combined re-loop delivery'] }],
+        softRelaxations: [],
+        leads: canonicalDsLeads,
+        finalVerdict: combinedTowerVerdict || 'pass',
+        finalAction: combinedTowerVerdict === 'pass' ? 'accept' : 'continue',
+        stopReason: null,
+      });
+
+      console.log(`[RELOOP_SKELETON] Emitted canonical delivery_summary with ${canonicalDsLeads.length} leads (supersedes per-loop summaries)`);
+    } catch (dsErr: any) {
+      console.warn(`[RELOOP_SKELETON] Canonical delivery_summary emit failed (non-fatal): ${dsErr.message}`);
+    }
+  }
 
   return combinedResult;
 }
