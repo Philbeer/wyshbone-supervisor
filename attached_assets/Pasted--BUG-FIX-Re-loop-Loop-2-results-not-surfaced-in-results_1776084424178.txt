@@ -1,0 +1,159 @@
+# BUG FIX: Re-loop (Loop 2) results not surfaced in results card
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE BUG
+
+When Loop 1 (Google Places + website evidence) finds few or no results, Loop 2 (GPT-4o web search) runs and finds additional results. These Loop 2 results:
+- ARE counted in the supervisor's delivery message ("I found 7 micropubs")
+- ARE NOT shown in the results card (results card shows 0)
+
+The user sees a contradiction: the text says results were found, but the card is empty.
+
+## ROOT CAUSE
+
+In `server/supervisor/reloop/loop-skeleton.ts`, the combined delivery merges results from all loops into `delivered_exact`:
+
+```typescript
+for (const ds of allDeliverySummaries) {
+  for (const lead of (ds.delivered_exact || [])) {
+    // merge
+  }
+}
+```
+
+But Loop 2's delivery summary (from `gpt4o-search.ts` via `gpt4o-adapter.ts`) may not use `delivered_exact` — it might put leads in a different field (e.g., `leads`, `results`, or the structure might be different). So the merge picks up nothing from Loop 2.
+
+Meanwhile, the delivery MESSAGE is generated from `deliveredLeads.length` which counts the accumulated entities correctly — creating the contradiction.
+
+## INVESTIGATION STEPS
+
+### Step 1: Check what format Loop 2's delivery summary uses
+
+In `server/supervisor/gpt4o-search.ts`, find where the `deliverySummary` is built. Look for what field names it uses for leads. It might be:
+- `delivered_exact` (what the merge expects)
+- `leads` (different field name)
+- `results` (different field name)
+- Or it might not have a `deliverySummary` at all — the results might be in `rawResult` only
+
+### Step 2: Check what format Loop 1's delivery summary uses
+
+In `server/supervisor/mission-executor.ts`, find where the delivery summary is built (search for `emitDeliverySummary`). Check the field names it uses. This is what the merge code was written for.
+
+### Step 3: Check the gpt4o-adapter.ts
+
+In `server/supervisor/reloop/gpt4o-adapter.ts`, this is the adapter that wraps GPT-4o search results into the re-loop's entity format. Check:
+- Does it set `entity.verified` correctly?
+- Does it build a `deliverySummary` in the `rawResult`?
+- What format is the delivery summary in?
+
+## THE FIX
+
+There are two complementary fixes needed:
+
+### Fix A: Ensure Loop 2 builds `delivered_exact` in the same format as Loop 1
+
+In `gpt4o-search.ts` (or `gpt4o-adapter.ts`), ensure the delivery summary returned in `rawResult.deliverySummary` includes a `delivered_exact` array with the same structure as Loop 1:
+
+```typescript
+deliverySummary: {
+  delivered_exact: verifiedLeads.map((lead, idx) => ({
+    index: idx + 1,
+    name: lead.name,
+    address: lead.address,
+    phone: lead.phone || null,
+    website: lead.website || null,
+    place_id: lead.placeId,
+    match_evidence: lead.evidence ? [{
+      constraint_type: 'website_evidence',
+      source_url: lead.sourceUrl || null,
+      source_type: 'gpt4o_web_search',
+      quote: lead.evidence,
+      matched_phrase: constraintValue,
+      confidence: lead.confidence || 0.7,
+      verification_status: 'verified',
+    }] : [],
+    match_basis: [],
+    match_summary: lead.evidence || 'Verified via GPT-4o web search',
+  })),
+  delivered_exact_count: verifiedLeads.length,
+  delivered_closest: [],
+  delivered_total_count: verifiedLeads.length,
+  // ... other delivery summary fields
+}
+```
+
+### Fix B: Make the merge in loop-skeleton.ts more resilient
+
+In `loop-skeleton.ts`, update the merge logic to handle multiple possible field names:
+
+```typescript
+const mergedExact: any[] = [];
+const mergedClosest: any[] = [];
+const seenNames = new Set<string>();
+
+for (const ds of allDeliverySummaries) {
+  // Check all possible field names for leads
+  const exactLeads = ds.delivered_exact || ds.leads || ds.results || [];
+  const closestLeads = ds.delivered_closest || [];
+  
+  for (const lead of exactLeads) {
+    const key = (lead.name || '').toLowerCase().trim();
+    if (key && !seenNames.has(key)) {
+      seenNames.add(key);
+      mergedExact.push(lead);
+    }
+  }
+  for (const lead of closestLeads) {
+    const key = (lead.name || '').toLowerCase().trim();
+    if (key && !seenNames.has(key)) {
+      seenNames.add(key);
+      mergedClosest.push(lead);
+    }
+  }
+}
+```
+
+### Fix C: Fallback — build delivered_exact from accumulated entities if merge finds nothing
+
+After the merge, if `mergedExact` is still empty but `verifiedLeads` has results, build `delivered_exact` directly from the accumulated entities:
+
+```typescript
+// Fallback: if merge found nothing but we have verified entities, build from accumulator
+if (mergedExact.length === 0 && verifiedLeads.length > 0) {
+  console.warn(`[RELOOP_SKELETON] Merge found 0 delivered_exact but ${verifiedLeads.length} verified leads exist — building from accumulator`);
+  for (const lead of verifiedLeads) {
+    mergedExact.push({
+      index: mergedExact.length + 1,
+      name: lead.name,
+      address: lead.address,
+      phone: lead.phone || null,
+      website: lead.website || null,
+      place_id: lead.placeId,
+      match_evidence: [],
+      match_basis: [],
+      match_summary: `Found via ${lead.source || 'search'}`,
+    });
+  }
+}
+```
+
+This ensures that even if the delivery summary formats don't match, the verified leads still make it into the results card.
+
+## TESTING
+
+1. **"pubs that serve cask ale in Sussex"** — Loop 1 should find most results. Loop 2 might add a few more. ALL should appear in the results card.
+
+2. **"independent web designers in Canterbury"** — likely scarce. Loop 1 might find 2-3. Loop 2 might find more via web search. ALL verified results should appear in the card.
+
+3. **Breadcrumbs vs delivery message** — the breadcrumbs count and the "I found X results" message should match. No more contradictions.
+
+4. **Check the AFR export** — look at the `combined_delivery` artefact payload. `delivered_exact` should contain ALL leads from ALL loops, not just Loop 1.
+
+## CRITICAL RULES
+
+1. Fix C (the fallback) is the safety net — implement it even if Fix A and B work. It catches any future format mismatches.
+2. Do NOT change the verification logic — only the delivery/surfacing of results
+3. Loop 2 results should still go through the same verification standards as Loop 1
+4. The results card should show the SOURCE of each result (Google Places vs GPT-4o web search) so the user knows where it came from
+5. The delivery message count MUST match the results card count — no contradictions

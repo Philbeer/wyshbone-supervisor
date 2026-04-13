@@ -856,26 +856,49 @@ export async function runReloop(params: {
   const allDeliverySummaries = loopHistory
     .map(r => (r.executorOutput.rawResult as any)?.deliverySummary)
     .filter(Boolean);
+  console.log(`[RELOOP_SKELETON] Merging ${allDeliverySummaries.length} delivery summaries from ${loopHistory.length} loops`);
 
   // Build merged delivered_exact from all loops' delivery summaries
+  // Fix B: check multiple possible field names to handle format differences between executors
   const mergedExact: any[] = [];
   const mergedClosest: any[] = [];
   const seenNames = new Set<string>();
   for (const ds of allDeliverySummaries) {
-    for (const lead of (ds.delivered_exact || [])) {
+    const exactLeads = ds.delivered_exact || ds.leads || ds.results || [];
+    const closestLeads = ds.delivered_closest || [];
+    console.log(`[RELOOP_SKELETON] Merge: ds has delivered_exact=${(ds.delivered_exact || []).length} leads=${(ds.leads || []).length} results=${(ds.results || []).length} delivered_closest=${closestLeads.length}`);
+    for (const lead of exactLeads) {
       const key = (lead.name || '').toLowerCase().trim();
       if (key && !seenNames.has(key)) {
         seenNames.add(key);
         mergedExact.push(lead);
       }
     }
-    for (const lead of (ds.delivered_closest || [])) {
+    for (const lead of closestLeads) {
       const key = (lead.name || '').toLowerCase().trim();
       if (key && !seenNames.has(key)) {
         seenNames.add(key);
         mergedClosest.push(lead);
       }
     }
+  }
+
+  // Fix C: fallback — if merge produced nothing but we have verified entities, build from accumulator
+  if (mergedExact.length === 0 && deliveredLeads.length > 0) {
+    console.warn(`[RELOOP_SKELETON] Merge found 0 delivered_exact but ${deliveredLeads.length} verified leads exist — building from entity accumulator`);
+    for (const lead of deliveredLeads) {
+      mergedExact.push({
+        entity_id: lead.placeId || `lead:${lead.name}`,
+        name: lead.name,
+        address: lead.address,
+        match_level: 'exact',
+        soft_violations: [],
+        match_valid: true,
+        match_summary: `Found via ${lead.source || 'search'}`,
+        source: lead.source,
+      });
+    }
+    console.log(`[RELOOP_SKELETON] Fallback built ${mergedExact.length} delivered_exact entries from entity accumulator`);
   }
 
   const lastDs = allDeliverySummaries[allDeliverySummaries.length - 1];
