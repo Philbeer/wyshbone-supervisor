@@ -1,0 +1,194 @@
+# ENHANCEMENT: Post-discovery location verification
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE GAP
+
+Location constraints are classified as `discovery_only` in `mission-planner.ts` (line ~106). They are explicitly excluded from the verification phase (line ~321). The system trusts Google Places to return results in the correct location.
+
+This works for distinct cities (Brighton, Canterbury, Manchester) but fails for:
+- Sub-city areas: "West London", "South Manchester", "central Edinburgh"
+- Vague regions: "the Cotswolds", "the Home Counties"
+- Colloquial areas: "the City" (meaning financial district, not all of London)
+
+Google Places treats "West London" as "London with a vague westward bias" and returns results from across London. The verification pipeline never checks because location_constraint is skipped.
+
+The Tower judge passes the results because it only checks constraint satisfaction (is this a guitar shop?) and delivery count — not individual lead locations.
+
+## WHAT TO CHANGE
+
+### Change 1: Add location verification to the evidence verification loop (mission-executor.ts)
+
+Find where the per-lead evidence verification loop runs in `mission-executor.ts`. This is where the system iterates through each lead and calls `extractConstraintLedEvidence` for each constraint.
+
+BEFORE the existing constraint loop (or as a new first step within it), add a location verification check:
+
+```typescript
+// Location verification — check each lead's address against the location constraint
+const locationConstraint = mission.constraints.find(
+  c => c.type === 'location_constraint' && c.hardness === 'hard'
+);
+
+if (locationConstraint && lead.address) {
+  try {
+    const locationCheckPrompt = `Does this address appear to be in or very near "${locationConstraint.value}"?
+
+Address: ${lead.address}
+Required location: ${locationConstraint.value}
+
+Consider:
+- For sub-city areas (e.g. "West London"), check the postcode district and neighbourhood. W, UB postcodes = West London. WC, EC = Central London. E = East London. N, NW = North London. S, SE, SW = South London.
+- For regions, check if the town/city is within that region.
+- For cities, check if the address is in that city (not a different nearby city).
+- Be reasonably inclusive — a business on the border of an area counts. But a business clearly in a different area does not.
+
+Respond with JSON only: {"in_location": true/false, "reasoning": "one sentence"}`;
+
+    const locationResult = await callLLMText(
+      'You verify whether a business address is within a specified geographic area. Respond with JSON only.',
+      locationCheckPrompt,
+      'location_verify',
+      {
+        anthropicModel: 'claude-3-5-haiku-20241022',
+        maxTokens: 100,
+        timeoutMs: 5000,
+      }
+    );
+
+    const cleaned = locationResult.replace(/```json\s*/gi, '').replace(/```\s*$/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+
+    if (!parsed.in_location) {
+      console.log(`[LOCATION_VERIFY] EXCLUDED "${lead.name}" — address "${lead.address}" is NOT in "${locationConstraint.value}": ${parsed.reasoning}`);
+      // Mark this lead as failing location verification
+      lead._location_mismatch = true;
+      lead._location_reasoning = parsed.reasoning;
+      continue; // Skip further verification for this lead
+    } else {
+      console.log(`[LOCATION_VERIFY] PASSED "${lead.name}" — address "${lead.address}" IS in "${locationConstraint.value}"`);
+    }
+  } catch (locErr: any) {
+    console.warn(`[LOCATION_VERIFY] Check failed for "${lead.name}" (non-fatal, including lead): ${locErr.message}`);
+    // On failure, include the lead (don't exclude based on a failed check)
+  }
+}
+```
+
+### IMPORTANT: Optimise with batch verification
+
+The above runs one LLM call per lead (20 calls for 20 leads). This is too expensive. Instead, batch all leads into ONE call:
+
+```typescript
+if (locationConstraint) {
+  try {
+    const addressList = leads
+      .map((lead, idx) => `${idx + 1}. "${lead.name}" — ${lead.address || 'no address'}`)
+      .join('\n');
+
+    const batchPrompt = `Which of these businesses are actually located in or very near "${locationConstraint.value}"?
+
+${addressList}
+
+For sub-city areas like "West London", use postcode knowledge:
+- W, UB, TW postcodes = West London
+- WC, EC = Central London  
+- E = East London
+- N, NW = North London
+- SE, SW = South London
+- For other cities, use local area knowledge.
+
+Be reasonably inclusive — border areas count. But clearly different areas do not.
+A business listed as "London W1" is Central London, not West London.
+
+Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "reasoning": "brief reason"}]}`;
+
+    const batchResult = await callLLMText(
+      'You verify whether business addresses are within a specified geographic area. Respond with JSON only.',
+      batchPrompt,
+      'location_verify_batch',
+      {
+        anthropicModel: 'claude-3-5-haiku-20241022',
+        maxTokens: 1500,
+        timeoutMs: 15000,
+      }
+    );
+
+    const cleaned = batchResult.replace(/```json\s*/gi, '').replace(/```\s*$/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+
+    if (parsed.results && Array.isArray(parsed.results)) {
+      let excluded = 0;
+      for (const result of parsed.results) {
+        const idx = result.index - 1; // Convert to 0-based
+        if (idx >= 0 && idx < leads.length && !result.in_location) {
+          leads[idx]._location_mismatch = true;
+          leads[idx]._location_reasoning = result.reasoning;
+          excluded++;
+          console.log(`[LOCATION_VERIFY] EXCLUDED "${leads[idx].name}" — ${result.reasoning}`);
+        }
+      }
+      console.log(`[LOCATION_VERIFY] Batch check: ${excluded}/${leads.length} excluded for location mismatch (required: "${locationConstraint.value}")`);
+    }
+  } catch (locErr: any) {
+    console.warn(`[LOCATION_VERIFY] Batch check failed (non-fatal, all leads included): ${locErr.message}`);
+  }
+}
+```
+
+This is ONE Haiku call for all 20 leads — fast and cheap.
+
+### Change 2: Filter out location mismatches before delivery
+
+After the evidence verification loop completes and before the delivery summary is built, filter out leads with `_location_mismatch: true`:
+
+```typescript
+const locationVerifiedLeads = verifiedLeads.filter(lead => !lead._location_mismatch);
+if (locationVerifiedLeads.length < verifiedLeads.length) {
+  console.log(`[LOCATION_VERIFY] Filtered ${verifiedLeads.length - locationVerifiedLeads.length} leads for location mismatch`);
+}
+```
+
+### Change 3: Log location exclusions in the delivery summary artefact
+
+In the delivery summary payload, add a `location_excluded` field showing which leads were removed and why:
+
+```typescript
+location_excluded: leads
+  .filter(l => l._location_mismatch)
+  .map(l => ({ name: l.name, address: l.address, reason: l._location_reasoning })),
+```
+
+This gives visibility into what was filtered — important for debugging and for the user to understand why some Google Places results didn't make the cut.
+
+### Change 4: Do NOT change the planner classification
+
+Keep `location_constraint: 'discovery_only'` in mission-planner.ts. The location verification is now a POST-DISCOVERY step, not part of the constraint verification pipeline. This is cleaner — the existing verification pipeline handles website evidence, and the location check is a separate filter applied after.
+
+## WHERE TO ADD THE CODE
+
+The batch location verification should run AFTER Google Places returns results and BEFORE the per-lead evidence verification loop. Find the section in `mission-executor.ts` where leads are collected from Google Places results but before they enter the constraint verification loop.
+
+The flow should be:
+1. Google Places returns 20 candidates
+2. **NEW: Batch location verification** — Haiku checks all 20 addresses against "West London"
+3. Filter out location mismatches (e.g., Denmark Street WC2H → excluded)
+4. Remaining leads (e.g., 8 actually in West London) enter the evidence verification pipeline
+5. Evidence verification checks constraints (guitar shop entity type, etc.)
+6. Delivery summary built from verified + location-verified leads
+
+## TESTING
+
+1. **"guitar shops in West London"** — results should only include W/UB/TW postcodes, NOT WC2H/EC/N/SE postcodes. Denmark Street shops should be excluded.
+2. **"pubs in Arundel"** — should still work (whole-town location, no sub-area ambiguity)
+3. **"pubs in Sussex"** — should still work (county-level, Google Places handles this well)
+4. **"cafes in central Edinburgh"** — should only include Edinburgh city centre, not Leith or Morningside
+5. Check logs for `[LOCATION_VERIFY]` — shows which leads were excluded and why
+
+## CRITICAL RULES
+
+1. ONE Haiku call for all leads (batch), not one per lead
+2. On LLM failure, INCLUDE all leads (fail open, don't fail closed)
+3. Do NOT change mission-planner.ts — keep location_constraint as discovery_only
+4. Do NOT change the Google Places search queries — the fix is in post-discovery filtering
+5. Log excluded leads clearly — this is important diagnostic data
+6. The LLM uses postcode and geographic knowledge, no geocoding API needed

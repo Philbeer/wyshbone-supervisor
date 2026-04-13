@@ -40,6 +40,7 @@ import { detectRelationshipPredicate, type RelationshipPredicateResult } from '.
 import { RADIUS_LADDER_KM } from './shared-constants';
 import { executeGpt4oPrimaryPath, type Gpt4oSearchContext } from './gpt4o-search';
 import { computeQueryShapeKey, deriveQueryShapeFromGoal } from './query-shape-key';
+import { callLLMText } from './llm-failover';
 
 const SUPERVISOR_NEUTRAL_MESSAGE = 'Run complete. Results are available.';
 const RUN_EXECUTION_TIMEOUT_MS_DEFAULT = 120_000;
@@ -1376,6 +1377,82 @@ export async function executeMissionDrivenPlan(
     leads = leads.slice(0, currentSearchBudget);
   }
 
+  // ── Batch location verification ───────────────────────────────────────────
+  // One Haiku call to verify all leads are actually in the specified location.
+  // Catches sub-city area mistakes (e.g. "West London" returning EC/WC postcodes).
+  // On any failure, all leads are included (fail open).
+  const locationExcludedLeads: Array<{ name: string; address: string | null; reason: string }> = [];
+  const locationConstraint = mission.constraints.find(
+    c => c.type === 'location_constraint' && c.hardness === 'hard',
+  );
+
+  if (locationConstraint && leads.length > 0) {
+    try {
+      const locationValue = typeof locationConstraint.value === 'string'
+        ? locationConstraint.value
+        : String(locationConstraint.value ?? '');
+
+      const addressList = leads
+        .map((lead, idx) => `${idx + 1}. "${lead.name}" — ${lead.address || 'no address'}`)
+        .join('\n');
+
+      const batchPrompt = `Which of these businesses are actually located in or very near "${locationValue}"?
+
+${addressList}
+
+For sub-city areas like "West London", use postcode knowledge:
+- W, UB, TW postcodes = West London
+- WC, EC = Central London
+- E = East London
+- N, NW = North London
+- SE, SW = South London
+- For other cities, use local area knowledge.
+
+Be reasonably inclusive — border areas count. But clearly different areas do not.
+A business listed as "London W1" is Central London, not West London.
+
+Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "reasoning": "brief reason"}]}`;
+
+      const batchResult = await callLLMText(
+        'You verify whether business addresses are within a specified geographic area. Respond with JSON only.',
+        batchPrompt,
+        'location_verify_batch',
+        {
+          anthropicModel: 'claude-3-5-haiku-20241022',
+          maxTokens: 1500,
+          timeoutMs: 15000,
+        },
+      );
+
+      const cleaned = batchResult.replace(/```json\s*/gi, '').replace(/```\s*$/g, '').trim();
+      const parsed = JSON.parse(cleaned);
+
+      if (parsed.results && Array.isArray(parsed.results)) {
+        let excluded = 0;
+        for (const result of parsed.results) {
+          const idx = result.index - 1;
+          if (idx >= 0 && idx < leads.length && !result.in_location) {
+            locationExcludedLeads.push({
+              name: leads[idx].name,
+              address: leads[idx].address ?? null,
+              reason: result.reasoning,
+            });
+            (leads[idx] as any)._location_mismatch = true;
+            excluded++;
+            console.log(`[LOCATION_VERIFY] EXCLUDED "${leads[idx].name}" — ${result.reasoning}`);
+          }
+        }
+        console.log(`[LOCATION_VERIFY] Batch check: ${excluded}/${leads.length} excluded for location mismatch (required: "${locationValue}")`);
+        if (excluded > 0) {
+          leads = leads.filter(l => !(l as any)._location_mismatch);
+        }
+      }
+    } catch (locErr: any) {
+      console.warn(`[LOCATION_VERIFY] Batch check failed (non-fatal, all leads included): ${locErr.message}`);
+    }
+  }
+  // ── End batch location verification ──────────────────────────────────────
+
   for (const lead of leads) {
     try {
       const created = await storage.createSuggestedLead({
@@ -2608,6 +2685,7 @@ IMPORTANT:
         findability: intentNarrative?.findability ?? null,
         supplementary_search_fired: intentNarrative !== null && (intentNarrative.findability === 'hard' || intentNarrative.findability === 'very_hard'),
       },
+      location_excluded: locationExcludedLeads,
     },
     userId,
     conversationId,
