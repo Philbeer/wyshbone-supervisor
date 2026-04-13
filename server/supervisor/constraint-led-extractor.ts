@@ -864,6 +864,9 @@ export async function extractConstraintLedEvidence(
   const constraintValue = constraint.value;
   const isRelationship = constraint.type === 'relationship_check';
   const isInferential = constraint.reasoning_mode === 'inferential';
+  const isTemporalConstraint = constraint.type === 'time_constraint' ||
+    constraint.type === 'time_predicate' ||
+    /\b(recent|opened|established|new|last\s+\d+\s+months?)\b/i.test(String(constraintValue));
 
   console.log(`[EVIDENCE_EXTRACT] fired for "${leadName ?? 'undefined'}" + "${constraintValue}"`);
 
@@ -1033,9 +1036,12 @@ Return JSON array only: ["term1", "term2", ...]`;
             const { default: OpenAI } = await import('openai');
             const client = new OpenAI({ apiKey: openaiKey });
 
+            const layer1JudgeModel = isTemporalConstraint
+              ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
+              : (process.env.EVIDENCE_JUDGE_MODEL ?? 'gpt-4o-mini');
             const fallbackResponse = await Promise.race([
               client.chat.completions.create({
-                model: process.env.EVIDENCE_JUDGE_MODEL ?? 'gpt-4o-mini',
+                model: layer1JudgeModel,
                 temperature: 0.1,
                 max_tokens: 300,
                 response_format: { type: 'json_object' },
@@ -1164,8 +1170,11 @@ Respond with JSON: {"match": true/false, "evidence_sentence": "one sentence summ
 
       console.log(`[EVIDENCE_EXTRACT_LLM] sending ${extracts.length} windows to gpt-4o for "${leadName}"`);
 
+      const layer2JudgeModel = isTemporalConstraint
+        ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
+        : (process.env.EVIDENCE_JUDGE_MODEL ?? 'gpt-4o-mini');
       const llmCallPromise = client.chat.completions.create({
-        model: process.env.EVIDENCE_JUDGE_MODEL ?? 'gpt-4o-mini',
+        model: layer2JudgeModel,
         temperature: 0.1,
         max_tokens: 200,
         response_format: { type: 'json_object' },

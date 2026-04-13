@@ -409,7 +409,12 @@ async function liveRefineWithFetch(
     if (openaiKey) {
       console.log(`[REFINE_FALLBACK] Running GPT-4o web search fallback for ${noEvidenceLeads.length} leads with no website evidence`);
 
-      const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
+      const isRefineTemporalConstraint1 = extracted.type === 'time_constraint' ||
+        extracted.type === 'time_predicate' ||
+        /\b(recent|opened|established|new|last\s+\d+\s+months?)\b/i.test(String(extracted.value));
+      const fallbackModel = isRefineTemporalConstraint1
+        ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
+        : (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini');
       const FALLBACK_BATCH = 5;
       const refineCutoffDate1 = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
@@ -629,7 +634,12 @@ export async function executeRefine(
       if (openaiKey) {
         console.log(`[REFINE_FALLBACK] Running GPT-4o web search fallback for ${noEvidenceCached.length} leads with no cached evidence`);
 
-        const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
+        const isRefineTemporalConstraint2 = extracted.type === 'time_constraint' ||
+          extracted.type === 'time_predicate' ||
+          /\b(recent|opened|established|new|last\s+\d+\s+months?)\b/i.test(String(extracted.value));
+        const fallbackModel = isRefineTemporalConstraint2
+          ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
+          : (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini');
         const FALLBACK_BATCH = 5;
         const refineCutoffDate2 = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 

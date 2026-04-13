@@ -676,6 +676,9 @@ export async function batchGpt4oVerification(
         ? task.constraint.value
         : String(task.constraint.value ?? '');
       const batchCutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const isTemporalConstraint = task.constraint.type === 'time_constraint' ||
+        task.constraint.type === 'time_predicate' ||
+        /\b(recent|opened|established|new|last\s+\d+\s+months?)\b/i.test(constraintValue);
 
       const prompt = `${getCurrentDatePreamble()}
 
@@ -697,7 +700,9 @@ IMPORTANT:
 - constraint_met means the constraint "${constraintValue}" IS genuinely true for this business
 - If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false`;
 
-      const model = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
+      const model = isTemporalConstraint
+        ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
+        : (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini');
       const resp = await fetch('https://api.openai.com/v1/responses', {
         method: 'POST',
         headers: {
@@ -1869,8 +1874,13 @@ IMPORTANT:
 - If the business exists but does NOT match the constraint, set business_found=true and constraint_met=false
 - A business that merely MENTIONS or USES something is NOT the same as a business that MANUFACTURES or PROVIDES it`;
 
-            const fallbackModel = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
-            console.log(`[GPT4O_FALLBACK] Using model: ${fallbackModel}`);
+            const isFallbackTemporalConstraint = er.constraintType === 'time_constraint' ||
+              er.constraintType === 'time_predicate' ||
+              /\b(recent|opened|established|new|last\s+\d+\s+months?)\b/i.test(er.constraintValue);
+            const fallbackModel = isFallbackTemporalConstraint
+              ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
+              : (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini');
+            console.log(`[GPT4O_FALLBACK] Using model: ${fallbackModel}${isFallbackTemporalConstraint ? ' (temporal override)' : ''}`);
             const fbResp = await fetch('https://api.openai.com/v1/responses', {
               method: 'POST',
               headers: {
