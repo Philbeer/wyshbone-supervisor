@@ -1,0 +1,100 @@
+# FIX: Use stronger LLM model for temporal constraint verification
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE PROBLEM
+
+Haiku and gpt-4o-mini cannot reliably do temporal arithmetic. Even with explicit date rules and cutoff dates, they:
+- See "founded in 2020" + "new tap room in 2026" and conclude "recent" (wrong — founded in 2020)
+- See "establishment before April 2025" in their OWN reasoning and still mark it verified
+- Pattern-match on "12 months" appearing in text instead of calculating dates
+
+This is a fundamental model capability limitation. Prompt engineering alone cannot fix it for small models.
+
+## THE FIX
+
+When the constraint being verified is a `time_constraint`, use a more capable model. Keep the cheap models for everything else.
+
+### Change 1: Evidence judge model override for temporal constraints (constraint-led-extractor.ts)
+
+Find the `callLLMText` calls for Layer 2 judge and fallback. They currently use the default model. Add a model override when the constraint is temporal:
+
+```typescript
+// Determine if this is a temporal constraint
+const isTemporalConstraint = constraint.type === 'time_constraint' || 
+  constraint.type === 'time_predicate' ||
+  (typeof constraintValue === 'string' && /\b(recent|opened|established|new|last\s+\d+\s+months?)\b/i.test(constraintValue));
+
+const modelOverride = isTemporalConstraint ? {
+  anthropicModel: process.env.TEMPORAL_LLM_MODEL || 'claude-sonnet-4-20250514',
+  openaiModel: process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o',
+} : {};
+```
+
+Then pass the override into the LLM call:
+
+```typescript
+const result = await callLLMText(systemPrompt, userPrompt, 'evidence_judge', {
+  anthropicModel: 'claude-3-5-haiku-20241022',
+  maxTokens: 512,
+  temperature: 0,
+  timeoutMs: 15000,
+  ...modelOverride,  // ← Override to stronger model for temporal constraints
+});
+```
+
+### Change 2: Same override for GPT-4o fallback verification (mission-executor.ts)
+
+In the GPT-4o fallback verification prompt (~line 1849), when the constraint is temporal, use the full GPT-4o model instead of gpt-4o-mini:
+
+```typescript
+const fallbackModel = isTemporalConstraint 
+  ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
+  : (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini');
+```
+
+### Change 3: Same override for batch GPT-4o verification (mission-executor.ts, ~line 684)
+
+```typescript
+const verifyModel = isTemporalConstraint
+  ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
+  : 'gpt-4o-mini';
+```
+
+### Change 4: Same override in gpt4o-search.ts and refine-executor.ts
+
+Any verification prompt that evaluates constraints should check if the constraint is temporal and use the stronger model.
+
+### Change 5: Add env vars for override
+
+Add to Replit Secrets (optional — defaults are set in code):
+- `TEMPORAL_LLM_MODEL` — Anthropic model for temporal checks (default: `claude-sonnet-4-20250514`)
+- `TEMPORAL_OPENAI_MODEL` — OpenAI model for temporal checks (default: `gpt-4o`)
+
+## COST IMPACT
+
+This is a targeted cost increase:
+- Non-temporal queries (cask ale, independent, family-run): unchanged, still use Haiku/gpt-4o-mini
+- Temporal queries only: use Sonnet/GPT-4o for the evidence judge calls
+- Typical temporal query: ~20 leads × 1 constraint = 20 LLM calls with the stronger model
+- Cost per temporal query: roughly 3-5x more than a non-temporal query, but temporal queries are much less common
+
+## WHY THIS WORKS
+
+Sonnet and GPT-4o can actually do maths. Given "Founded in 2020. Cutoff is April 2025. Is 2020 after 2025?" they correctly answer "No." The small models pattern-match and get confused. The capability gap is real and no amount of prompt engineering closes it for arithmetic tasks.
+
+## TESTING
+
+"find micropubs in Sussex that opened in the last 12 months":
+- "Only With Love Brewery" (founded 2020, new taproom 2026) → should be REJECTED
+- "The Hop Tub" (reviews from October 2023) → should be REJECTED
+- "BeerBelly Micropub" (opened December 2025) → should be ACCEPTED
+- Any business with opening date before April 2025 → REJECTED
+
+## CRITICAL RULES
+
+1. ONLY temporal constraints get the stronger model — everything else stays on Haiku/gpt-4o-mini
+2. The model override is controlled by env vars so you can adjust without code changes
+3. The temporal detection uses BOTH constraint type AND constraint value regex (catches "recently opened" even if classified as website_evidence)
+4. Keep the strict temporal rules from the previous prompt — the better model + better prompt = reliable results
+5. If neither API key supports the stronger model, fall back to the default model gracefully
