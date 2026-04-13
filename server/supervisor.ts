@@ -1345,7 +1345,7 @@ class SupervisorService {
     let _routerHandledSearch = false;
 
     // ═══ CONVERSATION ROUTER (replaces classifier → gate → clarify chain) ═══
-    if (process.env.CONVERSATION_ROUTER_ENABLED === 'true') {
+    if (process.env.CONVERSATION_ROUTER_DISABLED !== 'true') {
       // Ensure bridge completes before router sends artefacts
       await _bridgePromise;
       try {
@@ -1433,7 +1433,7 @@ class SupervisorService {
           }).catch(() => {});
           console.log(`[ROUTER] Handled as CHAT — done`);
           // Signal UI poller to stop
-          this.postArtefactToUI({
+          const _chatUiResult = await this.postArtefactToUI({
             runId: jobId,
             clientRequestId,
             type: 'diagnostic',
@@ -1446,7 +1446,13 @@ class SupervisorService {
             },
             userId: task.user_id,
             conversationId: task.conversation_id,
-          }).catch(() => {});
+          }).catch((err: any) => {
+            console.error(`[ROUTER] CRITICAL: Failed to signal UI that run is complete: ${err.message}`);
+            return null;
+          });
+          if (!_chatUiResult) {
+            console.error(`[ROUTER] UI may hang — run_complete signal failed for runId=${jobId}`);
+          }
           taskExecutionStartedEmitted = true;
           await emitTaskExecutionCompleted('router_chat');
           return;
@@ -1483,7 +1489,7 @@ class SupervisorService {
           }).catch(() => {});
           console.log(`[ROUTER] Handled as CLARIFY: "${decision.clarify_question.substring(0, 80)}"`);
           // Signal UI poller to stop
-          this.postArtefactToUI({
+          const _clarifyUiResult = await this.postArtefactToUI({
             runId: jobId,
             clientRequestId,
             type: 'diagnostic',
@@ -1496,7 +1502,13 @@ class SupervisorService {
             },
             userId: task.user_id,
             conversationId: task.conversation_id,
-          }).catch(() => {});
+          }).catch((err: any) => {
+            console.error(`[ROUTER] CRITICAL: Failed to signal UI that run is complete: ${err.message}`);
+            return null;
+          });
+          if (!_clarifyUiResult) {
+            console.error(`[ROUTER] UI may hang — run_complete signal failed for runId=${jobId}`);
+          }
           taskExecutionStartedEmitted = true;
           await emitTaskExecutionCompleted('router_clarify');
           return;
@@ -1591,6 +1603,7 @@ class SupervisorService {
     let classifiedMessageClass: string = 'search'; // default
 
     if (!isClarifyResponse && !missionQueryId && !_routerHandledSearch) {
+      console.log('[MESSAGE_CLASSIFIER] Still running as secondary check (router is primary)');
       const { classifyMessage: classifyMsg } = await import('./supervisor/message-classifier');
       const classification = classifyMsg(rawMsg);
       classifiedMessageClass = classification.messageClass;

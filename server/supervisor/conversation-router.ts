@@ -88,13 +88,15 @@ Examples (when previous search exists):
 - Previous assistant: "I can widen the search to include nearby towns." User: "yes please" → ITERATE, entity=same as last search, location=wider area around last search location, iteration_change="user accepted suggestion to widen search"
 
 ### CHAT
-Greetings, gibberish, off-topic, or anything that is not a search intent.
-Set route="CHAT" and chat_response=a friendly response.
+Greetings, gibberish, off-topic, general knowledge questions, or anything that is NOT a search/lead-finding intent.
+Set route="CHAT" and chat_response=a friendly response. For general knowledge questions, give a brief helpful answer (1-2 sentences) then redirect to what Wyshbone does.
 Examples:
 - "hi" → CHAT ("Hey! I can find businesses and leads for you. What are you looking for and where?")
+- "tell me about wine" → CHAT ("Wine is a fascinating world! But I'm a business finder — I can help you find wine merchants, vineyards, or wine bars. Just tell me a location!")
+- "what is AI" → CHAT ("AI is technology that enables machines to perform tasks that typically require human intelligence. I'm an AI-powered business finder — want me to find some businesses for you?")
+- "what can you do" → CHAT ("I find businesses and leads! Tell me a type of business and a location — like 'find cafes in Brighton'.")
 - "sdfghjkl plumbers banana car" → CHAT ("I didn't quite catch that. Could you tell me what type of businesses you're looking for and where?")
 - "what's the weather like" → CHAT ("I'm a business finder, so I can't help with weather! But tell me what businesses you're looking for and where.")
-- "what can you do" → CHAT ("I find businesses and leads! Tell me a type of business and a location — like 'find cafes in Brighton'.")
 - "any" → CHAT ("Could you tell me what you're looking for? I need a type of business and a location.")
 - "find" → CHAT ("What would you like me to find? Give me a business type and location, like 'find restaurants in Manchester'.")
 What NOT to route as CHAT:
@@ -241,56 +243,12 @@ function parseRouterResponse(raw: string): RouterDecision {
 }
 
 
-// ─── Fast Paths (skip LLM for obvious cases) ───────────────────────────────
-
-const INSTANT_CHAT = [
-  /^(hi|hello|hey|howdy|morning|afternoon|evening|yo|sup)[\s!.?]*$/i,
-  /^(thanks|thank you|cheers|ta|bye|goodbye|later)[\s!.?]*$/i,
-];
-
-function tryFastPath(message: string, hasPreviousResults: boolean): RouterDecision | null {
-  const trimmed = message.trim();
-
-  // Only fast-path very short messages when there's NO conversation context
-  // "ok" after system suggestions needs the LLM to understand context
-  if (trimmed.length < 3 && !hasPreviousResults) {
-    return {
-      route: 'CHAT', entity: null, location: null, constraints: [],
-      clarify_question: null,
-      chat_response: "Could you tell me what you're looking for? I need a type of business and a location — for example, 'find plumbers in Bristol'.",
-      iteration_change: null, referenced_result: null,
-      confidence: 0.99, reasoning: 'very short input, no context',
-    };
-  }
-
-  for (const p of INSTANT_CHAT) {
-    if (p.test(trimmed)) {
-      return {
-        route: 'CHAT', entity: null, location: null, constraints: [],
-        clarify_question: null,
-        chat_response: "Hey! I can find businesses and leads for you. What are you looking for and where? For example, 'find cafes in Brighton'.",
-        iteration_change: null, referenced_result: null,
-        confidence: 0.98, reasoning: 'greeting — fast path',
-      };
-    }
-  }
-
-  return null;
-}
-
-
 // ─── Main Export ─────────────────────────────────────────────────────────────
 
 export async function routeConversation(input: RouterInput): Promise<RouterDecision> {
   const startTime = Date.now();
 
-  // Fast path — no LLM needed
-  const fast = tryFastPath(input.currentMessage, input.previousResults.exists);
-  if (fast) {
-    console.log(`[ROUTER] Fast path: route=${fast.route} (${Date.now() - startTime}ms)`);
-    return fast;
-  }
-
+  // ALL messages go through the LLM router — no fast paths, no regex
   // Build context and call LLM
   const userMessage = buildRouterUserMessage(input);
 
