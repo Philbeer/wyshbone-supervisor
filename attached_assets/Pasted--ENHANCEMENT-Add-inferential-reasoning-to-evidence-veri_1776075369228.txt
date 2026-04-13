@@ -1,0 +1,147 @@
+# ENHANCEMENT: Add inferential reasoning to evidence verification
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## CONTEXT
+
+Wyshbone's evidence verification currently works well for direct-evidence constraints — things businesses explicitly state on their website (cask ale, dog friendly, wheelchair accessible). But it struggles with inferential constraints — characteristics that are inferred from signals rather than stated directly (independent, family-run, boutique, locally owned, high-end, budget).
+
+When a user searches for "independent hairdressers in Sussex", the constraint value is "independent." Most independent salons don't write "we are independent" on their website. But they DO show signals a human would recognise: the owner's name in the business name, "run by Sarah since 2005", a single location, no franchise logos, personal tone. A human (or ChatGPT) would infer independence from those signals.
+
+The system already has the LLM capability to do this — GPT-4o-mini in Layer 2 and the zero-hit fallback CAN reason inferentially. It just needs to be ASKED to. Currently the prompts say "prove" and "genuinely proves" which demands direct evidence and fails for inferential constraints.
+
+This is NOT a new layer. It's teaching the existing layers to reason differently when the constraint requires inference rather than direct evidence.
+
+## WHAT TO CHANGE
+
+### Change 1: Layer 2 judge prompt (constraint-led-extractor.ts, ~line 1112)
+
+Find the Layer 2 system prompt that starts with:
+```
+You are a strict evidence judge for a business lead finder.
+```
+
+Replace the ENTIRE system content string with:
+
+```typescript
+content: `You are an evidence judge for a business lead finder. You will receive short extracts from a business website. Decide if any extract provides evidence that this business "${constraintValue}".
+
+There are two types of evidence:
+1. DIRECT EVIDENCE — the business explicitly states or advertises "${constraintValue}" (e.g. "we serve cask ale", "wheelchair accessible", "dog-friendly").
+2. INFERENTIAL EVIDENCE — the business doesn't explicitly state "${constraintValue}", but a reasonable person reading the website would conclude it from the available signals. Examples of inferential signals:
+   - "Independent" → owner's name mentioned, "est. 2005", single location, no franchise branding, personal tone
+   - "Family-run" → family names, "run by the Smith family", photos of family members
+   - "High-end" / "luxury" → premium pricing, upmarket language, designer brand names
+   - "Budget" / "affordable" → price-focused messaging, discount offers, value language
+   - "Local" → emphasis on community, local sourcing, neighbourhood references
+   - "Boutique" → small scale, curated selection, personal service emphasis
+   - "Specialist" → niche focus, depth of expertise in specific area
+
+For direct-evidence constraints (specific products, services, facilities), require explicit mention.
+For inferential constraints (characteristics, qualities, business type), accept reasonable inference from signals.
+
+Rules:
+- Do not force a match from nothing — there must be SOME signal
+- A word in a brand name, product name, or unrelated context does not count for direct evidence
+- For inferential evidence, explain what signals you're reading
+- Return sentences or signal descriptions that a reasonable person would accept as evidence
+
+Respond with JSON only: {"evidence_sentences": ["..."]}. Return {"evidence_sentences": []} if nothing qualifies.`,
+```
+
+### Change 2: Zero-hit fallback prompt (constraint-led-extractor.ts, ~line 1027)
+
+Find the fallback system prompt that starts with:
+```
+You are judging whether a business offers or provides
+```
+
+Replace the ENTIRE system content string with:
+
+```typescript
+content: `You are judging whether a business "${constraintValue}". You will receive text from their website.
+
+Look for TWO types of evidence:
+1. DIRECT — explicit mentions of "${constraintValue}", synonyms, related terms, brand names, menu items, or descriptions.
+2. INFERENTIAL — signals that a reasonable person would interpret as indicating "${constraintValue}", even if the exact term is never used. For example:
+   - A hairdresser is "independent" if: owner-operated, single location, no franchise branding, personal name in business name
+   - A restaurant is "family-run" if: family names appear, "est. by the Johnsons", personal/warm tone
+   - A venue is "high-end" if: premium pricing, luxury language, designer references
+   - A business is "local" if: community emphasis, local sourcing, neighbourhood identity
+
+Be reasonably inclusive — accept genuine signals but don't force a match from nothing. If you infer the characteristic, briefly state what signals you're reading.
+
+Respond with JSON: {"match": true/false, "evidence_sentence": "one sentence summary of evidence found or null", "confidence": "high"/"medium"/"low", "evidence_type": "direct"/"inferential"}`,
+```
+
+### Change 3: Synonym expansion prompt (constraint-led-extractor.ts, ~line 900)
+
+Find the Haiku synonym expansion prompt. It currently says:
+```
+You generate search terms for finding evidence on business websites.
+```
+
+Update the system prompt to:
+
+```typescript
+system: 'You generate search terms for finding evidence on business websites. Given a concept, return a JSON array of 8-15 terms including: (1) direct synonyms and alternative phrases, (2) well-known brand names or specific examples, (3) inferential signal phrases — words or phrases that would IMPLY the concept even if it\'s not stated directly. For example, "independent" might be signalled by "family-run", "owner-operated", "est. 2005", "boutique". Return JSON only, no markdown.',
+```
+
+And update the example in the user message to include an inferential example:
+
+```typescript
+content: `Generate search phrases for: "${constraintValue}"
+
+Example: "cask ale" → ["cask ale", "real ale", "traditional ale", "hand-pulled", "hand pump", "cask-conditioned", "cask beer", "real ales", "Harvey's", "Timothy Taylor", "London Pride", "cask marque"]
+
+Example: "independent" → ["independent", "independently owned", "family-run", "owner-operated", "family business", "established by", "founded by", "est.", "sole proprietor", "boutique", "not a chain", "locally owned"]
+
+Now do: "${constraintValue}"
+Return JSON array only: ["term1", "term2", ...]`,
+```
+
+### Change 4: Pass 3 key_discriminator — add inferential guidance (mission-extractor.ts)
+
+Find the Pass 3 system prompt in `mission-extractor.ts` (the one that generates the key_discriminator). After the existing inclusive discriminator instruction, add:
+
+```
+If the user's constraint is a characteristic that businesses may not explicitly state (e.g. "independent", "family-run", "boutique", "high-end", "local"), generate a key_discriminator that describes INFERENTIAL SIGNALS a reasonable person would look for, not just direct statements. For example:
+- "independent hairdressers" → "appears independently owned — signals include: owner's name in business name or on website, single location, no franchise or chain branding, personal/local tone. A business that is part of a known chain (Toni & Guy, Supercuts, Rush) is NOT independent."
+- "family-run restaurants" → "appears to be a family business — signals include: family names on website, 'family' in business name, multi-generational references, personal ownership claims."
+```
+
+### Change 5: Pass 2 constraint type awareness (mission-extractor.ts)
+
+In the Pass 2 system prompt, where constraint types are described, add a note about inferential constraints:
+
+Find where the constraint types are listed in the Pass 2 prompt and add:
+
+```
+When the user's query includes a characteristic that is typically INFERRED rather than explicitly stated (such as "independent", "family-run", "boutique", "local", "high-end"), set the constraint value to that characteristic AND add a "reasoning_mode" field set to "inferential". Direct evidence constraints (products, services, facilities) should have "reasoning_mode": "direct" or omit the field.
+
+Example:
+User: "independent hairdressers in Sussex"
+Constraint: { "type": "website_evidence", "operator": "contains", "value": "independent", "reasoning_mode": "inferential", "synonyms": ["independently owned", "family-run", "owner-operated", "boutique", "not a chain"] }
+```
+
+Then in `constraint-led-extractor.ts`, when building the Layer 2 and fallback prompts, check for `constraint.reasoning_mode === 'inferential'` and adjust the prompt tone accordingly. If `reasoning_mode` is present and set to "inferential", use the inferential prompt variations. If absent or "direct", use the standard direct-evidence prompts.
+
+This way the system automatically adjusts its evidence strategy based on what Pass 2 determines about the constraint.
+
+## TESTING
+
+1. **Direct constraint (should still work):** "pubs that serve cask ale in Sussex" → verified by direct evidence (mentions of cask ale on websites)
+2. **Inferential constraint:** "independent hairdressers in Sussex" → verified by inferential signals (owner names, single location, no chain branding)
+3. **Mixed:** "independent pubs that serve cask ale in Sussex" → cask ale verified directly, independence verified inferentially
+4. **Other inferential types:** "family-run restaurants in Brighton", "boutique hotels in Chichester", "local bakeries in Lewes"
+
+Check the evidence cards in the results — inferential matches should show reasoning like "Website mentions 'owned and run by Sarah since 2005' and shows a single location, suggesting independence" rather than just "Matched phrase: independent."
+
+## CRITICAL RULES
+
+1. Do NOT create a new layer or new pipeline — modify the existing prompts
+2. Do NOT remove direct evidence checking — add inferential ON TOP of it
+3. The `reasoning_mode` field on constraints is optional — existing constraints without it continue to work as before
+4. All inferential judgements must still have SOME signal — don't accept "no evidence found but it's probably independent"
+5. The inferential examples in the prompts are illustrative, not exhaustive — the LLM should generalise to new constraint types
+6. Keep the zero-hit fallback — it's even more important for inferential constraints where Layer 1 keywords may not appear

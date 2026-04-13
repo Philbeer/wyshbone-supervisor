@@ -262,7 +262,8 @@ Each constraint object:
   "value": string or number or boolean or null,
   "value_secondary": string or number or null (only for "between"),
   "hardness": one of ${JSON.stringify(HARDNESS_VALUES)},
-  "synonyms": string[] or null (REQUIRED for website_evidence constraints — see below)
+  "synonyms": string[] or null (REQUIRED for website_evidence constraints — see below),
+  "reasoning_mode": "direct" | "inferential" | null (see INFERENTIAL CONSTRAINT RULE below)
 }
 
 SYNONYMS RULE (for website_evidence constraints only):
@@ -272,6 +273,14 @@ Examples:
   value: "vegan food" → synonyms: ["plant-based", "vegan menu", "vegan options", "dairy-free", "vegan friendly", "plant based"]
   value: "live music" → synonyms: ["live band", "open mic", "live entertainment", "gigs", "live acoustic", "music night", "live acts"]
 For all other constraint types, set synonyms to null.
+
+INFERENTIAL CONSTRAINT RULE:
+When the user's query includes a characteristic that is typically INFERRED rather than explicitly stated (such as "independent", "family-run", "boutique", "local", "high-end", "budget", "artisan", "specialist"), set "reasoning_mode": "inferential" on the constraint. For direct evidence constraints (specific products, services, facilities explicitly stated on websites), set "reasoning_mode": "direct" or omit the field.
+For inferential constraints, the synonyms array should include SIGNAL PHRASES — words or phrases that would imply the characteristic, not just synonyms for it.
+Examples:
+  value: "independent" → reasoning_mode: "inferential", synonyms: ["independently owned", "family-run", "owner-operated", "family business", "established by", "founded by", "boutique", "locally owned", "not a chain"]
+  value: "family-run" → reasoning_mode: "inferential", synonyms: ["family business", "family owned", "run by the family", "family name", "father and son", "husband and wife", "generations"]
+  value: "high-end" → reasoning_mode: "inferential", synonyms: ["luxury", "premium", "upmarket", "exclusive", "fine dining", "bespoke", "artisan", "award-winning"]
 
 ALLOWED OPERATORS PER TYPE — you MUST only use operators from this list:
 
@@ -548,6 +557,9 @@ RULES:
 - entity_exclusions must list realistic confusables — things a Places search could return that are clearly and wholly wrong (e.g. businesses that don't offer the thing at all). Do NOT exclude businesses that offer the thing alongside other things.
 - commercial_context is a single sentence about the user's likely intent. Do not speculate wildly.
 - key_discriminator is a single sentence. It must be an INCLUSIVE positive test: frame it as "has evidence of [X]" not "specialises in X" or "primarily offers X". A business that offers X alongside other things IS a valid match. Include explicit examples of what counts as evidence. Only exclude businesses that clearly do NOT offer X at all.
+  If the user's constraint is a characteristic that businesses may not explicitly state (e.g. "independent", "family-run", "boutique", "high-end", "local"), generate a key_discriminator that describes INFERENTIAL SIGNALS a reasonable person would look for, not just direct statements. For example:
+  - "independent hairdressers" → "appears independently owned — signals include: owner's name in business name or on website, single location, no franchise or chain branding, personal/local tone. A business that is part of a known chain (Toni & Guy, Supercuts, Rush) is NOT independent."
+  - "family-run restaurants" → "appears to be a family business — signals include: family names on website, 'family' in business name, multi-generational references, personal ownership claims."
   KEY_DISCRIMINATOR EXAMPLES:
   User: "pubs that serve cask ale"
   BAD: "serves cask ale as a primary offering — not just a selection of beers that may include cask ale"

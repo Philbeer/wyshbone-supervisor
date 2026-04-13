@@ -1432,6 +1432,7 @@ export async function executeMissionDrivenPlan(
             const hints = getPageHintsForConstraint({
               type: c.type, field: c.field, operator: c.operator, value: cValue, hardness: c.hardness,
               synonyms: c.synonyms ?? null,
+              reasoning_mode: c.reasoning_mode ?? null,
             });
             for (const h of hints) {
               if (!allPageHints.includes(h)) allPageHints.push(h);
@@ -1500,6 +1501,7 @@ export async function executeMissionDrivenPlan(
             value: constraintValue,
             hardness: constraint.hardness,
             synonyms: constraint.synonyms ?? null,
+            reasoning_mode: constraint.reasoning_mode ?? null,
           },
           [],
           3,

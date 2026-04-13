@@ -5,6 +5,7 @@ export interface ConstraintContext {
   value: string;
   hardness: string;
   synonyms?: string[] | null;
+  reasoning_mode?: 'direct' | 'inferential' | null;
 }
 
 export type SourceType = 'website' | 'search_snippet' | 'gov_page' | 'social_media' | 'directory' | 'unknown';
@@ -857,6 +858,7 @@ export async function extractConstraintLedEvidence(
   const phraseTargets = classifiedTargets.map(t => t.phrase);
   const constraintValue = constraint.value;
   const isRelationship = constraint.type === 'relationship_check';
+  const isInferential = constraint.reasoning_mode === 'inferential';
 
   console.log(`[EVIDENCE_EXTRACT] fired for "${leadName ?? 'undefined'}" + "${constraintValue}"`);
 
@@ -895,14 +897,14 @@ export async function extractConstraintLedEvidence(
                 model: synonymModel,
                 max_tokens: 200,
                 temperature: 0,
-                system: 'You generate search terms for finding evidence on business websites. Given a concept, return a JSON array of 8-15 alternative phrases, synonyms, related terms, and well-known brand names that indicate the same thing. Include both formal and informal terms. Return JSON only, no markdown.',
+                system: 'You generate search terms for finding evidence on business websites. Given a concept, return a JSON array of 8-15 terms including: (1) direct synonyms and alternative phrases, (2) well-known brand names or specific examples, (3) inferential signal phrases — words or phrases that would IMPLY the concept even if it\'s not stated directly. For example, "independent" might be signalled by "family-run", "owner-operated", "est. 2005", "boutique". Return JSON only, no markdown.',
                 messages: [{
                   role: 'user',
                   content: `Generate search phrases for: "${constraintValue}"
-          
-Example: "beer garden" → ["beer garden", "garden", "outdoor seating", "patio", "terrace", "alfresco", "outside area", "garden area"]
 
 Example: "cask ale" → ["cask ale", "real ale", "traditional ale", "hand-pulled", "hand pump", "cask-conditioned", "cask beer", "real ales", "Harvey's", "Timothy Taylor", "London Pride", "cask marque"]
+
+Example: "independent" → ["independent", "independently owned", "family-run", "owner-operated", "family business", "established by", "founded by", "est.", "sole proprietor", "boutique", "not a chain", "locally owned"]
 
 Now do: "${constraintValue}"
 Return JSON array only: ["term1", "term2", ...]`,
@@ -1024,7 +1026,19 @@ Return JSON array only: ["term1", "term2", ...]`,
                 messages: [
                   {
                     role: 'system',
-                    content: `You are judging whether a business offers or provides "${constraintValue}". You will receive text from their website. Look for ANY evidence — direct mentions, synonyms, related terms, brand names, menu items, or descriptions that indicate they offer this.\n\nBe reasonably inclusive — if a pub lists specific ale brands or says "real ales" and the constraint is "cask ale", that counts. But don't force a match from nothing.\n\nRespond with JSON: {"match": true/false, "evidence_sentence": "one sentence summary of evidence found or null", "confidence": "high"/"medium"/"low"}`,
+                    content: `You are judging whether a business "${constraintValue}". You will receive text from their website.
+
+Look for TWO types of evidence:
+1. DIRECT — explicit mentions of "${constraintValue}", synonyms, related terms, brand names, menu items, or descriptions.
+2. INFERENTIAL — signals that a reasonable person would interpret as indicating "${constraintValue}", even if the exact term is never used. For example:
+   - A hairdresser is "independent" if: owner-operated, single location, no franchise branding, personal name in business name
+   - A restaurant is "family-run" if: family names appear, "est. by the Johnsons", personal/warm tone
+   - A venue is "high-end" if: premium pricing, luxury language, designer references
+   - A business is "local" if: community emphasis, local sourcing, neighbourhood identity
+
+Be reasonably inclusive — accept genuine signals but don't force a match from nothing. If you infer the characteristic, briefly state what signals you're reading.${isInferential ? '\n\nIMPORTANT: This constraint is classified as INFERENTIAL — prioritise reading signals and indirect evidence over requiring explicit statements.' : ''}
+
+Respond with JSON: {"match": true/false, "evidence_sentence": "one sentence summary of evidence found or null", "confidence": "high"/"medium"/"low", "evidence_type": "direct"/"inferential"}`,
                   },
                   {
                     role: 'user',
@@ -1109,7 +1123,29 @@ Return JSON array only: ["term1", "term2", ...]`,
         messages: [
           {
             role: 'system',
-            content: `You are a strict evidence judge for a business lead finder. You will receive short extracts from a business website where a phrase was found. Decide if any extract genuinely proves this business offers or provides "${constraintValue}".\nRules:\n- A word in a brand name, product name, or unrelated context does not count\n- A phrase appearing in an unrelated context does not count\n- Generic lists do not count unless "${constraintValue}" is explicitly named within them\n- Only return sentences where a reasonable person would say this proves the business offers "${constraintValue}"\n- Do not force a match\nRespond with JSON only: {"evidence_sentences": ["..."]}. Return {"evidence_sentences": []} if nothing qualifies.`,
+            content: `You are an evidence judge for a business lead finder. You will receive short extracts from a business website. Decide if any extract provides evidence that this business "${constraintValue}".
+
+There are two types of evidence:
+1. DIRECT EVIDENCE — the business explicitly states or advertises "${constraintValue}" (e.g. "we serve cask ale", "wheelchair accessible", "dog-friendly").
+2. INFERENTIAL EVIDENCE — the business doesn't explicitly state "${constraintValue}", but a reasonable person reading the website would conclude it from the available signals. Examples of inferential signals:
+   - "Independent" → owner's name mentioned, "est. 2005", single location, no franchise branding, personal tone
+   - "Family-run" → family names, "run by the Smith family", photos of family members
+   - "High-end" / "luxury" → premium pricing, upmarket language, designer brand names
+   - "Budget" / "affordable" → price-focused messaging, discount offers, value language
+   - "Local" → emphasis on community, local sourcing, neighbourhood references
+   - "Boutique" → small scale, curated selection, personal service emphasis
+   - "Specialist" → niche focus, depth of expertise in specific area
+
+For direct-evidence constraints (specific products, services, facilities), require explicit mention.
+For inferential constraints (characteristics, qualities, business type), accept reasonable inference from signals.
+
+Rules:
+- Do not force a match from nothing — there must be SOME signal
+- A word in a brand name, product name, or unrelated context does not count for direct evidence
+- For inferential evidence, explain what signals you're reading
+- Return sentences or signal descriptions that a reasonable person would accept as evidence${isInferential ? '\n\nIMPORTANT: This constraint is classified as INFERENTIAL — prioritise reading signals and indirect evidence over requiring explicit statements.' : ''}
+
+Respond with JSON only: {"evidence_sentences": ["..."]}. Return {"evidence_sentences": []} if nothing qualifies.`,
           },
           {
             role: 'user',
