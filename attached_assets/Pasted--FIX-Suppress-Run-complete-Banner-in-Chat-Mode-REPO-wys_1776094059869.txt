@@ -1,0 +1,68 @@
+# FIX: Suppress "Run complete" Banner in Chat Mode
+
+REPO: wyshbone-ui-post-CC
+
+## THE PROBLEM
+
+When the Supervisor completes a CHAT or CLARIFY route, it sends a diagnostic artefact to the UI with `run_complete: true`. The UI correctly uses this flag to stop polling and reset the waiting state. But it also displays a green "✓ Run complete" banner in the chat — which makes sense after a search run but looks wrong in a conversational chat exchange.
+
+## WHAT TO FIX
+
+Find where the "Run complete" banner/message is rendered in the chat UI (most likely in `client/src/pages/chat.tsx` or a component it imports). The rendering logic currently triggers whenever `run_complete: true` is detected in the artefact/diagnostic payload.
+
+Add a condition: suppress the "Run complete" banner when the payload `status` is `'CHAT'` or `'CLARIFY'`. The `run_complete` flag should STILL be processed to reset polling state (`waiting=false`, `inFlight=0`) — just don't show the visual banner.
+
+## HOW TO FIND IT
+
+Search for "Run complete" (with the capital R) in the UI codebase. It will be a string literal in a JSX element, probably something like:
+
+```tsx
+<span>✓ Run complete</span>
+```
+
+or
+
+```tsx
+{runComplete && <div className="...">Run complete</div>}
+```
+
+It may also be "Run Complete" (capitalised) — search for both.
+
+Also search for `run_complete` (with underscore) to find where the flag is read from the artefact payload and sets the state that triggers the banner.
+
+## THE FIX PATTERN
+
+Wherever the "Run complete" banner is conditionally rendered, add a check for the run type. The diagnostic payload that arrives from the Supervisor includes a `status` field. When processing the artefact/diagnostic:
+
+1. Continue to process `run_complete: true` for polling reset (this MUST still work)
+2. Store the `status` value (e.g. 'CHAT', 'CLARIFY', 'SEARCH', 'DISCUSS') alongside the run_complete state
+3. Only show the "Run complete" banner when status is NOT 'CHAT' and NOT 'CLARIFY'
+
+Pseudocode:
+```tsx
+// When processing the diagnostic payload:
+if (payload.run_complete) {
+  setWaiting(false);  // Always reset polling — keep this
+  setInFlight(0);     // Always reset — keep this
+  
+  // Only show the banner for non-chat completions
+  if (payload.status !== 'CHAT' && payload.status !== 'CLARIFY') {
+    setShowRunComplete(true);  // or however the banner is currently triggered
+  }
+}
+```
+
+The exact variable names will differ — look at the existing code and follow the pattern.
+
+## WHAT NOT TO CHANGE
+
+- Do NOT modify the Supervisor — the `run_complete: true` flag is correct and necessary
+- Do NOT change how polling is reset — that must still work for all run types
+- Do NOT remove the "Run complete" banner entirely — it's useful after search runs
+
+## VERIFICATION
+
+1. Type "tell me about the wine society" → Chat response appears, NO "Run complete" banner
+2. Type "how much is membership?" → Chat response appears, NO "Run complete" banner
+3. Type "find pubs in Brighton" → Search runs, results appear, "Run complete" banner SHOWS (still works for search)
+4. Check diagnostic panel: `waiting=false` and `inFlight=0` after chat responses (polling reset still works even without the banner)

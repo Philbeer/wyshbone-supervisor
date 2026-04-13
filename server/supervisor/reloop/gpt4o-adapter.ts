@@ -27,6 +27,7 @@ export async function gpt4oAdapter(input: ExecutorInput): Promise<ExecutorOutput
     verificationPolicy,
     verificationPolicyReason,
     queryId: (input.missionContext.queryId as string | null | undefined) ?? null,
+    suppressDeliverySummary: true,
   };
 
   const result = await executeGpt4oPrimaryPath(gpt4oCtx);

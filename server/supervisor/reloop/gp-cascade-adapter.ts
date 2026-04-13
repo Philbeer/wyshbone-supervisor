@@ -20,6 +20,7 @@ export async function gpCascadeAdapter(input: ExecutorInput): Promise<ExecutorOu
     intentNarrative: (input.missionContext.intentNarrative as any) ?? null,
     queryId: (input.missionContext.queryId as string | null | undefined) ?? null,
     executionPath: 'gp_cascade',
+    suppressDeliverySummary: true,
   };
 
   const result = await executeMissionDrivenPlan(missionCtx);

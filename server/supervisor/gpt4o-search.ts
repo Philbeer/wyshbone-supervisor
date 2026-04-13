@@ -42,6 +42,7 @@ export interface Gpt4oSearchContext {
   verificationPolicy: VerificationPolicy;
   verificationPolicyReason: string;
   queryId?: string | null;
+  suppressDeliverySummary?: boolean;
 }
 
 export interface Gpt4oPrimaryResult {
@@ -643,23 +644,26 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     };
   });
 
-  const dsPayload = await emitDeliverySummary({
-    runId,
-    userId,
-    conversationId,
-    originalUserGoal: rawUserInput,
-    requestedCount,
-    hardConstraints,
-    softConstraints,
-    planVersions: dsPlanVersions,
-    softRelaxations: dsSoftRelaxations,
-    leads: dsLeads,
-    finalVerdict,
-    finalAction,
-    stopReason: null,
-    verificationPolicy,
-    verificationPolicyReason,
-  });
+  let dsPayload: Awaited<ReturnType<typeof emitDeliverySummary>> | null = null;
+  if (!ctx.suppressDeliverySummary) {
+    dsPayload = await emitDeliverySummary({
+      runId,
+      userId,
+      conversationId,
+      originalUserGoal: rawUserInput,
+      requestedCount,
+      hardConstraints,
+      softConstraints,
+      planVersions: dsPlanVersions,
+      softRelaxations: dsSoftRelaxations,
+      leads: dsLeads,
+      finalVerdict,
+      finalAction,
+      stopReason: null,
+      verificationPolicy,
+      verificationPolicyReason,
+    });
+  }
 
   await logAFREvent({
     userId, runId, conversationId, clientRequestId,

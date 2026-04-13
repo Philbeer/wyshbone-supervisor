@@ -1,0 +1,171 @@
+# COMPREHENSIVE FIX: Re-loop delivery — single canonical delivery_summary
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE PROBLEM (FULL PICTURE)
+
+When the re-loop runs multiple loops, THREE delivery_summary artefacts are created:
+1. Loop 1 (GP cascade) → `emitDeliverySummary` → delivery_summary with 0 leads, status: STOP
+2. Loop 2 (GPT-4o search) → `emitDeliverySummary` → delivery_summary with 3 leads, status: PASS
+3. Canonical (loop-skeleton) → `emitDeliverySummary` → delivery_summary with 3 leads, status: STOP
+
+The UI reads delivery_summary artefacts to render breadcrumbs and the results card. Due to timing, it reads #1 (0 leads, STOP) and shows "0 verified results delivered." Even if it reads #3, the STOP status causes the UI to hide results.
+
+Meanwhile, the supervisor message reads the lead count directly and correctly says "I found 3 micropubs."
+
+## THE FIX: Three changes
+
+### Change 1: Suppress per-loop delivery_summary when inside re-loop
+
+The executors (`executeMissionDrivenPlan` and `executeGpt4oPrimaryPath`) should NOT emit delivery_summary when running as part of a re-loop. Only the loop-skeleton should emit the canonical one.
+
+**In `server/supervisor/mission-executor.ts`:**
+
+Add an optional parameter to `executeMissionDrivenPlan`:
+
+Find the function signature:
+```typescript
+export async function executeMissionDrivenPlan(
+  ctx: MissionExecutionContext,
+): Promise<MissionExecutionResult> {
+```
+
+Add `suppressDeliverySummary` to the `MissionExecutionContext` interface:
+
+```typescript
+export interface MissionExecutionContext {
+  // ... existing fields ...
+  suppressDeliverySummary?: boolean;  // ← ADD THIS
+}
+```
+
+Then find the `emitDeliverySummary` call at the end of `executeMissionDrivenPlan` (around line 2926). Wrap it:
+
+```typescript
+if (!ctx.suppressDeliverySummary) {
+  const dsPayload = await emitDeliverySummary({
+    // ... existing call ...
+  });
+}
+```
+
+**In `server/supervisor/gpt4o-search.ts`:**
+
+Same approach. Add `suppressDeliverySummary` to `Gpt4oSearchContext`:
+
+```typescript
+export interface Gpt4oSearchContext {
+  // ... existing fields ...
+  suppressDeliverySummary?: boolean;  // ← ADD THIS
+}
+```
+
+Find the `emitDeliverySummary` call (around line 646). Wrap it:
+
+```typescript
+if (!ctx.suppressDeliverySummary) {
+  const dsPayload = await emitDeliverySummary({
+    // ... existing call ...
+  });
+}
+```
+
+**In `server/supervisor/reloop/gp-cascade-adapter.ts`:**
+
+Pass `suppressDeliverySummary: true` to the mission context:
+
+```typescript
+const missionCtx: MissionExecutionContext = {
+  // ... existing fields ...
+  suppressDeliverySummary: true,  // ← ADD THIS
+};
+```
+
+**In `server/supervisor/reloop/gpt4o-adapter.ts`:**
+
+Same — pass the flag through:
+
+```typescript
+const gpt4oCtx: Gpt4oSearchContext = {
+  // ... existing fields ...
+  suppressDeliverySummary: true,  // ← ADD THIS
+};
+```
+
+Now only the loop-skeleton's canonical `emitDeliverySummary` creates a delivery_summary artefact. No race condition — one artefact, one source of truth.
+
+### Change 2: Fix the canonical delivery status — never STOP when leads exist
+
+In `server/supervisor/reloop/loop-skeleton.ts`, in the canonical `emitDeliverySummary` call, override the verdict:
+
+```typescript
+// Don't let Tower STOP/FAIL hide delivered leads
+const canonicalVerdict = deliveredLeads.length > 0 ? 'pass' : (combinedTowerVerdict || 'stop');
+const canonicalAction = deliveredLeads.length > 0 ? 'accept' : 'stop';
+
+await emitDeliverySummary({
+  runId,
+  userId,
+  conversationId,
+  originalUserGoal: rawUserInput,
+  requestedCount,
+  hardConstraints,
+  softConstraints,
+  planVersions: [{ version: 1, changes_made: ['Combined re-loop delivery'] }],
+  softRelaxations: [],
+  leads: canonicalDsLeads,
+  finalVerdict: canonicalVerdict,
+  finalAction: canonicalAction,
+  stopReason: null,
+});
+```
+
+This means: if there ARE leads, status is PASS (not STOP). The UI renders them. If there are genuinely no leads, status stays STOP.
+
+### Change 3: Update the results-ready protocol event with correct count
+
+In `loop-skeleton.ts`, the `emitResultsReady` call near the end already uses `deliveredLeads.length`. But ALSO emit a progress update that overrides Loop 1's breadcrumbs:
+
+After the canonical delivery_summary is emitted, add:
+
+```typescript
+// Override the breadcrumb count that Loop 1 set to 0
+emitMilestoneReached({
+  ...protocolBase,
+  milestoneKey: 'delivery_complete',
+  milestoneText: `${deliveredLeads.length} verified results delivered`,
+  phaseName: 'delivery',
+  detail: `${deliveredLeads.length} leads from ${totalLoops} loops`,
+}).catch(() => {});
+```
+
+This ensures the breadcrumbs update to show the correct combined count.
+
+## TESTING
+
+1. **"find micropubs in Sussex that opened in the last 3 years"** — run 3 times. Every time:
+   - Breadcrumbs should show "X verified results delivered" (not 0)
+   - Results card should show the leads with evidence
+   - Supervisor message count should match breadcrumbs and card
+   - NO contradictions between the three views
+
+2. **"find pubs that serve cask ale in Sussex"** — this is a single-loop query (Loop 1 succeeds). Should still work as before — regression check.
+
+3. **"find independent hairdressers in Sussex"** — another single-loop query. No regression.
+
+4. Check the AFR export — there should be exactly ONE delivery_summary artefact per run (the canonical one), not three.
+
+## WHY THIS FULLY FIXES IT
+
+- **No race condition**: Only ONE delivery_summary exists, created AFTER all loops. The UI can only read one, and it's correct.
+- **No STOP-with-leads**: When leads exist, status is PASS. The UI renders them.
+- **Breadcrumbs updated**: The milestone event overrides Loop 1's "0 delivered" with the correct combined count.
+- **No regression**: When `suppressDeliverySummary` is not set (direct calls from supervisor.ts, not via re-loop adapters), the existing behavior is unchanged.
+
+## CRITICAL RULES
+
+1. `suppressDeliverySummary` must be optional with default `false` — existing direct calls still emit normally
+2. Only the re-loop adapters set `suppressDeliverySummary: true`
+3. The canonical delivery_summary MUST include all fields the UI needs (match_evidence, match_basis, etc.)
+4. Never set status STOP when `delivered_exact_count > 0` — use PASS or PARTIAL
+5. The milestone event for breadcrumbs must fire AFTER the canonical delivery_summary

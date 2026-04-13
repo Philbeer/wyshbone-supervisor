@@ -66,6 +66,7 @@ export interface MissionExecutionContext {
   queryId?: string | null;
   executionPath?: 'gp_cascade' | 'gpt4o_primary';
   checkpoint?: import('./reloop/types').ResumeCheckpoint | null;
+  suppressDeliverySummary?: boolean;
 }
 
 export interface MissionExecutionResult {
@@ -2923,33 +2924,36 @@ IMPORTANT:
     };
   });
 
-  const dsPayload = await emitDeliverySummary({
-    runId,
-    userId,
-    conversationId,
-    originalUserGoal: rawUserInput,
-    requestedCount,
-    hardConstraints,
-    softConstraints,
-    planVersions: dsPlanVersions,
-    softRelaxations: dsSoftRelaxations,
-    leads: dsLeads,
-    finalVerdict,
-    finalAction, // PHASE_3: pass Tower action to delivery summary
-    stopReason: null,
-    relationshipContext: relationshipPredicate.requires_relationship_evidence
-      ? {
-          requires_relationship_evidence: true,
-          detected_predicate: relationshipPredicate.detected_predicate,
-          relationship_target: relationshipPredicate.relationship_target,
-          verified_relationship_count: evidenceResults.filter(
-            r => r.constraintType === 'relationship_check' && r.evidenceFound,
-          ).length,
-        }
-      : undefined,
-    verificationPolicy: plan.verification_policy.verification_policy,
-    verificationPolicyReason: plan.verification_policy.reason,
-  });
+  let dsPayload: Awaited<ReturnType<typeof emitDeliverySummary>> | null = null;
+  if (!ctx.suppressDeliverySummary) {
+    dsPayload = await emitDeliverySummary({
+      runId,
+      userId,
+      conversationId,
+      originalUserGoal: rawUserInput,
+      requestedCount,
+      hardConstraints,
+      softConstraints,
+      planVersions: dsPlanVersions,
+      softRelaxations: dsSoftRelaxations,
+      leads: dsLeads,
+      finalVerdict,
+      finalAction, // PHASE_3: pass Tower action to delivery summary
+      stopReason: null,
+      relationshipContext: relationshipPredicate.requires_relationship_evidence
+        ? {
+            requires_relationship_evidence: true,
+            detected_predicate: relationshipPredicate.detected_predicate,
+            relationship_target: relationshipPredicate.relationship_target,
+            verified_relationship_count: evidenceResults.filter(
+              r => r.constraintType === 'relationship_check' && r.evidenceFound,
+            ).length,
+          }
+        : undefined,
+      verificationPolicy: plan.verification_policy.verification_policy,
+      verificationPolicyReason: plan.verification_policy.reason,
+    });
+  }
 
   await logAFREvent({
     userId, runId, conversationId, clientRequestId,

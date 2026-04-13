@@ -1019,6 +1019,9 @@ export async function runReloop(params: {
         match_evidence: lead.match_evidence || [],
       }));
 
+      const canonicalVerdict = deliveredLeads.length > 0 ? 'pass' : (combinedTowerVerdict || 'stop');
+      const canonicalAction = deliveredLeads.length > 0 ? 'accept' : 'stop';
+
       await emitDeliverySummary({
         runId,
         userId,
@@ -1030,12 +1033,20 @@ export async function runReloop(params: {
         planVersions: [{ version: 1, changes_made: ['Combined re-loop delivery'] }],
         softRelaxations: [],
         leads: canonicalDsLeads,
-        finalVerdict: combinedTowerVerdict || 'pass',
-        finalAction: combinedTowerVerdict === 'pass' ? 'accept' : 'continue',
+        finalVerdict: canonicalVerdict,
+        finalAction: canonicalAction,
         stopReason: null,
       });
 
       console.log(`[RELOOP_SKELETON] Emitted canonical delivery_summary with ${canonicalDsLeads.length} leads (supersedes per-loop summaries)`);
+
+      emitMilestoneReached({
+        ...protocolBase,
+        milestoneKey: 'delivery_complete',
+        milestoneText: `${deliveredLeads.length} verified results delivered`,
+        phaseName: 'delivery',
+        detail: `${deliveredLeads.length} leads from ${totalLoops} loops`,
+      }).catch(() => {});
     } catch (dsErr: any) {
       console.warn(`[RELOOP_SKELETON] Canonical delivery_summary emit failed (non-fatal): ${dsErr.message}`);
     }
