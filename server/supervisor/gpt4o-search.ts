@@ -83,10 +83,29 @@ function buildSearchPrompt(ctx: Gpt4oSearchContext, angle: string): string {
     ? `\nSearch angle: ${angle}\n`
     : '';
 
+  const hasTemporalConstraint = ctx.hardConstraints.some(c =>
+    /\b(recent|opened|established|new|last\s+\d+\s+months?|within\s+\d+)\b/i.test(c),
+  ) || /\b(recent|opened|new|last\s+\d+)\b/i.test(ctx.rawUserInput);
+
+  const cutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+  const temporalRules = hasTemporalConstraint ? `
+
+CRITICAL TEMPORAL RULES — READ CAREFULLY:
+You are looking for businesses that OPENED (were first established/founded) after ${cutoffDate}.
+- ONLY the original OPENING or ESTABLISHMENT date matters.
+- A business founded in 2020 that opened a new branch/taproom in 2026 does NOT qualify — it was founded in 2020.
+- A business that MOVED to new premises recently does NOT qualify unless it was also FOUNDED recently.
+- "Operating for over 12 months" means the business is OLD, not new.
+- Recent website updates, recent Companies House filings, or recent Google reviews do NOT prove recent opening.
+- If you cannot find a clear opening/establishment date AFTER ${cutoffDate}, do NOT include the business.
+- ONLY include businesses where you find evidence they were FIRST established after ${cutoffDate}.
+` : '';
+
   return `${getCurrentDatePreamble()}
 
 You are a research assistant finding specific entities. Search the web thoroughly.${angleNote}
-TASK: Find ${entityDesc} in ${ctx.location} that match the following search. ${constraintText}
+TASK: Find ${entityDesc} in ${ctx.location} that match the following search. ${constraintText}${temporalRules}
 Location: ${ctx.location}, ${ctx.country}
 
 For EACH result you find, provide:

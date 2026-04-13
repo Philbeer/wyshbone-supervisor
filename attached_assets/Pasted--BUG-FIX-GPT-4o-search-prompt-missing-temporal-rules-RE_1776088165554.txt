@@ -1,0 +1,71 @@
+# BUG FIX: GPT-4o search prompt missing temporal rules
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE PROBLEM
+
+`server/supervisor/gpt4o-search.ts` already uses GPT-4o full and has the date preamble. But its `buildSearchPrompt` function doesn't include the strict temporal rules. GPT-4o sees "founded 2020, new taproom 2026" and reports it as matching "opened in the last 12 months" because it sees recent activity.
+
+## THE FIX
+
+In `server/supervisor/gpt4o-search.ts`, find the `buildSearchPrompt` function. After the line that says `${constraintText}`, add temporal rules when the constraints mention time:
+
+```typescript
+function buildSearchPrompt(ctx: Gpt4oSearchContext, angle: string): string {
+  const entityDesc = ctx.intentNarrative?.entity_description ?? ctx.businessType;
+  const constraintText = ctx.hardConstraints.length > 0
+    ? `They must: ${ctx.hardConstraints.join(', ')}.`
+    : '';
+  
+  // Detect if any constraint is temporal
+  const hasTemporalConstraint = ctx.hardConstraints.some(c => 
+    /\b(recent|opened|established|new|last\s+\d+\s+months?|within\s+\d+)/i.test(c)
+  ) || /\b(recent|opened|new|last\s+\d+)/i.test(ctx.rawUserInput);
+  
+  const cutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  
+  const temporalRules = hasTemporalConstraint ? `
+
+CRITICAL TEMPORAL RULES — READ CAREFULLY:
+You are looking for businesses that OPENED (were first established/founded) after ${cutoffDate}.
+- ONLY the original OPENING or ESTABLISHMENT date matters.
+- A business founded in 2020 that opened a new branch/taproom in 2026 does NOT qualify — it was founded in 2020.
+- A business that MOVED to new premises recently does NOT qualify unless it was also FOUNDED recently.
+- "Operating for over 12 months" means the business is OLD, not new.
+- Recent website updates, recent Companies House filings, or recent Google reviews do NOT prove recent opening.
+- If you cannot find a clear opening/establishment date AFTER ${cutoffDate}, do NOT include the business.
+- ONLY include businesses where you find evidence they were FIRST established after ${cutoffDate}.
+` : '';
+
+  // ... rest of prompt with temporalRules inserted
+```
+
+Then insert `${temporalRules}` into the prompt string, right after `${constraintText}`.
+
+The full return statement should look like:
+
+```typescript
+  return `${getCurrentDatePreamble()}
+
+You are a research assistant finding specific entities. Search the web thoroughly.${angleNote}
+TASK: Find ${entityDesc} in ${ctx.location} that match the following search. ${constraintText}${temporalRules}
+Location: ${ctx.location}, ${ctx.country}
+
+For EACH result you find, provide:
+...rest of prompt unchanged...`;
+```
+
+## TESTING
+
+"find micropubs in Sussex that opened in the last 12 months":
+- BeerBelly Micropub (December 2025) → SHOULD be included
+- Only With Love Brewery (founded 2020, new taproom 2026) → SHOULD NOT be included
+- BN6 Craft Beer (opened February 2022) → SHOULD NOT be included
+- The Hop Tub (operating since 2023) → SHOULD NOT be included
+
+## CRITICAL RULES
+
+1. Only add temporal rules when a temporal constraint is detected
+2. Non-temporal searches are unchanged
+3. The cutoff date is calculated dynamically from `new Date()`
+4. This is the ONLY file that needs changing — the model override in other files is correct
