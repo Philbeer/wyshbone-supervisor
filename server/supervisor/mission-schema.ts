@@ -118,6 +118,7 @@ export const MissionConstraintSchema = z.object({
   value_secondary: z.union([z.string(), z.number(), z.null()]).optional(),
   hardness: z.enum(HARDNESS_VALUES),
   evidence_requirement: z.enum(EVIDENCE_REQUIREMENT_VALUES).optional(), // PHASE_2
+  synonyms: z.array(z.string()).nullable().optional(), // LLM-generated synonyms for website_evidence matching
 });
 
 export type MissionConstraint = z.infer<typeof MissionConstraintSchema>;

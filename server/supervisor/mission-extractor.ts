@@ -261,8 +261,17 @@ Each constraint object:
   "operator": string (MUST be from the allowed list for this type),
   "value": string or number or boolean or null,
   "value_secondary": string or number or null (only for "between"),
-  "hardness": one of ${JSON.stringify(HARDNESS_VALUES)}
+  "hardness": one of ${JSON.stringify(HARDNESS_VALUES)},
+  "synonyms": string[] or null (REQUIRED for website_evidence constraints — see below)
 }
+
+SYNONYMS RULE (for website_evidence constraints only):
+For every website_evidence constraint you emit, also generate a "synonyms" array containing 4-8 alternative terms, phrases, abbreviations, or brand names that would indicate the same thing on a business website. These help downstream evidence matching find relevant content even when the exact phrase isn't used.
+Examples:
+  value: "cask ale" → synonyms: ["real ale", "hand-pulled ale", "cask conditioned", "cask beer", "traditional ale", "hand pump", "cask marque", "real ales"]
+  value: "vegan food" → synonyms: ["plant-based", "vegan menu", "vegan options", "dairy-free", "vegan friendly", "plant based"]
+  value: "live music" → synonyms: ["live band", "open mic", "live entertainment", "gigs", "live acoustic", "music night", "live acts"]
+For all other constraint types, set synonyms to null.
 
 ALLOWED OPERATORS PER TYPE — you MUST only use operators from this list:
 
@@ -504,9 +513,9 @@ NOTE: You run BEFORE structured constraint extraction. Your entity_description, 
 OUTPUT SCHEMA (JSON only, no markdown):
 {
   "entity_description": "specific plain English description of what the user actually wants",
-  "entity_exclusions": ["things that look similar but are wrong"],
+  "entity_exclusions": ["things that clearly and obviously do not match — not things that partially match or match alongside other things"],
   "commercial_context": "why the user likely wants this and what they will do with the results",
-  "key_discriminator": "the single most important signal that separates a correct result from a plausible but wrong one",
+  "key_discriminator": "the MINIMUM signal that confirms a business meets the user's need — frame as an INCLUSIVE positive test",
   "findability": "easy | moderate | hard | very_hard",
   "findability_reason": "one sentence explaining why this is easy or hard to find on the internet",
   "suggested_approaches": [
@@ -536,9 +545,17 @@ MISSION MODE DETECTION — apply BEFORE all other analysis:
 
 RULES:
 - entity_description must be specific. Do not just repeat the category label. Describe the type of business in plain terms.
-- entity_exclusions must list realistic confusables — things a Places search could return that would look right but are wrong.
+- entity_exclusions must list realistic confusables — things a Places search could return that are clearly and wholly wrong (e.g. businesses that don't offer the thing at all). Do NOT exclude businesses that offer the thing alongside other things.
 - commercial_context is a single sentence about the user's likely intent. Do not speculate wildly.
-- key_discriminator is a single sentence. It is the most important signal Tower should use to accept or reject a result.
+- key_discriminator is a single sentence. It must be an INCLUSIVE positive test: frame it as "has evidence of [X]" not "specialises in X" or "primarily offers X". A business that offers X alongside other things IS a valid match. Include explicit examples of what counts as evidence. Only exclude businesses that clearly do NOT offer X at all.
+  KEY_DISCRIMINATOR EXAMPLES:
+  User: "pubs that serve cask ale"
+  BAD: "serves cask ale as a primary offering — not just a selection of beers that may include cask ale"
+  GOOD: "has evidence of serving cask ale (e.g. mentions cask ale, real ale, hand-pulled ales, specific cask brands, or cask marque accreditation). A pub that serves cask ale alongside other drinks is a valid match."
+  User: "bars with live music"
+  BAD: "is primarily a live music venue"
+  GOOD: "has evidence of live music events (e.g. mentions live bands, open mic nights, live entertainment, gigs). A bar that hosts live music alongside other events is a valid match."
+- entity_exclusions should only list businesses that CLEARLY do not match at all — not businesses that partially match or offer the thing alongside others.
 - suggested_approaches must have exactly 3 entries, ordered from most to least promising.
 - fallback_intent describes a more findable proxy query if all primary approaches fail.
 - scarcity_expectation: "abundant" >50 findable results, "moderate" 10–50, "scarce" <10, "unknown" when genuinely unclear.

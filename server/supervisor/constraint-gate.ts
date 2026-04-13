@@ -17,6 +17,8 @@ import {
   detectRelationshipRole,
 } from './relationship-predicate';
 
+import { callLLMText } from './llm-failover';
+
 import type { CanonicalIntent, CanonicalConstraint } from './canonical-intent';
 
 export type LiveMusicVerification = 'website_verify' | 'best_effort' | null;
@@ -295,14 +297,15 @@ function extractSubjectivePredicate(msg: string): SubjectivePredicateConstraint 
   const label = terms.join(', ');
   const required_inputs_missing = terms.map(t => `definition_of_${t.replace(/\s+/g, '_')}`);
   const rephrases = buildSuggestedRephrases(terms, msg);
+  console.log(`[CONSTRAINT_GATE] Subjective term(s) detected: ${label} — proceeding as soft warning (LLM will interpret semantically)`);
   return {
     type: 'subjective_predicate',
     label,
     verifiability: 'unverifiable',
     hardness: 'soft',
     required_inputs_missing,
-    can_execute: false,
-    why_blocked: `This request uses a subjective term that needs clarification`,
+    can_execute: true,
+    why_blocked: '',
     suggested_rephrase: rephrases.join(' | '),
     clarification_options: SUBJECTIVE_CLARIFICATION_OPTIONS,
   };
@@ -376,7 +379,8 @@ const COMMON_ATTRIBUTE_SYNONYMS: Record<string, string[]> = {
   'outdoor seating': ['outdoor area', 'outside seating', 'terrace', 'patio', 'al fresco', 'garden seating'],
   'live music': ['live band', 'live bands', 'open mic', 'gigs', 'gig', 'music night', 'music nights', 'live entertainment', 'live acoustic'],
   'craft beer': ['craft ales', 'craft brewery', 'microbrewery', 'artisan beer', 'indie beer'],
-  'real ale': ['cask ale', 'cask beer', 'real ales', 'hand-pulled', 'traditional ale'],
+  'real ale': ['cask ale', 'cask beer', 'real ales', 'hand-pulled', 'traditional ale', 'hand pump', 'cask marque', 'cask conditioned'],
+  'cask ale': ['real ale', 'cask beer', 'real ales', 'hand-pulled', 'traditional ale', 'hand pump', 'cask marque', 'cask conditioned', 'guest ales'],
   'rooftop': ['rooftop bar', 'rooftop terrace', 'sky bar', 'rooftop seating'],
   'vegan': ['vegan options', 'vegan menu', 'plant-based', 'vegan food', 'vegan friendly'],
   'vegetarian': ['vegetarian options', 'vegetarian menu', 'veggie options', 'veggie menu'],
@@ -442,6 +446,64 @@ export function generateKeywordVariants(attrRaw: string): string[] {
   for (const syn of synonyms) variants.add(syn);
 
   return Array.from(variants);
+}
+
+const _llmSynonymCache = new Map<string, string[]>();
+
+const LLM_SYNONYM_SYSTEM_PROMPT = `You are generating search synonyms for evidence verification. Given an attribute that a user is looking for in a business, list 5-10 alternative terms, phrases, or brand names that would indicate the business offers this attribute.
+
+Return ONLY a JSON array of strings. No explanation, no markdown, no commentary.
+
+Example:
+Attribute: "cask ale"
+["real ale", "hand-pulled ale", "traditional ale", "cask marque", "Harvey's", "London Pride", "Timothy Taylor", "guest ales", "hand pump", "cask conditioned"]`;
+
+async function fetchLLMSynonyms(attribute: string): Promise<string[]> {
+  const cacheKey = attribute.toLowerCase().trim();
+  if (_llmSynonymCache.has(cacheKey)) {
+    return _llmSynonymCache.get(cacheKey)!;
+  }
+  try {
+    const raw = await callLLMText(
+      LLM_SYNONYM_SYSTEM_PROMPT,
+      `Attribute: "${attribute}"`,
+      'synonym_expansion',
+      { maxTokens: 300, timeoutMs: 5000 },
+    );
+    let cleaned = raw.trim();
+    if (cleaned.startsWith('```')) cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed) && parsed.every(s => typeof s === 'string')) {
+      _llmSynonymCache.set(cacheKey, parsed);
+      return parsed;
+    }
+  } catch (err: any) {
+    console.warn(`[CONSTRAINT_GATE] LLM synonym expansion failed for "${attribute}": ${err?.message || err}`);
+  }
+  return [];
+}
+
+export async function enrichConstraintsWithLLMSynonyms(constraints: Constraint[]): Promise<void> {
+  const attrConstraints = constraints.filter(
+    (c): c is AttributeConstraint => c.type === 'attribute',
+  );
+
+  await Promise.all(
+    attrConstraints.map(async (c) => {
+      const attrDisplay = c.attribute.replace(/_/g, ' ');
+      const llmSynonyms = await fetchLLMSynonyms(attrDisplay);
+      if (llmSynonyms.length > 0) {
+        const existing = new Set((c.keyword_variants || []).map(v => v.toLowerCase()));
+        for (const syn of llmSynonyms) {
+          if (!existing.has(syn.toLowerCase())) {
+            c.keyword_variants = [...(c.keyword_variants || []), syn];
+            existing.add(syn.toLowerCase());
+          }
+        }
+        console.log(`[CONSTRAINT_GATE] LLM synonyms for "${attrDisplay}": ${llmSynonyms.slice(0, 5).join(', ')}...`);
+      }
+    }),
+  );
 }
 
 function extractGenericAttributes(msg: string, alreadyFound: Set<string>): { attribute: string; raw: string }[] {
@@ -756,7 +818,7 @@ function buildGateState(constraints: Constraint[], isNoProxy: boolean): Constrai
   };
 }
 
-export function preExecutionConstraintGate(msg: string): ConstraintContract {
+export async function preExecutionConstraintGate(msg: string): Promise<ConstraintContract> {
   const constraints = extractAllConstraints(msg);
 
   if (constraints.length === 0) {
@@ -771,7 +833,7 @@ export function preExecutionConstraintGate(msg: string): ConstraintContract {
 
   const hasSubjective = constraints.some(c => c.type === 'subjective_predicate');
   if (hasSubjective) {
-    console.log(`[CONSTRAINT_GATE] constraint_gate_triggered: subjective`);
+    console.log(`[CONSTRAINT_GATE] constraint_gate_triggered: subjective (soft warning only — proceeding)`);
   }
 
   const initialLiveMusicChoice = detectLiveMusicChoice(msg);
@@ -802,6 +864,8 @@ export function preExecutionConstraintGate(msg: string): ConstraintContract {
       }
     }
   }
+
+  await enrichConstraintsWithLLMSynonyms(constraints);
 
   const gate = buildGateState(constraints, isNoProxy || isMustBeCertain);
   if (isMustBeCertain) {
@@ -1005,7 +1069,7 @@ export function clearPendingContract(conversationId: string): void {
   pendingContracts.delete(conversationId);
 }
 
-export function preExecutionConstraintGateFromIntent(intent: CanonicalIntent, rawMsg: string): ConstraintContract {
+export async function preExecutionConstraintGateFromIntent(intent: CanonicalIntent, rawMsg: string): Promise<ConstraintContract> {
   const constraints: Constraint[] = [];
   let coveredTypes = new Set<string>();
 
@@ -1059,14 +1123,15 @@ export function preExecutionConstraintGateFromIntent(intent: CanonicalIntent, ra
       case 'unknown_constraint': {
         if (cc.clarify_if_needed) {
           const terms = cc.raw.trim();
+          console.log(`[CONSTRAINT_GATE] Subjective term from canonical intent: "${terms}" — proceeding as soft warning`);
           constraints.push({
             type: 'subjective_predicate',
             label: terms,
             terms: [terms],
             verifiability: 'unverifiable',
             hardness: 'soft',
-            can_execute: false,
-            why_blocked: `Subjective term "${terms}" is too vague to verify from listings data.`,
+            can_execute: true,
+            why_blocked: '',
             clarification_options: SUBJECTIVE_CLARIFICATION_OPTIONS,
             required_inputs_missing: [],
           });
@@ -1135,6 +1200,8 @@ export function preExecutionConstraintGateFromIntent(intent: CanonicalIntent, ra
       }
     }
   }
+
+  await enrichConstraintsWithLLMSynonyms(constraints);
 
   const gate = buildGateState(constraints, isNoProxy || isMustBeCertain);
   const result = isMustBeCertain ? applyCertaintyGate(gate) : gate;

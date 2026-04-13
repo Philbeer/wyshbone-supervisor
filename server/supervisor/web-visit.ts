@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 import { buildToolResult, buildToolError } from "@shared/tool-result-helpers";
 import type { ToolResultEnvelope, EvidenceItem } from "@shared/tool-result";
+import { callLLMText } from "./llm-failover";
 
 const TOOL_NAME = "WEB_VISIT";
 const TOOL_VERSION = "1.0";
@@ -56,6 +57,37 @@ const PAGE_HINT_PATHS: Record<string, string[]> = {
 
 const VALID_HINTS = Object.keys(PAGE_HINT_PATHS);
 
+const _pageHintCache = new Map<string, string[]>();
+
+async function getLLMPageHints(constraintValue: string, entityType: string): Promise<string[]> {
+  const cacheKey = `${entityType}::${constraintValue}`.toLowerCase();
+  if (_pageHintCache.has(cacheKey)) {
+    return _pageHintCache.get(cacheKey)!;
+  }
+  try {
+    const raw = await callLLMText(
+      `A user is looking for businesses with a specific attribute. Suggest 5-8 URL path slugs where this information would most likely appear on a business's website. Return ONLY a JSON array of strings starting with "/". No explanation.
+
+Example for "cask ale" on a "pub" website:
+["/beers", "/ales", "/our-beers", "/real-ale", "/drinks", "/cellar", "/tap-list", "/whats-on-tap"]`,
+      `Attribute: "${constraintValue}"\nBusiness type: "${entityType}"`,
+      'page_hints',
+      { maxTokens: 200, timeoutMs: 5000 },
+    );
+    let cleaned = raw.trim();
+    if (cleaned.startsWith('```')) cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed) && parsed.every(s => typeof s === 'string')) {
+      _pageHintCache.set(cacheKey, parsed);
+      console.log(`[WEB_VISIT] LLM page hints for "${constraintValue}" on "${entityType}": ${parsed.join(', ')}`);
+      return parsed;
+    }
+  } catch (err: any) {
+    console.warn(`[WEB_VISIT] LLM page hints failed for "${constraintValue}": ${err?.message || err}`);
+  }
+  return [];
+}
+
 type PageType = "home" | "contact" | "about" | "events" | "menu" | "other";
 
 export interface WebVisitInput {
@@ -63,6 +95,8 @@ export interface WebVisitInput {
   max_pages: number;
   page_hints?: string[];
   same_domain_only?: boolean;
+  constraint_value?: string;
+  entity_type?: string;
 }
 
 interface CrawledPage {
@@ -525,6 +559,18 @@ export async function executeWebVisit(
     for (const path of hintPaths) {
       const resolved = resolveUrl(baseUrl, path);
       if (resolved) urlQueue.push({ url: resolved, hintType: hint });
+    }
+  }
+
+  if (input.constraint_value && input.entity_type) {
+    const llmPaths = await getLLMPageHints(input.constraint_value, input.entity_type);
+    const existingUrls = new Set(urlQueue.map(q => q.url));
+    for (const path of llmPaths) {
+      const resolved = resolveUrl(baseUrl, path);
+      if (resolved && !existingUrls.has(resolved)) {
+        urlQueue.push({ url: resolved, hintType: "other" });
+        existingUrls.add(resolved);
+      }
     }
   }
 

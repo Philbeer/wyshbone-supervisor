@@ -1431,6 +1431,7 @@ export async function executeMissionDrivenPlan(
             const cValue = typeof c.value === 'string' ? c.value : String(c.value ?? '');
             const hints = getPageHintsForConstraint({
               type: c.type, field: c.field, operator: c.operator, value: cValue, hardness: c.hardness,
+              synonyms: c.synonyms ?? null,
             });
             for (const h of hints) {
               if (!allPageHints.includes(h)) allPageHints.push(h);
@@ -1452,6 +1453,11 @@ export async function executeMissionDrivenPlan(
             phaseName: 'web_evidence',
           }).catch(() => {});
 
+          const primaryWebEvConstraint = constraintsToVerify.find(c => c.type === 'website_evidence');
+          const webVisitConstraintValue = primaryWebEvConstraint
+            ? (typeof primaryWebEvConstraint.value === 'string' ? primaryWebEvConstraint.value : String(primaryWebEvConstraint.value ?? ''))
+            : undefined;
+
           runToolCallCount++;
           const wvResult = await executeAction({
             toolName: 'WEB_VISIT',
@@ -1460,6 +1466,7 @@ export async function executeMissionDrivenPlan(
               max_pages: 5,
               same_domain_only: true,
               ...(pageHintsArg ? { page_hints: pageHintsArg } : {}),
+              ...(webVisitConstraintValue ? { constraint_value: webVisitConstraintValue, entity_type: mission.entity_category } : {}),
             },
             userId,
             tracker: toolTracker,
@@ -1492,6 +1499,7 @@ export async function executeMissionDrivenPlan(
             operator: constraint.operator,
             value: constraintValue,
             hardness: constraint.hardness,
+            synonyms: constraint.synonyms ?? null,
           },
           [],
           3,

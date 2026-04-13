@@ -2749,9 +2749,9 @@ class SupervisorService {
       const noProxySource = outerGateMsg;
       const noProxyFromOriginal = detectNoProxySignal(noProxySource);
       const mustBeCertainFromOriginal = detectMustBeCertain(noProxySource);
-      let outerGateResult = canonicalIntent
+      let outerGateResult = await (canonicalIntent
         ? preExecutionConstraintGateFromIntent(canonicalIntent, outerGateMsg)
-        : preExecutionConstraintGate(outerGateMsg);
+        : preExecutionConstraintGate(outerGateMsg));
       if (!outerGateResult.semantic_source) outerGateResult.semantic_source = 'fallback_regex';
 
       if (mustBeCertainFromOriginal && !outerGateResult.stop_recommended && outerGateResult.constraints.length > 0) {

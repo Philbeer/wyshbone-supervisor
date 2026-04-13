@@ -4,6 +4,7 @@ export interface ConstraintContext {
   operator: string;
   value: string;
   hardness: string;
+  synonyms?: string[] | null;
 }
 
 export type SourceType = 'website' | 'search_snippet' | 'gov_page' | 'social_media' | 'directory' | 'unknown';
@@ -139,6 +140,8 @@ const PAGE_HINT_SLUGS: Record<string, string[]> = {
   'beer garden': ['garden', 'terrace', 'outdoor', 'facilities'],
   'craft beer': ['beer', 'brewery', 'drinks', 'tap-list'],
   'brew': ['brewery', 'beer', 'drinks', 'tap-list'],
+  'cask ale': ['beers', 'ales', 'our-beers', 'real-ale', 'drinks', 'cellar', 'tap-list', 'bar', 'what-we-serve'],
+  'real ale': ['beers', 'ales', 'our-beers', 'real-ale', 'drinks', 'cellar', 'tap-list', 'bar', 'what-we-serve'],
   'dog': ['dog-friendly', 'pets', 'facilities', 'info', 'about'],
   'wheelchair': ['accessibility', 'facilities', 'info', 'about'],
   'parking': ['parking', 'directions', 'visit', 'info'],
@@ -190,6 +193,8 @@ const SYNONYM_MAP: Record<string, string[]> = {
   'spa': ['spa', 'wellness', 'treatments', 'massage', 'sauna', 'steam room', 'jacuzzi', 'hot tub'],
   'craft beer': ['craft beer', 'craft ale', 'microbrewery', 'home brewed', 'own brew', 'brewed on site', 'in-house brew'],
   'brew': ['brew', 'brewery', 'microbrewery', 'brewpub', 'brew pub', 'on-site brewery', 'brewed', 'home-brewed'],
+  'cask ale': ['cask ale', 'real ale', 'hand-pulled', 'hand pump', 'cask conditioned', 'cask beer', 'cask marque', 'traditional ale', 'real ales', 'guest ales', 'live ale'],
+  'real ale': ['real ale', 'cask ale', 'hand-pulled', 'hand pump', 'cask conditioned', 'cask beer', 'cask marque', 'traditional ale', 'real ales', 'guest ales', 'live ale'],
   'personal training': ['personal training', 'personal trainer', 'pt sessions', 'one to one training', '1-2-1 training', 'pt'],
   'swimming pool': ['swimming pool', 'pool', 'indoor pool', 'outdoor pool', 'heated pool', 'lap pool'],
   'gym': ['gym', 'fitness centre', 'fitness center', 'workout', 'exercise'],
@@ -313,6 +318,12 @@ function generateClassifiedPhraseTargets(constraint: ConstraintContext): PhraseT
       for (const syn of synonyms) {
         addTarget(syn, { isSynonym: true, wordCount: syn.split(/\s+/).length });
       }
+    }
+  }
+
+  if (constraint.synonyms && constraint.synonyms.length > 0) {
+    for (const syn of constraint.synonyms) {
+      addTarget(syn.toLowerCase().trim(), { isSynonym: true, wordCount: syn.trim().split(/\s+/).length });
     }
   }
 
