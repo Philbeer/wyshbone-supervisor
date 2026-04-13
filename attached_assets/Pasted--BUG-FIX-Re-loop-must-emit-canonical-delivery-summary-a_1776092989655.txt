@@ -1,0 +1,95 @@
+# BUG FIX: Re-loop must emit canonical delivery_summary after merge
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## ROOT CAUSE
+
+Each executor inside the re-loop calls `emitDeliverySummary`, creating separate `delivery_summary` artefacts:
+- Loop 1 (GP cascade): creates `delivery_summary` with 0 leads (temporal check failed)
+- Loop 2 (GPT-4o search): creates `delivery_summary` with N leads
+
+The UI's AFR poll fetches artefacts and reads the delivery_summary to render the results card. Due to timing, it sometimes reads Loop 1's delivery_summary (0 leads) BEFORE Loop 2's is created, and finalizes with 0 results.
+
+The `combined_delivery` artefact IS created by loop-skeleton.ts with the correct merged data, but the UI reads `delivery_summary` not `combined_delivery` for the card.
+
+## THE FIX
+
+In `server/supervisor/reloop/loop-skeleton.ts`, AFTER building `mergedDeliverySummary` and BEFORE returning `combinedResult`, call `emitDeliverySummary` with the merged leads. This creates a FINAL `delivery_summary` artefact that has the correct combined leads.
+
+Find the section after `mergedDeliverySummary` is built (around line 910) and BEFORE the `return combinedResult` statement. Add:
+
+```typescript
+// ── Emit canonical delivery_summary for the combined delivery ──
+// This supersedes the per-loop delivery_summary artefacts created by individual executors.
+// The UI reads the LATEST delivery_summary artefact for the run, so this combined one
+// will be the one rendered in the results card.
+if (mergedExact.length > 0 || deliveredLeads.length > 0) {
+  try {
+    const canonicalDsLeads = mergedExact.map((lead: any) => ({
+      entity_id: lead.entity_id || lead.place_id || `lead:${lead.name}`,
+      name: lead.name,
+      address: lead.address || '',
+      found_in_plan_version: lead.found_in_plan_version || 1,
+      match_valid: lead.match_valid !== undefined ? lead.match_valid : true,
+      match_summary: lead.match_summary || `Found via search`,
+      match_basis: lead.match_basis || [],
+      supporting_evidence: lead.supporting_evidence || [],
+      match_evidence: lead.match_evidence || [],
+    }));
+
+    await emitDeliverySummary({
+      runId,
+      userId,
+      conversationId,
+      originalUserGoal: rawUserInput,
+      requestedCount,
+      hardConstraints,
+      softConstraints,
+      planVersions: [{ version: 1, changes_made: ['Combined re-loop delivery'] }],
+      softRelaxations: [],
+      leads: canonicalDsLeads,
+      finalVerdict: combinedTowerVerdict || 'pass',
+      finalAction: combinedTowerVerdict === 'pass' ? 'accept' : 'continue',
+      stopReason: null,
+    });
+
+    console.log(`[RELOOP_SKELETON] Emitted canonical delivery_summary with ${canonicalDsLeads.length} leads (supersedes per-loop summaries)`);
+  } catch (dsErr: any) {
+    console.warn(`[RELOOP_SKELETON] Canonical delivery_summary emit failed (non-fatal): ${dsErr.message}`);
+  }
+}
+```
+
+## ALSO: Add the import
+
+At the top of `loop-skeleton.ts`, add the import if not already present:
+
+```typescript
+import { emitDeliverySummary } from '../delivery-summary';
+```
+
+## WHY THIS WORKS
+
+The UI reads the LATEST `delivery_summary` artefact for a run (ordered by `created_at`). By emitting a canonical one AFTER all loops complete:
+1. Loop 1 creates delivery_summary at time T1 (0 leads)
+2. Loop 2 creates delivery_summary at time T2 (N leads) 
+3. Combined canonical delivery_summary created at time T3 (merged leads) ← latest
+4. UI reads the latest (T3) and renders the correct merged results
+
+Even if the UI polls early and sees T1's 0 leads, when the run completes and the UI does its final fetch, it will find T3's canonical summary and use that.
+
+## TESTING
+
+1. "find micropubs in Sussex that opened in the last 3 years" — Loop 1 finds some via GP cascade, Loop 2 supplements via GPT-4o. ALL results should appear in the card consistently.
+
+2. Run the same query 3 times. The results card should show the same count every time — no more intermittent 0-vs-N.
+
+3. Check the AFR export — there should be a `delivery_summary` artefact with title containing "Combined re-loop delivery" created AFTER the per-loop summaries.
+
+## CRITICAL RULES
+
+1. The canonical delivery_summary is emitted AFTER all loops and AFTER the Tower verdict
+2. It uses the merged `mergedExact` data — same source as the combined_delivery artefact
+3. It must include ALL required fields for the UI card renderer (match_evidence, match_basis, etc.)
+4. On failure, fall through gracefully — the per-loop summaries still exist as backup
+5. Do NOT suppress the per-loop delivery_summary calls — they're used for diagnostics and the learning store
