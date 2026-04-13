@@ -1,0 +1,148 @@
+# ENHANCEMENT: Verify entity type — don't trust Google Places classification
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## CONTEXT
+
+Google Places returns wrong entity types, especially for long-tail searches, edge cases, or queries with few results. When searching for "pubs", it returns breweries, wine bars, and restaurant-bars. When searching for "hairdressers", it returns barbers, beauty salons, and training academies. The fewer results available, the more aggressively it stretches.
+
+The current system trusts Google Places classification and only verifies constraints (cask ale, independent, etc.). It does NOT independently verify that the result is actually the entity type the user asked for. A brewery passes the "serves cask ale" check because of course it does — but it's not a pub.
+
+The fix is to make entity type verification part of the evidence pipeline. The system already has everything it needs — it visits the business's website, reads the content, and judges evidence. It just needs to also ask: "Is this actually a [pub/hairdresser/restaurant]?"
+
+## WHAT TO CHANGE
+
+### Change 1: Pass 3 key_discriminator — include entity type verification (mission-extractor.ts)
+
+Find the Pass 3 system prompt in `mission-extractor.ts`. Add this instruction to the key_discriminator generation:
+
+```
+CRITICAL: The key_discriminator must verify TWO things:
+1. ENTITY TYPE — Is this business actually the type the user asked for? Google Places often returns related-but-wrong business types. A brewery is NOT a pub unless it operates a public bar. A barber is NOT a hairdresser. A beauty salon is NOT a hairdresser unless it offers hair cutting/styling. A restaurant is NOT a pub unless it has a bar area open to non-diners.
+2. CONSTRAINT SATISFACTION — Does the business meet the user's specific requirements?
+
+Both must be true for a result to be valid.
+
+In the key_discriminator text, explicitly state what the entity type IS and what it IS NOT. Examples:
+- "pubs" → "Is a pub — an establishment primarily serving drinks with a bar area open to walk-in customers. NOT a brewery production facility, NOT a restaurant without a bar, NOT a wine bar, NOT a members-only club."
+- "hairdressers" → "Is a hairdressing salon that cuts and styles hair. NOT a barber (men's only), NOT a beauty salon (nails/facials only), NOT a hairdressing training academy, NOT a mobile-only service."
+- "restaurants" → "Is a restaurant where customers can sit down and order meals. NOT a takeaway-only outlet, NOT a catering company, NOT a food truck, NOT a meal prep service."
+```
+
+Also update the entity_exclusions instruction:
+
+```
+entity_exclusions must include common Google Places misclassifications for this entity type. Think about what Google Places would INCORRECTLY return for this search and list those as exclusions. Be specific — name the wrong entity types, not just vague categories.
+```
+
+### Change 2: Layer 2 judge prompt — add entity type check (constraint-led-extractor.ts, ~line 1112)
+
+In the Layer 2 system prompt, add entity type verification. Find the current prompt and add this section BEFORE the evidence rules:
+
+```
+FIRST, verify this is actually the correct type of business. The user asked for "${entityType}". Google Places sometimes returns related but wrong business types. Read the website content and determine:
+- Is this actually a ${entityType}?
+- Or is it a different type of business that Google Places incorrectly categorised?
+
+If the business is NOT the correct entity type, return {"evidence_sentences": [], "entity_type_mismatch": true, "actual_type": "what it actually is"}.
+
+Only if the entity type is correct, then judge whether it satisfies the constraint "${constraintValue}".
+```
+
+To pass `entityType` into this prompt, the `extractConstraintLedEvidence` function needs to receive it. Add an optional `entityType` parameter:
+
+```typescript
+export async function extractConstraintLedEvidence(
+  pages: PageInput[],
+  constraint: ConstraintContext,
+  webSearchSnippets?: string[],
+  maxItems: number = 3,
+  leadName?: string,
+  entityType?: string,  // ← ADD THIS
+): Promise<ConstraintLedExtractionResult> {
+```
+
+Then use `entityType` in the Layer 2 prompt. If `entityType` is provided, include the entity type check. If not provided, skip it (backwards compatible).
+
+### Change 3: Zero-hit fallback — add entity type check (constraint-led-extractor.ts, ~line 1027)
+
+Same approach for the fallback prompt. Add:
+
+```
+FIRST, based on this website content, is this business actually a ${entityType}? If the content clearly indicates it is a different type of business (e.g., a brewery rather than a pub, a barber rather than a hairdresser), respond with {"match": false, "evidence_sentence": null, "confidence": "high", "entity_type_mismatch": true, "actual_type": "brewery"}.
+
+Only if the entity type appears correct, then judge whether it satisfies "${constraintValue}".
+```
+
+### Change 4: Pass entityType through the execution pipeline (mission-executor.ts)
+
+Find where `extractConstraintLedEvidence` is called in `mission-executor.ts`. The entity type is available from the mission extraction — it's `mission.entity_category` or similar. Pass it through:
+
+Search for calls to `extractConstraintLedEvidence` and add the entityType parameter:
+
+```typescript
+const result = await extractConstraintLedEvidence(
+  pages,
+  constraint,
+  webSearchSnippets,
+  maxItems,
+  leadName,
+  mission.entity_category,  // ← ADD THIS — e.g. "pubs", "hairdressers"
+);
+```
+
+### Change 5: Handle entity_type_mismatch in results
+
+When the evidence judge returns `entity_type_mismatch: true`, the system should:
+1. Mark the lead as NOT verified (regardless of constraint evidence)
+2. Log the mismatch: `[ENTITY_TYPE_MISMATCH] "${leadName}" is actually a ${actual_type}, not a ${entityType}`
+3. Include the mismatch in the lead's verification record so the Tower can see it
+
+In the Layer 2 response handling (after parsing the JSON), add:
+
+```typescript
+if (parsed.entity_type_mismatch) {
+  console.log(`[ENTITY_TYPE_MISMATCH] "${leadName}" — expected ${entityType}, actual: ${parsed.actual_type || 'unknown'}`);
+  return {
+    evidence_items: [],
+    pages_scanned: pagesWithText,
+    constraint,
+    no_evidence: true,
+    extraction_method: 'no_match',
+    phrase_targets: phraseTargets,
+    entity_type_mismatch: true,
+    actual_entity_type: parsed.actual_type || null,
+  };
+}
+```
+
+Add `entity_type_mismatch` and `actual_entity_type` to the `ConstraintLedExtractionResult` interface as optional fields.
+
+### Change 6: Synonym expansion — add entity type signals (constraint-led-extractor.ts)
+
+Update the Haiku synonym expansion prompt to also generate entity-type-specific terms. When the function receives `entityType`, include it in the prompt:
+
+```
+Generate search phrases for: "${constraintValue}" (for a ${entityType})
+
+Include terms specific to what makes a genuine ${entityType} — not just the constraint but signals that this IS a ${entityType}. For example, for "pubs": "opening hours", "bar menu", "ales on tap", "beer garden" signal a pub. "Brewing capacity", "wholesale", "distribution" signal a brewery.
+```
+
+## TESTING
+
+1. **"pubs that serve cask ale in Sussex"** — results should NOT include breweries (unless they have a public bar/taproom). Check the evidence cards for any entity type mismatch flags.
+
+2. **"independent hairdressers in Sussex"** — results should NOT include barbers, beauty-only salons, or hairdressing training academies.
+
+3. **"restaurants in Brighton"** — results should NOT include takeaway-only places, food trucks, or catering companies.
+
+4. **Check the logs** for `[ENTITY_TYPE_MISMATCH]` — this shows which leads were rejected for being the wrong type. This is useful diagnostic data.
+
+## CRITICAL RULES
+
+1. Entity type verification is IN ADDITION TO constraint verification — both must pass
+2. The entityType parameter is optional — if not provided, skip entity type checking (backwards compatible)
+3. Don't be too strict — a brewery WITH a public taproom IS a valid pub. A beauty salon that ALSO does hair IS a valid hairdresser. The judge should use common sense.
+4. The entity_type_mismatch field should flow through to the delivery summary so the user can see WHY certain candidates were excluded
+5. Do NOT change Google Places queries — the fix is in verification, not discovery
+6. This is the same philosophy as the constraint verification: the LLM reads the website and judges. No hardcoded lists of "what is a pub" — the LLM knows.

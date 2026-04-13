@@ -1,0 +1,325 @@
+# BUILD: Chat Handler for Wyshbone Supervisor
+
+REPO: wyshbone-supervisor-Post-CC
+
+## CONTEXT
+
+The conversation router (`server/supervisor/conversation-router.ts`) already classifies messages as SEARCH, CLARIFY, DISCUSS, ITERATE, or CHAT. When it returns CHAT, the supervisor currently uses a short 1-3 sentence `chat_response` string that the router itself generated inline. This is inadequate — it cannot answer general knowledge questions, discuss previous results intelligently, or have a real conversation.
+
+We are building a proper chat handler that calls an LLM with conversation history and a system prompt, producing rich conversational responses. It follows the exact same pattern as the existing `result-discussion.ts` handler.
+
+## TASK 1: Create `server/supervisor/chat-handler.ts`
+
+Create a new file at `server/supervisor/chat-handler.ts`. Model it closely on `server/supervisor/result-discussion.ts` for structure, imports, and patterns.
+
+### Imports
+
+```typescript
+import { callLLMText } from './llm-failover';
+```
+
+### Types
+
+```typescript
+export interface ChatHandlerInput {
+  conversationId: string;
+  userId: string;
+  rawMessage: string;
+  jobId: string;
+  taskId: string;
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
+  urlContent?: string | null;
+  previousResultsSummary?: string | null;
+}
+
+export interface ChatHandlerOutput {
+  response: string;
+  messageId: string;
+}
+```
+
+### Circuit Breaker
+
+Copy the circuit breaker pattern from `result-discussion.ts` exactly. Same window (5 minutes), same max calls (10). Use a separate array `_chatCallTimestamps` so it doesn't share limits with the discussion handler.
+
+### System Prompt
+
+Define a constant `CHAT_SYSTEM_PROMPT` at the top of the file:
+
+```typescript
+const CHAT_SYSTEM_PROMPT = `You are Wyshbone, a business intelligence assistant that finds and verifies businesses for users. You are helpful, knowledgeable, and direct.
+
+WHAT YOU CAN DO:
+- Answer general knowledge questions about any topic — business, marketing, industries, food, wine, technology, anything the user asks
+- Discuss and give opinions on business strategy, lead generation, B2B approaches
+- If previous search results exist in the conversation, discuss them, offer insights, suggest next steps
+- If URL content has been shared, discuss what was found on that website
+- Explain what Wyshbone can do and how to use it
+
+WHAT YOU MUST NOT DO:
+- Never fabricate business names, addresses, phone numbers, websites, or contact details
+- Never pretend to search or claim you have found businesses — if the user wants a search, tell them to ask you to find [business type] in [location] and you will run a proper search
+- Never make up facts you are not confident about — say "I'm not sure" if you don't know
+
+HOW TO REDIRECT TO SEARCH:
+When the user expresses intent to find businesses but hasn't given enough detail, or when a general conversation naturally leads to a search opportunity, suggest it naturally. For example:
+- "I could search for wine merchants in your area if you tell me where — just say something like 'find wine merchants in Sussex'."
+- "Want me to look for some? Just give me a business type and location."
+
+TONE:
+- Professional but warm. Not corporate, not overly casual.
+- Concise — aim for 2-5 sentences for simple queries, longer for complex topics.
+- Think knowledgeable colleague, not customer support script.
+- Match the user's energy — if they are brief, be brief. If they ask a detailed question, give a detailed answer.
+
+CONTEXT AWARENESS:
+- You may receive previous conversation messages, search results, and URL content. Use this context naturally.
+- If the user references "the results" or "those businesses", and result context is provided, discuss them.
+- If no context is available, just have a normal conversation.`;
+```
+
+### Main Handler Function
+
+```typescript
+export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOutput> {
+  const { conversationId, rawMessage, conversationHistory, urlContent, previousResultsSummary } = input;
+
+  // 1. Build user prompt with context
+  const parts: string[] = [];
+
+  if (conversationHistory.length > 0) {
+    parts.push('CONVERSATION HISTORY:');
+    // Include last 8 messages for context
+    const recentHistory = conversationHistory.slice(-8);
+    for (const msg of recentHistory) {
+      const role = msg.role === 'user' ? 'User' : 'Wyshbone';
+      const content = msg.content.length > 500 ? msg.content.substring(0, 500) + '...' : msg.content;
+      parts.push(`${role}: ${content}`);
+    }
+    parts.push('');
+  }
+
+  if (previousResultsSummary) {
+    parts.push('PREVIOUS SEARCH RESULTS IN THIS CONVERSATION:');
+    parts.push(previousResultsSummary);
+    parts.push('');
+  }
+
+  if (urlContent) {
+    parts.push('URL CONTENT (from a link the user shared):');
+    parts.push(urlContent.substring(0, 3000));
+    parts.push('');
+  }
+
+  parts.push(`User: ${rawMessage}`);
+
+  const userPrompt = parts.join('\n');
+
+  // 2. Call LLM with circuit breaker
+  let response: string;
+
+  if (isCircuitBroken()) {
+    console.warn('[CHAT_HANDLER] Circuit breaker OPEN — using fallback');
+    response = "I'm a bit busy right now. I can find businesses for you — just tell me a business type and location, like 'find cafes in Brighton'.";
+  } else {
+    try {
+      recordChatCall();
+      response = await callLLMText(CHAT_SYSTEM_PROMPT, userPrompt, 'chat', {
+        anthropicModel: process.env.CHAT_LLM_MODEL || 'claude-3-5-haiku-20241022',
+        maxTokens: 1024,
+        temperature: 0.7,
+        timeoutMs: 15_000,
+      });
+    } catch (err: any) {
+      console.error(`[CHAT_HANDLER] LLM call failed: ${err.message}`);
+      response = "I can find businesses and leads for you. Just tell me what you're looking for and where — for example, 'find web designers in Manchester'.";
+    }
+  }
+
+  // 3. Save message to DB
+  const messageId = await saveChatMessage(conversationId, response);
+
+  console.log(`[CHAT_HANDLER] Responded — ${response.length} chars, conversation=${conversationId.slice(0, 8)}`);
+
+  return { response, messageId };
+}
+```
+
+### Save Helper
+
+Copy the `saveAssistantMessage` helper from `result-discussion.ts` and rename it to `saveChatMessage`. Change the metadata to:
+
+```typescript
+metadata: {
+  conversation_phase: 'chatting',
+  handler: 'chat',
+},
+```
+
+Keep the same error handling pattern (non-fatal log on insert failure).
+
+## TASK 2: Wire the handler into `server/supervisor.ts`
+
+Find the CHAT handling block in the `processChatTask` method. It currently looks like this (around the section after `const decision = await routeConversation(routerInput);`):
+
+```typescript
+// === HANDLE CHAT ===
+if (decision.route === 'CHAT' && decision.chat_response) {
+  const messageId = randomUUID();
+  await Promise.all([
+    supabase!.from('supervisor_tasks').update({
+      status: 'completed',
+      result: { response: decision.chat_response.substring(0, 200), message_id: messageId, router: 'chat' },
+    }).eq('id', task.id),
+    supabase!.from('messages').insert({
+      id: messageId,
+      conversation_id: task.conversation_id,
+      role: 'assistant',
+      content: decision.chat_response,
+      source: 'supervisor',
+      metadata: { supervisor_task_id: task.id, run_id: jobId, router_decision: decision },
+      created_at: Date.now(),
+    }),
+  ]);
+  // ... rest of CHAT block
+```
+
+Replace the ENTIRE `// === HANDLE CHAT ===` block (from `if (decision.route === 'CHAT'` through to and including its closing `return;`) with:
+
+```typescript
+// === HANDLE CHAT ===
+if (decision.route === 'CHAT') {
+  try {
+    const { handleChat } = await import('./supervisor/chat-handler');
+
+    // Build a summary of previous results if they exist
+    let previousResultsSummary: string | null = null;
+    if (routerPreviousResults.exists) {
+      try {
+        const { getConversationContext } = await import('./supervisor/conversation-context');
+        const ctx = await getConversationContext(task.conversation_id);
+        if (ctx.leads.length > 0) {
+          previousResultsSummary = ctx.leads
+            .map((l) => {
+              const parts = [`${l.index}. ${l.name}`, l.address];
+              if (l.website) parts.push(`Website: ${l.website}`);
+              return parts.join(' | ');
+            })
+            .join('\n');
+        }
+      } catch (ctxErr: any) {
+        console.warn(`[CHAT] Context load for chat failed (non-fatal): ${ctxErr.message}`);
+      }
+    }
+
+    const chatResult = await handleChat({
+      conversationId: task.conversation_id,
+      userId: task.user_id,
+      rawMessage: rawMsg,
+      jobId,
+      taskId: task.id,
+      conversationHistory: routerHistory,
+      urlContent: (requestData as any).url_content || null,
+      previousResultsSummary,
+    });
+
+    // Mark task complete
+    if (supabase) {
+      await supabase.from('supervisor_tasks').update({
+        status: 'completed',
+        result: { message_id: chatResult.messageId, router: 'chat', handler: 'chat_handler' },
+      }).eq('id', task.id);
+    }
+
+    await storage.updateAgentRun(jobId, {
+      status: 'completed', terminalState: 'completed', endedAt: new Date(),
+      metadata: { verdict: 'chat_handler', router: decision },
+    }).catch(() => {});
+
+    console.log(`[ROUTER] Handled as CHAT via chat-handler — done`);
+
+    // Signal UI poller to stop
+    this.postArtefactToUI({
+      runId: jobId,
+      clientRequestId,
+      type: 'diagnostic',
+      payload: {
+        status: 'CHAT',
+        leads: [],
+        message: chatResult.response,
+        router_verdict: 'chat',
+        run_complete: true,
+      },
+      userId: task.user_id,
+      conversationId: task.conversation_id,
+    }).catch((err: any) => {
+      console.error(`[ROUTER] CRITICAL: Failed to signal UI that run is complete: ${err.message}`);
+    });
+
+    taskExecutionStartedEmitted = true;
+    await emitTaskExecutionCompleted('chat_handler');
+    return;
+  } catch (chatErr: any) {
+    console.error(`[CHAT] Chat handler failed: ${chatErr.message} — falling back to router response`);
+    // Fallback to the router's inline chat_response if the handler fails
+    if (decision.chat_response) {
+      const messageId = randomUUID();
+      await Promise.all([
+        supabase!.from('supervisor_tasks').update({
+          status: 'completed',
+          result: { response: decision.chat_response.substring(0, 200), message_id: messageId, router: 'chat', fallback: true },
+        }).eq('id', task.id),
+        supabase!.from('messages').insert({
+          id: messageId,
+          conversation_id: task.conversation_id,
+          role: 'assistant',
+          content: decision.chat_response,
+          source: 'supervisor',
+          metadata: { supervisor_task_id: task.id, run_id: jobId, router_decision: decision, chat_handler_fallback: true },
+          created_at: Date.now(),
+        }),
+      ]);
+      await storage.updateAgentRun(jobId, {
+        status: 'completed', terminalState: 'completed', endedAt: new Date(),
+        metadata: { verdict: 'router_chat_fallback', router: decision },
+      }).catch(() => {});
+      this.postArtefactToUI({
+        runId: jobId, clientRequestId,
+        type: 'diagnostic',
+        payload: { status: 'CHAT', leads: [], message: decision.chat_response, router_verdict: 'chat', run_complete: true },
+        userId: task.user_id, conversationId: task.conversation_id,
+      }).catch(() => {});
+      taskExecutionStartedEmitted = true;
+      await emitTaskExecutionCompleted('router_chat_fallback');
+      return;
+    }
+  }
+}
+```
+
+Key differences from the old code:
+- Calls `handleChat()` from the new handler instead of using `decision.chat_response` directly
+- Passes `routerHistory` (already loaded above the router call) as conversation context
+- Passes URL content and previous results summary for richer context
+- Falls back to the router's inline `chat_response` if the handler throws — so it never breaks worse than before
+
+## TASK 3: What NOT to change
+
+- Do NOT modify `conversation-router.ts` — the router already returns CHAT correctly
+- Do NOT modify any UI repo files — the UI already renders assistant messages
+- Do NOT add new env vars (except optionally `CHAT_LLM_MODEL` to override the model)
+- Do NOT modify `llm-failover.ts`, `result-discussion.ts`, or any other handler
+- Do NOT create new SSE endpoints or message transports
+
+## VERIFICATION
+
+After building, test these in the app:
+
+1. Type "hi" — should get a friendly greeting mentioning what Wyshbone can do (more than 1 sentence)
+2. Type "tell me about wine" — should get a real answer about wine, then a natural redirect to searching for wine businesses
+3. Type "what can you do?" — should explain Wyshbone's capabilities in detail
+4. Type "find pubs in Brighton" — should trigger a SEARCH, NOT the chat handler
+5. After a search completes, type "tell me about the first one" — should trigger DISCUSS, NOT the chat handler
+6. Type "what pairs well with lamb?" — should get a real conversational answer about food pairing
+
+Check the Supervisor logs for `[CHAT_HANDLER]` entries confirming the handler ran.

@@ -1506,12 +1506,15 @@ export async function executeMissionDrivenPlan(
           [],
           3,
           lead.name,
+          mission.entity_category,
         );
 
         const extractedQuotes = [...new Set(extraction.evidence_items.map(e => e.direct_quote))];
         const keywordFound = extraction.evidence_items.length > 0;
 
-        if (extraction.evidence_items.length > 0) {
+        if (extraction.entity_type_mismatch) {
+          console.log(`[ENTITY_TYPE_MISMATCH] Skipping "${lead.name}" — expected ${mission.entity_category}, got ${extraction.actual_entity_type || 'unknown'}`);
+        } else if (extraction.evidence_items.length > 0) {
           console.log(`[MISSION_EXEC] Constraint-led extraction for "${lead.name}" + "${constraintValue}": ${extraction.evidence_items.length} evidence item(s), phrases=${extraction.phrase_targets.length}`);
         } else {
           console.log(`[MISSION_EXEC] Constraint-led extraction for "${lead.name}" + "${constraintValue}": no evidence found`);

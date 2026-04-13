@@ -58,6 +58,8 @@ export interface ConstraintLedExtractionResult {
   no_evidence: boolean;
   extraction_method: 'keyword_sentence' | 'keyword_chunk' | 'no_match';
   phrase_targets: string[];
+  entity_type_mismatch?: boolean;
+  actual_entity_type?: string | null;
 }
 
 interface PageInput {
@@ -853,6 +855,7 @@ export async function extractConstraintLedEvidence(
   webSearchSnippets?: string[],
   maxItems: number = 3,
   leadName?: string,
+  entityType?: string,
 ): Promise<ConstraintLedExtractionResult> {
   const classifiedTargets = generateClassifiedPhraseTargets(constraint);
   const phraseTargets = classifiedTargets.map(t => t.phrase);
@@ -900,13 +903,15 @@ export async function extractConstraintLedEvidence(
                 system: 'You generate search terms for finding evidence on business websites. Given a concept, return a JSON array of 8-15 terms including: (1) direct synonyms and alternative phrases, (2) well-known brand names or specific examples, (3) inferential signal phrases — words or phrases that would IMPLY the concept even if it\'s not stated directly. For example, "independent" might be signalled by "family-run", "owner-operated", "est. 2005", "boutique". Return JSON only, no markdown.',
                 messages: [{
                   role: 'user',
-                  content: `Generate search phrases for: "${constraintValue}"
+                  content: `Generate search phrases for: "${constraintValue}"${entityType ? ` (for a ${entityType})` : ''}
 
 Example: "cask ale" → ["cask ale", "real ale", "traditional ale", "hand-pulled", "hand pump", "cask-conditioned", "cask beer", "real ales", "Harvey's", "Timothy Taylor", "London Pride", "cask marque"]
 
 Example: "independent" → ["independent", "independently owned", "family-run", "owner-operated", "family business", "established by", "founded by", "est.", "sole proprietor", "boutique", "not a chain", "locally owned"]
-
-Now do: "${constraintValue}"
+${entityType ? `
+Also include a few terms that signal this is genuinely a ${entityType} (not a related but wrong business type). For example, if searching for pubs: "opening hours", "bar menu", "ales on tap" signal a genuine pub; "brewing capacity", "wholesale", "distribution" signal a brewery (not a pub).
+` : ''}
+Now do: "${constraintValue}"${entityType ? ` for a ${entityType}` : ''}
 Return JSON array only: ["term1", "term2", ...]`,
                 }],
               }),
@@ -1027,7 +1032,14 @@ Return JSON array only: ["term1", "term2", ...]`,
                   {
                     role: 'system',
                     content: `You are judging whether a business "${constraintValue}". You will receive text from their website.
+${entityType ? `
+FIRST — verify this is actually a ${entityType}. Google Places sometimes returns related but wrong business types. Read the website content and decide:
+- Is this genuinely a ${entityType}?
+- Or is it a different type of business (e.g., a brewery rather than a pub, a barber rather than a hairdresser, a takeaway rather than a restaurant)?
+If the content clearly indicates the wrong entity type, respond with: {"match": false, "evidence_sentence": null, "confidence": "high", "entity_type_mismatch": true, "actual_type": "what it actually is"}
+Note: use common sense — a brewery WITH a public taproom/bar IS a valid pub. A beauty salon that ALSO does hair IS a valid hairdresser. Only flag a mismatch if the business is clearly NOT a ${entityType}.
 
+THEN (only if entity type is correct) —` : ''}
 Look for TWO types of evidence:
 1. DIRECT — explicit mentions of "${constraintValue}", synonyms, related terms, brand names, menu items, or descriptions.
 2. INFERENTIAL — signals that a reasonable person would interpret as indicating "${constraintValue}", even if the exact term is never used. For example:
@@ -1056,6 +1068,20 @@ Respond with JSON: {"match": true/false, "evidence_sentence": "one sentence summ
             const fbRaw = fallbackResponse.choices[0]?.message?.content?.trim() || '';
             const fbCleaned = fbRaw.replace(/```json\n?|\n?```/g, '').trim();
             const fbParsed = JSON.parse(fbCleaned);
+
+            if (fbParsed.entity_type_mismatch) {
+              console.log(`[ENTITY_TYPE_MISMATCH] "${leadName}" — expected ${entityType || 'unknown'}, actual: ${fbParsed.actual_type || 'unknown'} (fallback LLM)`);
+              return {
+                evidence_items: [],
+                pages_scanned: pagesWithText,
+                constraint,
+                no_evidence: true,
+                extraction_method: 'no_match',
+                phrase_targets: phraseTargets,
+                entity_type_mismatch: true,
+                actual_entity_type: fbParsed.actual_type || null,
+              };
+            }
 
             if (fbParsed.match && fbParsed.evidence_sentence) {
               console.log(`[EVIDENCE_EXTRACT_FALLBACK_LLM] "${leadName}" + "${constraintValue}" → MATCH via full-page LLM: ${fbParsed.evidence_sentence.substring(0, 100)}`);
@@ -1123,7 +1149,16 @@ Respond with JSON: {"match": true/false, "evidence_sentence": "one sentence summ
         messages: [
           {
             role: 'system',
-            content: `You are an evidence judge for a business lead finder. You will receive short extracts from a business website. Decide if any extract provides evidence that this business "${constraintValue}".
+            content: `You are an evidence judge for a business lead finder. You will receive short extracts from a business website.
+${entityType ? `
+FIRST — verify this is actually a ${entityType}. Google Places sometimes returns related but wrong business types. Read the extracts and decide:
+- Is this genuinely a ${entityType}?
+- Or is it a different type of business (e.g., a brewery rather than a pub, a barber rather than a hairdresser, a takeaway rather than a restaurant)?
+If the extracts clearly indicate the wrong entity type, return: {"evidence_sentences": [], "entity_type_mismatch": true, "actual_type": "what it actually is"}
+Note: use common sense — a brewery WITH a taproom IS a valid pub. A beauty salon that ALSO does hair IS a valid hairdresser. Only flag a mismatch if clearly NOT a ${entityType}.
+
+THEN (only if entity type is correct) —` : ''}
+Decide if any extract provides evidence that this business "${constraintValue}".
 
 There are two types of evidence:
 1. DIRECT EVIDENCE — the business explicitly states or advertises "${constraintValue}" (e.g. "we serve cask ale", "wheelchair accessible", "dog-friendly").
@@ -1163,6 +1198,21 @@ Respond with JSON only: {"evidence_sentences": ["..."]}. Return {"evidence_sente
       const raw = response.choices[0]?.message?.content?.trim() || '';
       const cleaned = raw.replace(/```json\n?|\n?```/g, '').trim();
       const parsed = JSON.parse(cleaned);
+
+      if (parsed.entity_type_mismatch) {
+        console.log(`[ENTITY_TYPE_MISMATCH] "${leadName}" — expected ${entityType || 'unknown'}, actual: ${parsed.actual_type || 'unknown'}`);
+        return {
+          evidence_items: [],
+          pages_scanned: pagesWithText,
+          constraint,
+          no_evidence: true,
+          extraction_method: 'no_match',
+          phrase_targets: phraseTargets,
+          entity_type_mismatch: true,
+          actual_entity_type: parsed.actual_type || null,
+        };
+      }
+
       const sentences: string[] = Array.isArray(parsed.evidence_sentences)
         ? parsed.evidence_sentences.filter((s: any) => typeof s === 'string' && s.length > 0).slice(0, maxItems)
         : [];

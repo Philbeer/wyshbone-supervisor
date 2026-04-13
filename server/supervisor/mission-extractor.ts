@@ -554,9 +554,16 @@ MISSION MODE DETECTION — apply BEFORE all other analysis:
 
 RULES:
 - entity_description must be specific. Do not just repeat the category label. Describe the type of business in plain terms.
-- entity_exclusions must list realistic confusables — things a Places search could return that are clearly and wholly wrong (e.g. businesses that don't offer the thing at all). Do NOT exclude businesses that offer the thing alongside other things.
+- entity_exclusions must include common Google Places misclassifications for this entity type. Think about what Google Places would INCORRECTLY return for this search and list those wrong entity types explicitly. Be specific — name the wrong entity types, not vague categories. For example, for "pubs": ["breweries without a public bar", "wine bars", "restaurant-bars without a walk-in bar area", "members-only clubs"]. For "hairdressers": ["barber shops (men's only)", "beauty salons (nails/facials only without hair services)", "hairdressing training academies"].
 - commercial_context is a single sentence about the user's likely intent. Do not speculate wildly.
-- key_discriminator is a single sentence. It must be an INCLUSIVE positive test: frame it as "has evidence of [X]" not "specialises in X" or "primarily offers X". A business that offers X alongside other things IS a valid match. Include explicit examples of what counts as evidence. Only exclude businesses that clearly do NOT offer X at all.
+- key_discriminator MUST verify TWO things:
+  1. ENTITY TYPE — Is this business actually the type the user asked for? Google Places often returns related-but-wrong types. State explicitly what the entity IS and what it IS NOT. Examples:
+     - "pubs" → "Is a pub — an establishment primarily serving drinks with a bar area open to walk-in customers. NOT a brewery production facility, NOT a restaurant without a bar, NOT a wine bar, NOT a members-only club."
+     - "hairdressers" → "Is a hairdressing salon that cuts and styles hair. NOT a barber (men's only), NOT a beauty salon (nails/facials only), NOT a hairdressing training academy."
+     - "restaurants" → "Is a restaurant where customers sit down and order meals. NOT a takeaway-only outlet, NOT a catering company, NOT a food truck."
+  2. CONSTRAINT SATISFACTION — Does the business meet the user's specific requirements?
+  Both must be true for a result to be valid. Frame the key_discriminator to cover both.
+  It must be an INCLUSIVE positive test: frame it as "has evidence of [X]" not "specialises in X" or "primarily offers X". A business that offers X alongside other things IS a valid match. Include explicit examples of what counts as evidence.
   If the user's constraint is a characteristic that businesses may not explicitly state (e.g. "independent", "family-run", "boutique", "high-end", "local"), generate a key_discriminator that describes INFERENTIAL SIGNALS a reasonable person would look for, not just direct statements. For example:
   - "independent hairdressers" → "appears independently owned — signals include: owner's name in business name or on website, single location, no franchise or chain branding, personal/local tone. A business that is part of a known chain (Toni & Guy, Supercuts, Rush) is NOT independent."
   - "family-run restaurants" → "appears to be a family business — signals include: family names on website, 'family' in business name, multi-generational references, personal ownership claims."
