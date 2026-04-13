@@ -1,0 +1,129 @@
+# ENHANCEMENT: Temporal evidence reasoning — "opened recently" and time constraints
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## CONTEXT
+
+When a user searches for "micro pubs that opened recently in West Sussex", the system creates a time_constraint: `{ type: "time_constraint", field: "opening_date", operator: "within_last", value: "recent", hardness: "hard" }`. This routes through the website evidence pipeline correctly.
+
+But the evidence judge searches for literal phrases like "opened recently" and finds nothing — because businesses don't write that on their website. A human would infer recency from signals: "Now Open!", "Grand Opening", "est. 2025", a modern website template, Google reviews only from the last few months.
+
+This is the same pattern as the inferential reasoning we added for "independent" — the LLM needs to be taught what temporal signals look like, and the evidence judge needs permission to accept them.
+
+## WHAT TO CHANGE
+
+### Change 1: Synonym expansion for temporal constraints (constraint-led-extractor.ts)
+
+The Haiku synonym expansion prompt already generates search phrases. For temporal values like "recent", "opened recently", "new", "within the last 6 months", update the prompt examples to include temporal signal phrases.
+
+Find the synonym expansion user message (the one with the "cask ale" and "independent" examples) and add a temporal example:
+
+```
+Example: "opened recently" → ["opened recently", "now open", "grand opening", "just opened", "newly opened", "new opening", "est. 2025", "est. 2026", "established 2025", "established 2026", "opening soon", "we're open", "doors are open", "welcome to our new", "under new management", "formerly known as", "opening day", "first anniversary"]
+
+Example: "new" → ["new", "newly opened", "just opened", "now open", "brand new", "opening 2025", "opening 2026", "launched", "debut", "inaugural"]
+```
+
+### Change 2: Evidence judge — temporal inferential reasoning (constraint-led-extractor.ts)
+
+In both the Layer 2 judge prompt (~line 1112) and the zero-hit fallback prompt (~line 1027), the inferential evidence section already handles characteristics like "independent" and "family-run." Add temporal inference:
+
+Add to the inferential evidence examples in BOTH prompts:
+
+```
+   - "Opened recently" / "new" → website says "now open", "grand opening 2025", "est. 2025/2026", very modern template, "welcome to our new [business]", "under new management", no historical content older than 12 months. Google reviews starting only in the last 6-12 months is a strong signal.
+   - "Established" / "long-running" → "est. 1985", "serving since", "family-owned for 30 years", historical photos, references to decades of history
+   - "Closing" / "at risk" → "closing down", "last chance", "final weeks", "everything must go"
+```
+
+### Change 3: Key discriminator for temporal queries (mission-extractor.ts)
+
+In the Pass 3 system prompt, add temporal guidance to the key_discriminator generation:
+
+```
+If the user's constraint involves TIME (opened recently, new, established before X, etc.), generate a key_discriminator that describes TEMPORAL SIGNALS:
+- "opened recently" → "appears to have opened within the last 12 months — signals include: 'now open' or 'grand opening' messaging, establishment date of 2025 or 2026, Google reviews only from recent months, modern website with no historical content, 'under new management' or 'formerly known as' references. A business with reviews going back several years is NOT recently opened."
+- "established before 2000" → "appears to have been established before 2000 — signals include: 'est.' date before 2000, 'since 19XX' references, historical photos, long trading history mentioned."
+```
+
+### Change 4: Pass 2 constraint synonyms for temporal values (mission-extractor.ts)
+
+In the Pass 2 prompt, when a time_constraint is generated, the synonyms array should include temporal signal phrases:
+
+```
+For time_constraint values like "recent" or "within the last 6 months", generate synonyms that capture temporal signals:
+{ "type": "time_constraint", "field": "opening_date", "operator": "within_last", "value": "recent", "hardness": "hard", "synonyms": ["now open", "grand opening", "just opened", "newly opened", "est. 2025", "est. 2026", "new opening", "under new management"] }
+```
+
+### Change 5: Google Places review date as evidence (mission-executor.ts)
+
+This is a NEW evidence source that doesn't require website visits. Google Places returns review data including timestamps. If the earliest review for a business is from the last 6-12 months, that's strong evidence the business is new.
+
+In the evidence verification loop in `mission-executor.ts`, when processing a lead with a time_constraint, add a check BEFORE the website evidence pipeline:
+
+```typescript
+// Check Google Places review dates for temporal evidence
+if (timeConstraint && lead.reviews && Array.isArray(lead.reviews)) {
+  const reviewDates = lead.reviews
+    .map(r => new Date(r.time * 1000 || r.date || r.created_at))
+    .filter(d => !isNaN(d.getTime()))
+    .sort((a, b) => a.getTime() - b.getTime());
+  
+  if (reviewDates.length > 0) {
+    const earliestReview = reviewDates[0];
+    const monthsAgo = (Date.now() - earliestReview.getTime()) / (1000 * 60 * 60 * 24 * 30);
+    
+    if (timeConstraint.operator === 'within_last' && monthsAgo <= 12) {
+      console.log(`[TIME_EVIDENCE] "${lead.name}" — earliest Google review is ${Math.round(monthsAgo)} months old — consistent with "opened recently"`);
+      // Add as evidence item
+      lead._temporal_evidence = {
+        source: 'google_reviews',
+        earliest_review: earliestReview.toISOString(),
+        months_ago: Math.round(monthsAgo),
+        signal: `Earliest Google review is from ${Math.round(monthsAgo)} months ago, suggesting the business opened around that time.`,
+      };
+    }
+  }
+}
+```
+
+Note: Check whether Google Places API data includes review timestamps in the format the system receives. If reviews are just text without dates, skip this step — the website evidence pipeline handles it instead.
+
+### Change 6: Combine temporal evidence sources
+
+For a lead being checked against a time constraint, the verification should combine:
+1. **Google review dates** (if available) — strong structured signal
+2. **Website content signals** — "now open", "est. 2025", modern design indicators
+3. **Absence of historical content** — no old blog posts, no "celebrating 10 years" type content
+
+The evidence judge should weigh these together. A lead with recent Google reviews AND "now open" on the website is high-confidence recent. A lead with only "modern-looking website" is low-confidence. Neither alone may be enough, but together they're strong.
+
+Add this to the evidence judge prompt for time constraints:
+
+```
+For time constraints, combine multiple signals:
+- Strong: explicit date ("est. 2025"), "now open" messaging, Google reviews only from last 12 months
+- Medium: modern website, no historical content, "under new management"
+- Weak: no clear signals either way
+
+A business with 2+ medium signals or 1+ strong signal satisfies "opened recently."
+A business with Google reviews going back several years does NOT satisfy "opened recently."
+```
+
+## TESTING
+
+1. **"micro pubs that opened recently in West Sussex"** — should find micro pubs and verify temporal evidence. Results should show WHY each one is considered recent (website signals, review dates).
+
+2. **"restaurants that opened in the last year in Brighton"** — same pattern, different entity type.
+
+3. **"pubs in Arundel"** (no time constraint) — should still work as before, no temporal filtering applied.
+
+4. Check the evidence cards — for time-verified results, evidence should say things like "Website mentions 'opened January 2026'" or "Google reviews start from 3 months ago" rather than just "Matched phrase: opened recently."
+
+## CRITICAL RULES
+
+1. Temporal verification is ADDITIVE — it doesn't replace existing verification, it adds temporal evidence on top
+2. If no temporal signals are found, the lead fails the time_constraint (this is correct behaviour — the user asked for recent openings)
+3. Do NOT hardcode specific years — the LLM should calculate recency relative to the current date
+4. Google review dates are a SUPPLEMENT to website evidence, not a replacement — use both when available
+5. This uses the same evidence pipeline as everything else — no new architecture needed
