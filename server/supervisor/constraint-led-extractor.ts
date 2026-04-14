@@ -174,11 +174,20 @@ export function getPageHintsForConstraint(constraint: ConstraintContext): string
     }
   }
 
+  // No hardcoded hints matched — use generic paths that work for most attributes.
+  // The evidence LLM judge will still find relevant content regardless of which page it's on.
+  if (hints.length === 0) {
+    hints.push('about', 'services', 'menu', 'what-we-do', 'our-story', 'features');
+  }
+
   return hints;
 }
 
 const _synonymCache = new Map<string, string[]>();
 
+// FALLBACK keyword seeds — used when LLM synonym expansion is unavailable.
+// The LLM-expanded synonyms from constraint-gate.ts are the PRIMARY source.
+// Do NOT add entries here to fix search quality — improve the LLM synonym prompt instead.
 const SYNONYM_MAP: Record<string, string[]> = {
   'live music': ['live music', 'live band', 'acoustic', 'live entertainment', 'live gig', 'live performance', 'music night', 'open mic'],
   'dog friendly': ['dog friendly', 'dogs welcome', 'dog-friendly', 'pet friendly', 'pets welcome', 'four-legged', 'canine'],

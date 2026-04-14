@@ -365,6 +365,9 @@ const GENERIC_ATTRIBUTE_PATTERNS = [
   /\b(?:that|which)\s+(?:are|is)\s+(.+?)(?:\s+(?:in|near|around|across|throughout|within)\b|$)/i,
 ];
 
+// FALLBACK synonym seeds — used when LLM synonym expansion fails or times out.
+// The LLM call in fetchLLMSynonyms() is the PRIMARY source; these are safety nets.
+// Do NOT add new entries here to "fix" missing synonyms — improve the LLM prompt instead.
 const COMMON_ATTRIBUTE_SYNONYMS: Record<string, string[]> = {
   'air conditioning': ['air con', 'a/c', 'ac', 'climate control', 'air conditioned', 'air-conditioned', 'air-conditioning'],
   'serve food': ['food served', 'food available', 'serves food', 'food menu', 'kitchen', 'dining', 'meals', 'lunch', 'dinner'],
@@ -450,13 +453,18 @@ export function generateKeywordVariants(attrRaw: string): string[] {
 
 const _llmSynonymCache = new Map<string, string[]>();
 
-const LLM_SYNONYM_SYSTEM_PROMPT = `You are generating search synonyms for evidence verification. Given an attribute that a user is looking for in a business, list 5-10 alternative terms, phrases, or brand names that would indicate the business offers this attribute.
+const LLM_SYNONYM_SYSTEM_PROMPT = `You are generating search synonyms for evidence verification. Given an attribute that a user is looking for in a business, generate 5-10 alternative terms that would indicate the business offers this attribute.
+
+Include:
+- Direct synonyms and spelling variants
+- Industry-specific terms
+- Brand names or certification marks commonly associated with this attribute
+- Informal/colloquial terms customers might use
+- Abbreviations or acronyms
 
 Return ONLY a JSON array of strings. No explanation, no markdown, no commentary.
 
-Example:
-Attribute: "cask ale"
-["real ale", "hand-pulled ale", "traditional ale", "cask marque", "Harvey's", "London Pride", "Timothy Taylor", "guest ales", "hand pump", "cask conditioned"]`;
+Output format: ["synonym1", "synonym2", "synonym3", ...]`;
 
 async function fetchLLMSynonyms(attribute: string): Promise<string[]> {
   const cacheKey = attribute.toLowerCase().trim();
