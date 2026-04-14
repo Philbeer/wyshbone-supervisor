@@ -1,0 +1,185 @@
+# AUDIT & FIX: Remove hardcoded literal examples from all LLM prompts
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## PRINCIPLE
+
+LLM prompts should teach RULES and PATTERNS, not memorised examples. Literal examples bias models toward pattern-matching instead of reasoning, especially small models. Format examples (showing JSON output structure) are acceptable. Classification/routing examples with specific user phrases are dangerous.
+
+---
+
+## FIX 1: Synonym expansion prompt (MEDIUM RISK)
+
+**File:** `server/supervisor/constraint-gate.ts` (~line 453)
+
+**Current problem:** The `LLM_SYNONYM_SYSTEM_PROMPT` has a literal worked example:
+```
+Example:
+Attribute: "cask ale"
+["real ale", "hand-pulled ale", "traditional ale", "cask marque", "Harvey's", ...]
+```
+
+If someone searches for "cask ale," the LLM might copy this list verbatim instead of thinking about what other synonyms exist.
+
+**Fix:** Replace with a pattern-based instruction:
+
+```typescript
+const LLM_SYNONYM_SYSTEM_PROMPT = `You are generating search synonyms for evidence verification. Given an attribute that a user is looking for in a business, generate 5-10 alternative terms that would indicate the business offers this attribute.
+
+Include:
+- Direct synonyms and spelling variants
+- Industry-specific terms
+- Brand names or certification marks commonly associated with this attribute
+- Informal/colloquial terms customers might use
+- Abbreviations or acronyms
+
+Return ONLY a JSON array of strings. No explanation, no markdown, no commentary.
+
+Output format: ["synonym1", "synonym2", "synonym3", ...]`;
+```
+
+The format is clear without needing a specific worked example. Sonnet and even Haiku can produce a JSON array from this instruction.
+
+---
+
+## FIX 2: Hardcoded synonym map — make it a fallback, not primary (LOW-MEDIUM RISK)
+
+**File:** `server/supervisor/constraint-gate.ts` (~line 370)
+
+**Current:** `COMMON_ATTRIBUTE_SYNONYMS` is a large hardcoded map (~25 entries) that's the PRIMARY source of synonyms, with LLM expansion as a supplement.
+
+**Problem:** New attributes that aren't in this map get no hardcoded synonyms. The LLM expansion covers them, but if the LLM call fails (timeout, rate limit), there are zero synonyms.
+
+**Fix:** No code change needed — the current architecture is actually fine. The hardcoded map is a reliable fallback when the LLM fails. The LLM expands beyond it. Just add a comment:
+
+```typescript
+// FALLBACK synonym seeds — used when LLM synonym expansion fails or times out.
+// The LLM call in fetchLLMSynonyms() is the PRIMARY source; these are safety nets.
+// Do NOT add new entries here to "fix" missing synonyms — improve the LLM prompt instead.
+const COMMON_ATTRIBUTE_SYNONYMS: Record<string, string[]> = {
+```
+
+This prevents future developers from treating the map as the place to add new synonyms.
+
+---
+
+## FIX 3: URL path hints — make dynamic (LOW-MEDIUM RISK)
+
+**File:** `server/supervisor/constraint-led-extractor.ts` (~line 148)
+
+**Current:** Hardcoded `PAGE_HINT_PATHS` maps like:
+```typescript
+'cask ale': ['beers', 'ales', 'our-beers', 'real-ale', 'drinks', 'cellar', 'tap-list', 'bar'],
+```
+
+**Problem:** New attributes with no hardcoded paths get generic paths only. A search for "EV charging" won't check `/ev-charging` or `/electric-vehicle` pages.
+
+**Fix:** Add an LLM-generated path hint when no hardcoded entry exists. After the hardcoded lookup, if nothing matched:
+
+```typescript
+// In the function that resolves page hints (find it near line 148):
+function getPageHintPaths(attribute: string): string[] {
+  const key = attribute.toLowerCase().replace(/\s+/g, ' ').trim();
+  
+  // Check hardcoded seeds first (fast, free)
+  const hardcoded = PAGE_HINT_PATHS[key];
+  if (hardcoded && hardcoded.length > 0) return hardcoded;
+  
+  // No hardcoded hints — use generic paths that work for most attributes
+  // The evidence LLM judge will still find evidence on any page
+  return ['about', 'services', 'menu', 'what-we-do', 'our-story', 'features'];
+}
+```
+
+The generic fallback means new attributes aren't penalised. The LLM evidence judge will find relevant content regardless of which page it's on.
+
+---
+
+## FIX 4: Hardcoded keyword map in constraint-led-extractor (LOW-MEDIUM RISK)
+
+**File:** `server/supervisor/constraint-led-extractor.ts` (~line 201)
+
+**Current:** `COMMON_KEYWORD_MAP` with entries like:
+```typescript
+'cask ale': ['cask ale', 'real ale', 'hand-pulled', ...],
+```
+
+**Same pattern as Fix 2** — these are seeds expanded by the LLM. Add the same comment:
+
+```typescript
+// FALLBACK keyword seeds — used when LLM synonym expansion is unavailable.
+// The LLM-expanded synonyms from constraint-gate.ts are the PRIMARY source.
+// Do NOT add entries here to fix search quality — improve the LLM synonym prompt instead.
+const COMMON_KEYWORD_MAP: Record<string, string[]> = {
+```
+
+---
+
+## FIX 5: Chat handler fallback messages (LOW RISK)
+
+**File:** `server/supervisor/chat-handler.ts` (~lines 129, 141)
+
+**Current:** Hardcoded fallback messages mentioning specific searches:
+```typescript
+response = "I'm a bit busy right now. I can find businesses for you — just tell me a business type and location, like 'find cafes in Brighton'.";
+response = "I can find businesses and leads for you. Just tell me what you're looking for and where — for example, 'find web designers in Manchester'.";
+```
+
+**Problem:** Low risk (not sent to LLMs) but creates a pattern where the same example locations appear everywhere. If a user sees "find cafes in Brighton" in the fallback, they might type exactly that, which then gets matched against examples in other prompts.
+
+**Fix:** Use generic placeholders:
+
+```typescript
+response = "I'm a bit busy right now. I can find businesses for you — just tell me a business type and location, like 'find [type] in [place]'.";
+```
+
+Actually, for user-facing strings, specific examples ARE helpful. The risk is minimal. **Leave these as-is** — they help the user understand the format.
+
+---
+
+## FIX 6: Mission extractor format examples (NO CHANGE NEEDED)
+
+**File:** `server/supervisor/mission-extractor.ts`
+
+The PASS1/2/3 prompts have format examples with Nottingham, Sheffield, etc. These teach OUTPUT FORMAT ("here's what a correctly structured JSON looks like"), not classification. The model needs to see the output schema with realistic data.
+
+These were already decontaminated to avoid benchmark locations. **No change needed.**
+
+---
+
+## FIX 7: Router prompt (ALREADY COVERED BY PROMPT 18)
+
+**File:** `server/supervisor/conversation-router.ts`
+
+Already being fixed by Prompt 18 — Sonnet upgrade, pattern rules instead of literal examples, safety net check.
+
+---
+
+## SUMMARY OF CHANGES
+
+| File | Risk | Action |
+|------|------|--------|
+| conversation-router.ts | HIGH | Prompt 18 (already written) |
+| constraint-gate.ts (synonym prompt) | MEDIUM | Replace worked example with pattern instruction |
+| constraint-gate.ts (synonym map) | LOW | Add comment — no code change |
+| constraint-led-extractor.ts (page hints) | LOW-MEDIUM | Add generic fallback for unknown attributes |
+| constraint-led-extractor.ts (keyword map) | LOW | Add comment — no code change |
+| chat-handler.ts (fallback messages) | LOW | No change — user-facing, not LLM-facing |
+| mission-extractor.ts (format examples) | LOW | No change — format examples are acceptable |
+
+## TESTING
+
+1. "find pubs that serve cask ale in Sussex" — synonym expansion should still work, evidence should still verify
+2. "find places with EV charging in Brighton" — should work even without hardcoded synonyms (LLM generates them)
+3. "tell me about wine" — router should classify as CHAT (Prompt 18 fix)
+4. Run the 20-test comprehensive smoke test — all should pass
+
+## RULE FOR THE FUTURE
+
+When adding new LLM prompts:
+- ✅ Format examples showing JSON output structure
+- ✅ Pattern descriptions: "Messages like 'tell me about [topic]' are CHAT"
+- ✅ Rule statements: "SEARCH requires BOTH entity AND location"
+- ❌ Literal phrase examples: "tell me about wine → CHAT"
+- ❌ Worked examples with specific data: 'Attribute: "cask ale" → ["real ale", ...]'
+- ❌ Hardcoded maps as primary data source (use as fallback only)
