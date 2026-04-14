@@ -1,0 +1,111 @@
+# FIX: Router fallback defaults must be CHAT, not SEARCH
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE PROBLEM
+
+When the router LLM returns invalid JSON (parse error) or fails entirely (timeout, API error), the fallback code defaults to `route: 'SEARCH'`. This causes:
+
+1. A search with no entity/location
+2. The cross-session resolver rewrites it to the user's last search
+3. "what is portuguese wine like" becomes a search for pubs in Arundel
+
+This happened because the Sonnet router returned something that wasn't valid JSON, the parse failed, and the fallback sent the message into the search pipeline.
+
+## THE FIX
+
+In `server/supervisor/conversation-router.ts`, find BOTH catch blocks and change the fallback route from SEARCH to CHAT.
+
+### Fix 1: LLM call failure (around line 275)
+
+Find:
+```typescript
+} catch (err: any) {
+    console.error(`[ROUTER] LLM failed (${Date.now() - startTime}ms): ${err.message}`);
+    return {
+      route: 'SEARCH', entity: null, location: null, constraints: [],
+      clarify_question: null, chat_response: null,
+      iteration_change: null, referenced_result: null,
+      confidence: 0.1, reasoning: `Router LLM failed — fallback to pipeline`,
+    };
+  }
+```
+
+Replace with:
+```typescript
+} catch (err: any) {
+    console.error(`[ROUTER] LLM failed (${Date.now() - startTime}ms): ${err.message}`);
+    return {
+      route: 'CHAT', entity: null, location: null, constraints: [],
+      clarify_question: null,
+      chat_response: "I didn't quite catch that. Could you tell me what you're looking for? I can find businesses for you — just give me a type and location.",
+      iteration_change: null, referenced_result: null,
+      confidence: 0.1, reasoning: `Router LLM failed — fallback to CHAT`,
+    };
+  }
+```
+
+### Fix 2: Parse failure (around line 290)
+
+Find:
+```typescript
+} catch (parseErr: any) {
+    console.error(`[ROUTER] Parse failed (${Date.now() - startTime}ms): ${parseErr.message}`);
+    return {
+      route: 'SEARCH', entity: null, location: null, constraints: [],
+      clarify_question: null, chat_response: null,
+      iteration_change: null, referenced_result: null,
+      confidence: 0.1, reasoning: `Router parse failed — fallback to pipeline`,
+    };
+  }
+```
+
+Replace with:
+```typescript
+} catch (parseErr: any) {
+    console.error(`[ROUTER] Parse failed (${Date.now() - startTime}ms): ${parseErr.message}`);
+    return {
+      route: 'CHAT', entity: null, location: null, constraints: [],
+      clarify_question: null,
+      chat_response: "I didn't quite catch that. Could you tell me what you're looking for? I can find businesses for you — just give me a type and location.",
+      iteration_change: null, referenced_result: null,
+      confidence: 0.1, reasoning: `Router parse failed — fallback to CHAT`,
+    };
+  }
+```
+
+## WHY CHAT NOT SEARCH
+
+- If the router can't even decide what to do, the SAFEST action is to ask the user. A chat response is always harmless.
+- A SEARCH with no entity/location ALWAYS produces garbage — it either clarifies (wasting time) or gets rewritten by cross-session resolver to an unrelated search.
+- CHAT with a helpful response guides the user to give a proper search query.
+- The confidence is 0.1 — the system is admitting it doesn't know. Don't take an aggressive action (search) when you don't know what's happening.
+
+## ALSO: Why did the parse fail?
+
+Sonnet likely returned the JSON wrapped in markdown code fences or with a preamble. The parser strips ```json fences but might miss other formats. Check the console log for the raw response — if Sonnet is consistently returning non-parseable JSON, the prompt may need a stronger "return ONLY JSON" instruction or the parser needs to be more tolerant.
+
+Consider adding this to the parser as a more resilient extraction:
+```typescript
+// In parseRouterResponse, before JSON.parse:
+// Try to extract JSON from anywhere in the response
+const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+if (jsonMatch) {
+  cleaned = jsonMatch[0];
+}
+```
+
+This handles cases where the LLM wraps JSON in text like "Here's my analysis: {...}"
+
+## TESTING
+
+1. "what is portuguese wine like" (after chatting about wine) → must be CHAT, not search
+2. "tell me about wine" → still CHAT (Prompt 18 fix)
+3. "find pubs in Brighton" → still SEARCH (no regression)
+4. Force a parse failure (temporarily break the prompt) → should get a friendly chat response, not a broken search
+
+## CRITICAL
+
+- Change ONLY the two fallback return objects — nothing else in the router
+- The chat_response in the fallback must be helpful — guide the user to give a proper query
+- Do NOT default to CLARIFY — that implies the system understood it was a search but needs more info. CHAT is more honest: "I didn't understand, let me help you."
