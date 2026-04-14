@@ -36,7 +36,12 @@ import {
 } from '../learning-store';
 
 function normaliseEntityName(name: string): string {
-  return name.toLowerCase().replace(/^the\s+/i, '').trim();
+  return name
+    .toLowerCase()
+    .replace(/^the\s+/i, '')
+    .replace(/\b(ltd|limited|inc|plc|llc|llp|co|company|group|holdings)\b\.?/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 export async function runReloop(params: {
