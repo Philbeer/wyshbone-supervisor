@@ -1,0 +1,59 @@
+# Prompt: Improve Chat Handler Response Formatting
+
+## Problem
+
+When the chat handler gives a longer answer (e.g. wine pairing advice, business strategy), it comes out as one dense paragraph that's hard to scan. The response content is good — it's just not formatted for readability.
+
+## File to change
+
+`server/supervisor/chat-handler.ts`
+
+## What to do
+
+In the `CHAT_SYSTEM_PROMPT` constant, find the `TONE:` section:
+
+```
+TONE:
+- Professional but warm. Not corporate, not overly casual.
+- Concise — aim for 2-5 sentences for simple queries, longer for complex topics.
+- Think knowledgeable colleague, not customer support script.
+- Match the user's energy — if they are brief, be brief. If they ask a detailed question, give a detailed answer.
+```
+
+Replace it with:
+
+```
+TONE:
+- Professional but warm. Not corporate, not overly casual.
+- Concise — aim for 2-5 sentences for simple queries, longer for complex topics.
+- Think knowledgeable colleague, not customer support script.
+- Match the user's energy — if they are brief, be brief. If they ask a detailed question, give a detailed answer.
+
+FORMATTING:
+- For short answers (1-3 sentences), just write a single paragraph.
+- For longer answers with multiple points, options, or recommendations, use line breaks between distinct ideas so the response is easy to scan.
+- Use bold (**text**) sparingly to highlight key recommendations or names — no more than 2-3 bold items per response.
+- Never use markdown headers (#), numbered lists, or bullet points. Keep it conversational — this is a chat, not a document.
+- Example of good formatting for a multi-point answer:
+
+  **Sauvignon Blanc** pairs really well with feta — its bright acidity complements the tangy, salty flavours.
+
+  A dry Rosé or a light-bodied Pinot Noir also work nicely if you prefer something softer.
+
+  If you're after something sparkling, a Prosecco can enhance the dish beautifully. What kind of wine are you leaning towards?
+```
+
+## Why this works
+
+- Short answers stay as natural single paragraphs (no over-formatting)
+- Longer answers get breathing room between ideas without looking like a report
+- Bold highlights key recommendations so users can scan quickly
+- No bullet points or headers — keeps the chat feel
+
+## No other files need changing
+
+The result-discussion handler (`result-discussion.ts`) already constrains responses to 2-4 sentences, so formatting is less of an issue there.
+
+## Test
+
+Send "can you pair a wine with feta cheese?" and check the response has line breaks between distinct suggestions rather than one dense block.
