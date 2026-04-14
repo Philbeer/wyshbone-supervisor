@@ -1,0 +1,149 @@
+# FIX: Upgrade router to Sonnet + remove hardcoded examples + add safety net
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE PROBLEM
+
+The conversation router uses Haiku (claude-3-5-haiku) which is easily biased by context. When the user's search history contains previous searches, Haiku interprets conversational messages like "tell me about wine" as search intent because the surrounding context (search history, assistant's "I find businesses" response) primes it toward SEARCH.
+
+The router prompt contains literal example phrases like "tell me about wine → CHAT" as workarounds for previous misroutes. This is brittle — you can't list every possible chat phrase. A smarter model wouldn't need them.
+
+## THREE CHANGES
+
+### Change 1: Upgrade router model to Sonnet
+
+In `server/supervisor/conversation-router.ts`, find the `callLLMText` call (around line 267):
+
+```typescript
+rawResponse = await callLLMText(ROUTER_SYSTEM_PROMPT, userMessage, 'router', {
+  anthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-3-5-haiku-20241022',
+  openaiModel: 'gpt-4o-mini',
+  timeoutMs: parseInt(process.env.ROUTER_TIMEOUT_MS || '15000', 10),
+});
+```
+
+Change the default model to Sonnet:
+
+```typescript
+rawResponse = await callLLMText(ROUTER_SYSTEM_PROMPT, userMessage, 'router', {
+  anthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-sonnet-4-20250514',
+  openaiModel: 'gpt-4o-mini',
+  timeoutMs: parseInt(process.env.ROUTER_TIMEOUT_MS || '15000', 10),
+});
+```
+
+This is overridable via ROUTER_LLM_MODEL env var if you want to switch back.
+
+### Change 2: Clean up the prompt — remove all literal example phrases
+
+In the same file, in `ROUTER_SYSTEM_PROMPT`, replace all the CHAT examples with PATTERN descriptions instead of literal phrases. The goal: teach the model the RULE, not memorise specific sentences.
+
+Replace the CHAT section with:
+
+```
+### CHAT
+General conversation, greetings, off-topic questions, knowledge questions, or anything that is NOT a request to find/search for businesses in a specific location.
+
+Key signal: the message does NOT contain both a business type AND a location. If the user is asking ABOUT a topic (wine, AI, marketing, weather) rather than asking you to FIND businesses, it's CHAT.
+
+Set route="CHAT" and chat_response=a friendly response. For knowledge questions, give a brief helpful answer then mention what Wyshbone can do.
+
+CHAT patterns:
+- Greetings: "hi", "hello", "hey there"
+- Knowledge questions: "tell me about X", "what is X", "how does X work", "explain X"
+- Capability questions: "what can you do", "how do you work"
+- Off-topic: weather, philosophy, personal questions
+- Gibberish: more than half the words aren't real English
+- Single words or fragments without search intent
+- Gratitude: "thanks", "cheers", "that's helpful"
+- The word "find" or "search" WITHOUT both a business type AND location
+
+CRITICAL: "tell me about [topic]" is ALWAYS CHAT, even if the topic relates to businesses (wine, restaurants, marketing). The user is asking for information, not requesting a search. Only route as SEARCH when the user explicitly asks to FIND or SEARCH for a business type in a specific place.
+
+chat_response guidelines:
+- For knowledge questions: give a brief helpful 1-2 sentence answer, then redirect to what Wyshbone does
+- For greetings: welcome them and explain what you can do
+- For gibberish: ask them to clarify
+- Keep to 1-3 sentences
+```
+
+Also remove ALL literal phrase examples from every route section. Replace them with pattern descriptions. For example in the SEARCH section, keep the format examples but make clear they're format illustrations, not an exhaustive list:
+
+```
+Format examples (illustrative, not exhaustive):
+- "find [type] in [place]" → SEARCH
+- "[type] in [place]" → SEARCH  
+- "search for [type] near [place]" → SEARCH
+```
+
+### Change 3: Add post-router safety check for SEARCH without location words
+
+In the `routeConversation` function, AFTER parsing the response but BEFORE returning, add a safety check:
+
+```typescript
+// Safety: if route is SEARCH but the original message has no location-like content,
+// and the entity/location came from search history not the message, override to CHAT or CLARIFY
+if (decision.route === 'SEARCH') {
+  const msgLower = input.currentMessage.toLowerCase().trim();
+  
+  // Check if the message contains any location-like words
+  // (the entity and location should come FROM the message, not from search history)
+  const hasLocationWords = decision.location && msgLower.includes(decision.location.toLowerCase().substring(0, 4));
+  const hasEntityWords = decision.entity && msgLower.includes(decision.entity.toLowerCase().substring(0, 4));
+  
+  // If neither entity nor location appear in the original message, the router hallucinated them from history
+  if (!hasLocationWords && !hasEntityWords) {
+    // Check if it looks like a knowledge/chat question
+    const chatPatterns = [
+      /^(tell|teach|explain|describe|what is|what are|how does|how do|can you tell|do you know)/i,
+      /^(hi|hello|hey|thanks|cheers|ok|sure|yes)/i,
+      /\?$/,  // ends with question mark and no location
+    ];
+    const looksLikeChat = chatPatterns.some(p => p.test(msgLower));
+    
+    if (looksLikeChat) {
+      console.warn(`[ROUTER_SAFETY] Overriding SEARCH→CHAT: message="${input.currentMessage.substring(0, 60)}" has no entity/location words. Router hallucinated from history.`);
+      decision = {
+        ...decision,
+        route: 'CHAT',
+        entity: null,
+        location: null,
+        chat_response: decision.chat_response || "I'm not sure I understood that as a search. Could you tell me what type of businesses you're looking for and where?",
+        confidence: 0.6,
+        reasoning: `Safety override: SEARCH→CHAT — message contains no entity/location words`,
+      };
+    }
+  }
+}
+```
+
+Place this AFTER the `parseRouterResponse` call and BEFORE the final `console.log` and `return`.
+
+## WHY THIS WORKS
+
+1. **Sonnet is much harder to bias with context.** It reads the prompt rules more carefully and doesn't get swayed by search history the way Haiku does.
+
+2. **No literal examples to pattern-match against.** The prompt teaches RULES ("tell me about X is ALWAYS CHAT") not EXAMPLES ("tell me about wine → CHAT"). A new phrase the model hasn't seen before will still be routed correctly.
+
+3. **Safety net catches hallucinated searches.** If the model returns SEARCH but the entity/location don't appear anywhere in the user's actual message, they came from search history — override to CHAT. This prevents the cascade where a misrouted SEARCH gets rewritten by the cross-session resolver.
+
+## COST IMPACT
+
+Sonnet costs more per call than Haiku (~5x). But routing is ONE call per message, typically 500-1000 tokens. At current pricing that's roughly $0.005 per route vs $0.001. For a B2B app doing maybe 100 messages/day, that's $0.50/day vs $0.10/day. Negligible for the reliability improvement.
+
+## TESTING
+
+1. "tell me about wine" → must be CHAT (the exact bug that prompted this fix)
+2. "what is AI" → must be CHAT
+3. "find pubs in Brighton" → must be SEARCH (no regression)
+4. "hi" → must be CHAT
+5. "find things in Kent" → must be CLARIFY (vague entity)
+6. Run the 20-test comprehensive smoke test — all should still pass
+
+## CRITICAL RULES
+
+1. Do NOT add new literal phrase examples to the prompt. Add PATTERN rules instead.
+2. The ROUTER_LLM_MODEL env var still overrides the default — useful for A/B testing
+3. The safety check runs AFTER the LLM call, not before — it's a net, not a gate
+4. The safety check only fires when entity/location words are MISSING from the message — it won't interfere with valid searches
+5. Keep the existing SEARCH-without-entity-or-location downgrade to CLARIFY — the new safety check is an additional layer
