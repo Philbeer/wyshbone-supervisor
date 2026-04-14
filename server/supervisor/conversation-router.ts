@@ -91,23 +91,32 @@ Examples (when previous search exists):
 - Previous assistant: "I can widen the search to include nearby towns." User: "yes please" → ITERATE, entity=same as last search, location=wider area around last search location, iteration_change="user accepted suggestion to widen search"
 
 ### CHAT
-Greetings, gibberish, off-topic, general knowledge questions, conversational follow-ups to a previous CHAT exchange, or anything that is NOT a search/lead-finding intent.
-Set route="CHAT" and chat_response=a friendly response. For general knowledge questions, give a brief helpful answer (1-2 sentences) then redirect to what Wyshbone does.
-Examples:
-- "hi" → CHAT ("Hey! I can find businesses and leads for you. What are you looking for and where?")
-- "tell me about wine" → CHAT ("Wine is a fascinating world! But I'm a business finder — I can help you find wine merchants, vineyards, or wine bars. Just tell me a location!")
-- "what is AI" → CHAT ("AI is technology that enables machines to perform tasks that typically require human intelligence. I'm an AI-powered business finder — want me to find some businesses for you?")
-- "what can you do" → CHAT ("I find businesses and leads! Tell me a type of business and a location — like 'find cafes in Brighton'.")
-- "sdfghjkl plumbers banana car" → CHAT ("I didn't quite catch that. Could you tell me what type of businesses you're looking for and where?")
-- "what's the weather like" → CHAT ("I'm a business finder, so I can't help with weather! But tell me what businesses you're looking for and where.")
-- "any" → CHAT ("Could you tell me what you're looking for? I need a type of business and a location.")
-- "find" → CHAT ("What would you like me to find? Give me a business type and location, like 'find restaurants in Manchester'.")
-CHAT CONTINUITY examples (when the previous exchange was a CHAT, not search results):
-- Previous: assistant explained about The Wine Society. User: "how much is membership?" → CHAT (follow-up about the topic being discussed)
-- Previous: assistant discussed wine pairing. User: "what about with fish?" → CHAT (continuing the conversation)
-- Previous: assistant explained what Wyshbone can do. User: "can you do that for restaurants?" → CHAT (asking about capabilities, not requesting a search — no location given)
-- Previous: assistant chatted about an industry. User: "that's interesting, tell me more" → CHAT
-- Previous: assistant gave a CHAT response. User: "where are they based?" → CHAT (follow-up about the topic)
+General conversation, greetings, off-topic questions, knowledge questions, or anything that is NOT a request to find/search for businesses in a specific location.
+
+Key signal: the message does NOT contain both a business type AND a location. If the user is asking ABOUT a topic (wine, AI, marketing, weather) rather than asking you to FIND businesses, it's CHAT.
+
+Set route="CHAT" and chat_response=a friendly response. For knowledge questions, give a brief helpful answer then mention what Wyshbone can do.
+
+CHAT patterns:
+- Greetings: "hi", "hello", "hey there"
+- Knowledge questions: "tell me about X", "what is X", "how does X work", "explain X"
+- Capability questions: "what can you do", "how do you work"
+- Off-topic: weather, philosophy, personal questions
+- Gibberish: more than half the words aren't real English
+- Single words or fragments without search intent
+- Gratitude: "thanks", "cheers", "that's helpful"
+- The word "find" or "search" WITHOUT both a business type AND location
+
+CRITICAL: "tell me about [topic]" is ALWAYS CHAT, even if the topic relates to businesses (wine, restaurants, marketing). The user is asking for information, not requesting a search. Only route as SEARCH when the user explicitly asks to FIND or SEARCH for a business type in a specific place.
+
+chat_response guidelines:
+- For knowledge questions: give a brief helpful 1-2 sentence answer, then redirect to what Wyshbone does
+- For greetings: welcome them and explain what you can do
+- For gibberish: ask them to clarify
+- Keep to 1-3 sentences
+
+CHAT CONTINUITY: If the conversation history shows the last exchange was a CHAT (the assistant gave a conversational/informational answer, NOT search results), short follow-up questions are almost certainly CHAT continuations. Only route away from CHAT if the user gives a clear, explicit search instruction with both a business type AND a location.
+
 What NOT to route as CHAT:
 - "yes please" (when previous assistant offered to search more) → NOT CHAT and NOT DISCUSS — this is an affirmative to a search offer → ITERATE or SEARCH
 
@@ -125,7 +134,6 @@ What NOT to route as CHAT:
 10. For ITERATE, include the COMPLETE new search params, not just the delta.
 11. Keep all responses concise. clarify_question: 1-2 sentences. chat_response: 1-3 sentences.
 12. AFFIRMATIVE RESPONSES (overrides rule 4): If the user's ENTIRE message is a short affirmative (under 5 words) like "yes", "yes please", "ok", "sure", "go ahead", "do it", "yeah", "please do", "go for it" — this is NOT a discussion. Read the PREVIOUS ASSISTANT MESSAGE. If it offered to search, refine, expand, or filter, route as ITERATE or SEARCH with the entity and location from the LAST SEARCH context. Example: last search was "pubs in Arundel", assistant said "I can search nearby towns too — want me to?", user says "yes please" → ITERATE with expanded location. Rule 12 takes priority over rule 4 whenever the entire user message is a short affirmative.
-13. CHAT CONTINUITY: If the CONVERSATION HISTORY shows the last exchange was a CHAT (the assistant gave a conversational/informational answer, NOT search results), then short follow-up questions from the user are almost certainly CHAT continuations. Examples: after chatting about an organisation, "how much is membership?", "where are they based?", "do they deliver?", "what do they sell?", "when were they founded?" are all CHAT — the user is asking follow-up questions about the topic being discussed, not requesting a new business search. Only route away from CHAT if the user gives a clear, explicit search instruction with both an entity type AND a location (e.g. "find wine merchants in Sussex").
 
 ## OUTPUT FORMAT
 
@@ -265,7 +273,7 @@ export async function routeConversation(input: RouterInput): Promise<RouterDecis
   let rawResponse: string;
   try {
     rawResponse = await callLLMText(ROUTER_SYSTEM_PROMPT, userMessage, 'router', {
-      anthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-3-5-haiku-20241022',
+      anthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-sonnet-4-20250514',
       openaiModel: 'gpt-4o-mini',
       timeoutMs: parseInt(process.env.ROUTER_TIMEOUT_MS || '15000', 10),
     });
@@ -291,6 +299,37 @@ export async function routeConversation(input: RouterInput): Promise<RouterDecis
       iteration_change: null, referenced_result: null,
       confidence: 0.1, reasoning: `Router parse failed — fallback to pipeline`,
     };
+  }
+
+  // Safety: if route is SEARCH but the original message has no location-like content,
+  // and the entity/location came from search history not the message, override to CHAT or CLARIFY
+  if (decision.route === 'SEARCH') {
+    const msgLower = input.currentMessage.toLowerCase().trim();
+
+    const hasLocationWords = decision.location && msgLower.includes(decision.location.toLowerCase().substring(0, 4));
+    const hasEntityWords = decision.entity && msgLower.includes(decision.entity.toLowerCase().substring(0, 4));
+
+    if (!hasLocationWords && !hasEntityWords) {
+      const chatPatterns = [
+        /^(tell|teach|explain|describe|what is|what are|how does|how do|can you tell|do you know)/i,
+        /^(hi|hello|hey|thanks|cheers|ok|sure|yes)/i,
+        /\?$/,
+      ];
+      const looksLikeChat = chatPatterns.some(p => p.test(msgLower));
+
+      if (looksLikeChat) {
+        console.warn(`[ROUTER_SAFETY] Overriding SEARCH→CHAT: message="${input.currentMessage.substring(0, 60)}" has no entity/location words. Router hallucinated from history.`);
+        decision = {
+          ...decision,
+          route: 'CHAT',
+          entity: null,
+          location: null,
+          chat_response: decision.chat_response || "I'm not sure I understood that as a search. Could you tell me what type of businesses you're looking for and where?",
+          confidence: 0.6,
+          reasoning: `Safety override: SEARCH→CHAT — message contains no entity/location words`,
+        };
+      }
+    }
   }
 
   console.log(`[ROUTER] route=${decision.route} entity="${decision.entity}" location="${decision.location}" confidence=${decision.confidence} (${Date.now() - startTime}ms)`);
