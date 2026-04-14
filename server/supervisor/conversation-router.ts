@@ -209,6 +209,12 @@ function parseRouterResponse(raw: string): RouterDecision {
   if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
   cleaned = cleaned.trim();
 
+  // Try to extract JSON from anywhere in the response (handles preamble/postamble)
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    cleaned = jsonMatch[0];
+  }
+
   const parsed = JSON.parse(cleaned);
 
   const validRoutes: Route[] = ['SEARCH', 'CLARIFY', 'DISCUSS', 'ITERATE', 'CHAT'];
@@ -279,12 +285,12 @@ export async function routeConversation(input: RouterInput): Promise<RouterDecis
     });
   } catch (err: any) {
     console.error(`[ROUTER] LLM failed (${Date.now() - startTime}ms): ${err.message}`);
-    // Fallback: let existing pipeline handle it
     return {
-      route: 'SEARCH', entity: null, location: null, constraints: [],
-      clarify_question: null, chat_response: null,
+      route: 'CHAT', entity: null, location: null, constraints: [],
+      clarify_question: null,
+      chat_response: "I didn't quite catch that. Could you tell me what you're looking for? I can find businesses for you — just give me a type and location.",
       iteration_change: null, referenced_result: null,
-      confidence: 0.1, reasoning: `Router LLM failed — fallback to pipeline`,
+      confidence: 0.1, reasoning: `Router LLM failed — fallback to CHAT`,
     };
   }
 
@@ -294,10 +300,11 @@ export async function routeConversation(input: RouterInput): Promise<RouterDecis
   } catch (parseErr: any) {
     console.error(`[ROUTER] Parse failed (${Date.now() - startTime}ms): ${parseErr.message}`);
     return {
-      route: 'SEARCH', entity: null, location: null, constraints: [],
-      clarify_question: null, chat_response: null,
+      route: 'CHAT', entity: null, location: null, constraints: [],
+      clarify_question: null,
+      chat_response: "I didn't quite catch that. Could you tell me what you're looking for? I can find businesses for you — just give me a type and location.",
       iteration_change: null, referenced_result: null,
-      confidence: 0.1, reasoning: `Router parse failed — fallback to pipeline`,
+      confidence: 0.1, reasoning: `Router parse failed — fallback to CHAT`,
     };
   }
 
