@@ -1,0 +1,92 @@
+# FIX: Location verification rejects valid results for county searches
+
+## REPO: wyshbone-supervisor-Post-CC
+
+## THE PROBLEM
+
+The batch Haiku location verification call rejects valid results when the search location is a county. Example: "find pubs in Devon" returns 20 candidates, location verifier rejects 17 including:
+
+- "Exeter is not in Devon" — Exeter IS the county town of Devon
+- "Drewsteignton is not in Devon" — it IS in Devon
+- "Dartington is not in Devon" — it IS in Devon  
+- "Croyde is not in Devon" — it IS in Devon (North Devon coast)
+
+Haiku doesn't know UK geography well enough to map towns/cities to their counties. It sees "Exeter EX4 4EP, UK" in the address and because "Devon" doesn't appear literally, it rejects it.
+
+## ROOT CAUSE
+
+The location verification in `server/supervisor/mission-executor.ts` (the `verifyLocations` batch call) sends addresses to Haiku and asks "is this in [location]?" For city-level searches (Brighton, Manchester), this works because the city name appears in the address. For county-level searches (Devon, Sussex, Kent), the town name appears but not the county — and Haiku doesn't know the mapping.
+
+## THE FIX — Two changes
+
+### Change 1: Upgrade location verification model to Sonnet
+
+Find the `verifyLocations` or batch location verification `callLLMText` call in `mission-executor.ts`. Change the model from Haiku to Sonnet:
+
+```typescript
+// Find something like:
+const batchResult = await callLLMText(locationPrompt, addressBatch, 'location_verify', {
+  anthropicModel: 'claude-3-5-haiku-20241022',  // ← CHANGE THIS
+  ...
+});
+
+// Change to:
+const batchResult = await callLLMText(locationPrompt, addressBatch, 'location_verify', {
+  anthropicModel: process.env.LOCATION_VERIFY_MODEL || 'claude-sonnet-4-20250514',
+  ...
+});
+```
+
+Sonnet has much better geographic knowledge and knows that Exeter is in Devon, Worthing is in Sussex, etc.
+
+### Change 2: Add geographic context to the prompt
+
+Find the system prompt for the location verification. Add explicit instructions about UK geography:
+
+Add to the system prompt:
+```
+IMPORTANT UK GEOGRAPHY CONTEXT:
+- Counties contain many towns and cities. For example: Devon contains Exeter, Plymouth, Torquay, Barnstaple, and hundreds of smaller towns.
+- The address may not mention the county name. "Exeter EX4 4EP, UK" IS in Devon even though "Devon" doesn't appear.
+- Use your geographic knowledge to determine if the town/city in the address is within the requested county/region.
+- If in doubt, mark as IN the location. False positives (keeping a borderline result) are better than false negatives (rejecting a valid result).
+- Common UK counties and their major towns:
+  - Devon: Exeter, Plymouth, Torquay, Barnstaple, Bideford, Tiverton, Newton Abbot, Dartmouth, Totnes, Sidmouth, Exmouth
+  - Sussex (includes East Sussex and West Sussex): Brighton, Worthing, Chichester, Crawley, Eastbourne, Hastings, Lewes, Horsham, Arundel, Bognor Regis
+  - Kent: Canterbury, Maidstone, Dover, Folkestone, Tunbridge Wells, Margate, Ashford, Dartford, Gravesend, Sevenoaks
+  - Cornwall: Truro, Falmouth, Penzance, Newquay, St Ives, Bodmin, Padstow, Bude
+  - Somerset: Taunton, Bath, Yeovil, Bridgwater, Glastonbury, Wells, Frome
+  - Dorset: Dorchester, Bournemouth, Poole, Weymouth, Sherborne, Lyme Regis
+  - Yorkshire: York, Leeds, Sheffield, Bradford, Harrogate, Scarborough, Whitby, Ripon
+  - Norfolk: Norwich, King's Lynn, Great Yarmouth, Cromer, Thetford
+  - Suffolk: Ipswich, Bury St Edmunds, Lowestoft, Aldeburgh, Southwold
+```
+
+This gives the model reference data so it doesn't have to guess. The list covers the most commonly searched counties.
+
+### Change 3: Fail open, not closed
+
+In the location verification result parsing, if the LLM says "not in [location]" but the Google Places search originally returned the result FOR that location, bias toward keeping it. Google Places already does geographic filtering — if GP returned it for "pubs in Devon", it's probably in Devon.
+
+Add to the prompt:
+```
+BIAS: These addresses were returned by Google Places for a search within "[LOCATION]". Google already filtered by location. You are a SECOND CHECK, not the primary filter. Only reject if you are CONFIDENT the address is clearly outside the requested area. When in doubt, KEEP the result.
+```
+
+## TESTING
+
+1. "find pubs in Devon" — should return 15-20 pubs including Exeter, Dartington, Croyde results
+2. "find pubs in Sussex" — should return 15-20 pubs including Worthing, Arundel, Chichester
+3. "find pubs in West London" — should still correctly filter out East/North London (city-level still works)
+4. "find pubs in Brighton" — no regression (city-level search unaffected)
+
+## COST NOTE
+
+Upgrading to Sonnet for location verification adds cost per search. The batch call is ONE call per run with ~20 addresses. At Sonnet pricing, that's roughly $0.01 per search. Acceptable for the accuracy improvement. Override via LOCATION_VERIFY_MODEL env var if needed.
+
+## CRITICAL
+
+- The county reference list in the prompt is a HINT, not exhaustive. Sonnet should use its own knowledge too.
+- "Fail open" is essential — Google Places already filtered by location, the LLM is a second check
+- Don't change the location verification for DISCUSS, CHAT, or other non-search routes
+- The env var override (LOCATION_VERIFY_MODEL) lets you switch back to Haiku if costs are too high
