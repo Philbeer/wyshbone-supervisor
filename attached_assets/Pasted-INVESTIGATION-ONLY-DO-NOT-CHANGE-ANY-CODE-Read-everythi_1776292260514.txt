@@ -1,0 +1,70 @@
+INVESTIGATION ONLY — DO NOT CHANGE ANY CODE. Read everything and write a full report.
+I need to understand exactly how the Supervisor handles a simple "hi" message from the UI and sends its response back. This is to debug a layout jump issue in the UI where the typing dots and the response appear at different vertical positions.
+Part 1 — How the Supervisor receives work
+
+How does the Supervisor get notified that a user sent a message? Does the UI call a Supervisor API endpoint directly, or does the Supervisor poll Supabase, or does it use realtime subscriptions?
+What is the exact entry point — which file and function first handles an incoming user message?
+What tables in Supabase are involved? (e.g. supervisor_tasks, messages, supervisor_runs)
+What does the incoming payload look like for a "hi" message?
+
+Part 2 — The routing/classification for "hi"
+
+When the Supervisor receives "hi", how does it decide what to do with it?
+Is there a router or classifier? What file is it in?
+What are the possible classifications/verdicts? (e.g. chat_classified, router_chat, multi_step_plan, etc.)
+For "hi" specifically, what classification does it get?
+Does "hi" trigger a full supervisor run (with artefacts, tower judgements, etc.) or a simpler chat response path?
+
+Part 3 — How the response is generated
+For a simple "hi" message:
+
+Which LLM generates the response? (Claude, GPT-4o, etc.)
+What prompt/system message is used?
+Is the response streamed or generated in one shot?
+How long does it typically take?
+
+Part 4 — How the response gets back to the UI
+This is the most important part:
+
+Where does the Supervisor write its response? (Supabase messages table? A direct API call back to the UI? An SSE stream?)
+What fields does it set on the message? (e.g. role, source, content, metadata)
+Does it set source: 'supervisor' on the message?
+Does the UI need to poll for this message, or does it arrive via Supabase realtime subscription?
+What is the status field on the supervisor run during and after this response? (e.g. executing, completed)
+Is there a terminal_state set? What is it?
+Does the run produce any artefacts for a simple "hi"? If so, what types?
+
+Part 5 — Status/progress updates during processing
+
+Does the Supervisor send any status updates to the UI while processing? (e.g. ack, classifying, planning, executing)
+How are these sent — via the supervisor_runs status field, SSE events, or something else?
+What status transitions happen for a "hi" message? List them in order with approximate timing.
+
+Part 6 — The run lifecycle for "hi"
+Trace the EXACT sequence from message received to response delivered:
+
+T=0: Message arrives at Supervisor. What happens?
+T=?: Run created. What fields are set? What status?
+T=?: Classification happens. What's the verdict?
+T=?: Response generation starts. How?
+T=?: Response is written. Where? What fields?
+T=?: Run marked complete. What status/terminal_state?
+What is the client_request_id and how does it flow through?
+
+Part 7 — The stream/poll endpoint
+The UI polls /api/afr/stream to check run status.
+
+Where is this endpoint defined in the Supervisor?
+What data does it return?
+What does is_terminal mean and when is it set to true?
+What does the metadata field contain? Specifically the verdict field.
+For a "hi" that gets classified as chat — does the run appear as status: 'completed' with verdict: 'chat_classified' or router_chat' or something else?
+
+Part 8 — Differences between chat response and search response
+
+For a chat message like "hi", does the response flow through the same path as a search query like "find pubs in Brighton"?
+If different, what are the key differences in how the response gets back to the UI?
+Does a chat response produce a delivery_summary artefact?
+How should the UI know that a response is "just a chat reply" vs "a search that will produce results"?
+
+Write the full report with file paths and function names. DO NOT CHANGE ANY CODE.
