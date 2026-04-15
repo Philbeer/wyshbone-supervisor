@@ -1392,9 +1392,10 @@ export async function executeMissionDrivenPlan(
   }
 
   // ── Batch location verification ───────────────────────────────────────────
-  // One Haiku call to verify all leads are actually in the specified location.
+  // One Sonnet call to verify all leads are actually in the specified location.
   // Catches sub-city area mistakes (e.g. "West London" returning EC/WC postcodes).
-  // On any failure, all leads are included (fail open).
+  // Uses Sonnet (not Haiku) for better county-level UK geography knowledge.
+  // Override model via LOCATION_VERIFY_MODEL env var. On any failure, all leads are included (fail open).
   const locationExcludedLeads: Array<{ name: string; address: string | null; reason: string }> = [];
   const locationConstraint = mission.constraints.find(
     c => c.type === 'location_constraint' && c.hardness === 'hard',
@@ -1414,6 +1415,24 @@ export async function executeMissionDrivenPlan(
 
 ${addressList}
 
+BIAS: These addresses were returned by Google Places for a search within "${locationValue}". Google already filtered by location. You are a SECOND CHECK, not the primary filter. Only reject if you are CONFIDENT the address is clearly outside the requested area. When in doubt, KEEP the result.
+
+IMPORTANT UK GEOGRAPHY CONTEXT:
+- Counties contain many towns and cities. The address may not mention the county name — use your geographic knowledge to determine if the town/city is within the requested county/region.
+- "Exeter EX4 4EP, UK" IS in Devon even though "Devon" doesn't appear in the address.
+- If in doubt, mark as IN the location. False positives (keeping a borderline result) are better than false negatives (rejecting a valid result).
+- Common UK counties and their major towns:
+  - Devon: Exeter, Plymouth, Torquay, Barnstaple, Bideford, Tiverton, Newton Abbot, Dartmouth, Totnes, Sidmouth, Exmouth, Drewsteignton, Dartington, Croyde
+  - Sussex (includes East Sussex and West Sussex): Brighton, Worthing, Chichester, Crawley, Eastbourne, Hastings, Lewes, Horsham, Arundel, Bognor Regis
+  - Kent: Canterbury, Maidstone, Dover, Folkestone, Tunbridge Wells, Margate, Ashford, Dartford, Gravesend, Sevenoaks
+  - Cornwall: Truro, Falmouth, Penzance, Newquay, St Ives, Bodmin, Padstow, Bude
+  - Somerset: Taunton, Bath, Yeovil, Bridgwater, Glastonbury, Wells, Frome
+  - Dorset: Dorchester, Bournemouth, Poole, Weymouth, Sherborne, Lyme Regis
+  - Yorkshire: York, Leeds, Sheffield, Bradford, Harrogate, Scarborough, Whitby, Ripon
+  - Norfolk: Norwich, King's Lynn, Great Yarmouth, Cromer, Thetford
+  - Suffolk: Ipswich, Bury St Edmunds, Lowestoft, Aldeburgh, Southwold
+- This list is a hint, not exhaustive — use your own geographic knowledge too.
+
 For sub-city areas like "West London", use postcode knowledge:
 - W, UB, TW postcodes = West London
 - WC, EC = Central London
@@ -1428,11 +1447,11 @@ A business listed as "London W1" is Central London, not West London.
 Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "reasoning": "brief reason"}]}`;
 
       const batchResult = await callLLMText(
-        `${getCurrentDatePreamble()} You verify whether business addresses are within a specified geographic area. Respond with JSON only.`,
+        `${getCurrentDatePreamble()} You verify whether business addresses are within a specified geographic area. You have strong geographic knowledge and understand that counties contain many towns whose addresses may not mention the county name. Respond with JSON only.`,
         batchPrompt,
         'location_verify_batch',
         {
-          anthropicModel: 'claude-3-5-haiku-20241022',
+          anthropicModel: process.env.LOCATION_VERIFY_MODEL || 'claude-sonnet-4-20250514',
           maxTokens: 1500,
           timeoutMs: 15000,
         },
