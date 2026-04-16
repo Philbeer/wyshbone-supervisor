@@ -1,0 +1,85 @@
+
+Fix: LLM outputs Show Image instead of [IMAGE:] markers — catch both patterns
+The LLM keeps hallucinating markdown image syntax (![alt](url)) instead of using the [IMAGE: description] placeholder format. Two fixes needed:
+Fix A: Make the system prompt MORE explicit
+In server/supervisor/chat-handler.ts, find the VISUAL ILLUSTRATIONS section in CHAT_SYSTEM_PROMPT. Replace it entirely with this stronger version:
+VISUAL ILLUSTRATIONS:
+- You may include image placeholders using ONLY this syntax: [IMAGE: description]
+- CRITICAL: Do NOT write ![alt](url) markdown. You do NOT have access to real image URLs. Any URL you write will be broken. ONLY use [IMAGE: description] and the system handles the rest.
+- Place each [IMAGE: description] marker on its own line after the paragraph it illustrates.
+- Use concrete, specific descriptions: [IMAGE: glass of red cabernet sauvignon wine] not [IMAGE: wine].
+- Maximum 2 image markers per response.
+- Only use for visual topics: food, wine, drinks, places, products, animals, plants, design.
+- Do NOT use for: greetings, short answers, technical topics, calculations.
+Fix B: Also catch hallucinated Show Image patterns in the resolver
+In server/supervisor/image-search.ts, update resolveImagePlaceholders to ALSO catch ![alt text](url) patterns where the URL is fake/hallucinated, and replace them with real Unsplash images:
+tsexport async function resolveImagePlaceholders(
+  response: string,
+): Promise<{ text: string; imageCount: number }> {
+  // Pattern 1: Our intended [IMAGE: description] markers
+  const markerRegex = /\[IMAGE:\s*([^\]]+)\]/g;
+  
+  // Pattern 2: Hallucinated ![alt](url) — catch these too
+  // Match ![any alt text](any url) and extract the alt text as the search query
+  const markdownImgRegex = /!\[([^\]]+)\]\([^)]*\)/g;
+  
+  // Collect all image descriptions to fetch
+  const toResolve: Array<{ fullMatch: string; description: string }> = [];
+  
+  // First pass: [IMAGE: ...] markers
+  for (const m of response.matchAll(markerRegex)) {
+    toResolve.push({ fullMatch: m[0], description: m[1].trim() });
+  }
+  
+  // Second pass: ![alt](url) — only if we didn't already find [IMAGE:] markers
+  // This catches the LLM hallucinating markdown images
+  if (toResolve.length === 0) {
+    for (const m of response.matchAll(markdownImgRegex)) {
+      toResolve.push({ fullMatch: m[0], description: m[1].trim() });
+    }
+  }
+  
+  if (toResolve.length === 0) return { text: response, imageCount: 0 };
+
+  const MAX_IMAGES = 3;
+  const toFetch = toResolve.slice(0, MAX_IMAGES);
+
+  const fetched = await Promise.all(
+    toFetch.map(async ({ fullMatch, description }) => {
+      const images = await searchImages(description, { count: 1 });
+      return { fullMatch, description, image: images[0] || null };
+    })
+  );
+
+  let text = response;
+  let imageCount = 0;
+  for (const { fullMatch, description, image } of fetched) {
+    if (image) {
+      text = text.replace(fullMatch, `![${image.alt || description}](${image.url})`);
+      imageCount++;
+    } else {
+      // Remove the broken placeholder/image quietly
+      text = text.replace(fullMatch, '');
+    }
+  }
+  
+  // Clean up any remaining [IMAGE:] markers beyond the limit
+  text = text.replace(markerRegex, '');
+  
+  return { text: text.trim(), imageCount };
+}
+This way, even if the LLM ignores our instructions and writes ![glass of wine](https://fake-url), we catch it, extract "glass of wine" as the search query, fetch a real Unsplash image, and replace the fake URL with the real one.
+Do NOT
+
+Change anything else in the chat handler
+Touch the UI code
+Modify the router or speed optimisations
+
+Test
+
+"pair a wine with lamb" → check logs for [CHAT_HANDLER] Inlined N image(s) via Unsplash ✅
+Images should appear as actual pictures, not alt text ✅
+If LLM uses [IMAGE:] markers → they get resolved ✅
+If LLM uses ![alt](url) → those ALSO get resolved with real Unsplash URLs ✅
+
+Commit: Fix image resolution: catch both [IMAGE:] markers and hallucinated ![alt](url) patterns

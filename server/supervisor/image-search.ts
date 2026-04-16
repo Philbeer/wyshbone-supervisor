@@ -55,31 +55,51 @@ export async function searchImages(
 export async function resolveImagePlaceholders(
   response: string,
 ): Promise<{ text: string; imageCount: number }> {
-  const placeholderRegex = /\[IMAGE:\s*([^\]]+)\]/g;
-  const matches = Array.from(response.matchAll(placeholderRegex));
-  if (matches.length === 0) return { text: response, imageCount: 0 };
+  // Pattern 1: Our intended [IMAGE: description] markers
+  const markerRegex = /\[IMAGE:\s*([^\]]+)\]/g;
+
+  // Pattern 2: Hallucinated ![alt](url) — catch these too and replace with real Unsplash images
+  const markdownImgRegex = /!\[([^\]]+)\]\([^)]*\)/g;
+
+  const toResolve: Array<{ fullMatch: string; description: string }> = [];
+
+  // First pass: [IMAGE: ...] markers
+  for (const m of response.matchAll(markerRegex)) {
+    toResolve.push({ fullMatch: m[0], description: m[1].trim() });
+  }
+
+  // Second pass: ![alt](url) — only if no [IMAGE:] markers found
+  if (toResolve.length === 0) {
+    for (const m of response.matchAll(markdownImgRegex)) {
+      toResolve.push({ fullMatch: m[0], description: m[1].trim() });
+    }
+  }
+
+  if (toResolve.length === 0) return { text: response, imageCount: 0 };
 
   const MAX_IMAGES = 3;
-  const toFetch = matches.slice(0, MAX_IMAGES);
+  const toFetch = toResolve.slice(0, MAX_IMAGES);
 
   const fetched = await Promise.all(
-    toFetch.map(async (m) => {
-      const desc = m[1].trim();
-      const images = await searchImages(desc, { count: 1 });
-      return { placeholder: m[0], desc, image: images[0] || null };
+    toFetch.map(async ({ fullMatch, description }) => {
+      const images = await searchImages(description, { count: 1 });
+      return { fullMatch, description, image: images[0] || null };
     })
   );
 
   let text = response;
   let imageCount = 0;
-  for (const { placeholder, desc, image } of fetched) {
+  for (const { fullMatch, description, image } of fetched) {
     if (image) {
-      text = text.replace(placeholder, `![${image.alt || desc}](${image.url})`);
+      text = text.replace(fullMatch, `![${image.alt || description}](${image.url})`);
       imageCount++;
     } else {
-      text = text.replace(placeholder, '');
+      text = text.replace(fullMatch, '');
     }
   }
-  text = text.replace(placeholderRegex, '');
+
+  // Clean up any remaining [IMAGE:] markers beyond the limit
+  text = text.replace(markerRegex, '');
+
   return { text: text.trim(), imageCount };
 }
