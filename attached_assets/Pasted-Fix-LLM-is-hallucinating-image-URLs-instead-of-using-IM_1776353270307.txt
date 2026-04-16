@@ -1,0 +1,31 @@
+Fix: LLM is hallucinating image URLs instead of using [IMAGE:] markers
+The chat handler LLM is generating ![alt](hallucinated-url) instead of [IMAGE: description] markers. Either the VISUAL ILLUSTRATIONS section wasn't added to the system prompt, or it needs to be more explicit.
+Step 1: Open server/supervisor/chat-handler.ts and check if the CHAT_SYSTEM_PROMPT contains the text VISUAL ILLUSTRATIONS. If it does NOT, add this block after the FORMATTING: section and before CONTEXT AWARENESS::
+VISUAL ILLUSTRATIONS:
+- When the topic is visual in nature (food, drinks, wine, dishes, places, products, dog breeds, plants, design), you may include up to 2 image markers inline using this EXACT syntax: [IMAGE: specific visual description]
+- Place each marker on its own line, after the paragraph it illustrates.
+- Write the description as a concrete image search query: "glass of cabernet sauvignon red wine", "roast rack of lamb with rosemary".
+- NEVER write markdown image syntax like ![alt](url) — you do not have access to real image URLs. ONLY use [IMAGE: description] markers. The system will automatically replace them with real images.
+- Do NOT use image markers for: generic advice, abstract topics, calculations, technical questions, greetings, or short replies under 3 sentences.
+Step 2: Verify the image resolution code exists in handleChat. Search for resolveImagePlaceholders in chat-handler.ts. If it's NOT there, add this block AFTER the LLM call returns response and BEFORE saving the message:
+ts// Resolve [IMAGE: ...] placeholders into real Unsplash images
+try {
+  const { resolveImagePlaceholders } = await import('./image-search');
+  const resolved = await resolveImagePlaceholders(response);
+  if (resolved.imageCount > 0) {
+    response = resolved.text;
+    console.log(`[CHAT_HANDLER] Inlined ${resolved.imageCount} image(s) via Unsplash`);
+  }
+} catch (err: any) {
+  console.warn(`[CHAT_HANDLER] Image resolution failed (non-fatal): ${err.message}`);
+}
+Step 3: Verify server/supervisor/image-search.ts exists and exports resolveImagePlaceholders. If the file doesn't exist, create it with the implementation from the earlier prompt.
+Step 4: Also fix the router model while you're in there. In server/supervisor/conversation-router.ts, find the anthropicModel line in routeConversation and change to:
+tsanthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-haiku-4-5-20251001',
+Do NOT change anything else. Just verify these four things exist, fix what's missing, and restart.
+Test: Send "pair a wine with roast lamb" — check logs for:
+
+[IMAGE_SEARCH] lines (Unsplash was called)
+[CHAT_HANDLER] Inlined N image(s) (placeholders were resolved)
+[ROUTER] time under 800ms (Haiku is faster)
+
