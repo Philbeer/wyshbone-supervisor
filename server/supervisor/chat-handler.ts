@@ -1,4 +1,3 @@
-import { callLLMText } from './llm-failover';
 import { getRelevantReferenceKnowledge } from './reference-knowledge';
 import { getCurrentContextPreamble } from './current-context';
 
@@ -141,8 +140,35 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
 
   const userPrompt = parts.join('\n');
 
-  // 2. Call LLM with circuit breaker
+  // 2. Stream LLM response with progressive Supabase writes
+  const { randomUUID } = await import('crypto');
+  const messageId = randomUUID();
+
+  // Create message row immediately with empty content + streaming flag
+  try {
+    const { supabase } = await import('../supabase');
+    if (supabase) {
+      await supabase.from('messages').insert({
+        id: messageId,
+        conversation_id: conversationId,
+        role: 'assistant',
+        content: '',
+        source: 'supervisor',
+        metadata: {
+          conversation_phase: 'chatting',
+          handler: 'chat',
+          streaming: true,
+        },
+        created_at: Date.now(),
+      });
+    }
+  } catch (err: any) {
+    console.warn(`[CHAT_HANDLER] Failed to create streaming message row: ${err.message}`);
+  }
+
   let response: string;
+  let lastFlushMs = Date.now();
+  const FLUSH_INTERVAL_MS = 300;
 
   if (isCircuitBroken()) {
     console.warn('[CHAT_HANDLER] Circuit breaker OPEN — using fallback');
@@ -150,19 +176,42 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
   } else {
     try {
       recordChatCall();
-      response = await callLLMText(CHAT_SYSTEM_PROMPT, userPrompt, 'chat', {
-        anthropicModel: process.env.CHAT_LLM_MODEL || 'claude-sonnet-4-6',
-        maxTokens: 2048,
-        temperature: 0.7,
-        timeoutMs: 15_000,
-      });
+      const { callLLMStream } = await import('./llm-failover');
+
+      response = await callLLMStream(
+        CHAT_SYSTEM_PROMPT,
+        userPrompt,
+        'chat',
+        async (accumulated: string, _delta: string) => {
+          const now = Date.now();
+          if (now - lastFlushMs >= FLUSH_INTERVAL_MS) {
+            lastFlushMs = now;
+            try {
+              const { supabase } = await import('../supabase');
+              if (supabase) {
+                await supabase.from('messages')
+                  .update({ content: accumulated })
+                  .eq('id', messageId);
+              }
+            } catch {
+              // Non-fatal — next flush will include these tokens
+            }
+          }
+        },
+        {
+          anthropicModel: process.env.CHAT_LLM_MODEL || 'claude-sonnet-4-6',
+          maxTokens: 2048,
+          temperature: 0.7,
+          timeoutMs: 30_000,
+        },
+      );
     } catch (err: any) {
       console.error(`[CHAT_HANDLER] LLM call failed: ${err.message}`);
       response = "I can find businesses and leads for you. Just tell me what you're looking for and where — for example, 'find web designers in Manchester'.";
     }
   }
 
-  // 3. Resolve [IMAGE: ...] placeholders into real Unsplash images
+  // 3. Resolve [IMAGE: ...] placeholders (must happen on the full response)
   try {
     const { resolveImagePlaceholders } = await import('./image-search');
     const resolved = await resolveImagePlaceholders(response);
@@ -174,39 +223,26 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
     console.warn(`[CHAT_HANDLER] Image resolution failed (non-fatal): ${err.message}`);
   }
 
-  // 4. Save message to DB
-  const messageId = await saveChatMessage(conversationId, response);
+  // 4. Final write — complete content + clear streaming flag
+  try {
+    const { supabase } = await import('../supabase');
+    if (supabase) {
+      await supabase.from('messages')
+        .update({
+          content: response,
+          metadata: {
+            conversation_phase: 'chatting',
+            handler: 'chat',
+            streaming: false,
+          },
+        })
+        .eq('id', messageId);
+    }
+  } catch (err: any) {
+    console.error(`[CHAT_HANDLER] Failed to finalise message: ${err.message}`);
+  }
 
   console.log(`[CHAT_HANDLER] Responded — ${response.length} chars, conversation=${conversationId.slice(0, 8)}`);
 
   return { response, messageId };
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-async function saveChatMessage(conversationId: string, content: string): Promise<string> {
-  const { randomUUID } = await import('crypto');
-  const messageId = randomUUID();
-
-  try {
-    const { supabase } = await import('../supabase');
-    if (!supabase) return messageId;
-
-    await supabase.from('messages').insert({
-      id: messageId,
-      conversation_id: conversationId,
-      role: 'assistant',
-      content,
-      source: 'supervisor',
-      metadata: {
-        conversation_phase: 'chatting',
-        handler: 'chat',
-      },
-      created_at: Date.now(),
-    });
-  } catch (err: any) {
-    console.error(`[CHAT_HANDLER] Failed to save message (non-fatal): ${err.message}`);
-  }
-
-  return messageId;
 }

@@ -1,0 +1,235 @@
+Repo 1: Supervisor — Give this to Replit Agent on wyshbone-supervisor-Post-CC:
+
+Win 5: Stream chat responses token-by-token via progressive Supabase writes
+Currently the chat handler awaits the full LLM response before saving to Supabase, so users see nothing until the entire response is ready. Change it to stream: create the message row immediately with empty content, then UPDATE it progressively as tokens arrive from the LLM. The UI already subscribes to both INSERT and UPDATE events on the messages table, so it will render the growing content automatically.
+Step 1: Add callAnthropicStream to server/supervisor/llm-failover.ts
+Add a new export function alongside the existing callLLMText. This uses Anthropic's streaming API:
+ts/**
+ * Stream an Anthropic response, calling onChunk for each text delta.
+ * Returns the full accumulated text. Falls back to non-streaming callLLMText on error.
+ */
+export async function callLLMStream(
+  system: string,
+  user: string,
+  label: string,
+  onChunk: (accumulated: string, delta: string) => void,
+  overrides?: Partial<CallLLMOptions>,
+): Promise<string> {
+  const {
+    anthropicModel = overrides?.anthropicModel || process.env.CHAT_LLM_MODEL || 'claude-sonnet-4-6',
+    maxTokens = overrides?.maxTokens || 2048,
+    temperature = overrides?.temperature || 0.7,
+    timeoutMs = overrides?.timeoutMs || 30000,
+  } = overrides || {};
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    // Fall back to non-streaming
+    console.warn(`[LLM_STREAM:${label}] No ANTHROPIC_API_KEY — falling back to non-streaming`);
+    const text = await callLLMText(system, user, label, overrides);
+    onChunk(text, text);
+    return text;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: anthropicModel,
+        max_tokens: maxTokens,
+        temperature,
+        stream: true,
+        system,
+        messages: [{ role: 'user', content: user }],
+      }),
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '(no body)');
+      throw new Error(`Anthropic ${resp.status}: ${body.substring(0, 200)}`);
+    }
+
+    const reader = resp.body?.getReader();
+    if (!reader) throw new Error('No response body reader');
+
+    const decoder = new TextDecoder();
+    let accumulated = '';
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+
+        try {
+          const event = JSON.parse(data);
+          if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+            const delta = event.delta.text || '';
+            accumulated += delta;
+            onChunk(accumulated, delta);
+          }
+        } catch {
+          // skip unparseable lines
+        }
+      }
+    }
+
+    console.log(`[LLM_STREAM:${label}] Completed — ${accumulated.length} chars`);
+    return accumulated;
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    // Fall back to non-streaming on any error
+    console.warn(`[LLM_STREAM:${label}] Stream failed (${err.message}) — falling back to non-streaming`);
+    const text = await callLLMText(system, user, label, overrides);
+    onChunk(text, text);
+    return text;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+Step 2: Update server/supervisor/chat-handler.ts to use streaming
+Replace the single callLLMText call with callLLMStream and progressive Supabase writes.
+Find the handleChat function. Currently it does:
+tsresponse = await callLLMText(CHAT_SYSTEM_PROMPT, userPrompt, 'chat', { ... });
+Replace the LLM call section AND the message save section with:
+ts// 2. Stream LLM response with progressive Supabase writes
+const { randomUUID } = await import('crypto');
+const messageId = randomUUID();
+
+// Create message row immediately with empty content + streaming flag
+try {
+  const { supabase } = await import('../supabase');
+  if (supabase) {
+    await supabase.from('messages').insert({
+      id: messageId,
+      conversation_id: conversationId,
+      role: 'assistant',
+      content: '',
+      source: 'supervisor',
+      metadata: {
+        conversation_phase: 'chatting',
+        handler: 'chat',
+        streaming: true,
+      },
+      created_at: Date.now(),
+    });
+  }
+} catch (err: any) {
+  console.warn(`[CHAT_HANDLER] Failed to create streaming message row: ${err.message}`);
+}
+
+let lastFlushMs = Date.now();
+const FLUSH_INTERVAL_MS = 300; // update Supabase every 300ms
+
+if (isCircuitBroken()) {
+  console.warn('[CHAT_HANDLER] Circuit breaker OPEN — using fallback');
+  response = "I'm a bit busy right now. I can find businesses for you — just tell me a business type and location, like 'find cafes in Brighton'.";
+} else {
+  try {
+    recordChatCall();
+    const { callLLMStream } = await import('./llm-failover');
+    
+    response = await callLLMStream(
+      CHAT_SYSTEM_PROMPT,
+      userPrompt,
+      'chat',
+      async (accumulated: string, _delta: string) => {
+        // Flush to Supabase at intervals (not every token)
+        const now = Date.now();
+        if (now - lastFlushMs >= FLUSH_INTERVAL_MS) {
+          lastFlushMs = now;
+          try {
+            const { supabase } = await import('../supabase');
+            if (supabase) {
+              await supabase.from('messages')
+                .update({ content: accumulated })
+                .eq('id', messageId);
+            }
+          } catch {
+            // Non-fatal — next flush will include these tokens
+          }
+        }
+      },
+      {
+        anthropicModel: process.env.CHAT_LLM_MODEL || 'claude-sonnet-4-6',
+        maxTokens: 2048,
+        temperature: 0.7,
+        timeoutMs: 30_000,
+      },
+    );
+  } catch (err: any) {
+    console.error(`[CHAT_HANDLER] LLM call failed: ${err.message}`);
+    response = "I can find businesses and leads for you. Just tell me what you're looking for and where — for example, 'find web designers in Manchester'.";
+  }
+}
+
+// Resolve [IMAGE: ...] placeholders (must happen on full response)
+try {
+  const { resolveImagePlaceholders } = await import('./image-search');
+  const resolved = await resolveImagePlaceholders(response);
+  if (resolved.imageCount > 0) {
+    response = resolved.text;
+    console.log(`[CHAT_HANDLER] Inlined ${resolved.imageCount} image(s) via Unsplash`);
+  }
+} catch (err: any) {
+  console.warn(`[CHAT_HANDLER] Image resolution failed (non-fatal): ${err.message}`);
+}
+
+// Final write — complete content + clear streaming flag
+try {
+  const { supabase } = await import('../supabase');
+  if (supabase) {
+    await supabase.from('messages')
+      .update({
+        content: response,
+        metadata: {
+          conversation_phase: 'chatting',
+          handler: 'chat',
+          streaming: false,
+        },
+      })
+      .eq('id', messageId);
+  }
+} catch (err: any) {
+  console.error(`[CHAT_HANDLER] Failed to finalise message: ${err.message}`);
+}
+
+console.log(`[CHAT_HANDLER] Responded — ${response.length} chars, conversation=${conversationId.slice(0, 8)}`);
+
+return { response, messageId };
+IMPORTANT: Remove the existing saveChatMessage call — message creation and updates are now handled inline above. Also remove or comment out the old saveChatMessage helper function if nothing else uses it, OR just leave it in place since it won't be called.
+The return at the bottom should now use the messageId created above. Make sure the function doesn't also call saveChatMessage — that would create a duplicate.
+Step 3: Verify the messages table has a metadata JSONB column
+The streaming flag is stored in metadata.streaming. If metadata is already a JSONB column (it should be — it's used for conversation_phase and handler), no schema change needed.
+Do NOT
+
+Touch the search pipeline or any non-chat LLM calls
+Change the router or fast-path logic (already done in previous task)
+Modify the image-search module (it works on the final complete response)
+Change the Supabase realtime subscription setup
+
+Test
+
+Send "tell me about wine pairings" — text should appear word-by-word in the chat bubble (not all at once)
+Send "pair wine with lamb with pictures" — text streams, then images appear at the end (images require the full response to resolve)
+Send "hi" — if fast path catches it, response appears complete (fast path doesn't stream — it's already fast enough). If routed normally, response streams.
+Check supervisor logs for [LLM_STREAM:chat] Completed on successful streams
+
+Commit: Stream chat responses via progressive Supabase writes

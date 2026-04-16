@@ -251,3 +251,102 @@ export async function callLLMText(
   const result = await callLLM({ system, user, label, ...overrides });
   return result.text;
 }
+
+// ─── Streaming call (Anthropic only, falls back to non-streaming) ────────────
+
+/**
+ * Stream an Anthropic response, calling onChunk for each text delta.
+ * Returns the full accumulated text. Falls back to non-streaming callLLMText on error.
+ */
+export async function callLLMStream(
+  system: string,
+  user: string,
+  label: string,
+  onChunk: (accumulated: string, delta: string) => void,
+  overrides?: Partial<CallLLMOptions>,
+): Promise<string> {
+  const anthropicModel = overrides?.anthropicModel || process.env.CHAT_LLM_MODEL || 'claude-sonnet-4-6';
+  const maxTokens = overrides?.maxTokens || 2048;
+  const temperature = overrides?.temperature ?? 0.7;
+  const timeoutMs = overrides?.timeoutMs || 30000;
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.warn(`[LLM_STREAM:${label}] No ANTHROPIC_API_KEY — falling back to non-streaming`);
+    const text = await callLLMText(system, user, label, overrides);
+    onChunk(text, text);
+    return text;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: anthropicModel,
+        max_tokens: maxTokens,
+        temperature,
+        stream: true,
+        system,
+        messages: [{ role: 'user', content: user }],
+      }),
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '(no body)');
+      throw new Error(`Anthropic ${resp.status}: ${body.substring(0, 200)}`);
+    }
+
+    const reader = resp.body?.getReader();
+    if (!reader) throw new Error('No response body reader');
+
+    const decoder = new TextDecoder();
+    let accumulated = '';
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+
+        try {
+          const event = JSON.parse(data);
+          if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+            const delta = event.delta.text || '';
+            accumulated += delta;
+            onChunk(accumulated, delta);
+          }
+        } catch {
+          // skip unparseable lines
+        }
+      }
+    }
+
+    console.log(`[LLM_STREAM:${label}] Completed — ${accumulated.length} chars`);
+    return accumulated;
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    console.warn(`[LLM_STREAM:${label}] Stream failed (${err.message}) — falling back to non-streaming`);
+    const text = await callLLMText(system, user, label, overrides);
+    onChunk(text, text);
+    return text;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
