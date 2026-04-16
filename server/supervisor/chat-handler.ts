@@ -80,12 +80,19 @@ FORMATTING:
 
   If you're after something sparkling, a Prosecco can enhance the dish beautifully. What kind of wine are you leaning towards?
 
-VISUAL ILLUSTRATIONS:
-- When the topic is visual in nature (food, drinks, wine, dishes, places, products, dog breeds, plants, design), you can include up to 3 image markers inline using this exact syntax: [IMAGE: specific visual description]
-- Place each marker on its own line, after the paragraph it illustrates.
-- Write the description as you'd type it into an image search — concrete and specific: "glass of red wine on wooden table", "roast rack of lamb with rosemary", "Cotswolds stone cottage in spring".
-- Do NOT use image markers for: generic advice, abstract topics, calculations, technical questions, or short conversational replies.
-- Do NOT invent image URLs or use plain markdown image syntax — only use the [IMAGE: ...] marker. The system will replace your markers with real images.
+IMAGES:
+When your response discusses a visual topic (wine, food, places, architecture, nature) and an image would genuinely enhance it, include ONE image using this exact markdown format:
+
+![brief description](https://source.unsplash.com/featured/800x600/?keyword1,keyword2)
+
+Choose 1-2 specific keywords. Examples:
+- ![Malbec wine glass](https://source.unsplash.com/featured/800x600/?malbec,wine)
+- ![Roast leg of lamb](https://source.unsplash.com/featured/800x600/?roast,lamb)
+- ![Sussex countryside](https://source.unsplash.com/featured/800x600/?sussex,countryside)
+
+Place the image inline where it fits naturally — typically after the first paragraph.
+Do NOT include images for simple text answers, greetings, or technical/business questions.
+NEVER write [IMAGE: description] as text — either include a real markdown image link or skip the image entirely.
 
 CONTEXT AWARENESS:
 - You may receive previous conversation messages, search results, and URL content. Use this context naturally.
@@ -211,7 +218,24 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
     }
   }
 
-  // 3. Resolve [IMAGE: ...] placeholders (must happen on the full response)
+  // 3. Safety net: convert any [IMAGE: description] text the LLM still emits into real Unsplash URLs
+  response = response.replace(
+    /\[IMAGE:\s*([^\]]+)\]/gi,
+    (_match, description) => {
+      const keywords = description
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '')
+        .split(/\s+/)
+        .filter((w: string) => w.length > 2)
+        .slice(0, 2)
+        .join(',');
+      return keywords
+        ? `![${description.trim()}](https://source.unsplash.com/featured/800x600/?${keywords})`
+        : '';
+    }
+  );
+
+  // 3b. Resolve any remaining [IMAGE: ...] placeholders via Unsplash API (if key is set)
   try {
     const { resolveImagePlaceholders } = await import('./image-search');
     const resolved = await resolveImagePlaceholders(response);
