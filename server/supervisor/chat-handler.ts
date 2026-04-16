@@ -151,8 +151,8 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
     try {
       recordChatCall();
       response = await callLLMText(CHAT_SYSTEM_PROMPT, userPrompt, 'chat', {
-        anthropicModel: process.env.CHAT_LLM_MODEL || 'claude-3-5-haiku-20241022',
-        maxTokens: 1024,
+        anthropicModel: process.env.CHAT_LLM_MODEL || 'claude-sonnet-4-6',
+        maxTokens: 2048,
         temperature: 0.7,
         timeoutMs: 15_000,
       });
