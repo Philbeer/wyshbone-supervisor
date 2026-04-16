@@ -81,6 +81,13 @@ FORMATTING:
 
   If you're after something sparkling, a Prosecco can enhance the dish beautifully. What kind of wine are you leaning towards?
 
+VISUAL ILLUSTRATIONS:
+- When the topic is visual in nature (food, drinks, wine, dishes, places, products, dog breeds, plants, design), you can include up to 3 image markers inline using this exact syntax: [IMAGE: specific visual description]
+- Place each marker on its own line, after the paragraph it illustrates.
+- Write the description as you'd type it into an image search — concrete and specific: "glass of red wine on wooden table", "roast rack of lamb with rosemary", "Cotswolds stone cottage in spring".
+- Do NOT use image markers for: generic advice, abstract topics, calculations, technical questions, or short conversational replies.
+- Do NOT invent image URLs or use plain markdown image syntax — only use the [IMAGE: ...] marker. The system will replace your markers with real images.
+
 CONTEXT AWARENESS:
 - You may receive previous conversation messages, search results, and URL content. Use this context naturally.
 - If the user references "the results" or "those businesses", and result context is provided, discuss them.
@@ -155,7 +162,19 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
     }
   }
 
-  // 3. Save message to DB
+  // 3. Resolve [IMAGE: ...] placeholders into real Unsplash images
+  try {
+    const { resolveImagePlaceholders } = await import('./image-search');
+    const resolved = await resolveImagePlaceholders(response);
+    if (resolved.imageCount > 0) {
+      response = resolved.text;
+      console.log(`[CHAT_HANDLER] Inlined ${resolved.imageCount} image(s) via Unsplash`);
+    }
+  } catch (err: any) {
+    console.warn(`[CHAT_HANDLER] Image resolution failed (non-fatal): ${err.message}`);
+  }
+
+  // 4. Save message to DB
   const messageId = await saveChatMessage(conversationId, response);
 
   console.log(`[CHAT_HANDLER] Responded — ${response.length} chars, conversation=${conversationId.slice(0, 8)}`);
