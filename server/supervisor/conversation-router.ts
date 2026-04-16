@@ -279,7 +279,7 @@ export async function routeConversation(input: RouterInput): Promise<RouterDecis
   let rawResponse: string;
   try {
     rawResponse = await callLLMText(ROUTER_SYSTEM_PROMPT, userMessage, 'router', {
-      anthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-sonnet-4-20250514',
+      anthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-haiku-4-5-20251001',
       openaiModel: 'gpt-4o-mini',
       timeoutMs: parseInt(process.env.ROUTER_TIMEOUT_MS || '15000', 10),
     });

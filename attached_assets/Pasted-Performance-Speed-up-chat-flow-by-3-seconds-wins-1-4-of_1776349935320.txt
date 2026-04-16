@@ -1,0 +1,138 @@
+Performance: Speed up chat flow by ~3 seconds (wins 1-4 of 6)
+Chat messages currently take 4-7 seconds because they go through the same pipeline as searches. This batch cuts that to ~1.5s for obvious chat and ~2.5-3s for complex chat.
+The four wins are bundled because they share testing surface. Wins 5 (streaming) and 6 (context skinnying) are separate follow-ups.
+Win 1: Regex fast path for obvious chat
+Location: server/supervisor.ts, inside processChatTask(), near the top — AFTER the early agent_run persist and task ownership guard, but BEFORE the build_user_context stage at line ~1334.
+Create a narrow regex matcher that short-circuits the router for unambiguous chat messages. If the fast path hits, skip straight to the chat handler and return.
+Add a helper function at the top of server/supervisor.ts or in a new file server/supervisor/chat-fast-path.ts:
+ts/**
+ * Fast-path detector for obvious chat messages.
+ * Narrow by design: only matches short, unambiguous greetings/thanks/ack.
+ * When in doubt, return false and let the LLM router handle it.
+ */
+export function isObviousChat(message: string): boolean {
+  const trimmed = (message || '').trim().toLowerCase();
+  
+  // Empty or suspiciously long — not obvious chat
+  if (trimmed.length === 0 || trimmed.length > 60) return false;
+  
+  // Single-word or 2-3 word greetings/acks
+  const patterns = [
+    /^(hi|hello|hey|yo|sup|howdy|hiya|heya|morning|afternoon|evening)[\s!.?]*$/,
+    /^(thanks|thank\s*you|ta|cheers|thx|ty|much\s+appreciated)[\s!.?]*$/,
+    /^(ok|okay|cool|sure|nice|great|awesome|got\s+it|understood|perfect|brilliant|lovely|fab)[\s!.?]*$/,
+    /^(bye|goodbye|cya|see\s*ya|later|ciao)[\s!.?]*$/,
+    /^(yes|yeah|yep|nope|no)[\s!.?]*$/,
+  ];
+  
+  return patterns.some(p => p.test(trimmed));
+}
+Then in processChatTask, immediately after task ownership is confirmed and BEFORE the build_user_context stage (line ~1334), add:
+ts// Win 1: fast-path obvious chat without running the router or building heavy context
+if (isObviousChat(rawMessage)) {
+  console.log(`[FAST_PATH] Obvious chat detected: "${rawMessage.substring(0, 40)}" — bypassing router`);
+  
+  // Minimal context for chat handler (no monitors, no research runs)
+  const minimalHistory = await loadRecentMessages(task.conversation_id, 8);
+  
+  const chatResult = await handleChat({
+    conversationId: task.conversation_id,
+    userId: task.user_id,
+    rawMessage,
+    jobId,
+    taskId: task.id,
+    conversationHistory: minimalHistory,
+    urlContent: null,
+    previousResultsSummary: null,
+  });
+  
+  // Emit terminal completion markers (preserves UI run tracking)
+  await emitTaskExecutionCompleted(task, jobId, 'chat_fast_path');
+  await postFinalArtefact(task, jobId, clientRequestId, {
+    type: 'chat_response',
+    content: chatResult.response,
+    verdict: 'chat_fast_path',
+  });
+  
+  return;
+}
+IMPORTANT: Use the EXACT function names that already exist in processChatTask for loading messages and emitting completion. If loadRecentMessages doesn't exist as a standalone helper, inline the query — find the existing code that loads recent messages in the current chat flow and copy that pattern. Same for emitTaskExecutionCompleted and postFinalArtefact — match whatever the existing flow does for the completion sequence.
+Do NOT invent new helpers that don't exist. Match the codebase.
+Win 2: Downgrade router from Sonnet to Haiku
+Location: server/supervisor/conversation-router.ts, in routeConversation() around line 280.
+Find:
+tsanthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-sonnet-4-20250514',
+Change to:
+tsanthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-haiku-4-5-20251001',
+The router is a structured classification task with safety overrides already in place — Haiku 4.5 is plenty.
+Win 3: Parallelise context building and router
+Location: server/supervisor.ts, processChatTask() around lines 1334-1399.
+Currently this runs sequentially:
+
+build_user_context stage (line ~1334) — calls buildUserContext(userId) or similar, awaits result
+routeConversation(routerInput) (line 1399) — uses the context
+
+Change to run concurrently. Find the block that builds context, note what function is called, then wrap both operations in a Promise.all:
+tsconsole.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=build_user_context`);
+
+const [userContext, routerDecision] = await Promise.all([
+  buildUserContext(task.user_id),   // or whatever the existing function is
+  routeConversation(routerInput),
+]);
+
+const decision = routerDecision;  // preserve existing variable name
+Note: routerInput currently depends on userContext for userSearchHistory and previousResults. If so, you have two options:
+
+Split buildUserContext into a fast part (recent messages — needed for router) and a slow part (facts, research runs — only needed by chat handler), parallelise only the slow part with the router
+OR pass minimal defaults to the router if the context isn't ready yet (router has its own safety overrides)
+
+Pick whichever is cleanest — likely the first option. If implementing the split is too invasive, just swap to a simpler pattern: kick off buildUserContext with .then() but don't await it until after the router returns. As long as the DB queries are in flight in parallel, we get the benefit.
+Verify after change: the router still receives previousResults and userSearchHistory correctly. Router accuracy must not regress.
+Win 4: Strip search-pipeline telemetry for non-SEARCH routes
+Location: server/supervisor.ts.
+Wrap these three calls in a condition that checks whether the route is SEARCH (or if we're in the fast path). Skip them for CHAT / CLARIFY / DISCUSS / ITERATE:
+
+emitProbe('intent_extractor_probe', ...) around line 1219 — this is a search-lane telemetry probe
+logMissionReceived(...) around line 1283 — search-lane mission marker
+Creating the Router: CHAT diagnostic artefact (the line that calls storage.createArtefact with type: 'diagnostic' and the router decision)
+
+Gate each behind:
+tsconst STRIP_CHAT_TELEMETRY = (process.env.STRIP_CHAT_TELEMETRY || 'true').toLowerCase() === 'true';
+
+// For intent_extractor_probe (if it's currently called unconditionally before router):
+if (!STRIP_CHAT_TELEMETRY) {
+  await emitProbe('intent_extractor_probe', ...);
+}
+// Alternative: only emit if route is known to be SEARCH — but that requires router to have run first
+Since intent_extractor_probe fires BEFORE the router decides, the cleanest gate is the env flag. For logMissionReceived and the diagnostic artefact, both fire AFTER the router decides — gate those on decision.route === 'SEARCH':
+tsif (decision.route === 'SEARCH') {
+  logMissionReceived(...);
+}
+
+if (decision.route === 'SEARCH' || !STRIP_CHAT_TELEMETRY) {
+  await storage.createArtefact(...); // the Router: {route} diagnostic
+}
+Default STRIP_CHAT_TELEMETRY=true in .env.example. In development, override to false if debugging is needed.
+Do NOT
+
+Touch the SEARCH execution pipeline — wins 1-4 only affect chat-lane latency
+Modify handleChat or the chat handler system prompt
+Change image-search behaviour (it's fine)
+Remove task_execution_completed or the final artefact POST — those are needed for audit
+Reduce user context loading for the chat handler itself — that's win 6, separate task
+Add streaming — that's win 5, separate task
+
+Test plan after changes
+Restart server. Run these in order and note approximate reply time:
+
+"hi" → should reply in ~1.5s (fast path + chat handler, no router)
+"thanks!" → same
+"tell me about wine pairings" → should reply in ~2.5-3s (router hits Haiku, then chat handler)
+"pair wine with lamb with pictures" → should reply in ~3.5-4s with images
+"find pubs in Arundel" → unchanged (~normal search time, no regression)
+"hello there, can you help me find some pubs in Brighton?" → this should NOT hit the fast path (too long, contains search intent) → router runs → SEARCH route fires correctly
+Router accuracy check: send 5 chat-like messages and 5 search-like messages, confirm router gets them right with Haiku
+
+Log what the fast path caught vs routed — look for [FAST_PATH] lines.
+Commit
+Single commit: Speed up chat flow: regex fast path, Haiku router, parallel context, strip search telemetry

@@ -1216,14 +1216,18 @@ class SupervisorService {
     console.log(`[ID_MAP] jobId=${jobId} uiRunId=${uiRunId} crid=${clientRequestId} taskId=${task.id} entry=processChatTask`);
     console.log(`[SUPERVISOR] Processing chat task ${task.id} (${task.task_type}) jobId=${jobId} uiRunId=${uiRunId} clientRequestId=${clientRequestId}`);
 
-    await emitProbe('intent_extractor_probe', task.user_id, jobId, task.conversation_id, {
-      run_id: jobId,
-      conversation_id: task.conversation_id ?? null,
-      user_id: task.user_id,
-      raw_msg: userInput,
-      intent_extractor_mode: getIntentExtractorMode(),
-      ts: Date.now(),
-    });
+    const STRIP_CHAT_TELEMETRY = (process.env.STRIP_CHAT_TELEMETRY || 'true').toLowerCase() === 'true';
+
+    if (!STRIP_CHAT_TELEMETRY) {
+      await emitProbe('intent_extractor_probe', task.user_id, jobId, task.conversation_id, {
+        run_id: jobId,
+        conversation_id: task.conversation_id ?? null,
+        user_id: task.user_id,
+        raw_msg: userInput,
+        intent_extractor_mode: getIntentExtractorMode(),
+        ts: Date.now(),
+      });
+    }
 
     const nowMs = Date.now();
     let runPersistedEarly = false;
@@ -1280,9 +1284,11 @@ class SupervisorService {
       console.error(`[RUN_BRIDGE] bridgeRunToUI failed: ${e.message}`)
     );
 
-    logMissionReceived(
-      task.user_id, jobId, task.id, task.task_type, task.conversation_id
-    ).catch(() => {});
+    if (!STRIP_CHAT_TELEMETRY) {
+      logMissionReceived(
+        task.user_id, jobId, task.id, task.task_type, task.conversation_id
+      ).catch(() => {});
+    }
 
     console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=ownership_guard`);
     const { data: statusCheck } = await supabase
@@ -1331,8 +1337,81 @@ class SupervisorService {
       return;
     }
 
+    // Win 1: fast-path obvious chat without running the router or building heavy context
+    {
+      const rawMsgForFastPath = String(requestData.user_message || '');
+      const { isObviousChat } = await import('./supervisor/chat-fast-path');
+      if (isObviousChat(rawMsgForFastPath)) {
+        console.log(`[FAST_PATH] Obvious chat detected: "${rawMsgForFastPath.substring(0, 40)}" — bypassing router`);
+
+        await _bridgePromise;
+
+        // Minimal conversation history for chat handler
+        let fastPathHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+        if (task.conversation_id && supabase) {
+          const { data: fpMsgs } = await supabase
+            .from('messages')
+            .select('role, content')
+            .eq('conversation_id', task.conversation_id)
+            .order('created_at', { ascending: false })
+            .limit(8);
+          if (fpMsgs) {
+            fastPathHistory = fpMsgs.reverse().map((m: any) => ({
+              role: m.role as 'user' | 'assistant',
+              content: String(m.content || ''),
+            }));
+          }
+        }
+
+        const { handleChat } = await import('./supervisor/chat-handler');
+        const chatResult = await handleChat({
+          conversationId: task.conversation_id,
+          userId: task.user_id,
+          rawMessage: rawMsgForFastPath,
+          jobId,
+          taskId: task.id,
+          conversationHistory: fastPathHistory,
+          urlContent: null,
+          previousResultsSummary: null,
+        });
+
+        if (supabase) {
+          await supabase.from('supervisor_tasks').update({
+            status: 'completed',
+            result: { message_id: chatResult.messageId, router: 'chat', handler: 'chat_fast_path' },
+          }).eq('id', task.id);
+        }
+
+        await storage.updateAgentRun(jobId, {
+          status: 'completed', terminalState: 'completed', endedAt: new Date(),
+          metadata: { verdict: 'chat_fast_path' },
+        }).catch(() => {});
+
+        this.postArtefactToUI({
+          runId: jobId,
+          clientRequestId,
+          type: 'diagnostic',
+          payload: {
+            status: 'CHAT',
+            leads: [],
+            message: chatResult.response,
+            router_verdict: 'chat_fast_path',
+            run_complete: true,
+          },
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        }).catch((err: any) => {
+          console.error(`[FAST_PATH] CRITICAL: Failed to signal UI run is complete: ${err.message}`);
+        });
+
+        taskExecutionStartedEmitted = true;
+        await emitTaskExecutionCompleted('chat_fast_path');
+        return;
+      }
+    }
+
     console.log(`[STAGE] runId=${jobId} crid=${clientRequestId} stage=build_user_context`);
-    const userContext = await this.buildUserContext(task.user_id);
+    const userContextPromise = this.buildUserContext(task.user_id);
     let rawMsg = String(requestData.user_message || '');
 
     const missionQueryId: string | null = (requestData as any).query_id || getBenchmarkQueryId(rawMsg.trim()) || null;
@@ -1393,21 +1472,23 @@ class SupervisorService {
           conversationHistory: routerHistory,
           previousResults: routerPreviousResults,
           urlContent: (requestData as any).url_content || null,
-          userSearchHistory: userContext.recentSearches?.map((s: any) => ({ query: s.query, delivered: s.delivered })) || null,
+          userSearchHistory: null,
         };
 
         const decision = await routeConversation(routerInput);
 
-        // Log the decision as an artefact
-        createArtefact({
-          runId: jobId,
-          type: 'diagnostic',
-          title: `Router: ${decision.route} (${decision.confidence.toFixed(2)})`,
-          summary: decision.reasoning,
-          payload: { ...decision as any, diagnostic_type: 'conversation_router' },
-          userId: task.user_id,
-          conversationId: task.conversation_id,
-        }).catch(() => {});
+        // Log the decision as an artefact (skipped for non-SEARCH routes when telemetry is stripped)
+        if (decision.route === 'SEARCH' || !STRIP_CHAT_TELEMETRY) {
+          createArtefact({
+            runId: jobId,
+            type: 'diagnostic',
+            title: `Router: ${decision.route} (${decision.confidence.toFixed(2)})`,
+            summary: decision.reasoning,
+            payload: { ...decision as any, diagnostic_type: 'conversation_router' },
+            userId: task.user_id,
+            conversationId: task.conversation_id,
+          }).catch(() => {});
+        }
 
         // === HANDLE CHAT ===
         if (decision.route === 'CHAT') {
@@ -1649,6 +1730,9 @@ class SupervisorService {
       }
     }
     // ═══ END CONVERSATION ROUTER ═══
+
+    // Await user context — has been running concurrently with the router pipeline
+    const userContext = await userContextPromise;
 
     if (_routerHandledSearch) {
       console.log(`[ROUTER_BYPASS] Router handled SEARCH/ITERATE — skipping classifier, state, shadow, vague resolver, constraint gate, smart clarify. Proceeding directly to mission extraction with: "${effectiveMsg.substring(0, 100)}"`);
