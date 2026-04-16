@@ -50,100 +50,6 @@ You are the conversation router for Wyshbone, a B2B lead generation app that fin
 
 Return ONLY a JSON object. No markdown, no backticks, no commentary.
 
-## HOW TO THINK (read this every time)
-
-You must make TWO judgements in order. The first constrains the second.
-
-### STEP 1 — Analyse the conversational turn
-
-Before classifying the action, understand where we are in the conversation. Look at the last assistant message and ask:
-
-a) What KIND of message was the last assistant turn?
-   - SEARCH RESULTS: the assistant delivered a list of businesses (PREVIOUS RESULTS: exists, count > 0)
-   - A QUESTION: the assistant asked the user something (ended with a question mark, asked for preference, asked for clarification)
-   - A CHAT REPLY: the assistant gave information, recommendation, advice, or opinion — no search results delivered
-   - A CLARIFICATION REQUEST: the assistant asked the user to provide missing info for a search (entity or location)
-   - NONE: first message in the conversation
-
-b) What is the user's CURRENT message doing in response to that?
-   - ANSWERING A QUESTION: a short reply that fits as an answer to what the assistant just asked
-   - CONTINUING CHAT: refining, following up, or asking more about the topic the assistant was discussing
-   - PROVIDING CLARIFICATION: giving the missing info the assistant asked for (e.g. assistant asked for location, user says "Brighton")
-   - DISCUSSING RESULTS: talking about the businesses the assistant delivered
-   - REFINING SEARCH: wanting to change the existing search (different location, entity, filters)
-   - NEW SEARCH REQUEST: explicitly asking to find businesses (uses verbs like find/search/show + entity + location)
-   - GREETING / THANKS / OFF-TOPIC: conversational chit-chat not tied to previous turn
-
-Output your turn analysis in the reasoning field. Example: "Last assistant turn was a chat reply ending with a question about lamb cooking style. User is answering that question."
-
-### STEP 2 — Decide the action, constrained by the turn analysis
-
-The turn type determines which routes are plausible. Keyword matching on the user message alone is NOT enough.
-
-KEY CONSTRAINTS:
-
-- If the user is ANSWERING A QUESTION the assistant just asked, the route is almost always CHAT (unless the assistant asked for search parameters and the user now gave them). Words in the user's reply that could look like business types are NOT search requests — they are answers to the question.
-
-- If the user is PROVIDING CLARIFICATION (assistant asked "which location?" and user says "Brighton"), combine with the earlier SEARCH context and route as SEARCH.
-
-- If the user is DISCUSSING RESULTS (assistant delivered leads, user asks about them), route as DISCUSS.
-
-- If the user is REFINING SEARCH (results exist, user wants to change params), route as ITERATE with full new params.
-
-- Only route as SEARCH when the user is explicitly making a NEW SEARCH REQUEST — uses search verbs (find, search, show, look for) AND provides both entity and location.
-
-- Context beats keywords. Every time.
-
-WORKED EXAMPLES of STEP 1 → STEP 2:
-
-Example A:
-  Last assistant: "For lamb, I'd suggest Cabernet Sauvignon or Syrah. What style of lamb — roast, chops, slow-cooked?"
-  User: "ok im doing chops"
-  STEP 1: Last turn was a CHAT REPLY ending in a question about cooking style. User is ANSWERING A QUESTION.
-  STEP 2: Route = CHAT. The word "chops" is an answer to the question, not a search entity. Continue the wine-pairing conversation with specifics for lamb chops.
-
-Example B:
-  Last assistant: "What type of businesses, and where?"
-  User: "pubs in Arundel"
-  STEP 1: Last turn was a CLARIFICATION REQUEST. User is PROVIDING CLARIFICATION.
-  STEP 2: Route = SEARCH, entity="pubs", location="Arundel".
-
-Example C:
-  Last assistant: delivered 20 pubs in Arundel (PREVIOUS RESULTS exists)
-  User: "which ones have good reviews?"
-  STEP 1: Last turn was SEARCH RESULTS. User is DISCUSSING RESULTS.
-  STEP 2: Route = DISCUSS.
-
-Example D:
-  Last assistant: delivered 20 pubs in Arundel
-  User: "try Brighton instead"
-  STEP 1: Last turn was SEARCH RESULTS. User is REFINING SEARCH (changing location).
-  STEP 2: Route = ITERATE, entity="pubs", location="Brighton".
-
-Example E:
-  Last assistant: "What cuisine are you in the mood for tonight?"
-  User: "italian"
-  STEP 1: CHAT REPLY ending in a question. User is ANSWERING A QUESTION.
-  STEP 2: Route = CHAT. "italian" is a preference answer, not a search for Italian restaurants.
-
-Example F:
-  Last assistant: "I can widen the search to nearby towns — want me to?"
-  User: "yes please"
-  STEP 1: Last turn offered a search action. User is affirming it.
-  STEP 2: Route = ITERATE with expanded location.
-
-Example G:
-  No prior conversation (NONE).
-  User: "find cafes in Brighton"
-  STEP 1: NONE → NEW SEARCH REQUEST with entity + location.
-  STEP 2: Route = SEARCH, entity="cafes", location="Brighton".
-
-Example H:
-  Last assistant: chat about marketing strategies.
-  User: "find me some marketing agencies in London"
-  STEP 1: Last turn was CHAT REPLY. User is making a NEW SEARCH REQUEST (explicit "find" verb + entity + location).
-  STEP 2: Route = SEARCH. Explicit search verb + full params overrides conversational continuity.
-
 ## YOUR FIVE ROUTES
 
 ### SEARCH
@@ -241,7 +147,7 @@ What NOT to route as CHAT:
   "iteration_change": "what changed" | null,
   "referenced_result": "what they're asking about" | null,
   "confidence": 0.0-1.0,
-  "reasoning": "STEP 1: [turn analysis]. STEP 2: [route decision]. [one sentence explaining why]"
+  "reasoning": "one sentence explaining the decision"
 }`;
 
 
@@ -402,9 +308,9 @@ export async function routeConversation(input: RouterInput): Promise<RouterDecis
     };
   }
 
-  // Safety: if route is SEARCH or CLARIFY but the original message has no entity/location words
-  // and looks like chat, the router hallucinated intent from history. Override to CHAT.
-  if (decision.route === 'SEARCH' || decision.route === 'CLARIFY') {
+  // Safety: if route is SEARCH but the original message has no location-like content,
+  // and the entity/location came from search history not the message, override to CHAT or CLARIFY
+  if (decision.route === 'SEARCH') {
     const msgLower = input.currentMessage.toLowerCase().trim();
 
     const hasLocationWords = decision.location && msgLower.includes(decision.location.toLowerCase().substring(0, 4));
