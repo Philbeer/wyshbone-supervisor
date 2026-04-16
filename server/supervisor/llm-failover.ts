@@ -1,37 +1,22 @@
 /**
  * LLM Failover Utility
  * 
- * Single shared function for all LLM calls across the supervisor pipeline.
- * Tries the primary provider with a timeout. If it fails (timeout, API error,
- * rate limit), automatically falls back to the other provider.
- * 
- * Usage:
- *   import { callLLM } from './llm-failover';
- *   const text = await callLLM({ system: '...', user: '...', label: 'router' });
+ * Provider order: Groq (if key set) → Anthropic → OpenAI
+ * If the preferred provider fails, falls over to the next available one.
  */
 
-// ─── Types ──────────────────────────────────────────────────────────────────
-
-type Provider = 'anthropic' | 'openai';
+type Provider = 'anthropic' | 'openai' | 'groq';
 
 export interface CallLLMOptions {
-  /** System prompt */
   system: string;
-  /** User message */
   user: string;
-  /** Label for logging (e.g. 'router', 'discussion', 'rescue') */
   label: string;
-  /** Max tokens in response (default: 500) */
   maxTokens?: number;
-  /** Temperature (default: 0) */
   temperature?: number;
-  /** Override Anthropic model (default: claude-3-5-haiku-20241022) */
   anthropicModel?: string;
-  /** Override OpenAI model (default: gpt-4o-mini) */
   openaiModel?: string;
-  /** Timeout in ms (default: 15000) */
+  groqModel?: string;
   timeoutMs?: number;
-  /** Which provider to try first. Defaults to whichever key is set, preferring Anthropic */
   preferredProvider?: Provider;
 }
 
@@ -43,14 +28,11 @@ export interface CallLLMResult {
   durationMs: number;
 }
 
-// ─── Defaults ───────────────────────────────────────────────────────────────
-
 const DEFAULT_ANTHROPIC_MODEL = 'claude-3-5-haiku-20241022';
 const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
+const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_TOKENS = 500;
-
-// ─── Provider Calls ─────────────────────────────────────────────────────────
 
 async function callAnthropic(
   system: string,
@@ -117,17 +99,35 @@ async function callOpenAI(
   return response.choices[0]?.message?.content || '';
 }
 
-// ─── Main Export ─────────────────────────────────────────────────────────────
+async function callGroq(
+  system: string,
+  user: string,
+  model: string,
+  maxTokens: number,
+  temperature: number,
+  timeoutMs: number,
+): Promise<string> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('GROQ_API_KEY not set');
 
-/**
- * Call an LLM with automatic failover between providers.
- * 
- * Tries the preferred provider first (default: Anthropic if key exists).
- * If it fails (timeout, error, rate limit), tries the other provider.
- * If both fail, throws the last error.
- * 
- * Every call has a timeout via AbortController (Anthropic) or SDK timeout (OpenAI).
- */
+  const { default: OpenAI } = await import('openai');
+  const client = new OpenAI({
+    apiKey,
+    baseURL: 'https://api.groq.com/openai/v1',
+    timeout: timeoutMs,
+  });
+  const response = await client.chat.completions.create({
+    model,
+    temperature,
+    max_tokens: maxTokens,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+  });
+  return response.choices[0]?.message?.content || '';
+}
+
 export async function callLLM(options: CallLLMOptions): Promise<CallLLMResult> {
   const {
     system,
@@ -137,76 +137,66 @@ export async function callLLM(options: CallLLMOptions): Promise<CallLLMResult> {
     temperature = 0,
     anthropicModel = process.env[`${label.toUpperCase()}_LLM_MODEL`] || DEFAULT_ANTHROPIC_MODEL,
     openaiModel = DEFAULT_OPENAI_MODEL,
+    groqModel = process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL,
     timeoutMs = parseInt(process.env.LLM_TIMEOUT_MS || String(DEFAULT_TIMEOUT_MS), 10),
   } = options;
 
-  // Determine provider order
+  const hasGroq = !!process.env.GROQ_API_KEY;
   const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
   const hasOpenAI = !!process.env.OPENAI_API_KEY;
 
-  if (!hasAnthropic && !hasOpenAI) {
-    throw new Error(`[LLM:${label}] No LLM API key configured (need ANTHROPIC_API_KEY or OPENAI_API_KEY)`);
+  if (!hasGroq && !hasAnthropic && !hasOpenAI) {
+    throw new Error(`[LLM:${label}] No LLM API key configured (need GROQ_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY)`);
   }
 
   let preferred: Provider;
   if (options.preferredProvider) {
     preferred = options.preferredProvider;
+  } else if (hasGroq) {
+    preferred = 'groq';
   } else if (hasAnthropic) {
     preferred = 'anthropic';
   } else {
     preferred = 'openai';
   }
 
-  const fallback: Provider = preferred === 'anthropic' ? 'openai' : 'anthropic';
-  const hasFallback = fallback === 'anthropic' ? hasAnthropic : hasOpenAI;
+  const allProviders: Provider[] = ['groq', 'anthropic', 'openai'];
+  const available = allProviders.filter(p =>
+    p === 'groq' ? hasGroq : p === 'anthropic' ? hasAnthropic : hasOpenAI
+  );
+  const chain = [preferred, ...available.filter(p => p !== preferred)];
 
   const startTime = Date.now();
+  let lastError = '';
 
-  // ── Try primary provider ──
-  try {
-    const text = await callProvider(preferred, system, user, anthropicModel, openaiModel, maxTokens, temperature, timeoutMs, label);
-    return {
-      text,
-      provider: preferred,
-      failedOver: false,
-      primaryError: null,
-      durationMs: Date.now() - startTime,
-    };
-  } catch (primaryErr: any) {
-    const errMsg = primaryErr.name === 'AbortError'
-      ? `timeout after ${timeoutMs}ms`
-      : primaryErr.message || String(primaryErr);
-    
-    console.warn(`[LLM:${label}] ${preferred} failed: ${errMsg}${hasFallback ? ` — failing over to ${fallback}` : ' — no fallback available'}`);
+  for (let i = 0; i < chain.length; i++) {
+    const provider = chain[i];
+    const isFirst = i === 0;
 
-    if (!hasFallback) {
-      throw new Error(`[LLM:${label}] ${preferred} failed and ${fallback} not available: ${errMsg}`);
+    try {
+      const text = await callProvider(provider, system, user, anthropicModel, openaiModel, groqModel, maxTokens, temperature, timeoutMs, label);
+      if (!isFirst) {
+        console.log(`[LLM:${label}] Failover to ${provider} succeeded (total ${Date.now() - startTime}ms)`);
+      }
+      return {
+        text,
+        provider,
+        failedOver: !isFirst,
+        primaryError: isFirst ? null : lastError,
+        durationMs: Date.now() - startTime,
+      };
+    } catch (err: any) {
+      lastError = err.name === 'AbortError'
+        ? `timeout after ${timeoutMs}ms`
+        : err.message || String(err);
+
+      const nextProvider = chain[i + 1];
+      console.warn(`[LLM:${label}] ${provider} failed: ${lastError}${nextProvider ? ` — trying ${nextProvider}` : ' — no more providers'}`);
     }
   }
 
-  // ── Try fallback provider ──
-  const failoverStart = Date.now();
-  try {
-    const text = await callProvider(fallback, system, user, anthropicModel, openaiModel, maxTokens, temperature, timeoutMs, label);
-    const totalMs = Date.now() - startTime;
-    console.log(`[LLM:${label}] Failover to ${fallback} succeeded (${Date.now() - failoverStart}ms, total ${totalMs}ms)`);
-    return {
-      text,
-      provider: fallback,
-      failedOver: true,
-      primaryError: `${preferred} failed`,
-      durationMs: totalMs,
-    };
-  } catch (fallbackErr: any) {
-    const fallbackMsg = fallbackErr.name === 'AbortError'
-      ? `timeout after ${timeoutMs}ms`
-      : fallbackErr.message || String(fallbackErr);
-    
-    throw new Error(`[LLM:${label}] Both providers failed. ${preferred}: see previous log. ${fallback}: ${fallbackMsg}`);
-  }
+  throw new Error(`[LLM:${label}] All providers failed. Last error: ${lastError}`);
 }
-
-// ─── Internal dispatcher ────────────────────────────────────────────────────
 
 async function callProvider(
   provider: Provider,
@@ -214,12 +204,15 @@ async function callProvider(
   user: string,
   anthropicModel: string,
   openaiModel: string,
+  groqModel: string,
   maxTokens: number,
   temperature: number,
   timeoutMs: number,
   label: string,
 ): Promise<string> {
-  if (provider === 'anthropic') {
+  if (provider === 'groq') {
+    return await callGroq(system, user, groqModel, maxTokens, temperature, timeoutMs);
+  } else if (provider === 'anthropic') {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       console.warn(`[LLM:${label}] Anthropic call timed out after ${timeoutMs}ms — aborting`);
@@ -235,13 +228,6 @@ async function callProvider(
   }
 }
 
-
-// ─── Convenience: simple text call (for quick migration) ────────────────────
-
-/**
- * Drop-in replacement for existing callXxxLLM(system, user) functions.
- * Returns just the text string. Throws on total failure.
- */
 export async function callLLMText(
   system: string,
   user: string,
@@ -252,12 +238,6 @@ export async function callLLMText(
   return result.text;
 }
 
-// ─── Streaming call (Anthropic only, falls back to non-streaming) ────────────
-
-/**
- * Stream an Anthropic response, calling onChunk for each text delta.
- * Returns the full accumulated text. Falls back to non-streaming callLLMText on error.
- */
 export async function callLLMStream(
   system: string,
   user: string,
@@ -266,9 +246,46 @@ export async function callLLMStream(
   overrides?: Partial<CallLLMOptions>,
 ): Promise<string> {
   const anthropicModel = overrides?.anthropicModel || process.env.CHAT_LLM_MODEL || 'claude-sonnet-4-6';
+  const groqModel = overrides?.groqModel || process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL;
   const maxTokens = overrides?.maxTokens || 2048;
   const temperature = overrides?.temperature ?? 0.7;
   const timeoutMs = overrides?.timeoutMs || 30000;
+
+  if (process.env.GROQ_API_KEY) {
+    try {
+      const { default: OpenAI } = await import('openai');
+      const client = new OpenAI({
+        apiKey: process.env.GROQ_API_KEY,
+        baseURL: 'https://api.groq.com/openai/v1',
+        timeout: timeoutMs,
+      });
+
+      const stream = await client.chat.completions.create({
+        model: groqModel,
+        temperature,
+        max_tokens: maxTokens,
+        stream: true,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      });
+
+      let accumulated = '';
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content || '';
+        if (delta) {
+          accumulated += delta;
+          onChunk(accumulated, delta);
+        }
+      }
+
+      console.log(`[LLM_STREAM:${label}] Groq completed — ${accumulated.length} chars`);
+      return accumulated;
+    } catch (err: any) {
+      console.warn(`[LLM_STREAM:${label}] Groq stream failed (${err.message}) — falling back to Anthropic`);
+    }
+  }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -338,11 +355,11 @@ export async function callLLMStream(
       }
     }
 
-    console.log(`[LLM_STREAM:${label}] Completed — ${accumulated.length} chars`);
+    console.log(`[LLM_STREAM:${label}] Anthropic completed — ${accumulated.length} chars`);
     return accumulated;
   } catch (err: any) {
     clearTimeout(timeoutId);
-    console.warn(`[LLM_STREAM:${label}] Stream failed (${err.message}) — falling back to non-streaming`);
+    console.warn(`[LLM_STREAM:${label}] Anthropic stream failed (${err.message}) — falling back to non-streaming`);
     const text = await callLLMText(system, user, label, overrides);
     onChunk(text, text);
     return text;
