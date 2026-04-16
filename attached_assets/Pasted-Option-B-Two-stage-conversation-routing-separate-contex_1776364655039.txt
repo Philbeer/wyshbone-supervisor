@@ -1,0 +1,383 @@
+Option B: Two-stage conversation routing — separate context analysis from route classification
+Why
+The current single-LLM router tries to do two things at once: (1) understand what's happening in the conversation, and (2) pick one of 5 routes. When we add worked examples for specific phrasings (like "ok im doing chops" or "any more?"), we're curve-fitting the route list to patterns. That doesn't generalise.
+The fix is architectural: split these into two stages.
+Stage 1 — turn classifier: A small LLM that ONLY analyses conversational context. It doesn't know about SEARCH/CLARIFY/CHAT/DISCUSS/ITERATE. It outputs a structured analysis of what just happened and what the user's message is doing relative to it.
+Stage 2 — router: Takes the Stage 1 analysis as authoritative input alongside the conversation. Uses turn_type as a hard constraint on which routes are plausible.
+Benefits:
+
+Stage 1 can't be distracted by route examples because it doesn't know the routes exist
+Stage 2 gets a clean structured signal instead of pattern-matching raw history
+Auditable in logs — you see the classifier's decision AND the router's decision
+New bugs get fixed in the right place: if classifier is wrong, fix the classifier; if router misused a good signal, fix the router
+Reusable — chat handler and result discussion can consume the same turn analysis
+
+Step 1: Create server/supervisor/conversation-turn-classifier.ts
+New file. Exports a single classifyTurn function.
+ts/**
+ * Conversation Turn Classifier
+ *
+ * Pure context analysis — knows NOTHING about routes (SEARCH/CLARIFY/etc).
+ * Output feeds into the router as authoritative conversational context.
+ *
+ * Runs in ~300-500ms on Haiku 4.5.
+ */
+
+import { callLLMText } from './llm-failover';
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export type LastAssistantTurnType =
+  | 'SEARCH_RESULTS'
+  | 'ASKED_QUESTION'
+  | 'CHAT_REPLY'
+  | 'CLARIFICATION_REQUEST'
+  | 'NONE';
+
+export type UserMessageRelation =
+  | 'ANSWERING_QUESTION'
+  | 'CONTINUING_CHAT'
+  | 'PROVIDING_CLARIFICATION'
+  | 'DISCUSSING_RESULTS'
+  | 'REFINING_SEARCH'
+  | 'NEW_SEARCH_REQUEST'
+  | 'GREETING_OR_OFFTOPIC';
+
+export interface TurnAnalysis {
+  last_assistant_turn_type: LastAssistantTurnType;
+  last_assistant_summary: string;       // 1 sentence — what the assistant said/asked
+  user_message_relation: UserMessageRelation;
+  reasoning: string;                     // why this classification
+}
+
+export interface TurnClassifierInput {
+  currentMessage: string;
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
+  previousResultsExist: boolean;         // were businesses delivered in this conversation?
+}
+
+// ─── System prompt ──────────────────────────────────────────────────────────
+
+const CLASSIFIER_SYSTEM_PROMPT = `You analyse conversations. Your ONLY job is to understand what just happened between the user and assistant.
+
+You do NOT decide any action or route. You do NOT recommend what to do next. You describe what IS happening in the conversation.
+
+Return ONLY a JSON object. No markdown, no backticks, no commentary.
+
+## WHAT TO ANALYSE
+
+Given the conversation history and the user's current message, identify two things:
+
+### 1. What kind of message was the LAST ASSISTANT TURN?
+
+- SEARCH_RESULTS: The assistant delivered a list of businesses/leads in a previous turn (PREVIOUS_RESULTS_EXIST is true).
+- ASKED_QUESTION: The assistant's last message ended with a question to the user (asking for preference, cooking style, clarifying something, etc).
+- CHAT_REPLY: The assistant gave information, advice, opinion, or recommendation in a conversational way. No search results delivered.
+- CLARIFICATION_REQUEST: The assistant asked for missing information needed to perform a task (e.g. "what type of businesses?", "which location?").
+- NONE: There is no previous assistant turn (this is the user's first message).
+
+Note: ASKED_QUESTION vs CLARIFICATION_REQUEST — if the assistant's question is asking for search parameters (business type, location), it's CLARIFICATION_REQUEST. If the question is conversational (cooking style, preferences, opinions), it's ASKED_QUESTION.
+
+### 2. What is the USER'S CURRENT MESSAGE doing in relation to that?
+
+- ANSWERING_QUESTION: Replying to the assistant's non-clarification question. Often short. May contain nouns that look like business types but are actually answers.
+- CONTINUING_CHAT: Following up on the conversational topic the assistant was discussing. Asking for more of the same content, refining the topic, asking related questions.
+- PROVIDING_CLARIFICATION: Giving the missing info the assistant asked for (location, entity type, etc).
+- DISCUSSING_RESULTS: Talking about the businesses/leads the assistant delivered (only possible when PREVIOUS_RESULTS_EXIST).
+- REFINING_SEARCH: Wanting to modify an existing search — different location, different entity, extra filter (only possible when PREVIOUS_RESULTS_EXIST).
+- NEW_SEARCH_REQUEST: Explicitly asking to find businesses. Uses search verbs (find, search, show me, look for) AND provides a business type AND a location (or at least intent to start a new search).
+- GREETING_OR_OFFTOPIC: Greetings, thanks, or unrelated messages that don't fit the flow.
+
+## OUTPUT FORMAT
+
+{
+  "last_assistant_turn_type": "SEARCH_RESULTS" | "ASKED_QUESTION" | "CHAT_REPLY" | "CLARIFICATION_REQUEST" | "NONE",
+  "last_assistant_summary": "one sentence describing what the assistant's last message said or asked",
+  "user_message_relation": "ANSWERING_QUESTION" | "CONTINUING_CHAT" | "PROVIDING_CLARIFICATION" | "DISCUSSING_RESULTS" | "REFINING_SEARCH" | "NEW_SEARCH_REQUEST" | "GREETING_OR_OFFTOPIC",
+  "reasoning": "one sentence explaining why this relation fits"
+}`;
+
+// ─── Builder ────────────────────────────────────────────────────────────────
+
+function buildClassifierInput(input: TurnClassifierInput): string {
+  const parts: string[] = [];
+
+  parts.push(`PREVIOUS_RESULTS_EXIST: ${input.previousResultsExist}`);
+  parts.push('');
+
+  if (input.conversationHistory.length === 0) {
+    parts.push('CONVERSATION HISTORY: (none — this is the first message)');
+  } else {
+    parts.push('CONVERSATION HISTORY:');
+    // Last 6 turns is plenty for turn classification
+    const recent = input.conversationHistory.slice(-6);
+    for (const msg of recent) {
+      const role = msg.role === 'user' ? 'user' : 'assistant';
+      const content = msg.content.length > 600
+        ? msg.content.substring(0, 600) + '...'
+        : msg.content;
+      parts.push(`[${role}] ${content}`);
+    }
+  }
+  parts.push('');
+  parts.push(`USER'S CURRENT MESSAGE: ${input.currentMessage}`);
+
+  return parts.join('\n');
+}
+
+// ─── Parser ─────────────────────────────────────────────────────────────────
+
+const VALID_TURN_TYPES: LastAssistantTurnType[] = [
+  'SEARCH_RESULTS', 'ASKED_QUESTION', 'CHAT_REPLY', 'CLARIFICATION_REQUEST', 'NONE',
+];
+
+const VALID_RELATIONS: UserMessageRelation[] = [
+  'ANSWERING_QUESTION', 'CONTINUING_CHAT', 'PROVIDING_CLARIFICATION',
+  'DISCUSSING_RESULTS', 'REFINING_SEARCH', 'NEW_SEARCH_REQUEST', 'GREETING_OR_OFFTOPIC',
+];
+
+function parseClassifierResponse(raw: string): TurnAnalysis {
+  let cleaned = raw.trim();
+  if (cleaned.startsWith('```json')) cleaned = cleaned.slice(7);
+  else if (cleaned.startsWith('```')) cleaned = cleaned.slice(3);
+  if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
+  cleaned = cleaned.trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (match) cleaned = match[0];
+
+  const parsed = JSON.parse(cleaned);
+
+  if (!VALID_TURN_TYPES.includes(parsed.last_assistant_turn_type)) {
+    throw new Error(`Invalid turn type: ${parsed.last_assistant_turn_type}`);
+  }
+  if (!VALID_RELATIONS.includes(parsed.user_message_relation)) {
+    throw new Error(`Invalid relation: ${parsed.user_message_relation}`);
+  }
+
+  return {
+    last_assistant_turn_type: parsed.last_assistant_turn_type,
+    last_assistant_summary: String(parsed.last_assistant_summary || '').substring(0, 300),
+    user_message_relation: parsed.user_message_relation,
+    reasoning: String(parsed.reasoning || '').substring(0, 300),
+  };
+}
+
+// ─── Main export ────────────────────────────────────────────────────────────
+
+export async function classifyTurn(input: TurnClassifierInput): Promise<TurnAnalysis> {
+  const start = Date.now();
+
+  const userMessage = buildClassifierInput(input);
+
+  let raw: string;
+  try {
+    raw = await callLLMText(CLASSIFIER_SYSTEM_PROMPT, userMessage, 'turn_classifier', {
+      anthropicModel: process.env.TURN_CLASSIFIER_MODEL || 'claude-haiku-4-5-20251001',
+      openaiModel: 'gpt-4o-mini',
+      timeoutMs: parseInt(process.env.TURN_CLASSIFIER_TIMEOUT_MS || '8000', 10),
+      maxTokens: 300,
+      temperature: 0,
+    });
+  } catch (err: any) {
+    console.warn(`[TURN_CLASSIFIER] LLM failed (${Date.now() - start}ms): ${err.message} — falling back to neutral analysis`);
+    return fallbackAnalysis(input);
+  }
+
+  try {
+    const analysis = parseClassifierResponse(raw);
+    console.log(
+      `[TURN_CLASSIFIER] turn=${analysis.last_assistant_turn_type} ` +
+      `relation=${analysis.user_message_relation} (${Date.now() - start}ms)`
+    );
+    return analysis;
+  } catch (err: any) {
+    console.warn(`[TURN_CLASSIFIER] Parse failed (${Date.now() - start}ms): ${err.message} — falling back`);
+    return fallbackAnalysis(input);
+  }
+}
+
+function fallbackAnalysis(input: TurnClassifierInput): TurnAnalysis {
+  // If classifier fails, return neutral analysis that doesn't over-constrain the router.
+  // Router still has full history and makes its own decision.
+  const isFirstMessage = input.conversationHistory.length === 0;
+  return {
+    last_assistant_turn_type: isFirstMessage ? 'NONE' : 'CHAT_REPLY',
+    last_assistant_summary: 'unavailable',
+    user_message_relation: isFirstMessage ? 'NEW_SEARCH_REQUEST' : 'CONTINUING_CHAT',
+    reasoning: 'Classifier unavailable — neutral fallback',
+  };
+}
+Step 2: Update server/supervisor/conversation-router.ts
+2a. Add turnAnalysis to RouterInput
+tsimport type { TurnAnalysis } from './conversation-turn-classifier';
+
+export interface RouterInput {
+  currentMessage: string;
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
+  previousResults: {
+    exists: boolean;
+    count: number;
+    entityType: string | null;
+    location: string | null;
+    lastSearchRunId: string | null;
+  };
+  urlContent: string | null;
+  userSearchHistory: Array<{ query: string; delivered: number }> | null;
+  turnAnalysis: TurnAnalysis;   // NEW — required
+}
+2b. Update buildRouterUserMessage to surface the turn analysis
+Add this near the top of the user message, before CONVERSATION HISTORY:
+tsparts.push('TURN ANALYSIS (from context analyser — treat as authoritative):');
+parts.push(`  last_assistant_turn_type: ${input.turnAnalysis.last_assistant_turn_type}`);
+parts.push(`  last_assistant_summary: ${input.turnAnalysis.last_assistant_summary}`);
+parts.push(`  user_message_relation: ${input.turnAnalysis.user_message_relation}`);
+parts.push(`  reasoning: ${input.turnAnalysis.reasoning}`);
+parts.push('');
+2c. Rewrite ROUTER_SYSTEM_PROMPT to use turn analysis as primary signal
+Replace the current ROUTER_SYSTEM_PROMPT with this. Keep all five route descriptions and the 12 critical rules as-is — only change the top-level framing and add the turn-analysis-to-route-mapping section. Delete the previous "HOW TO THINK" / "STEP 1 STEP 2" / worked examples sections if they exist from the Option A rollback.
+tsconst ROUTER_SYSTEM_PROMPT = `${getCurrentDatePreamble()}
+
+You are the conversation router for Wyshbone, a B2B lead generation app that finds businesses for users.
+
+A context analyser has already determined what kind of conversational turn this is. You will receive a TURN ANALYSIS block in the input. Treat it as authoritative — it tells you what the user's message is doing relative to the conversation. Your job is to pick the right action given that context.
+
+Return ONLY a JSON object. No markdown, no backticks, no commentary.
+
+## HOW TURN ANALYSIS MAPS TO ROUTES
+
+The TURN ANALYSIS \`user_message_relation\` field constrains which routes are plausible:
+
+- ANSWERING_QUESTION → Route = CHAT. The user is answering a conversational question the assistant asked. Any nouns in their reply (including food items, business types, colours) are answers, not search entities. Continue the conversation.
+
+- CONTINUING_CHAT → Route = CHAT. The user is following up on the topic the assistant was discussing. Keep the conversation going.
+
+- PROVIDING_CLARIFICATION → Route = SEARCH or CLARIFY. Read the conversation history to find what was missing (entity, location) and combine with the user's current message. If you now have BOTH entity and location → SEARCH. If still missing one → CLARIFY.
+
+- DISCUSSING_RESULTS → Route = DISCUSS. User is talking about leads already delivered. (Exception: short affirmatives like "yes", "go ahead" may be ITERATE — see rule 12.)
+
+- REFINING_SEARCH → Route = ITERATE. User wants to modify the existing search (different location, different entity, extra filter). Include full new params.
+
+- NEW_SEARCH_REQUEST → Route = SEARCH if entity + location both present; otherwise CLARIFY.
+
+- GREETING_OR_OFFTOPIC → Route = CHAT.
+
+IMPORTANT: If the turn analysis says ANSWERING_QUESTION or CONTINUING_CHAT, do NOT route as SEARCH even if the user's message contains words that look like business types. The context analyser has already determined the user is in conversational mode. Trust it.
+
+The ONLY case where you may override turn analysis is if the user's current message contains an explicit search verb (find, search, show me, look for) PLUS a new entity AND location — in which case it's a clear NEW_SEARCH_REQUEST regardless of prior context.
+
+## THE FIVE ROUTES
+
+[KEEP EXISTING CONTENT: all five route descriptions — SEARCH, CLARIFY, DISCUSS, ITERATE, CHAT — exactly as they currently are]
+
+## CRITICAL RULES
+
+[KEEP EXISTING CONTENT: all 12 critical rules exactly as they currently are]
+
+## OUTPUT FORMAT
+
+{
+  "route": "SEARCH" | "CLARIFY" | "DISCUSS" | "ITERATE" | "CHAT",
+  "entity": "business type" | null,
+  "location": "place name" | null,
+  "constraints": ["filter1", "filter2"] | [],
+  "clarify_question": "question text" | null,
+  "chat_response": "response text" | null,
+  "iteration_change": "what changed" | null,
+  "referenced_result": "what they're asking about" | null,
+  "confidence": 0.0-1.0,
+  "reasoning": "one sentence — reference the turn analysis and explain the route choice"
+}`;
+Where it says [KEEP EXISTING CONTENT: ...], preserve those sections verbatim. Do NOT delete the five route descriptions or the 12 critical rules — they are still needed for the router to know what each route means.
+2d. Keep the existing safety override
+The SEARCH→CHAT safety override at the bottom of routeConversation() stays as-is. It's a last-resort guard against LLM hallucinations, not curve-fitting. Do NOT widen it and do NOT remove it.
+Step 3: Update server/supervisor.ts to call classifier before router
+Find the processChatTask function, around line 1431-1478 where routeConversation is imported and called. Currently:
+tsconst { routeConversation } = await import('./supervisor/conversation-router');
+// ...
+const decision = await routeConversation(routerInput);
+Change to call the classifier first, then pass its result into the router:
+tsconst { routeConversation } = await import('./supervisor/conversation-router');
+const { classifyTurn } = await import('./supervisor/conversation-turn-classifier');
+
+// Stage 1: analyse the conversational turn (context only, no route awareness)
+const turnAnalysis = await classifyTurn({
+  currentMessage: rawMessage,  // or whatever variable name is used for the user message
+  conversationHistory: routerInput.conversationHistory,
+  previousResultsExist: routerInput.previousResults.exists,
+});
+
+// Stage 2: router uses turn analysis as authoritative context
+const decision = await routeConversation({
+  ...routerInput,
+  turnAnalysis,
+});
+Use the exact variable names already present in processChatTask — don't invent new ones. If rawMessage is called something different there, adapt accordingly.
+Step 4: Confirm .env.example documents the new env vars
+Add these if not already present:
+# Turn classifier (Stage 1 of conversation routing)
+TURN_CLASSIFIER_MODEL=claude-haiku-4-5-20251001
+TURN_CLASSIFIER_TIMEOUT_MS=8000
+Do NOT
+
+Add any regex matching or keyword gates anywhere — the LLMs are the decision makers
+Add worked examples for specific phrasings ("ok im doing chops", "any more?", "italian") to either prompt — Option B's whole point is that the classifier's structured output replaces the need for those
+Remove the 5 route descriptions or the 12 critical rules from the router prompt
+Change the chat handler, image search, fast path, or any other file
+Widen or remove the existing SEARCH→CHAT safety override at the bottom of routeConversation
+Change the router or chat handler models
+
+Test cases
+Run these manually after restart and check both [TURN_CLASSIFIER] AND [ROUTER] console lines for each:
+
+Fresh: "pair wine with lamb"
+
+Classifier: last_turn=NONE, relation=CONTINUING_CHAT or GREETING_OR_OFFTOPIC
+Router: CHAT ✅
+
+
+After assistant asks "what style of lamb?": "ok im doing chops"
+
+Classifier: last_turn=ASKED_QUESTION, relation=ANSWERING_QUESTION
+Router: CHAT ✅
+
+
+After assistant chat about wines with "how are you cooking them?": "ok any more?"
+
+Classifier: last_turn=ASKED_QUESTION (or CHAT_REPLY), relation=CONTINUING_CHAT
+Router: CHAT ✅
+
+
+Fresh: "find pubs in Arundel"
+
+Classifier: last_turn=NONE, relation=NEW_SEARCH_REQUEST
+Router: SEARCH ✅
+
+
+After assistant asks "which location?": "Brighton"
+
+Classifier: last_turn=CLARIFICATION_REQUEST, relation=PROVIDING_CLARIFICATION
+Router: SEARCH (combined with earlier entity) ✅
+
+
+After 20 pubs delivered: "which have good reviews?"
+
+Classifier: last_turn=SEARCH_RESULTS, relation=DISCUSSING_RESULTS
+Router: DISCUSS ✅
+
+
+After 20 pubs delivered: "try Brighton"
+
+Classifier: last_turn=SEARCH_RESULTS, relation=REFINING_SEARCH
+Router: ITERATE ✅
+
+
+After chat about marketing: "now find marketing agencies in London"
+
+Classifier: last_turn=CHAT_REPLY, relation=NEW_SEARCH_REQUEST
+Router: SEARCH ✅
+
+
+
+Check total latency: classifier (~400ms) + router (~500ms) = ~900ms. Acceptable given this is the new architectural baseline.
+Commit
+Two-stage routing: conversation-turn-classifier runs before router, produces structured turn analysis used as authoritative context

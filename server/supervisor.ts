@@ -1429,6 +1429,7 @@ class SupervisorService {
       await _bridgePromise;
       try {
         const { routeConversation } = await import('./supervisor/conversation-router');
+        const { classifyTurn } = await import('./supervisor/conversation-turn-classifier');
 
         // Load conversation history
         let routerHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
@@ -1467,14 +1468,23 @@ class SupervisorService {
           }
         }
 
+        // Stage 1: analyse the conversational turn (context only, no route awareness)
+        const turnAnalysis = await classifyTurn({
+          currentMessage: rawMsg,
+          conversationHistory: routerHistory,
+          previousResultsExist: routerPreviousResults.exists,
+        });
+
         const routerInput = {
           currentMessage: rawMsg,
           conversationHistory: routerHistory,
           previousResults: routerPreviousResults,
           urlContent: (requestData as any).url_content || null,
           userSearchHistory: null,
+          turnAnalysis,
         };
 
+        // Stage 2: router uses turn analysis as authoritative context
         const decision = await routeConversation(routerInput);
 
         // Log the decision as an artefact (skipped for non-SEARCH routes when telemetry is stripped)

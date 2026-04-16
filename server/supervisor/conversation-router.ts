@@ -10,6 +10,7 @@
 
 import { callLLMText } from './llm-failover';
 import { getCurrentDatePreamble } from './current-context';
+import type { TurnAnalysis } from './conversation-turn-classifier';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -40,17 +41,42 @@ export interface RouterInput {
   };
   urlContent: string | null;
   userSearchHistory: Array<{ query: string; delivered: number }> | null;
+  turnAnalysis: TurnAnalysis;   // NEW — required
 }
 
 // ─── System Prompt ──────────────────────────────────────────────────────────
 
 const ROUTER_SYSTEM_PROMPT = `${getCurrentDatePreamble()}
 
-You are the conversation router for Wyshbone, a B2B lead generation app that finds businesses for users. You read the full conversation and decide what should happen next.
+You are the conversation router for Wyshbone, a B2B lead generation app that finds businesses for users.
+
+A context analyser has already determined what kind of conversational turn this is. You will receive a TURN ANALYSIS block in the input. Treat it as authoritative — it tells you what the user's message is doing relative to the conversation. Your job is to pick the right action given that context.
 
 Return ONLY a JSON object. No markdown, no backticks, no commentary.
 
-## YOUR FIVE ROUTES
+## HOW TURN ANALYSIS MAPS TO ROUTES
+
+The TURN ANALYSIS \`user_message_relation\` field constrains which routes are plausible:
+
+- ANSWERING_QUESTION → Route = CHAT. The user is answering a conversational question the assistant asked. Any nouns in their reply (including food items, business types, colours) are answers, not search entities. Continue the conversation.
+
+- CONTINUING_CHAT → Route = CHAT. The user is following up on the topic the assistant was discussing. Keep the conversation going.
+
+- PROVIDING_CLARIFICATION → Route = SEARCH or CLARIFY. Read the conversation history to find what was missing (entity, location) and combine with the user's current message. If you now have BOTH entity and location → SEARCH. If still missing one → CLARIFY.
+
+- DISCUSSING_RESULTS → Route = DISCUSS. User is talking about leads already delivered. (Exception: short affirmatives like "yes", "go ahead" may be ITERATE — see rule 12.)
+
+- REFINING_SEARCH → Route = ITERATE. User wants to modify the existing search (different location, different entity, extra filter). Include full new params.
+
+- NEW_SEARCH_REQUEST → Route = SEARCH if entity + location both present; otherwise CLARIFY.
+
+- GREETING_OR_OFFTOPIC → Route = CHAT.
+
+IMPORTANT: If the turn analysis says ANSWERING_QUESTION or CONTINUING_CHAT, do NOT route as SEARCH even if the user's message contains words that look like business types. The context analyser has already determined the user is in conversational mode. Trust it.
+
+The ONLY case where you may override turn analysis is if the user's current message contains an explicit search verb (find, search, show me, look for) PLUS a new entity AND location — in which case it's a clear NEW_SEARCH_REQUEST regardless of prior context.
+
+## THE FIVE ROUTES
 
 ### SEARCH
 The user has given enough information to run a search. Minimum requirement: a type of business AND a location.
@@ -147,7 +173,7 @@ What NOT to route as CHAT:
   "iteration_change": "what changed" | null,
   "referenced_result": "what they're asking about" | null,
   "confidence": 0.0-1.0,
-  "reasoning": "one sentence explaining the decision"
+  "reasoning": "one sentence — reference the turn analysis and explain the route choice"
 }`;
 
 
@@ -155,6 +181,13 @@ What NOT to route as CHAT:
 
 function buildRouterUserMessage(input: RouterInput): string {
   const parts: string[] = [];
+
+  parts.push('TURN ANALYSIS (from context analyser — treat as authoritative):');
+  parts.push(`  last_assistant_turn_type: ${input.turnAnalysis.last_assistant_turn_type}`);
+  parts.push(`  last_assistant_summary: ${input.turnAnalysis.last_assistant_summary}`);
+  parts.push(`  user_message_relation: ${input.turnAnalysis.user_message_relation}`);
+  parts.push(`  reasoning: ${input.turnAnalysis.reasoning}`);
+  parts.push('');
 
   if (input.conversationHistory.length > 0) {
     parts.push('CONVERSATION HISTORY:');
