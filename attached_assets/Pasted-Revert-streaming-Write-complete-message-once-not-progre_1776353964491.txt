@@ -1,0 +1,57 @@
+Revert streaming: Write complete message once, not progressive Supabase updates
+The progressive Supabase streaming writes are causing truncated messages in the UI — Supabase realtime doesn't reliably deliver all UPDATE events, so the final content often doesn't arrive.
+Revert to the simpler approach: call the LLM, wait for the full response, resolve images, write the message ONCE to Supabase.
+In server/supervisor/chat-handler.ts, find the handleChat function.
+Replace the entire streaming section (the part that creates a message row with empty content, calls callLLMStream with progressive flushes, and does a final update) with the straightforward approach:
+tsif (isCircuitBroken()) {
+  console.warn('[CHAT_HANDLER] Circuit breaker OPEN — using fallback');
+  response = "I'm a bit busy right now. I can find businesses for you — just tell me a business type and location, like 'find cafes in Brighton'.";
+} else {
+  try {
+    recordChatCall();
+    response = await callLLMText(CHAT_SYSTEM_PROMPT, userPrompt, 'chat', {
+      anthropicModel: process.env.CHAT_LLM_MODEL || 'claude-sonnet-4-6',
+      maxTokens: 2048,
+      temperature: 0.7,
+      timeoutMs: 30_000,
+    });
+  } catch (err: any) {
+    console.error(`[CHAT_HANDLER] LLM call failed: ${err.message}`);
+    response = "I can find businesses and leads for you. Just tell me what you're looking for and where — for example, 'find web designers in Manchester'.";
+  }
+}
+
+// Resolve [IMAGE: ...] placeholders into real Unsplash images
+try {
+  const { resolveImagePlaceholders } = await import('./image-search');
+  const resolved = await resolveImagePlaceholders(response);
+  if (resolved.imageCount > 0) {
+    response = resolved.text;
+    console.log(`[CHAT_HANDLER] Inlined ${resolved.imageCount} image(s) via Unsplash`);
+  }
+} catch (err: any) {
+  console.warn(`[CHAT_HANDLER] Image resolution failed (non-fatal): ${err.message}`);
+}
+
+// Save message to DB (single write, complete content)
+const messageId = await saveChatMessage(conversationId, response);
+
+console.log(`[CHAT_HANDLER] Responded — ${response.length} chars, conversation=${conversationId.slice(0, 8)}`);
+
+return { response, messageId };
+Make sure saveChatMessage is restored/kept as a helper function (the original version that does a single INSERT).
+Also: remove callLLMStream import if it was added. The callLLMStream function in llm-failover.ts can stay — it's not harmful, just unused for now.
+Do NOT:
+
+Remove the image-search module or the VISUAL ILLUSTRATIONS prompt section
+Change the router or fast-path logic
+Touch any UI code
+
+Test:
+
+"pair a wine with lamb" → full complete response appears (not truncated), with [IMAGE:] markers resolved to real images ✅
+"hi" → fast response ✅
+Check logs for [CHAT_HANDLER] Responded — XXX chars where XXX is 500+ ✅
+Check logs for [CHAT_HANDLER] Inlined N image(s) ✅
+
+Commit: Revert chat streaming to single-write — Supabase realtime too unreliable for progressive updates
