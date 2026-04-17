@@ -1451,6 +1451,7 @@ Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "re
         batchPrompt,
         'location_verify_batch',
         {
+          providerChain: ['anthropic', 'openai', 'groq'],
           anthropicModel: process.env.LOCATION_VERIFY_MODEL || 'claude-sonnet-4-20250514',
           maxTokens: 1500,
           timeoutMs: 15000,

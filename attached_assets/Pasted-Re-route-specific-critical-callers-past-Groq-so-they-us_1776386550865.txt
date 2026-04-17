@@ -1,0 +1,120 @@
+Re-route specific critical callers past Groq so they use their original Anthropic/OpenAI models directly.
+
+CONTEXT:
+Recent change made Groq the default first provider in llm-failover.ts. This was fine for chat, but it silently also redirected critical callers (router, location verification, temporal checker) away from their carefully-chosen models (Sonnet, GPT-4o) to Groq. We need to revert these specific callers to their intended models while keeping Groq as the default for everything else.
+
+INSTRUCTIONS:
+
+Step 1 — Add a new option to llm-failover.ts
+
+In `server/supervisor/llm-failover.ts`, add support for a `providerChain` option so callers can specify their own provider order, overriding the default Groq-first behaviour.
+
+In the CallLLMOptions interface, add:
+  /** Custom provider chain in order of preference. Overrides default Groq→Anthropic→OpenAI. */
+  providerChain?: Provider[];
+
+In the callLLM function, update the chain construction. Replace this existing block:
+
+  let preferred: Provider;
+  if (options.preferredProvider) {
+    preferred = options.preferredProvider;
+  } else if (hasGroq) {
+    preferred = 'groq';
+  } else if (hasAnthropic) {
+    preferred = 'anthropic';
+  } else {
+    preferred = 'openai';
+  }
+
+  const allProviders: Provider[] = ['groq', 'anthropic', 'openai'];
+  const available = allProviders.filter(p =>
+    p === 'groq' ? hasGroq : p === 'anthropic' ? hasAnthropic : hasOpenAI
+  );
+  const chain = [preferred, ...available.filter(p => p !== preferred)];
+
+With this:
+
+  // Build the provider chain
+  let chain: Provider[];
+  if (options.providerChain && options.providerChain.length > 0) {
+    // Caller specified a custom chain — filter to only available providers, preserving order
+    chain = options.providerChain.filter(p =>
+      p === 'groq' ? hasGroq : p === 'anthropic' ? hasAnthropic : hasOpenAI
+    );
+    if (chain.length === 0) {
+      throw new Error(`[LLM:${label}] Custom providerChain requested but none of the specified providers have API keys configured`);
+    }
+  } else {
+    // Default: use preferredProvider if specified, else Groq-first if available, else Anthropic, else OpenAI
+    let preferred: Provider;
+    if (options.preferredProvider) {
+      preferred = options.preferredProvider;
+    } else if (hasGroq) {
+      preferred = 'groq';
+    } else if (hasAnthropic) {
+      preferred = 'anthropic';
+    } else {
+      preferred = 'openai';
+    }
+    const allProviders: Provider[] = ['groq', 'anthropic', 'openai'];
+    const available = allProviders.filter(p =>
+      p === 'groq' ? hasGroq : p === 'anthropic' ? hasAnthropic : hasOpenAI
+    );
+    chain = [preferred, ...available.filter(p => p !== preferred)];
+  }
+
+Step 2 — Update the router in conversation-router.ts
+
+Find the callLLMText call (around line 281) and add providerChain. Change this:
+
+  rawResponse = await callLLMText(ROUTER_SYSTEM_PROMPT, userMessage, 'router', {
+    anthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-haiku-4-5-20251001',
+    openaiModel: 'gpt-4o-mini',
+    timeoutMs: parseInt(process.env.ROUTER_TIMEOUT_MS || '15000', 10),
+  });
+
+To this:
+
+  rawResponse = await callLLMText(ROUTER_SYSTEM_PROMPT, userMessage, 'router', {
+    providerChain: ['anthropic', 'openai', 'groq'],
+    anthropicModel: process.env.ROUTER_LLM_MODEL || 'claude-sonnet-4-5-20250929',
+    openaiModel: 'gpt-4o',
+    timeoutMs: parseInt(process.env.ROUTER_TIMEOUT_MS || '15000', 10),
+  });
+
+Step 3 — Update location verification in mission-executor.ts
+
+Find the callLLMText call for 'location_verify_batch' (around line 1452) and add providerChain so it goes Anthropic (Sonnet) first, NOT Groq. Change this:
+
+  const batchResult = await callLLMText(
+    locationPrompt,
+    addressBatch,
+    'location_verify_batch',
+    {
+      anthropicModel: process.env.LOCATION_VERIFY_MODEL || 'claude-sonnet-4-20250514',
+      ...
+    }
+  );
+
+Add `providerChain: ['anthropic', 'openai', 'groq']` to the options object. Leave everything else in the options unchanged. Do this for BOTH location verify calls if there are multiple (singular 'location_verify' and batch 'location_verify_batch').
+
+Step 4 — Update temporal checker
+
+Find any callLLMText calls with label 'evidence_judge' or similar where the code checks for temporal constraints and uses a stronger model. Find the one currently using `anthropicModel: process.env.TEMPORAL_... || 'gpt-4o'` or similar. Add `providerChain: ['openai', 'anthropic', 'groq']` to keep GPT-4o as the primary for temporal reasoning.
+
+Step 5 — Verify
+
+After the changes:
+- Chat should still go Groq-first (unchanged, no providerChain specified) ✅
+- Turn classifier, evidence judge (non-temporal), narratives, etc. should still go Groq-first (unchanged) ✅
+- Router should now go Sonnet-first ✅
+- Location verification should now go Sonnet-first ✅
+- Temporal checker should now go GPT-4o-first ✅
+
+Run TypeScript check and restart the supervisor. Report back what the startup logs say and any errors.
+
+DO NOT TOUCH:
+- chat-handler.ts (must keep Groq-first)
+- turn-classifier
+- Any other caller not explicitly mentioned above
+- The openai package or any dependencies

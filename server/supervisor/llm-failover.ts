@@ -18,6 +18,8 @@ export interface CallLLMOptions {
   groqModel?: string;
   timeoutMs?: number;
   preferredProvider?: Provider;
+  /** Custom provider chain in order of preference. Overrides default Groq→Anthropic→OpenAI. */
+  providerChain?: Provider[];
 }
 
 export interface CallLLMResult {
@@ -149,22 +151,34 @@ export async function callLLM(options: CallLLMOptions): Promise<CallLLMResult> {
     throw new Error(`[LLM:${label}] No LLM API key configured (need GROQ_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY)`);
   }
 
-  let preferred: Provider;
-  if (options.preferredProvider) {
-    preferred = options.preferredProvider;
-  } else if (hasGroq) {
-    preferred = 'groq';
-  } else if (hasAnthropic) {
-    preferred = 'anthropic';
+  // Build the provider chain
+  let chain: Provider[];
+  if (options.providerChain && options.providerChain.length > 0) {
+    // Caller specified a custom chain — filter to only available providers, preserving order
+    chain = options.providerChain.filter(p =>
+      p === 'groq' ? hasGroq : p === 'anthropic' ? hasAnthropic : hasOpenAI
+    );
+    if (chain.length === 0) {
+      throw new Error(`[LLM:${label}] Custom providerChain requested but none of the specified providers have API keys configured`);
+    }
   } else {
-    preferred = 'openai';
+    // Default: use preferredProvider if specified, else Groq-first if available, else Anthropic, else OpenAI
+    let preferred: Provider;
+    if (options.preferredProvider) {
+      preferred = options.preferredProvider;
+    } else if (hasGroq) {
+      preferred = 'groq';
+    } else if (hasAnthropic) {
+      preferred = 'anthropic';
+    } else {
+      preferred = 'openai';
+    }
+    const allProviders: Provider[] = ['groq', 'anthropic', 'openai'];
+    const available = allProviders.filter(p =>
+      p === 'groq' ? hasGroq : p === 'anthropic' ? hasAnthropic : hasOpenAI
+    );
+    chain = [preferred, ...available.filter(p => p !== preferred)];
   }
-
-  const allProviders: Provider[] = ['groq', 'anthropic', 'openai'];
-  const available = allProviders.filter(p =>
-    p === 'groq' ? hasGroq : p === 'anthropic' ? hasAnthropic : hasOpenAI
-  );
-  const chain = [preferred, ...available.filter(p => p !== preferred)];
 
   const startTime = Date.now();
   let lastError = '';
