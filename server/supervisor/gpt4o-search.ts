@@ -22,6 +22,7 @@ import { logAFREvent } from './afr-logger';
 import { storage } from '../storage';
 import type { IntentNarrative } from './mission-schema';
 import type { VerificationPolicy } from './verification-policy';
+import type { StructuredConstraintPayload } from './mission-executor';
 
 const MAX_SEARCH_ROUNDS = 3;
 const LOW_RESULT_THRESHOLD = 5;
@@ -39,7 +40,7 @@ export interface Gpt4oSearchContext {
   requestedCount: number | null;
   hardConstraints: string[];
   softConstraints: string[];
-  structuredConstraints: Record<string, unknown>[];
+  structuredConstraints: StructuredConstraintPayload[];
   intentNarrative: IntentNarrative | null;
   verificationPolicy: VerificationPolicy;
   verificationPolicyReason: string;
@@ -77,14 +78,122 @@ interface Gpt4oSearchResponse {
   coverage_assessment: string;
 }
 
+/**
+ * Convert a structured constraint into a natural-language instruction
+ * suitable for a web search prompt.
+ *
+ * The real constraint VALUE (e.g. "swan", "local authority", "vegan") is
+ * injected directly — not hidden inside a narrative phrase or stripped to a
+ * type label like "name_contains".
+ */
+function formatConstraintForSearch(c: StructuredConstraintPayload): string {
+  const valueRaw = c.value === null || c.value === undefined ? '' : String(c.value).trim();
+  if (!valueRaw) return '';
+
+  const valuePretty = valueRaw.length > 0
+    ? valueRaw[0].toUpperCase() + valueRaw.slice(1)
+    : valueRaw;
+
+  switch (c.type) {
+    case 'text_compare': {
+      const fieldLabel = c.field === 'name' ? 'business name' : c.field;
+      switch (c.operator) {
+        case 'contains':
+          return `The ${fieldLabel} must contain the word "${valuePretty}".`;
+        case 'starts_with':
+          return `The ${fieldLabel} must start with "${valuePretty}".`;
+        case 'ends_with':
+          return `The ${fieldLabel} must end with "${valuePretty}".`;
+        case 'equals':
+          return `The ${fieldLabel} must be exactly "${valuePretty}".`;
+        case 'not_contains':
+          return `The ${fieldLabel} must NOT contain "${valuePretty}".`;
+        default:
+          return `The ${fieldLabel} ${c.operator} "${valuePretty}".`;
+      }
+    }
+
+    case 'relationship_check':
+      return `They must have evidence of ${c.operator === 'serves' ? 'working with' : c.operator} ${valueRaw}.`;
+
+    case 'website_evidence':
+      return `Their website must contain evidence of "${valueRaw}".`;
+
+    case 'attribute_check': {
+      if (valueRaw === 'true' || valueRaw === 'yes') {
+        return `They must be ${c.field.replace(/_/g, ' ')}.`;
+      }
+      if (valueRaw === 'false' || valueRaw === 'no') {
+        return `They must NOT be ${c.field.replace(/_/g, ' ')}.`;
+      }
+      return `Their ${c.field.replace(/_/g, ' ')} must be "${valueRaw}".`;
+    }
+
+    case 'status_check':
+      return `They must currently be ${valueRaw}.`;
+
+    case 'numeric_range': {
+      const fieldLabel = c.field.replace(/_/g, ' ');
+      switch (c.operator) {
+        case 'gte':
+        case '>=':
+          return `Their ${fieldLabel} must be at least ${valueRaw}.`;
+        case 'lte':
+        case '<=':
+          return `Their ${fieldLabel} must be at most ${valueRaw}.`;
+        case 'gt':
+        case '>':
+          return `Their ${fieldLabel} must be greater than ${valueRaw}.`;
+        case 'lt':
+        case '<':
+          return `Their ${fieldLabel} must be less than ${valueRaw}.`;
+        case 'equals':
+        case '=':
+          return `Their ${fieldLabel} must equal ${valueRaw}.`;
+        default:
+          return `Their ${fieldLabel} ${c.operator} ${valueRaw}.`;
+      }
+    }
+
+    case 'time_constraint':
+    case 'time_predicate':
+      if (c.operator === 'within_last' || c.operator === 'since') {
+        return `They must have ${c.field === 'opened' ? 'opened' : c.field} ${c.operator === 'within_last' ? 'within the last' : 'since'} ${valueRaw}.`;
+      }
+      return `Their ${c.field} must satisfy: ${c.operator} ${valueRaw}.`;
+
+    case 'location_constraint':
+      return '';
+
+    case 'ranking':
+      return `Rank results by ${valueRaw}.`;
+
+    default:
+      return `They must match: ${c.field} ${c.operator} "${valueRaw}".`;
+  }
+}
+
 function buildSearchPrompt(ctx: Gpt4oSearchContext, angle: string): string {
   const entityDesc = ctx.intentNarrative?.entity_description ?? ctx.businessType;
-  const constraintText = ctx.hardConstraints.length > 0
-    ? `They must: ${ctx.hardConstraints.join(', ')}.`
-    : '';
   const angleNote = angle !== 'primary'
     ? `\nSearch angle: ${angle}\n`
     : '';
+
+  const useStructured = (process.env.GPT4O_STRUCTURED_PROMPT ?? 'true').toLowerCase() === 'true';
+
+  let constraintText = '';
+  if (useStructured && ctx.structuredConstraints.length > 0) {
+    const hardInstructions = ctx.structuredConstraints
+      .filter(c => c.hardness === 'hard')
+      .map(c => formatConstraintForSearch(c))
+      .filter(s => s.length > 0);
+
+    if (hardInstructions.length > 0) {
+      constraintText = `\n\nCONSTRAINTS — these must be true for a result to qualify:\n${hardInstructions.map(s => `- ${s}`).join('\n')}\n`;
+    }
+  } else if (ctx.hardConstraints.length > 0) {
+    constraintText = `They must: ${ctx.hardConstraints.join(', ')}.`;
+  }
 
   const hasTemporalConstraint = ctx.hardConstraints.some(c =>
     /\b(recent|opened|established|new|last\s+\d+\s+months?|within\s+\d+)\b/i.test(c),
@@ -108,7 +217,7 @@ You are looking for businesses that OPENED (were first established/founded) afte
   return `${getCurrentDatePreamble()}
 
 You are a research assistant finding specific entities. Search the web thoroughly.${angleNote}
-TASK: Find ${entityDesc} in ${ctx.location} that match the following search. ${constraintText}${temporalRules}
+TASK: Find ${entityDesc} in ${ctx.location}.${constraintText}${temporalRules}
 Location: ${ctx.location}, ${ctx.country}
 
 For EACH result you find, provide:
@@ -262,9 +371,24 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     metadata: { execution_source: 'gpt4o_primary', entity: entityDesc, location },
   });
 
+  const primaryConstraintValue = (() => {
+    const firstHardStructural = ctx.structuredConstraints.find(
+      c => c.hardness === 'hard' && c.value !== null && c.value !== undefined && String(c.value).trim().length > 0,
+    );
+    if (firstHardStructural) {
+      const v = String(firstHardStructural.value).trim();
+      return v.includes(' ') ? `"${v}"` : v;
+    }
+    return '';
+  })();
+
+  console.log(`[GPT4O_SEARCH] Prompt format: ${(process.env.GPT4O_STRUCTURED_PROMPT ?? 'true').toLowerCase() === 'true' ? 'structured' : 'legacy'} | hard_constraints=${ctx.structuredConstraints.filter(c => c.hardness === 'hard').length}`);
+
   const searchAngles = [
     'primary',
-    `${businessType} ${location} ${hardConstraints.join(' ')} site listings`.trim(),
+    primaryConstraintValue
+      ? `${businessType} ${location} ${primaryConstraintValue} site listings`.trim()
+      : `${businessType} ${location} site listings`,
     `${location} ${businessType} directory listings`,
   ];
 

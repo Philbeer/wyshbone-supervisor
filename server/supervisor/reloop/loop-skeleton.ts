@@ -179,7 +179,7 @@ export async function runReloop(params: {
     constraints: {
       hardConstraints,
       softConstraints,
-      structuredConstraints: structuredConstraints as unknown as Record<string, unknown>[],
+      structuredConstraints,
     },
     knownEntities: [],
     budget: {

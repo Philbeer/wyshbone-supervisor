@@ -1,3 +1,5 @@
+import type { StructuredConstraintPayload } from '../mission-executor';
+
 // ── Executor Interface ──
 export interface ExecutorInput {
   executorType: string;
@@ -12,7 +14,7 @@ export interface ExecutorInput {
   constraints: {
     hardConstraints: string[];
     softConstraints: string[];
-    structuredConstraints: Record<string, unknown>[];
+    structuredConstraints: StructuredConstraintPayload[];
   };
   knownEntities: string[];
   budget: {

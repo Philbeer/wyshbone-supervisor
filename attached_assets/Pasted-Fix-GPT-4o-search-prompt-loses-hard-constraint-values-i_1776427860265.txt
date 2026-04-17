@@ -1,0 +1,217 @@
+Fix: GPT-4o search prompt loses hard constraint values — inject them as natural-language instructions
+The mission extractor correctly produces structured constraints with real values (e.g. name contains "Swan", relationship with "local authority"). But before those reach the GPT-4o search prompt, they get stripped to generic type labels like name_contains or relationship_check. As a result, the GPT-4o prompt says "They must: name_contains." instead of "The business name must contain the word 'Swan'."
+GPT-4o only learns the actual constraint value if the intent narrative's entity_description happens to include it — which is a soft, fragile channel. On harder queries (relationships, website evidence, attribute checks) this causes search to be under-specified.
+The gp_cascade path is unaffected because it reads c.value directly for client-side filtering. This fix only touches the GPT-4o search path.
+Already exists and just needs wiring:
+
+buildStructuredConstraints() in mission-executor.ts already produces a typed StructuredConstraintPayload[] with real values
+It's already passed into executeGpt4oPrimaryPath via ctx.structuredConstraints
+It's just typed as Record<string, unknown>[] in Gpt4oSearchContext, which loses the type safety and isn't used in the prompt
+
+
+Changes — all in server/supervisor/gpt4o-search.ts
+1. Update the Gpt4oSearchContext type
+Currently:
+tsstructuredConstraints: Record<string, unknown>[];
+Change to:
+tsstructuredConstraints: StructuredConstraintPayload[];
+And add the import near the top of the file:
+tsimport type { StructuredConstraintPayload } from './mission-executor';
+2. Add a formatConstraintForSearch helper
+Add this helper function near the top of the file, above buildSearchPrompt. It turns a structured constraint into a single natural-language instruction that a human (and GPT-4o) can read and act on.
+ts/**
+ * Convert a structured constraint into a natural-language instruction
+ * suitable for a web search prompt.
+ *
+ * The goal is that the real constraint VALUE (e.g. "swan", "local authority",
+ * "vegan") reaches GPT-4o as a clear directive, not hidden inside a narrative
+ * phrase or stripped to a type label.
+ */
+function formatConstraintForSearch(c: StructuredConstraintPayload): string {
+  const valueRaw = c.value === null || c.value === undefined ? '' : String(c.value).trim();
+  if (!valueRaw) return '';
+
+  // Capitalise first letter of word values for readability in prompts
+  const valuePretty = valueRaw.length > 0
+    ? valueRaw[0].toUpperCase() + valueRaw.slice(1)
+    : valueRaw;
+
+  switch (c.type) {
+    case 'text_compare': {
+      const fieldLabel = c.field === 'name' ? 'business name' : c.field;
+      switch (c.operator) {
+        case 'contains':
+          return `The ${fieldLabel} must contain the word "${valuePretty}".`;
+        case 'starts_with':
+          return `The ${fieldLabel} must start with "${valuePretty}".`;
+        case 'ends_with':
+          return `The ${fieldLabel} must end with "${valuePretty}".`;
+        case 'equals':
+          return `The ${fieldLabel} must be exactly "${valuePretty}".`;
+        case 'not_contains':
+          return `The ${fieldLabel} must NOT contain "${valuePretty}".`;
+        default:
+          return `The ${fieldLabel} ${c.operator} "${valuePretty}".`;
+      }
+    }
+
+    case 'relationship_check':
+      return `They must have evidence of ${c.operator === 'serves' ? 'working with' : c.operator} ${valueRaw}.`;
+
+    case 'website_evidence':
+      return `Their website must contain evidence of "${valueRaw}".`;
+
+    case 'attribute_check': {
+      // Booleans render as "They must be independent." etc.
+      if (valueRaw === 'true' || valueRaw === 'yes') {
+        return `They must be ${c.field.replace(/_/g, ' ')}.`;
+      }
+      if (valueRaw === 'false' || valueRaw === 'no') {
+        return `They must NOT be ${c.field.replace(/_/g, ' ')}.`;
+      }
+      return `Their ${c.field.replace(/_/g, ' ')} must be "${valueRaw}".`;
+    }
+
+    case 'status_check':
+      return `They must currently be ${valueRaw}.`;
+
+    case 'numeric_range': {
+      const fieldLabel = c.field.replace(/_/g, ' ');
+      switch (c.operator) {
+        case 'gte':
+        case '>=':
+          return `Their ${fieldLabel} must be at least ${valueRaw}.`;
+        case 'lte':
+        case '<=':
+          return `Their ${fieldLabel} must be at most ${valueRaw}.`;
+        case 'gt':
+        case '>':
+          return `Their ${fieldLabel} must be greater than ${valueRaw}.`;
+        case 'lt':
+        case '<':
+          return `Their ${fieldLabel} must be less than ${valueRaw}.`;
+        case 'equals':
+        case '=':
+          return `Their ${fieldLabel} must equal ${valueRaw}.`;
+        default:
+          return `Their ${fieldLabel} ${c.operator} ${valueRaw}.`;
+      }
+    }
+
+    case 'time_constraint':
+    case 'time_predicate':
+      if (c.operator === 'within_last' || c.operator === 'since') {
+        return `They must have ${c.field === 'opened' ? 'opened' : c.field} ${c.operator === 'within_last' ? 'within the last' : 'since'} ${valueRaw}.`;
+      }
+      return `Their ${c.field} must satisfy: ${c.operator} ${valueRaw}.`;
+
+    case 'location_constraint':
+      // Location is already injected separately — skip
+      return '';
+
+    case 'ranking':
+      return `Rank results by ${valueRaw}.`;
+
+    default:
+      // Safe fallback — include the real value, not just the type label
+      return `They must match: ${c.field} ${c.operator} "${valueRaw}".`;
+  }
+}
+3. Rewrite buildSearchPrompt to use structured constraints
+Find buildSearchPrompt in the same file. Replace the current constraint logic:
+ts// DELETE these lines:
+const constraintText = ctx.hardConstraints.length > 0
+  ? `They must: ${ctx.hardConstraints.join(', ')}.`
+  : '';
+Replace with:
+ts// Build hard constraint instructions from structured constraints (real values)
+// Falls back to legacy labels only if STRUCTURED flag is disabled or no structured data
+const useStructured = (process.env.GPT4O_STRUCTURED_PROMPT ?? 'true').toLowerCase() === 'true';
+
+let constraintText = '';
+if (useStructured && ctx.structuredConstraints.length > 0) {
+  const hardInstructions = ctx.structuredConstraints
+    .filter(c => c.hardness === 'hard')
+    .map(c => formatConstraintForSearch(c))
+    .filter(s => s.length > 0);
+
+  if (hardInstructions.length > 0) {
+    constraintText = `\n\nCONSTRAINTS — these must be true for a result to qualify:\n${hardInstructions.map(s => `- ${s}`).join('\n')}\n`;
+  }
+} else if (ctx.hardConstraints.length > 0) {
+  // Legacy fallback (kept for safe rollback)
+  constraintText = `They must: ${ctx.hardConstraints.join(', ')}.`;
+}
+Then update the prompt template itself. The current template has ${constraintText} inline after "match the following search." Remove the old inline position and let the new constraintText block stand on its own (it already has leading/trailing newlines in the structured case). The relevant section should end up as:
+tsreturn `${getCurrentDatePreamble()}
+
+You are a research assistant finding specific entities. Search the web thoroughly.${angleNote}
+TASK: Find ${entityDesc} in ${ctx.location}.${constraintText}${temporalRules}
+Location: ${ctx.location}, ${ctx.country}
+
+For EACH result you find, provide:
+[...rest of the prompt stays the same, from "For EACH result" onwards...]
+4. Improve the search angle generator
+In executeGpt4oPrimaryPath, find this block (currently ~line 267):
+tsconst searchAngles = [
+  'primary',
+  `${businessType} ${location} ${hardConstraints.join(' ')} site listings`.trim(),
+  `${location} ${businessType} directory listings`,
+];
+Replace with:
+ts// Build search angles. The second angle injects the primary constraint VALUE
+// (not the label) so search queries reflect what the user actually asked for.
+const primaryConstraintValue = (() => {
+  const firstHardStructural = ctx.structuredConstraints.find(
+    c => c.hardness === 'hard' && c.value !== null && c.value !== undefined && String(c.value).trim().length > 0
+  );
+  if (firstHardStructural) {
+    const v = String(firstHardStructural.value).trim();
+    // Wrap multi-word values in quotes for search engines
+    return v.includes(' ') ? `"${v}"` : v;
+  }
+  return '';
+})();
+
+const searchAngles = [
+  'primary',
+  primaryConstraintValue
+    ? `${businessType} ${location} ${primaryConstraintValue} site listings`.trim()
+    : `${businessType} ${location} site listings`,
+  `${location} ${businessType} directory listings`,
+];
+5. Keep hardConstraints: string[] as-is
+Do NOT remove hardConstraints: string[] from the Gpt4oSearchContext type. It's still used in artefact payloads (search around lines 350-450 for references) and logs. Leave it intact so nothing downstream breaks.
+6. Log which prompt format was used
+At the top of buildSearchPrompt, add one log line for diagnostics:
+tsconst promptFormat = useStructured && ctx.structuredConstraints.filter(c => c.hardness === 'hard').length > 0
+  ? 'structured'
+  : 'legacy_labels';
+// (Moved — see integration note below)
+Actually simpler: in executeGpt4oPrimaryPath, after the first buildSearchPrompt call, log once:
+tsconsole.log(`[GPT4O_SEARCH] Prompt format: ${(process.env.GPT4O_STRUCTURED_PROMPT ?? 'true').toLowerCase() === 'true' ? 'structured' : 'legacy'} | hard_constraints=${ctx.structuredConstraints.filter(c => c.hardness === 'hard').length}`);
+
+Do NOT
+
+Touch gp_cascade, mission-extractor.ts, mission-planner.ts, router, or chat handler
+Remove or change buildHardConstraintLabels — other call sites still depend on it
+Remove hardConstraints: string[] from the context type
+Change the artefact payload shapes (they reference hardConstraints and structuredConstraints — keep both)
+Modify how intentNarrative.entity_description is used — it stays as supplementary context
+Add unit tests in this task (will follow in a separate pass)
+
+Test after restart
+Run the supervisor and submit this query: find pubs in Arundel with Swan in the name
+Expected behaviour:
+
+Check supervisor logs for [GPT4O_SEARCH] Prompt format: structured | hard_constraints=1
+Open the step_result artefact for the GPT4O_WEB_SEARCH step (in admin UI or DB). The payload should show the search ran and returned pubs.
+If possible, inspect the prompt by adding a temporary console.log(prompt) line before the callGpt4oWebSearch call. Confirm it contains:
+CONSTRAINTS — these must be true for a result to qualify:
+- The business name must contain the word "Swan".
+
+Run a second test: find organisations that work with the local authority in Blackpool
+Expected: the prompt should contain - They must have evidence of working with local authority.
+To verify rollback works: set GPT4O_STRUCTURED_PROMPT=false in Replit Secrets, restart, re-run. Prompt format should log as legacy and the old They must: relationship_check. text should reappear.
+Commit
+GPT-4o search: inject hard constraint values as natural-language instructions, env-flagged
