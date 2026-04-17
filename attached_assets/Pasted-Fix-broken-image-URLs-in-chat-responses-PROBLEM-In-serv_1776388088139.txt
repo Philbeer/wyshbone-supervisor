@@ -1,0 +1,44 @@
+Fix broken image URLs in chat responses.
+
+PROBLEM:
+In server/supervisor/chat-handler.ts, the image handling logic has two conflicting steps:
+1. Step 3 (regex replace) converts [IMAGE: desc] markers into markdown images using the DEPRECATED `source.unsplash.com/featured/...` URL. These URLs no longer work.
+2. Step 3b (resolveImagePlaceholders) is supposed to replace [IMAGE: desc] with real API URLs, but step 3 has already consumed all the markers before 3b runs.
+
+The result: images in responses use broken URLs, and the UI shows alt text instead of images.
+
+FIX:
+Remove step 3 entirely. Let resolveImagePlaceholders handle [IMAGE: ...] markers directly via the real Unsplash API.
+
+In server/supervisor/chat-handler.ts, find and DELETE this entire block (the "Step 3 Safety net"):
+
+  // 3. Safety net: convert any [IMAGE: description] markers the LLM still emits into Unsplash URLs
+  response = response.replace(
+    /\[IMAGE:\s*([^\]]+)\]/gi,
+    (_match, description) => {
+      const keywords = description
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '')
+        .split(/\s+/)
+        .filter((w: string) => w.length > 2)
+        .slice(0, 2)
+        .join(',');
+      return keywords
+        ? `![${description.trim()}](https://source.unsplash.com/featured/800x600/?${keywords})`
+        : '';
+    }
+  );
+
+The next block (3b, which calls resolveImagePlaceholders) should remain unchanged — it already handles [IMAGE: ...] markers properly via the real Unsplash API.
+
+After the change, restart the supervisor and test with a wine pairing chat message. You should see:
+- Log: [CHAT_HANDLER] Inlined 1 image(s) via Unsplash
+- UI: An actual image of wine/food loads (URL should start with https://images.unsplash.com/photo-...)
+
+VERIFY: Right-click the resulting image in the browser and inspect it. The src should be an `images.unsplash.com/photo-xxxxx` URL, NOT `source.unsplash.com`.
+
+DO NOT modify:
+- Step 3b (the resolveImagePlaceholders call)
+- image-search.ts
+- The system prompt
+- Anything else in chat-handler.ts

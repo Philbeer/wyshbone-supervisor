@@ -164,23 +164,6 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
     }
   }
 
-  // 3. Safety net: convert any [IMAGE: description] markers the LLM still emits into Unsplash URLs
-  response = response.replace(
-    /\[IMAGE:\s*([^\]]+)\]/gi,
-    (_match, description) => {
-      const keywords = description
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, '')
-        .split(/\s+/)
-        .filter((w: string) => w.length > 2)
-        .slice(0, 2)
-        .join(',');
-      return keywords
-        ? `![${description.trim()}](https://source.unsplash.com/featured/800x600/?${keywords})`
-        : '';
-    }
-  );
-
   // 3b. Resolve any remaining [IMAGE: ...] placeholders via Unsplash API (if key is set)
   try {
     const { resolveImagePlaceholders } = await import('./image-search');
