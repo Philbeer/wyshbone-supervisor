@@ -279,9 +279,12 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
   try {
     const { resolveImagePlaceholders } = await import('./image-search');
     const resolved = await resolveImagePlaceholders(response);
+    // Always apply cleaned text (strips orphaned [IMAGE:] markers on failure)
+    response = resolved.text;
     if (resolved.imageCount > 0) {
-      response = resolved.text;
       console.log(`[CHAT_HANDLER] Inlined ${resolved.imageCount} image(s) via Unsplash`);
+    } else {
+      console.log(`[CHAT_HANDLER] No images resolved — orphan markers stripped`);
     }
   } catch (err: any) {
     console.warn(`[CHAT_HANDLER] Image resolution failed (non-fatal): ${err.message}`);
