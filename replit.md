@@ -186,3 +186,24 @@ The frontend uses React, TypeScript, Vite, and Wouter. Styling is managed with T
 - **Handoff Diagnostic**: `buildHandoffDiagnostic()` in `mission-bridge.ts` compares canonical mission constraints against mapped `StructuredConstraint[]` and detects semantic downgrades (e.g., relationship→HAS_ATTRIBUTE). Returns `HandoffDiagnostic` with `mapping_fidelity` (`exact` | `degraded`), `downgrades[]` with reason/detail, and canonical/mapped constraint summaries. Emitted as `mission_handoff_diagnostic` artefact and UI diagnostic after every successful mission bridge.
 - **Clarify Gate**: Monitoring/alert verbs (`monitor`, `check`, `checking`, `watch`, `alert`, `notify`, `track`) added to `LEAD_FINDING_VERBS` so monitoring requests always route to `agent_run`. Dedicated `hasMonitoringIntent()` helper with `MONITORING_VERBS` regex detects `keep checking`, `monitor`, `watch for`, `alert me`, `notify me`, `track`, `let me know`, `keep an eye`, `ongoing`, `recurring`, `check every`. Monitoring detection is the FIRST check in both `evaluateClarifyGateFromIntent()` (checks `mission_type=monitor` then `hasMonitoringIntent` regex) and `evaluateClarifyGate()` (checks `hasMonitoringIntent` regex) — early exit to `agent_run` before any other classification logic can interfere. This prevents downstream `explain`/`meta_question`/`isDirectResponse` checks from misrouting monitoring requests.
 - **Monitoring Routing**: `'monitor'` added to `MISSION_TYPE_ENUM` in `canonical-intent.ts`. Intent extractor prompt includes `mission_type` classification rules and two monitoring examples. Supervisor creates `scheduled_monitors` row when `mission_mode` is `monitor`, `alert_on_change`, or `recurring_check` after successful tower loop execution. Monitor creation emits `monitor_created` artefact. Response is appended with monitoring confirmation note. All monitor creation is non-fatal (failures are logged but don't block the response).
+
+## User Preferences
+
+### Wine Recommendation Response Format
+When responding to any wine recommendation query, always use this structure:
+
+1. **Bold header** naming the region, grape, or style.
+2. One sentence of specific context — what makes this region or style distinctive.
+3. If presenting options, use a short labelled list (max 3 unless user asks for more):
+   - **Taste direction label** in bold (e.g. **Dry**, **Sweeter**, **Special occasion**)
+   - Wine name or style in *italics*
+   - One sentence max explaining why it fits
+4. Close with a single focused question — either a specific bottle search or a next step. Never ask two questions.
+
+**Tone**: Knowledgeable but not condescending. Confident recommendations, not hedged lists. Write as a sommelier talking to a curious customer.
+
+**Formatting rules**:
+- Use markdown: **bold** for labels, *italics* for wine names and classifications
+- Emoji sparingly — one per option at most, only where it aids scannability
+- No bullet walls
+- Never start a response with "I" or "Certainly"
