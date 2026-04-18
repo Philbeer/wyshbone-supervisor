@@ -1,0 +1,35 @@
+I need to debug why images aren't rendering in chat responses, even though [IMAGE: ...] markers should be getting resolved to real Unsplash URLs.
+Please do the following and report back:
+1. Confirm the current state of server/supervisor/chat-handler.ts:
+
+Does the CHAT_SYSTEM_PROMPT currently contain a VISUAL ILLUSTRATIONS: section that instructs the LLM to use [IMAGE: description] syntax? Paste the exact lines.
+Find the block that calls resolveImagePlaceholders(response) — what does it currently look like? Paste the exact lines (should be around line 190-210).
+
+2. Confirm the Unsplash secret:
+
+Is there a secret named exactly UNSPLASH_ACCESS_KEY set in the supervisor's Replit Secrets? (Don't reveal the value, just confirm it exists with that exact name.)
+Has the supervisor been republished since the secret was added?
+
+3. Run a live test:
+
+In the UI, send this message: recommend a wine to pair with lamb
+While the supervisor is processing, tail the supervisor console output.
+Capture and paste back every log line containing any of these strings: IMAGE_SEARCH, CHAT_HANDLER, Inlined, Unsplash, image
+
+4. Apply this fix if not already applied:
+Replace the image resolver block in server/supervisor/chat-handler.ts with:
+ts// 3b. Resolve any remaining [IMAGE: ...] placeholders via Unsplash API (if key is set)
+try {
+  const { resolveImagePlaceholders } = await import('./image-search');
+  const resolved = await resolveImagePlaceholders(response);
+  // Always apply cleaned text (strips orphaned [IMAGE:] markers on failure)
+  response = resolved.text;
+  if (resolved.imageCount > 0) {
+    console.log(`[CHAT_HANDLER] Inlined ${resolved.imageCount} image(s) via Unsplash`);
+  } else {
+    console.log(`[CHAT_HANDLER] No images resolved — orphan markers stripped`);
+  }
+} catch (err: any) {
+  console.warn(`[CHAT_HANDLER] Image resolution failed (non-fatal): ${err.message}`);
+}
+Report back the answers to 1, 2, and 3, and confirm whether 4 was already applied or you've just applied it now. Do not modify anything else.
