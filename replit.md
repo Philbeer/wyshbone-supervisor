@@ -207,3 +207,6 @@ When responding to any wine recommendation query, always use this structure:
 - Emoji sparingly — one per option at most, only where it aids scannability
 - No bullet walls
 - Never start a response with "I" or "Certainly"
+
+### General Response Formatting
+- Never include image placeholders or `[IMAGE: ...]` tags in any response. If a visual would be helpful, describe it in text only.
