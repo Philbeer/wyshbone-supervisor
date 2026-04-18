@@ -1,0 +1,35 @@
+MODE: INVESTIGATE ONLY. DO NOT CHANGE ANY CODE.
+Your previous report confirmed the code structure is correct. We now need to find a runtime data issue. Two recent commits are suspect. Please investigate both and report findings.
+1. Show the diff for commit 7b79e7c6
+Run:
+bashgit show 7b79e7c6 -- client/src/pages/chat.tsx
+Report every hunk. Specifically flag any line that:
+
+Changes when setIsWaitingForSupervisor(false) is called
+Moves a cleanupRunState call earlier
+Changes the currentTurnIsComplete timing
+Touches the SSE handler that creates isActivityTicker messages
+
+2. Show the diff for commit 160304ec
+Run:
+bashgit show 160304ec -- client/src/pages/chat.tsx
+Report every hunk. Flag any line that:
+
+Changes how messages with isActivityTicker: true are created or preserved
+Changes how messages with isIntentNarrative: true are handled
+Adds a hidden: true flag to streaming messages
+Modifies the message poller's specialMessages filter
+
+3. Report current behaviour of three key state transitions
+Search chat.tsx for setIsWaitingForSupervisor. Report EVERY call site with 3 lines of context. For each, describe in one line what condition triggers it. I want to see the full lifecycle of this flag.
+4. Find where isActivityTicker messages are injected
+Search for isActivityTicker: true in chat.tsx. Report the injection point(s) with 10 lines of context. Specifically I want to see:
+
+What event triggers injection (SSE message? poller? supervisorTaskId arrival?)
+Whether the injection condition has changed recently (check git blame on those lines: git blame -L <start>,<end> client/src/pages/chat.tsx | head -20)
+
+5. Find where messages are marked hidden: true
+Search for hidden: true in chat.tsx. Report every location with 5 lines of context. I want to know if intent narrative messages are being force-hidden by a recent change.
+Output
+For each of 1-5, report findings. Then give your best guess diagnosis: which of the three runtime hypotheses (ticker not injected / intent hidden / isWaiting false too early) is most likely, based on the diffs you saw.
+DO NOT CHANGE ANY CODE. DO NOT RESTART. READ AND REPORT ONLY.
