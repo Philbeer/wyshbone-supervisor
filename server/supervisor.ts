@@ -1431,9 +1431,7 @@ class SupervisorService {
         const { routeConversation } = await import('./supervisor/conversation-router');
         const { classifyTurn } = await import('./supervisor/conversation-turn-classifier');
 
-        // Load conversation history — fetch last 15 messages (≥ 7 turns) so the router and
-        // sticky-flag fallback both receive at least the last 4 user/assistant turns of context.
-        // The full array is passed to routeConversation without further slicing.
+        // Load conversation history
         let routerHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
         if (task.conversation_id && supabase) {
           const { data: msgs } = await supabase
@@ -1467,75 +1465,6 @@ class SupervisorService {
             }
           } catch (ctxErr: any) {
             console.warn(`[ROUTER] Context load failed (non-fatal): ${ctxErr.message}`);
-          }
-        }
-
-        // ── Part 3: sticky flag check — bypass classifier + router if user is answering a chat question ──
-        {
-          const { getConversationFlag, setConversationFlag } = await import('./supervisor/conversation-state');
-          const stickyFlag = getConversationFlag(task.conversation_id);
-          const flagActive = stickyFlag.awaiting_chat_reply === true
-            && (stickyFlag.awaiting_chat_reply_expires_at ?? 0) > Date.now();
-
-          if (flagActive) {
-            // Does the message look like an explicit new search intent?
-            const isClearNewIntent =
-              /\b(find|search|look for|get me|i need|show me)\b.{0,60}\b(in|near|around)\b/i.test(rawMsg)
-              || /\bfind\s+\w+\s+(in|near|around)/i.test(rawMsg);
-
-            if (!isClearNewIntent) {
-              console.log(`[ROUTER] Sticky chat reply detected — routing to chat-handler (skipping classifier)`);
-
-              const { handleChat } = await import('./supervisor/chat-handler');
-              const chatResult = await handleChat({
-                conversationId: task.conversation_id,
-                userId: task.user_id,
-                rawMessage: rawMsg,
-                jobId,
-                taskId: task.id,
-                conversationHistory: routerHistory,
-                urlContent: (requestData as any).url_content || null,
-                previousResultsSummary: null,
-              });
-
-              if (supabase) {
-                await supabase.from('supervisor_tasks').update({
-                  status: 'completed',
-                  result: { message_id: chatResult.messageId, router: 'chat', handler: 'chat_handler_sticky' },
-                }).eq('id', task.id);
-              }
-
-              await storage.updateAgentRun(jobId, {
-                status: 'completed', terminalState: 'completed', endedAt: new Date(),
-                metadata: { verdict: 'chat_handler_sticky' },
-              }).catch(() => {});
-
-              this.postArtefactToUI({
-                runId: jobId,
-                clientRequestId,
-                type: 'diagnostic',
-                payload: {
-                  status: 'CHAT',
-                  leads: [],
-                  message: chatResult.response,
-                  router_verdict: 'chat_handler_sticky',
-                  run_complete: true,
-                },
-                userId: task.user_id,
-                conversationId: task.conversation_id,
-              }).catch((err: any) => {
-                console.error(`[STICKY] CRITICAL: Failed to signal UI run is complete: ${err.message}`);
-              });
-
-              taskExecutionStartedEmitted = true;
-              await emitTaskExecutionCompleted('chat_handler_sticky');
-              return;
-
-            } else {
-              console.log(`[ROUTER] Sticky flag set but clear new intent detected — breaking out`);
-              setConversationFlag(task.conversation_id, { awaiting_chat_reply: false });
-              // Fall through to normal router below
-            }
           }
         }
 

@@ -62,10 +62,6 @@ CORE RULES:
 11. Detect relationship language: "works with", "partnered with", "supplies", "serves [entity]", "affiliated with".
 12. Detect ranking language: "best", "top", "highest rated".
 13. Detect monitoring intent: "keep checking", "alert me when", "notify me if".
-14. CONTEXT ENRICHMENT: if recent conversation turns are provided and the current message uses a vague or generic entity (e.g. "retailers", "businesses", "shops"), check whether the conversation context reveals a more specific topic. If it does, enrich the entity type in your semantic interpretation. Examples:
-    - Context: "discussing English sparkling wines" → current: "find retailers in Sussex" → interpret as: "wine retailers in Sussex" (specifically English sparkling wine retailers)
-    - Context: "discussing dog grooming" → current: "find businesses near Leeds" → interpret as: "dog groomers near Leeds"
-    Apply this ONLY when the entity in the current message is clearly generic and the conversational context provides a specific, unambiguous subject that the user obviously intends.
 
 SEMANTIC STRIPPING RULES — these are critical:
 

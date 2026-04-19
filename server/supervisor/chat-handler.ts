@@ -1,7 +1,6 @@
 import { callLLMText } from './llm-failover';
 import { getRelevantReferenceKnowledge } from './reference-knowledge';
 import { getCurrentContextPreamble } from './current-context';
-import { getConversationFlag, setConversationFlag } from './conversation-state';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -253,14 +252,6 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
 
   parts.push(`User: ${rawMessage}`);
 
-  // Check consecutive clarification question count — if capped, instruct LLM to answer instead of ask
-  const currentFlag = getConversationFlag(conversationId);
-  if (currentFlag.consecutive_chat_questions >= 2) {
-    parts.push('');
-    parts.push('[SYSTEM NOTE: You have already asked 2 clarifying questions in a row. Do NOT ask another question. Give your best answer now based on the information available, even if it is not perfectly specific. Commit to a recommendation.]');
-    console.log(`[CHAT_HANDLER] consecutive_chat_questions=${currentFlag.consecutive_chat_questions} — injecting best-guess instruction`);
-  }
-
   const userPrompt = parts.join('\n');
 
   // 2. Call LLM with circuit breaker
@@ -297,45 +288,6 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
     }
   } catch (err: any) {
     console.warn(`[CHAT_HANDLER] Image resolution failed (non-fatal): ${err.message}`);
-  }
-
-  // 3c. Update sticky flag based on whether response ends with a question
-  //     Search-setup questions (asking WHERE to search / WHAT TYPE of business)
-  //     must NOT set the sticky flag — the next user reply should go back through
-  //     the full router so it can trigger a proper search.
-  {
-    const endsWithQuestion = /\?\s*$/.test(response.trim());
-    const prevFlag = getConversationFlag(conversationId);
-
-    const SEARCH_SETUP_PATTERNS = [
-      /where.{0,30}(search|look|find)/i,
-      /what (type|kind|sort) of/i,
-      /which (city|town|area|region|location)/i,
-      /in (what|which) (area|city|town|region)/i,
-      /what (area|city|town|location|place).{0,20}(search|look|find)/i,
-    ];
-    const isSearchSetupQuestion = endsWithQuestion
-      && SEARCH_SETUP_PATTERNS.some(re => re.test(response));
-
-    if (endsWithQuestion && !isSearchSetupQuestion) {
-      setConversationFlag(conversationId, {
-        awaiting_chat_reply: true,
-        awaiting_chat_reply_expires_at: Date.now() + 10 * 60 * 1000,
-        consecutive_chat_questions: prevFlag.consecutive_chat_questions + 1,
-      });
-      console.log(`[CHAT_HANDLER] Sticky flag SET — consecutive_chat_questions=${prevFlag.consecutive_chat_questions + 1}`);
-    } else {
-      setConversationFlag(conversationId, {
-        awaiting_chat_reply: false,
-        awaiting_chat_reply_expires_at: null,
-        consecutive_chat_questions: 0,
-      });
-      if (isSearchSetupQuestion) {
-        console.log(`[CHAT_HANDLER] Search-setup question detected — sticky flag NOT set, router will handle next turn`);
-      } else {
-        console.log(`[CHAT_HANDLER] Sticky flag CLEARED — substantive answer given`);
-      }
-    }
   }
 
   // 4. Save message to DB (single write, complete content)
