@@ -1,0 +1,64 @@
+I want to fix a routing bug where short user replies to a chat-handler question get misclassified as new lead-gen intents. The fix has four parts — please apply them all and confirm what you changed.
+Part 1 — Add sticky flag tracking
+In the conversation record (same place conversation_phase is stored — probably conversations table metadata), track two fields:
+
+awaiting_chat_reply: boolean — true when chat-handler just asked a question
+awaiting_chat_reply_expires_at: number — unix timestamp 10 minutes in the future when the flag was set
+
+Part 2 — Chat-handler sets/clears the flag
+In server/supervisor/chat-handler.ts, after the LLM generates a response, detect whether the response ends with a question:
+tsconst endsWithQuestion = /\?\s*$/.test(response.trim());
+if (endsWithQuestion) {
+  await setConversationFlag(conversationId, {
+    awaiting_chat_reply: true,
+    awaiting_chat_reply_expires_at: Date.now() + 10 * 60 * 1000,
+  });
+} else {
+  await setConversationFlag(conversationId, {
+    awaiting_chat_reply: false,
+    awaiting_chat_reply_expires_at: null,
+  });
+}
+Also track consecutive_chat_questions — increment when the handler asks a question, reset to 0 when it gives a substantive answer. If this hits 2, the handler must stop asking and give its best-guess answer instead. This prevents clarification loops.
+Part 3 — Router checks the flag first
+In the main router (wherever it decides chat vs search — likely in supervisor.ts or a router module), BEFORE the normal classification logic, add:
+tsconst flag = await getConversationFlag(conversationId);
+const flagActive = flag?.awaiting_chat_reply === true
+  && (flag.awaiting_chat_reply_expires_at ?? 0) > Date.now();
+
+if (flagActive) {
+  // Quick intent override check — does the new message look like a clear new intent?
+  const isClearNewIntent = /\b(find|search|look for|get me|i need|show me)\b.{0,60}\b(in|near|around)\b/i.test(rawMessage)
+    || /\bfind\s+\w+\s+(in|near|around)/i.test(rawMessage);
+
+  if (!isClearNewIntent) {
+    // Stick with chat-handler — user is answering the question
+    console.log(`[ROUTER] Sticky chat reply detected — routing to chat-handler (skipping classifier)`);
+    return { verdict: 'chat_handler_sticky', handler: 'chat' };
+  } else {
+    console.log(`[ROUTER] Sticky flag set but clear new intent detected — breaking out`);
+    // Fall through to normal router, clear the flag
+    await setConversationFlag(conversationId, { awaiting_chat_reply: false });
+  }
+}
+Part 4 — Normal router path gets more history
+When the router falls through to its normal classification path, make sure it's being given the last 4 user/assistant turns as context (not just the latest message). Find where the router prompt is built and confirm it includes conversationHistory.slice(-4). If it doesn't, add it.
+Hard requirements:
+
+Don't touch the judge, gate, planner, re-loop logic, or any agent-pipeline code
+Don't change how actual lead searches work
+The sticky flag must expire after 10 minutes — no permanent stickiness
+The intent override must exist — users must always be able to type "find pubs in Brighton" mid-conversation and have it work
+Cap consecutive chat questions at 2 to prevent clarification loops
+
+Report back:
+
+Every file modified and the line numbers
+Confirmation all four parts are in place
+Confirmation no agent-pipeline code was touched
+
+How I'll test it:
+
+Chat about wine → ask a clarifying question → type "sussex" → should stay in chat-handler, not trigger the full agent pipeline
+Chat about wine → mid-conversation type "find pubs in Brighton" → should break out and run a normal search
+Chat about wine → let chat ask 2 clarifying questions in a row → third time it should just answer with its best guess rather than asking again
