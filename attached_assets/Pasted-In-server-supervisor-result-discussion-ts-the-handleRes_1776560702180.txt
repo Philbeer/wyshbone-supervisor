@@ -1,0 +1,73 @@
+In server/supervisor/result-discussion.ts, the handleResultDiscussion function currently only loads verification evidence when the user names a specific lead. This means general questions like "how do you know they are independent?" or "why did you include these?" can't be answered properly — the LLM doesn't see the Tower verification quotes that exist in the artefacts.
+Fix: always load and include the verification evidence for all delivered leads in the prompt.
+Step 1 — Move the artefact loading outside the if (resolvedLead && ctx.lastDeliveryRunId) block so it runs for every discussion turn:
+ts// Load verification evidence for ALL leads (not just a resolved one)
+let leadEvidenceMap: Map<string, { matched_phrase?: string; quote?: string; source_url?: string; verdict?: string }> = new Map();
+
+if (ctx.lastDeliveryRunId) {
+  try {
+    const artefacts = await storage.getArtefactsByRunId(ctx.lastDeliveryRunId);
+
+    // Look in delivery_summary / combined_delivery / lead_verification for the per-lead evidence
+    for (const artefact of artefacts) {
+      const type = artefact.type;
+      if (!['delivery_summary', 'combined_delivery', 'final_delivery', 'lead_verification', 'attribute_verification'].includes(type)) continue;
+
+      const payload = artefact.payloadJson as any;
+      if (!payload) continue;
+
+      const leadsArray = payload.delivered_exact || payload.leads || payload.delivered || [];
+      for (const lead of leadsArray) {
+        if (!lead || !lead.name) continue;
+
+        const evidence = lead.match_evidence?.[0] || lead.supporting_evidence?.[0] || lead.evidence?.[0];
+        if (evidence) {
+          leadEvidenceMap.set(lead.name.toLowerCase(), {
+            matched_phrase: evidence.matched_phrase || evidence.constraint_value,
+            quote: evidence.quote || (evidence.snippets && evidence.snippets[0]),
+            source_url: evidence.source_url,
+            verdict: evidence.verification_status || evidence.verdict || evidence.tower_status,
+          });
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[RESULT_DISCUSSION] Failed to load lead evidence (non-fatal): ${err.message}`);
+  }
+}
+Step 2 — Enrich the lead summary in the prompt so each lead shows its evidence:
+Replace the existing leadSummary with:
+tsconst leadSummary = ctx.leads
+  .map((l) => {
+    const parts = [`${l.index}. ${l.name}`, l.address];
+    if (l.website) parts.push(`Website: ${l.website}`);
+    if (l.phone) parts.push(`Phone: ${l.phone}`);
+
+    const ev = leadEvidenceMap.get(l.name.toLowerCase());
+    if (ev) {
+      if (ev.matched_phrase) parts.push(`Verified match: "${ev.matched_phrase}"`);
+      if (ev.quote) parts.push(`Evidence quote: "${ev.quote}"`);
+      if (ev.source_url) parts.push(`Source: ${ev.source_url}`);
+      if (ev.verdict) parts.push(`Tower verdict: ${ev.verdict}`);
+    }
+    return parts.join(' | ');
+  })
+  .join('\n');
+Step 3 — Update the system prompt to tell the LLM to use this evidence:
+Add to the DISCUSSION_SYSTEM_PROMPT under RULES:
+- Each lead may include a "Verified match", "Evidence quote", "Source", and "Tower verdict". These are verification facts captured during the search. If the user asks how you know something (e.g. "how do you know they are independent?"), cite the evidence quotes and source URLs directly. Do NOT say you don't have information if evidence is present — use it.
+What NOT to change:
+
+The router logic, the judge, the planner, the re-loop system, the chat-handler
+The fallback behaviour when no results exist
+The circuit breaker
+Anything in the main agent pipeline
+
+Test plan:
+
+Run a search where evidence is captured (e.g. "find independent beer merchants in Sussex")
+Ask "how do you know they are independent?" → response should cite specific evidence quotes from the relevant websites
+Ask "which ones verified strongest?" → response should reference Tower verdicts
+Ask about a specific lead by number → should still work as before (the existing resolvedLead flow is unchanged, just enriched)
+
+Show me the file paths, exact lines changed, and confirm the main agent pipeline is untouched.

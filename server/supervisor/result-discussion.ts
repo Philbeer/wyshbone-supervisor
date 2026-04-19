@@ -55,6 +55,7 @@ RULES:
 - If asked a general question ("which have websites?"), scan the lead list and answer.
 - Keep responses to 2-4 sentences. Be direct.
 - If you don't have enough information to answer, say so honestly.
+- Each lead may include a "Verified match", "Evidence quote", "Source", and "Tower verdict". These are verification facts captured during the search. If the user asks how you know something (e.g. "how do you know they are independent?"), cite the evidence quotes and source URLs directly. Do NOT say you don't have information if evidence is present — use it.
 
 SUGGESTING NEXT ACTIONS — only suggest things the system can actually do:
 - "I can search for the same type of business in a different area"
@@ -88,39 +89,54 @@ export async function handleResultDiscussion(
   // 2. Try to resolve a specific lead reference
   const resolvedLead = resolveLeadReference(ctx, rawMessage);
 
-  // 3. Optionally load artefact evidence for a specific lead
-  let evidenceContext = '';
-  if (resolvedLead && ctx.lastDeliveryRunId) {
+  // 3. Load verification evidence for ALL leads (not just a resolved one)
+  let leadEvidenceMap: Map<string, { matched_phrase?: string; quote?: string; source_url?: string; verdict?: string }> = new Map();
+
+  if (ctx.lastDeliveryRunId) {
     try {
       const artefacts = await storage.getArtefactsByRunId(ctx.lastDeliveryRunId);
-      const evidenceArtefacts = artefacts.filter((a) =>
-        ['verification_evidence', 'step_result', 'leads_list'].includes(a.type),
-      );
 
-      for (const artefact of evidenceArtefacts) {
+      for (const artefact of artefacts) {
+        const type = artefact.type;
+        if (!['delivery_summary', 'combined_delivery', 'final_delivery', 'lead_verification', 'attribute_verification'].includes(type)) continue;
+
         const payload = artefact.payloadJson as any;
         if (!payload) continue;
 
-        const payloadStr = JSON.stringify(payload);
-        const nameMatch = payloadStr.toLowerCase().includes(resolvedLead.name.toLowerCase());
-        const placeMatch = resolvedLead.placeId && payloadStr.includes(resolvedLead.placeId);
+        const leadsArray = payload.delivered_exact || payload.leads || payload.delivered || [];
+        for (const lead of leadsArray) {
+          if (!lead || !lead.name) continue;
 
-        if (nameMatch || placeMatch) {
-          evidenceContext = payloadStr.substring(0, 2000);
-          break;
+          const evidence = lead.match_evidence?.[0] || lead.supporting_evidence?.[0] || lead.evidence?.[0];
+          if (evidence) {
+            leadEvidenceMap.set(lead.name.toLowerCase(), {
+              matched_phrase: evidence.matched_phrase || evidence.constraint_value,
+              quote: evidence.quote || (evidence.snippets && evidence.snippets[0]),
+              source_url: evidence.source_url,
+              verdict: evidence.verification_status || evidence.verdict || evidence.tower_status,
+            });
+          }
         }
       }
     } catch (err: any) {
-      console.warn(`[RESULT_DISCUSSION] Failed to load artefacts (non-fatal): ${err.message}`);
+      console.warn(`[RESULT_DISCUSSION] Failed to load lead evidence (non-fatal): ${err.message}`);
     }
   }
 
-  // 4. Build lead summary
+  // 4. Build lead summary (with evidence per lead)
   const leadSummary = ctx.leads
     .map((l) => {
       const parts = [`${l.index}. ${l.name}`, l.address];
       if (l.website) parts.push(`Website: ${l.website}`);
       if (l.phone) parts.push(`Phone: ${l.phone}`);
+
+      const ev = leadEvidenceMap.get(l.name.toLowerCase());
+      if (ev) {
+        if (ev.matched_phrase) parts.push(`Verified match: "${ev.matched_phrase}"`);
+        if (ev.quote) parts.push(`Evidence quote: "${ev.quote}"`);
+        if (ev.source_url) parts.push(`Source: ${ev.source_url}`);
+        if (ev.verdict) parts.push(`Tower verdict: ${ev.verdict}`);
+      }
       return parts.join(' | ');
     })
     .join('\n');
@@ -133,10 +149,6 @@ export async function handleResultDiscussion(
     if (resolvedLead.website) userPrompt += ` | Website: ${resolvedLead.website}`;
     if (resolvedLead.phone) userPrompt += ` | Phone: ${resolvedLead.phone}`;
     userPrompt += '\n\n';
-  }
-
-  if (evidenceContext) {
-    userPrompt += `EVIDENCE CONTEXT:\n${evidenceContext}\n\n`;
   }
 
   userPrompt += `USER MESSAGE: ${rawMessage}`;
