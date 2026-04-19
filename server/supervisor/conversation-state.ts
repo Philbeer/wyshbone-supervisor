@@ -42,6 +42,15 @@ export interface ConversationState {
   lastActivityAt: number;
   phaseEnteredAt: number;
   turnCount: number;
+  awaiting_chat_reply: boolean;
+  awaiting_chat_reply_expires_at: number | null;
+  consecutive_chat_questions: number;
+}
+
+export interface ConversationFlag {
+  awaiting_chat_reply?: boolean;
+  awaiting_chat_reply_expires_at?: number | null;
+  consecutive_chat_questions?: number;
 }
 
 export interface PhaseDetectionInput {
@@ -103,6 +112,9 @@ export function getConversationState(conversationId: string): ConversationState 
     lastActivityAt: now,
     phaseEnteredAt: now,
     turnCount: 0,
+    awaiting_chat_reply: false,
+    awaiting_chat_reply_expires_at: null,
+    consecutive_chat_questions: 0,
   };
   store.set(conversationId, fresh);
   return fresh;
@@ -153,6 +165,28 @@ export function setLastDelivery(conversationId: string, delivery: LastDelivery):
 
 export function resetConversationState(conversationId: string): void {
   store.delete(conversationId);
+}
+
+export function setConversationFlag(conversationId: string, flag: ConversationFlag): void {
+  const state = getConversationState(conversationId);
+  if (flag.awaiting_chat_reply !== undefined) {
+    state.awaiting_chat_reply = flag.awaiting_chat_reply;
+  }
+  if (flag.awaiting_chat_reply_expires_at !== undefined) {
+    state.awaiting_chat_reply_expires_at = flag.awaiting_chat_reply_expires_at;
+  }
+  if (flag.consecutive_chat_questions !== undefined) {
+    state.consecutive_chat_questions = flag.consecutive_chat_questions;
+  }
+}
+
+export function getConversationFlag(conversationId: string): Pick<ConversationState, 'awaiting_chat_reply' | 'awaiting_chat_reply_expires_at' | 'consecutive_chat_questions'> {
+  const state = getConversationState(conversationId);
+  return {
+    awaiting_chat_reply: state.awaiting_chat_reply,
+    awaiting_chat_reply_expires_at: state.awaiting_chat_reply_expires_at,
+    consecutive_chat_questions: state.consecutive_chat_questions,
+  };
 }
 
 export function suggestPhase(input: PhaseDetectionInput): ConversationPhase {
