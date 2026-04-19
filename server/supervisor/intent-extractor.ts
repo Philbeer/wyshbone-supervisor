@@ -227,7 +227,14 @@ User: "monitor new vegan restaurants opening in Cardiff"
 }
 
 CONVERSATION CONTEXT:
-If prior conversation turns are provided, use them to understand follow-up replies. A message like "option B" or "use first reviews" only makes sense in context of a prior clarification question. Extract intent from the LATEST user message but use context to resolve references.
+If prior conversation turns are provided, use them in two ways:
+
+1. Reference resolution: resolve follow-up references. A message like "option B" or "use first reviews" only makes sense in context of a prior clarification question. Extract intent from the LATEST user message but use context to resolve references.
+
+2. Entity enrichment: if recent conversation was about a specific topic (e.g. "English sparkling wines", "dog grooming", "craft beer") and the user's current message uses a vague or generic entity (e.g. "find retailers", "find shops", "find businesses"), enrich entity_category using the specific topic from context. For example:
+   - Context: discussion of "English sparkling wines" → user: "find retailers in Sussex" → entity_category: "wine retailers" (NOT just "retailers")
+   - Context: discussion of "dog grooming" → user: "find businesses near Leeds" → entity_category: "dog groomers" (NOT just "businesses")
+   Apply this ONLY when the entity in the current message is clearly generic and the context provides a specific, relevant subject.
 
 Return ONLY valid JSON. No markdown fences, no commentary.`;
 

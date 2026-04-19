@@ -300,10 +300,24 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
   }
 
   // 3c. Update sticky flag based on whether response ends with a question
+  //     Search-setup questions (asking WHERE to search / WHAT TYPE of business)
+  //     must NOT set the sticky flag — the next user reply should go back through
+  //     the full router so it can trigger a proper search.
   {
     const endsWithQuestion = /\?\s*$/.test(response.trim());
     const prevFlag = getConversationFlag(conversationId);
-    if (endsWithQuestion) {
+
+    const SEARCH_SETUP_PATTERNS = [
+      /where.{0,30}(search|look|find)/i,
+      /what (type|kind|sort) of/i,
+      /which (city|town|area|region|location)/i,
+      /in (what|which) (area|city|town|region)/i,
+      /what (area|city|town|location|place).{0,20}(search|look|find)/i,
+    ];
+    const isSearchSetupQuestion = endsWithQuestion
+      && SEARCH_SETUP_PATTERNS.some(re => re.test(response));
+
+    if (endsWithQuestion && !isSearchSetupQuestion) {
       setConversationFlag(conversationId, {
         awaiting_chat_reply: true,
         awaiting_chat_reply_expires_at: Date.now() + 10 * 60 * 1000,
@@ -316,7 +330,11 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
         awaiting_chat_reply_expires_at: null,
         consecutive_chat_questions: 0,
       });
-      console.log(`[CHAT_HANDLER] Sticky flag CLEARED — substantive answer given`);
+      if (isSearchSetupQuestion) {
+        console.log(`[CHAT_HANDLER] Search-setup question detected — sticky flag NOT set, router will handle next turn`);
+      } else {
+        console.log(`[CHAT_HANDLER] Sticky flag CLEARED — substantive answer given`);
+      }
     }
   }
 
