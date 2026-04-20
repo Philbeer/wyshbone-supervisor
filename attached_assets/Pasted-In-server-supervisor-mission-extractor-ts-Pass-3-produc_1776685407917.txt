@@ -1,0 +1,53 @@
+In server/supervisor/mission-extractor.ts, Pass 3 produces the pass3IntentNarrative object around line 945 (the console.log that says "Pass 3 complete"). Currently this object gets passed back up the call chain and the intent_narrative artefact is only created later in mission-executor.ts around line 1036, after mission extraction, handoff diagnostics, capability checks, and mission planning have all finished.
+Goal: emit the intent_narrative artefact to the user's Live Activity panel as soon as Pass 3 completes, not after the full extraction + planning chain. This lets the user see the intent card appear ~10 seconds earlier.
+Change 1 — mission-extractor.ts
+extractStructuredMission doesn't currently have access to runId, userId, conversationId — it only returns the trace. Add these as optional parameters so it can emit the artefact early:
+tsexport async function extractStructuredMission(
+  userMessage: string,
+  conversationContext?: string,
+  earlyEmit?: {
+    runId: string;
+    userId: string;
+    conversationId?: string;
+  },
+): Promise<MissionExtractionResult> {
+Then, right after Pass 3 parses successfully (right after the console.log "Pass 3 complete" line, around line 945), if earlyEmit was passed, fire the artefact creation but don't await it — let it run in the background so Pass 2 can start immediately:
+tsif (earlyEmit && pass3IntentNarrative) {
+  // Fire and forget — don't block Pass 2 on the artefact write
+  import('./artefacts').then(({ createArtefact }) => {
+    createArtefact({
+      runId: earlyEmit.runId,
+      type: 'intent_narrative',
+      title: 'Intent Narrative (Pass 3)',
+      summary: `entity="${pass3IntentNarrative!.entity_description.substring(0, 80)}" scarcity=${pass3IntentNarrative!.scarcity_expectation} exclusions=${pass3IntentNarrative!.entity_exclusions.length}`,
+      payload: pass3IntentNarrative as unknown as Record<string, unknown>,
+      userId: earlyEmit.userId,
+      conversationId: earlyEmit.conversationId,
+    }).catch((e: any) => console.warn(`[MISSION_EXTRACTOR] early intent_narrative emit failed (non-fatal): ${e.message}`));
+  });
+  console.log(`[MISSION_EXTRACTOR] Early intent_narrative emitted to UI`);
+}
+Change 2 — Update mission-executor.ts
+Find where extractStructuredMission is called and pass the new earlyEmit object with runId, userId, conversationId from the mission execution context.
+Change 3 — Prevent duplicate artefact
+The existing intent_narrative artefact creation in mission-executor.ts around line 1036 will now be a duplicate. Options:
+
+Safer option: leave the later emit in place — the duplicate is harmless (two rows in DB, UI shows the first one it receives). Only concern is DB noise.
+Cleaner option: skip the late emit if earlyEmit was used. Add a flag on the context or just skip it when the pass3IntentNarrative is present on the mission trace (which it always will be if extraction succeeded).
+
+Go with the safer option first — leave the late emit in place. If duplicates show up as an issue in the UI we'll clean up later.
+Hard constraints:
+
+Do NOT change any Pass 1, 2, or 3 logic, prompts, or models
+Do NOT remove the Pass 1 → Pass 3 dependency — it stays sequential
+The early emit must be fire-and-forget so Pass 2 isn't blocked
+If earlyEmit is not provided (backwards compatibility), behaviour is unchanged
+
+Test plan:
+
+Run "find pubs in Arundel"
+Watch the Live Activity panel — the intent card should appear while Pass 2 is still running
+Check supervisor logs for [MISSION_EXTRACTOR] Early intent_narrative emitted to UI
+Confirm the final mission output is identical to before
+
+Report back: files modified, lines changed, and whether the early emit log line appears.

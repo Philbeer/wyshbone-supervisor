@@ -806,6 +806,11 @@ function cleanupMissionValues(mission: Record<string, unknown>): Record<string, 
 export async function extractStructuredMission(
   userMessage: string,
   conversationContext?: string,
+  earlyEmit?: {
+    runId: string;
+    userId: string;
+    conversationId?: string;
+  },
 ): Promise<MissionExtractionResult> {
   const model = selectModel();
   const timestamp = new Date().toISOString();
@@ -954,6 +959,21 @@ Produce the intent narrative JSON for this search.`;
       };
       console.log(`[MISSION] Pass 3 complete — entity: ${pass3IntentNarrative.entity_description.substring(0, 100)}`);
       console.log(`[MISSION_EXTRACTOR] Pass 3 — findability=${pass3IntentNarrative.findability} scarcity=${pass3IntentNarrative.scarcity_expectation} clarification_needed=${pass3IntentNarrative.clarification_needed} exclusions=${pass3IntentNarrative.entity_exclusions.length} duration=${pass3DurationMs}ms`);
+      if (earlyEmit && pass3IntentNarrative) {
+        // Fire and forget — don't block Pass 2 on the artefact write
+        import('./artefacts').then(({ createArtefact }) => {
+          createArtefact({
+            runId: earlyEmit.runId,
+            type: 'intent_narrative',
+            title: 'Intent Narrative (Pass 3)',
+            summary: `entity="${pass3IntentNarrative!.entity_description.substring(0, 80)}" scarcity=${pass3IntentNarrative!.scarcity_expectation} exclusions=${pass3IntentNarrative!.entity_exclusions.length}`,
+            payload: pass3IntentNarrative as unknown as Record<string, unknown>,
+            userId: earlyEmit.userId,
+            conversationId: earlyEmit.conversationId,
+          }).catch((e: any) => console.warn(`[MISSION_EXTRACTOR] early intent_narrative emit failed (non-fatal): ${e.message}`));
+        });
+        console.log(`[MISSION_EXTRACTOR] Early intent_narrative emitted to UI`);
+      }
     } else {
       console.warn(`[MISSION_EXTRACTOR] Pass 3 returned unexpected shape — skipping (non-fatal), Pass 2 will run without context`);
     }

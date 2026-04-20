@@ -2185,7 +2185,11 @@ class SupervisorService {
 
     if (missionMode !== 'off') {
       try {
-        missionResult = await extractStructuredMission(effectiveMsg, conversationContextStr);
+        missionResult = await extractStructuredMission(effectiveMsg, conversationContextStr, {
+          runId: jobId,
+          userId: task.user_id,
+          conversationId: task.conversation_id,
+        });
         const canonicalForComparison = shadowResult.extraction?.validation?.intent ?? null;
 
         logMissionShadow(
