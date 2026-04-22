@@ -1,0 +1,82 @@
+Please create a report-only investigation of all LLM usage across the Supervisor repo.
+
+Goal:
+Produce a clear human-readable report showing every place an LLM call is made, which model/provider is used, what the call is for, and whether the current model choice seems appropriate.
+
+Do not change any code. Do not refactor. Do not install anything. This is report only.
+
+Please inspect:
+
+* All OpenAI calls
+* All Anthropic / Claude calls
+* All Groq calls
+* Any Gemini / Google calls
+* Any Together / OpenRouter / Perplexity / DeepSeek / Ollama calls
+* Any generic wrappers, provider abstractions, helper functions, env-based model routing, or central config files
+* Any fallback chains, retry chains, or model-selection logic
+* Any places where model names are dynamically set from env vars or config
+* Any hardcoded model names inside prompts, routes, services, planners, tools, evaluators, judges, or background jobs
+
+For each LLM call found, produce a row with:
+
+1. File path
+2. Function / route / service name
+3. Provider
+4. Exact model name
+5. Main purpose of the call
+6. Approximate importance level:
+
+   * cheap / background
+   * standard reasoning
+   * premium / hard reasoning
+   * code / extraction
+   * temporal / date reasoning
+   * judgement / verification
+   * fallback only
+7. Whether the current model seems sensible for the job
+8. Suggested alternative model(s)
+9. Whether the call should maybe be downgraded to a cheaper model
+10. Whether the call should maybe be upgraded to a stronger model
+11. Whether the call appears to be on a hot path / high-frequency path
+12. Any concerns about cost, latency, or overkill
+
+Then produce:
+
+Section A: Summary by provider
+
+* OpenAI usage count
+* Anthropic usage count
+* Groq usage count
+* Gemini usage count
+* Other usage count
+
+Section B: Summary by model
+
+* Which models are used most often
+* Which models are probably too expensive
+* Which models are probably too weak
+* Which calls look like they should be moved to cheaper workhorse models
+* Which calls look like they should be reserved for premium users only
+
+Section C: Suggested routing strategy
+Provide a recommended future model-routing stack for Wyshbone, for example:
+
+* Cheap workhorse chat
+* Extraction / classification
+* Temporal reasoning
+* Tower judgement
+* Final verification
+* Premium/VIP users
+* Background batch jobs
+* Fallbacks
+
+Section D: Cost-risk observations
+Highlight any cases where:
+
+* Expensive models are being used for simple work
+* Weak models are being used for difficult work
+* Multiple LLM calls could potentially be merged
+* Certain calls should maybe be cached
+* Certain prompts appear to justify a premium model
+
+Output as a markdown report with tables where useful.
