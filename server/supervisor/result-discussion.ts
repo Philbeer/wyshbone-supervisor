@@ -163,7 +163,7 @@ export async function handleResultDiscussion(
     try {
       recordDiscussionCall();
       response = await callLLMText(DISCUSSION_SYSTEM_PROMPT, userPrompt, 'discussion', {
-        anthropicModel: process.env.DISCUSSION_LLM_MODEL || process.env.RESCUE_LLM_MODEL || 'claude-3-haiku-20240307',
+        anthropicModel: process.env.DISCUSSION_LLM_MODEL || process.env.RESCUE_LLM_MODEL || 'claude-3-5-haiku-20241022',
         maxTokens: 400,
         timeoutMs: 15_000,
       });

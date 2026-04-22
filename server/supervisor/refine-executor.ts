@@ -56,7 +56,7 @@ async function extractConstraintValue(userQuestion: string): Promise<{ value: st
     return { value: cleaned || userQuestion, type: 'attribute_check' };
   }
 
-  const model = process.env.REFINE_LLM_MODEL || 'claude-3-haiku-20240307';
+  const model = process.env.REFINE_LLM_MODEL || 'claude-3-5-haiku-20241022';
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',

@@ -688,7 +688,7 @@ async function callLLM(model: string, systemPrompt: string, userPrompt: string):
       const is429 = err?.status === 429 || String(err?.message ?? '').includes('429');
       if (is429 && process.env.ANTHROPIC_API_KEY) {
         console.warn('[MISSION_EXTRACTOR] OpenAI 429 — falling back to Claude haiku for routing');
-        return callAnthropic('claude-3-haiku-20240307', systemPrompt, userPrompt);
+        return callAnthropic('claude-3-5-haiku-20241022', systemPrompt, userPrompt);
       }
       throw err;
     }

@@ -899,7 +899,7 @@ export async function extractConstraintLedEvidence(
           l1Phrases = _synonymCache.get(cacheKey)!;
           console.log(`[EVIDENCE_SYNONYM] Cache hit for "${constraintValue}" — ${l1Phrases.length} phrases`);
         } else {
-          const synonymModel = process.env.SYNONYM_EXPANSION_MODEL || 'claude-3-haiku-20240307';
+          const synonymModel = process.env.SYNONYM_EXPANSION_MODEL || 'claude-3-5-haiku-20241022';
           const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
           if (anthropicKey) {
