@@ -1,0 +1,44 @@
+Two fixes needed. Apply both, then restart the server and confirm from the logs that the seed line fires.
+
+FIX 1 — Correct the seed values in /server/supervisor/seed-outreach-config.ts
+
+The current seed values are wrong. They say 'Listers Brewery', 'listers', 'demo@brewery.com' — these were invented from existing codebase examples. They must be changed to the exact values from the original task spec.
+
+Open /server/supervisor/seed-outreach-config.ts and change the upsert object so it contains EXACTLY these fields and values, and nothing else:
+
+  user_id: DEMO_USER_ID,
+  display_name: 'Phil',
+  handle: 'phil',
+  sending_domain: 'wyshbonesales.com',
+  reply_to_domain: 'wyshbonesales.com',
+  user_real_email: 'phil@wyshbonesales.com',
+  signature_text: null,
+  enabled: true,
+  updated_at: new Date().toISOString(),
+
+Do not look for or use any other values from anywhere else in the codebase. These six strings — 'Phil', 'phil', 'wyshbonesales.com' (twice), 'phil@wyshbonesales.com', null — are explicit overrides and final.
+
+FIX 2 — Confirm the seed function is actually called on server startup
+
+Open /server/index.ts. Find the server.listen callback block — specifically the area where supervisor.start() and startSubconScheduler() etc. are called.
+
+Immediately BEFORE the line "supervisor.start().catch(...)", add the seed call:
+
+    // Seed outreach_config for the demo user (idempotent, non-fatal on failure)
+    import('./supervisor/seed-outreach-config').then(({ seedDemoOutreachConfig }) => {
+      seedDemoOutreachConfig().catch((err) =>
+        console.warn(`[SEED_OUTREACH] Seed failed (non-fatal): ${err.message}`)
+      );
+    }).catch(() => {});
+
+If a similar block is already present, leave it as-is — just confirm that it imports seed-outreach-config and calls seedDemoOutreachConfig().
+
+VERIFICATION
+
+After both fixes:
+1. Restart the dev server.
+2. Watch the startup logs for the line: [SEED_OUTREACH] Demo outreach config seed complete (or equivalent success message from the seed function).
+3. If that line does not appear, investigate why the seed import isn't running.
+4. If you see a [SEED_OUTREACH] error, paste the exact error in your summary.
+
+Confirm when both fixes are in place, the server has been restarted, and the [SEED_OUTREACH] log line appears in the restart logs.

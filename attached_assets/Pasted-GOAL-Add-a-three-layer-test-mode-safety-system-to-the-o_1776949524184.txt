@@ -1,0 +1,331 @@
+GOAL
+Add a three-layer test-mode safety system to the outreach feature, remove two hardcoded test overrides, and seed the outreach_config row for the demo user so outreach works end-to-end.
+
+The outreach backend is mostly built already — this is a hardening and unblocking pass. Do not rewrite existing working code. Make only the changes listed below.
+
+---
+
+CHANGE 1 — Rewrite sendOutreachEmail() in /server/supervisor/outreach-transport.ts
+
+Locate the existing function sendOutreachEmail(input: OutreachSendInput): Promise<OutreachSendResult>. Replace the ENTIRE function body with the code below. Keep the surrounding file (imports, Types, helpers, webhook handlers) unchanged.
+
+export async function sendOutreachEmail(input: OutreachSendInput): Promise<OutreachSendResult> {
+  try {
+    // ── LAYER 1: Test-mode redirect ──────────────────────────────────
+    const testMode = (process.env.OUTREACH_TEST_MODE || '').toLowerCase() === 'true';
+    let finalRecipient = input.recipientEmail;
+    let finalSubject = input.subject;
+    let finalBodyText = input.bodyText;
+    let finalBodyHtml = input.bodyHtml;
+
+    if (testMode) {
+      const redirectTo = process.env.OUTREACH_TEST_REDIRECT_EMAIL;
+      if (!redirectTo) {
+        throw new Error(
+          'OUTREACH_TEST_MODE=true but OUTREACH_TEST_REDIRECT_EMAIL is not set. ' +
+          'Refusing to send to real recipient. Set OUTREACH_TEST_REDIRECT_EMAIL or disable test mode.'
+        );
+      }
+      console.log(`[OUTREACH_TRANSPORT] TEST MODE ACTIVE — redirecting ${input.recipientEmail} → ${redirectTo}`);
+      const originalRecipient = input.recipientEmail;
+      finalRecipient = redirectTo;
+      finalSubject = `[TEST → ${originalRecipient}] ${input.subject}`;
+      const textBanner =
+        `--- TEST MODE ---\n` +
+        `This email was redirected. Original intended recipient: ${originalRecipient}\n` +
+        `In production this would have been sent to that address.\n` +
+        `-----------------\n\n`;
+      const htmlBanner =
+        `<div style="background:#fef3c7;border:1px solid #f59e0b;padding:12px;margin-bottom:16px;font-family:monospace;font-size:12px;">` +
+        `<strong>--- TEST MODE ---</strong><br>` +
+        `This email was redirected. Original intended recipient: <strong>${originalRecipient}</strong><br>` +
+        `In production this would have been sent to that address.<br>` +
+        `<strong>-----------------</strong>` +
+        `</div>`;
+      finalBodyText = textBanner + input.bodyText;
+      finalBodyHtml = htmlBanner + input.bodyHtml;
+    }
+
+    // ── LAYER 2: Domain allow-list ──────────────────────────────────
+    const allowedDomainsRaw = process.env.OUTREACH_ALLOWED_DOMAINS || '';
+    const allowedDomains = allowedDomainsRaw
+      .split(',')
+      .map(d => d.trim().toLowerCase())
+      .filter(Boolean);
+    const domainGateActive = allowedDomains.length > 0;
+    let domainAllowed = true;
+
+    if (domainGateActive) {
+      const recipientDomain = finalRecipient.split('@')[1]?.toLowerCase() || '';
+      domainAllowed = allowedDomains.includes(recipientDomain);
+      if (!domainAllowed) {
+        console.warn(
+          `[OUTREACH_TRANSPORT] DOMAIN GATE blocked send to ${finalRecipient} — ` +
+          `domain "${recipientDomain}" not in OUTREACH_ALLOWED_DOMAINS (${allowedDomainsRaw})`
+        );
+        if (supabase) {
+          try {
+            await supabase
+              .from('outreach_messages')
+              .update({
+                status: 'failed',
+                failed_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', input.messageId);
+          } catch (e) {
+            console.error('[OUTREACH_TRANSPORT] Failed to mark message as failed after domain gate:', e);
+          }
+        }
+        return {
+          success: false,
+          resendMessageId: null,
+          error: 'recipient_domain_not_allowed',
+        };
+      }
+    }
+
+    // ── LAYER 3: Final decision log ────────────────────────────────
+    console.log(
+      `[OUTREACH_TRANSPORT] SEND DECISION: messageId=${input.messageId} ` +
+      `original=${input.recipientEmail} final=${finalRecipient} ` +
+      `test_mode=${testMode} domain_gate_active=${domainGateActive} domain_allowed=${domainAllowed}`
+    );
+
+    // ── Send via Resend ────────────────────────────────────────────
+    const { client } = getResendClient();
+    console.log(`[OUTREACH_TRANSPORT] Sending email: messageId=${input.messageId} to=${finalRecipient} from=${input.fromAddress}`);
+
+    const result = await client.emails.send({
+      from: input.fromAddress,
+      to: finalRecipient,
+      reply_to: input.replyToAddress,
+      subject: finalSubject,
+      html: finalBodyHtml,
+      text: finalBodyText,
+      headers: {
+        'X-Wyshbone-Message-Id': input.messageId,
+      },
+    });
+
+    const resendId = (result as any)?.data?.id ?? (result as any)?.id ?? null;
+
+    if (resendId) {
+      console.log(`[OUTREACH_TRANSPORT] Email sent successfully: messageId=${input.messageId} resendId=${resendId}`);
+      if (supabase) {
+        await supabase
+          .from('outreach_messages')
+          .update({
+            resend_message_id: resendId,
+            resend_status: 'sent',
+            status: 'sent',
+            sent_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', input.messageId);
+      }
+      return { success: true, resendMessageId: resendId, error: null };
+    }
+
+    console.warn(`[OUTREACH_TRANSPORT] Resend returned no ID for messageId=${input.messageId}`);
+    return { success: false, resendMessageId: null, error: 'No message ID returned from Resend' };
+  } catch (err: any) {
+    const errMsg = err.message || String(err);
+    console.error(`[OUTREACH_TRANSPORT] Send failed: messageId=${input.messageId} error=${errMsg}`);
+    if (supabase) {
+      try {
+        await supabase
+          .from('outreach_messages')
+          .update({
+            status: 'failed',
+            failed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', input.messageId);
+      } catch (e) {
+        console.error('[OUTREACH_TRANSPORT] Failed to update message status to failed:', e);
+      }
+    }
+    return { success: false, resendMessageId: null, error: errMsg };
+  }
+}
+
+Notes:
+- The function signature is unchanged.
+- The outreach_messages DB row is NOT updated to reflect the redirected recipient — the DB keeps the original intended recipient for audit. The redirection only affects what's sent to Resend.
+- Fail-closed: if OUTREACH_TEST_MODE=true but the redirect email is missing, the function throws rather than sending to the real recipient.
+
+---
+
+CHANGE 2 — Remove two hardcoded overrides in /server/routes/routes-outreach.ts
+
+(a) In the /trigger-single handler, find this exact block (inside the "Pick the best email" section, just after the sort):
+
+    const best = sorted[0];
+    let contactEmail = best.value;
+    // TEST OVERRIDE: send to Phil's inbox during development
+    contactEmail = 'phil@listersbrewery.com';
+
+Replace with:
+
+    const best = sorted[0];
+    const contactEmail = best.value;
+
+(Note: also change `let` to `const` since we no longer reassign it.)
+
+(b) In the /send handler, find this exact block inside the sendOutreachEmail call:
+
+      recipientEmail: 'phil@listersbrewery.com', // TEST OVERRIDE: all sends go to Phil during development
+
+Replace with:
+
+      recipientEmail: msg.recipient_email,
+
+That's it for changes in this file. Do not touch any other handler, validation, or logic here.
+
+---
+
+CHANGE 3 — Create /server/supervisor/seed-outreach-config.ts
+
+Create a new file at /server/supervisor/seed-outreach-config.ts with this exact content:
+
+/**
+ * seed-outreach-config.ts
+ *
+ * Idempotent seed of the outreach_config row for the demo user.
+ * Runs once on server startup. Safe to re-run — uses upsert on user_id.
+ */
+
+import { supabase } from '../supabase';
+
+const DEMO_USER_ID = '8f9079b3ddf739fb0217373c92292e91';
+
+export async function seedDemoOutreachConfig(): Promise<void> {
+  if (!supabase) {
+    console.warn('[SEED_OUTREACH] Supabase not configured — skipping seed');
+    return;
+  }
+
+  try {
+    const { error } = await supabase
+      .from('outreach_config')
+      .upsert(
+        {
+          user_id: DEMO_USER_ID,
+          display_name: 'Phil',
+          handle: 'phil',
+          sending_domain: 'wyshbonesales.com',
+          reply_to_domain: 'wyshbonesales.com',
+          user_real_email: 'phil@wyshbonesales.com',
+          signature_text: null,
+          enabled: true,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'user_id' }
+      );
+
+    if (error) {
+      console.warn(`[SEED_OUTREACH] Seed failed (non-fatal): ${error.message}`);
+      return;
+    }
+
+    console.log('[SEED_OUTREACH] Config seeded for demo user — from=phil@wyshbonesales.com');
+  } catch (err: any) {
+    console.warn(`[SEED_OUTREACH] Seed failed (non-fatal): ${err.message}`);
+  }
+}
+
+---
+
+CHANGE 4 — Call the seed function from server startup in /server/index.ts
+
+Inside the main (async () => { ... })() IIFE, locate the server.listen() callback block. Within that callback you will find lines that start the supervisor and schedulers — specifically:
+
+    // Start the supervisor service
+    supervisor.start().catch(error => {
+      console.error('Failed to start supervisor:', error);
+    });
+
+Directly ABOVE the "Start the supervisor service" comment line, add these lines:
+
+    // Seed outreach_config for the demo user (idempotent, non-fatal on failure)
+    import('./supervisor/seed-outreach-config').then(({ seedDemoOutreachConfig }) => {
+      seedDemoOutreachConfig().catch((err: any) =>
+        console.warn(`[SEED_OUTREACH] Seed failed (non-fatal): ${err.message}`)
+      );
+    }).catch(() => {});
+
+Do not change anything else in index.ts.
+
+---
+
+CHANGE 5 — Document env vars in /.env.example
+
+If a file named .env.example exists at the repo root, APPEND these lines (with a blank line separator). If it does not exist, CREATE it with just these lines:
+
+# ── Outreach safety (dev/test settings) ──────────────────────
+# OUTREACH_TEST_MODE=true redirects ALL outreach emails to OUTREACH_TEST_REDIRECT_EMAIL
+# OUTREACH_ALLOWED_DOMAINS is a comma-separated allow-list; if set, emails to any
+# other domain are rejected. Leave unset in production.
+OUTREACH_TEST_MODE=true
+OUTREACH_TEST_REDIRECT_EMAIL=phil@listersbrewery.com
+OUTREACH_ALLOWED_DOMAINS=listersbrewery.com
+
+---
+
+VALIDATION CHECKS (run these before marking the task done)
+
+1. Typecheck the repo (npm run build, or npx tsc --noEmit). Zero errors expected.
+2. Search all .ts files in /server for the string phil@listersbrewery.com. There should be ZERO matches in any .ts file. (.env.example is the only place it's allowed to appear.) If any .ts match remains, that's a bug — fix it.
+3. Search all .ts files in /server for TEST OVERRIDE. There should be ZERO matches.
+4. Read sendOutreachEmail in outreach-transport.ts and verify it contains all three of these strings: LAYER 1, LAYER 2, LAYER 3 (in the comments).
+5. Read the server.listen callback in /server/index.ts and verify the seedDemoOutreachConfig() import+call is present immediately before supervisor.start().
+6. If a lint command exists (npm run lint), run it. Fix any new lint errors this task introduced.
+
+---
+
+OUT OF SCOPE — DO NOT TOUCH
+
+- Do not modify /server/supervisor/outreach-drafter.ts (working as intended)
+- Do not modify /server/supervisor/reloop/outreach-adapter.ts (working as intended)
+- Do not modify any file in /client or the UI repo
+- Do not add a Settings UI page
+- Do not touch monitor code
+- Do not modify CHANGE 2's file (/server/routes/routes-outreach.ts) outside the two specific spots described above — the rest of that file is working and must not be edited
+
+---
+
+FINAL SUMMARY (produce this when the task is done)
+
+1. List of files changed, one line per file:
+   - /server/supervisor/outreach-transport.ts — rewrote sendOutreachEmail with 3-layer safety
+   - /server/routes/routes-outreach.ts — removed 2 hardcoded TEST OVERRIDE blocks
+   - /server/supervisor/seed-outreach-config.ts — NEW file, seeds demo user's outreach_config
+   - /server/index.ts — added seed call before supervisor.start()
+   - /.env.example — documented outreach env vars (created or appended)
+
+2. Env vars the developer (Phil) must add to Replit Secrets:
+   OUTREACH_TEST_MODE=true
+   OUTREACH_TEST_REDIRECT_EMAIL=phil@listersbrewery.com
+   OUTREACH_ALLOWED_DOMAINS=listersbrewery.com
+
+3. End-to-end test steps Phil should run after deploying:
+   a. Add the 3 env vars above to Replit Secrets in this repo
+   b. Restart the supervisor
+   c. Check supervisor logs for the line: [SEED_OUTREACH] Config seeded for demo user — from=phil@wyshbonesales.com
+   d. In the UI, run a lead search that returns results
+   e. Click the "✉ email" pill on any lead with a website
+   f. The draft modal should appear showing a real Hunter.io-discovered email as the recipient
+   g. Click Send
+   h. The email should arrive at phil@listersbrewery.com (NOT the real recipient)
+   i. The subject should start with [TEST → recipient@domain.com]
+   j. The body should start with the --- TEST MODE --- banner
+   k. Supervisor logs should contain a line starting [OUTREACH_TRANSPORT] SEND DECISION: showing test_mode=true and domain_allowed=true
+
+4. Confirm all six validation checks passed.
+
+---
+
+APPROACH
+
+Work in order: Change 1, 2, 3, 4, 5. Re-read each file after editing. After Change 2 run typecheck. After Change 4 run typecheck again. Only mark done when all six validation checks pass and the final summary is produced.

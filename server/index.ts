@@ -214,6 +214,13 @@ app.use((req, res, next) => {
       }
     });
     
+    // Seed outreach_config for the demo user (idempotent, non-fatal on failure)
+    import('./supervisor/seed-outreach-config').then(({ seedDemoOutreachConfig }) => {
+      seedDemoOutreachConfig().catch((err) =>
+        console.warn(`[SEED_OUTREACH] Seed failed (non-fatal): ${err.message}`)
+      );
+    }).catch(() => {});
+
     // Start the supervisor service
     supervisor.start().catch(error => {
       console.error('Failed to start supervisor:', error);
