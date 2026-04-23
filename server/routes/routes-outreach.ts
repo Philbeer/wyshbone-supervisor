@@ -533,6 +533,40 @@ outreachRouter.get('/messages/:messageId', async (req, res) => {
   }
 });
 
+// GET /messages — list all outreach messages for the user, ordered by most recent activity
+outreachRouter.get('/messages', async (req, res) => {
+  const userId = getUserId(req);
+  if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+  // Optional query params
+  const limit = Math.min(parseInt((req.query.limit as string) || '100', 10), 500);
+  const status = req.query.status as string | undefined;
+
+  try {
+    let query = supabase
+      .from('outreach_messages')
+      .select('id, run_id, lead_name, recipient_email, recipient_name, recipient_role, from_address, subject, body_text, body_html, status, drafted_at, approved_at, sent_at, delivered_at, bounced_at, failed_at, reply_from, reply_subject, reply_body_text, updated_at')
+      .eq('user_id', userId)
+      .order('updated_at', { ascending: false })
+      .limit(limit);
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    res.json({
+      messages: data || [],
+      count: data?.length || 0,
+    });
+  } catch (err: any) {
+    console.error(`[OUTREACH_MESSAGES] Error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /stats
 outreachRouter.get('/stats', async (req, res) => {
   const userId = getUserId(req);
