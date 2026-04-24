@@ -38,18 +38,87 @@ export interface InboundReplyPayload {
 // ── Send ──
 
 export async function sendOutreachEmail(input: OutreachSendInput): Promise<OutreachSendResult> {
-  try {
-    const { client } = getResendClient();
+  const originalRecipient = input.recipientEmail;
 
-    console.log(`[OUTREACH_TRANSPORT] Sending email: messageId=${input.messageId} to=${input.recipientEmail} from=${input.fromAddress}`);
+  try {
+    let effectiveRecipient = originalRecipient;
+    let effectiveSubject = input.subject;
+    let effectiveHtml = input.bodyHtml;
+    let effectiveText = input.bodyText;
+    let layer1Active = false;
+    const allowedDomainsEnv = process.env.OUTREACH_ALLOWED_DOMAINS;
+
+    // ── LAYER 1: Test-mode redirect ──
+    // If OUTREACH_TEST_MODE=true (case-insensitive), redirect all outgoing
+    // email to OUTREACH_TEST_REDIRECT_EMAIL and annotate subject/body so the
+    // tester can clearly see where the real email would have gone.
+    if ((process.env.OUTREACH_TEST_MODE || '').toLowerCase() === 'true') {
+      const redirectAddress = process.env.OUTREACH_TEST_REDIRECT_EMAIL;
+      if (!redirectAddress) {
+        throw new Error('OUTREACH_TEST_MODE is enabled but OUTREACH_TEST_REDIRECT_EMAIL is not set');
+      }
+      effectiveRecipient = redirectAddress;
+      layer1Active = true;
+      effectiveSubject = `[TEST → ${originalRecipient}] ${input.subject}`;
+      const testBannerText = `[TEST MODE] This email was redirected from ${originalRecipient} to ${redirectAddress}.\n\n`;
+      const testBannerHtml =
+        `<div style="background:#fff3cd;border:1px solid #ffc107;padding:8px 12px;margin-bottom:16px;font-family:monospace;font-size:12px;">` +
+        `<strong>[TEST MODE]</strong> This email was redirected from <em>${originalRecipient}</em> to <em>${redirectAddress}</em>.` +
+        `</div>`;
+      effectiveText = testBannerText + input.bodyText;
+      effectiveHtml = testBannerHtml + input.bodyHtml;
+      console.log(`[OUTREACH_TRANSPORT] LAYER 1 (test-mode redirect): original=${originalRecipient} → redirected=${effectiveRecipient}`);
+    }
+
+    // ── LAYER 2: Domain allow-list ──
+    // If OUTREACH_ALLOWED_DOMAINS is set (comma-separated list), the effective
+    // recipient's domain must appear in that list or the send is blocked.
+    // A blocked send marks the message as failed in the DB to keep status accurate.
+    if (allowedDomainsEnv) {
+      const allowedDomains = allowedDomainsEnv
+        .split(',')
+        .map(d => d.trim().toLowerCase())
+        .filter(Boolean);
+      const recipientDomain = effectiveRecipient.split('@')[1]?.toLowerCase() ?? '';
+      if (!allowedDomains.includes(recipientDomain)) {
+        const errMsg = `LAYER 2 (domain allow-list): domain "${recipientDomain}" is not in OUTREACH_ALLOWED_DOMAINS — send blocked`;
+        console.warn(`[OUTREACH_TRANSPORT] ${errMsg}`);
+        if (supabase) {
+          await supabase
+            .from('outreach_messages')
+            .update({
+              status: 'failed',
+              failed_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', input.messageId);
+        }
+        return { success: false, resendMessageId: null, error: errMsg };
+      }
+      console.log(`[OUTREACH_TRANSPORT] LAYER 2 (domain allow-list): domain="${recipientDomain}" is allowed`);
+    }
+
+    // ── LAYER 3: Decision log ──
+    // Log a structured record of the routing decision before every send so
+    // there is a complete auditable trail of where each message actually went.
+    console.log(
+      `[OUTREACH_TRANSPORT] LAYER 3 (decision log): messageId=${input.messageId}` +
+      ` originalRecipient=${originalRecipient}` +
+      ` effectiveRecipient=${effectiveRecipient}` +
+      ` testModeActive=${layer1Active}` +
+      ` domainCheckActive=${Boolean(allowedDomainsEnv)}` +
+      ` from=${input.fromAddress}`
+    );
+
+    const { client } = getResendClient();
 
     const result = await client.emails.send({
       from: input.fromAddress,
-      to: input.recipientEmail,
-      reply_to: input.replyToAddress,
-      subject: input.subject,
-      html: input.bodyHtml,
-      text: input.bodyText,
+      to: effectiveRecipient,
+      replyTo: input.replyToAddress,
+      subject: effectiveSubject,
+      html: effectiveHtml,
+      text: effectiveText,
       headers: {
         'X-Wyshbone-Message-Id': input.messageId,
       },

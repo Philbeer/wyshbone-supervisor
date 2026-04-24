@@ -4323,11 +4323,13 @@ class SupervisorService {
 
   private async notifyLeadCreated(lead: any): Promise<void> {
     try {
-      // TESTING: Use hardcoded email for now, will switch to user's email later
-      const testEmail = 'phil@listersbrewery.com';
-      
-      // Get user info from Supabase for name (optional)
+      // Get user info from Supabase for email and name
       const userInfo = await storage.getUserEmail(lead.userId);
+
+      if (!userInfo?.email) {
+        console.log(`[SUPERVISOR] notifyLeadCreated: no email for userId=${lead.userId} — skipping notification`);
+        return;
+      }
 
       // Generate dashboard URL from environment variable
       // FRONTEND_URL should be the public URL of the frontend (e.g., https://wyshbone.vercel.app)
@@ -4336,7 +4338,7 @@ class SupervisorService {
       // Send email notification
       await emailService.sendLeadCreatedEmail({
         lead,
-        userEmail: testEmail,
+        userEmail: userInfo.email,
         userName: userInfo?.name || 'there',
         dashboardUrl
       });
