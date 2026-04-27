@@ -1,0 +1,57 @@
+GOAL
+Remove the hardcoded Anthropic Sonnet override in the chat handler so chat queries use the default LLM failover chain (Groq → Anthropic → OpenAI) defined in llm-failover.ts. With GROQ_API_KEY set in Secrets, this means chat will run on Llama 3.3 70B via Groq — substantially faster than Sonnet for chat-style queries.
+
+CHANGE — Single line removal in /server/supervisor/chat-handler.ts
+
+Find the callLLMText invocation inside the handleChat function. It currently looks like:
+
+      response = await callLLMText(CHAT_SYSTEM_PROMPT, userPrompt, 'chat', {
+        anthropicModel: process.env.CHAT_LLM_MODEL || 'claude-sonnet-4-6',
+        maxTokens: 2048,
+        temperature: 0.7,
+        timeoutMs: 30_000,
+      });
+
+Remove ONLY the single line:
+        anthropicModel: process.env.CHAT_LLM_MODEL || 'claude-sonnet-4-6',
+
+After the change it should look like:
+
+      response = await callLLMText(CHAT_SYSTEM_PROMPT, userPrompt, 'chat', {
+        maxTokens: 2048,
+        temperature: 0.7,
+        timeoutMs: 30_000,
+      });
+
+Do NOT change anything else in this file. Do NOT modify llm-failover.ts. Do NOT modify any other file. Do NOT remove or change the circuit-breaker logic, system prompt, image resolution, or DB save logic.
+
+WHY THIS IS SAFE
+- The failover chain in llm-failover.ts will pick Groq first (since GROQ_API_KEY is set), then Anthropic, then OpenAI as fallback
+- If Groq fails for any reason, it automatically falls back to Anthropic with the default Anthropic model (claude-3-5-haiku-20241022) — still fast, still works
+- All other call sites that pass anthropicModel explicitly are unaffected — only the chat handler is changed
+
+VALIDATION
+
+1. Typecheck passes with zero new errors.
+2. Restart the supervisor.
+3. In the UI, send a chat-style message that should trigger the chat handler — for example: "what does Riesling taste like?"
+4. Watch the supervisor logs. You should see a line like:
+     [LLM:chat] ... (no failover message)
+   And NOT see:
+     [LLM:chat] groq failed: ... — trying anthropic
+   If you DO see a failover message, that's fine — it means Groq had an issue and Anthropic took over. Both work.
+5. The response should arrive noticeably faster than before — typically 0.5–2 seconds total instead of 3–8 seconds.
+6. The response quality for wine/general chat should be comparable.
+
+OUT OF SCOPE
+- Do not add streaming (separate task)
+- Do not modify the conversation router
+- Do not change the system prompt
+- Do not touch the UI repo
+- Do not modify llm-failover.ts
+
+FINAL SUMMARY
+1. Confirm chat-handler.ts changed (one line removed)
+2. Confirm typecheck passed
+3. Confirm a test chat message returned a response
+4. Quote the supervisor log line showing which provider handled the chat call (groq vs anthropic)
