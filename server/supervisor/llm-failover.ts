@@ -189,6 +189,7 @@ export async function callLLM(options: CallLLMOptions): Promise<CallLLMResult> {
 
     try {
       const text = await callProvider(provider, system, user, anthropicModel, openaiModel, groqModel, maxTokens, temperature, timeoutMs, label);
+      console.log(`[LLM:${label}] ${provider} succeeded in ${Date.now() - startTime}ms (model=${provider === 'groq' ? groqModel : provider === 'anthropic' ? anthropicModel : openaiModel})`);
       if (!isFirst) {
         console.log(`[LLM:${label}] Failover to ${provider} succeeded (total ${Date.now() - startTime}ms)`);
       }
