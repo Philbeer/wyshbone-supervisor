@@ -1,0 +1,48 @@
+Diagnostic only — no code changes.
+
+I want a full report on what's slowing down chat responses in this UI.
+
+Step 1 — Verify the previous change
+
+Open /client/src/components/results/LiveActivityTicker.tsx. Inside the "Dedicated fast poll for intent_narrative" useEffect block, find the setTimeout assigned to fallbackTimer. Report the exact millisecond value currently passed to it.
+
+Step 2 — Git history
+
+Run: git log --oneline -5
+Paste the output verbatim.
+
+Step 3 — Find every artificial delay in the UI's chat flow
+
+For chat-route messages (not search), the user sees "Thinking..." for ~16-19 seconds before the response renders, even though the supervisor finishes in ~5 seconds.
+
+Search /client and /server in this UI repo for any of the following that could be holding back chat rendering:
+- setTimeout calls with values >= 1000
+- setInterval calls with poll values >= 1000
+- Any "fallback" or "minimum" or "delay" timers
+- Polling loops in the chat message flow
+- Any state gate that waits for an artefact, intent, or status before rendering an assistant message
+
+For each one found, report:
+  a) File and line number
+  b) The trigger condition (when does it start?)
+  c) The duration
+  d) What it controls (does it block rendering of the chat message itself, or just an indicator/panel?)
+
+Step 4 — Trace the actual chat rendering path
+
+Find the file where assistant chat-message bubbles are added to the visible message list (likely /client/src/pages/chat.tsx). Identify:
+  a) Where the supervisor's response arrives (which fetch/poll/event listener?)
+  b) Where it gets added to the messages state
+  c) Any conditions/gates between the response arriving and the bubble appearing
+
+Step 5 — Time the render path
+
+Add console.time/console.timeEnd or console.log with timestamps at:
+  - When the user clicks Send
+  - When the first response chunk/event/status arrives from supervisor
+  - When the assistant message is added to the messages array
+  - When the bubble actually renders in the DOM
+
+Then send a chat message ("tell me about red wine"), wait for the response, and report the timestamps from each marker.
+
+Output the report as a clear list. Do not fix anything yet — I want to understand the full picture before deciding what to change.
