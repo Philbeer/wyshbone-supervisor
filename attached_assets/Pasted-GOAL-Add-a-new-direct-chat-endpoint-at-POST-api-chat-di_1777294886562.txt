@@ -1,0 +1,189 @@
+GOAL
+Add a new direct chat endpoint at POST /api/chat/direct that bypasses the entire agent task pipeline (no task queue, no run-bridge, no ownership guard, no Tower artefact posting, no router, no turn classifier). It just: receives a message, optionally injects relevant reference knowledge, calls the LLM, saves to the DB, and returns the response.
+
+This endpoint is for "chat-only" tenants like the Wine Society demo, where there is no possibility of a search or other agent action — every message is just a chat. Existing tenants with agent capability keep using the existing /api/chat (or whatever current path) and are unaffected.
+
+Target latency: ~1-2 seconds total backend time, vs ~8-12 seconds for the current path.
+
+CHANGE 1 — Create new file /server/routes/routes-chat-direct.ts
+
+Create a new file with this exact content:
+
+import { Router, type Request, type Response } from 'express';
+import { randomUUID } from 'crypto';
+import { callLLMText } from '../supervisor/llm-failover';
+import { getRelevantReferenceKnowledge } from '../supervisor/reference-knowledge';
+import { getCurrentContextPreamble } from '../supervisor/current-context';
+import { supabase } from '../supabase';
+
+export const chatDirectRouter = Router();
+
+/**
+ * Direct chat endpoint — no agent plumbing.
+ *
+ * Receives: { message: string, conversationId?: string, conversationHistory?: Array<{ role: 'user'|'assistant', content: string }> }
+ * Returns: { response: string, messageId: string, conversationId: string, durationMs: number }
+ *
+ * Designed for chat-only tenants (e.g. the Wine Society demo). Does NOT:
+ *   - claim a supervisor task
+ *   - call the conversation router
+ *   - call the turn classifier
+ *   - send run-bridge requests
+ *   - post Tower artefacts
+ *   - log AFR events
+ *
+ * Just: optional reference knowledge → LLM → DB save → return.
+ */
+
+const SYSTEM_PROMPT = `${getCurrentContextPreamble()}
+
+You are a knowledgeable, conversational assistant. Answer the user's question directly and naturally.
+
+Guidelines:
+- Concise — 2-5 sentences for simple questions, longer only when complexity requires it
+- Conversational tone, not corporate
+- Use **bold** sparingly (max 2-3 per response) to highlight key recommendations or names
+- For multi-point answers, use line breaks between distinct ideas — no markdown headers, numbered lists, or bullet points
+- If reference knowledge is provided about the user's topic, base your answer on it rather than general knowledge
+- Never fabricate specific facts (prices, addresses, dates) you are not confident about — say "I'm not sure" if you don't know`;
+
+chatDirectRouter.post('/direct', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+
+  try {
+    const { message, conversationId: incomingConvId, conversationHistory } = req.body || {};
+
+    if (typeof message !== 'string' || message.trim().length === 0) {
+      return res.status(400).json({ error: 'message is required (non-empty string)' });
+    }
+
+    const conversationId = incomingConvId || randomUUID();
+    const messageId = randomUUID();
+
+    const history: Array<{ role: 'user' | 'assistant'; content: string }> =
+      Array.isArray(conversationHistory) ? conversationHistory.slice(-8) : [];
+
+    // 1. Look up relevant reference knowledge (in-memory, ~10ms)
+    const referenceKnowledge = getRelevantReferenceKnowledge(message, history);
+
+    // 2. Build the user prompt
+    const promptParts: string[] = [];
+
+    if (history.length > 0) {
+      promptParts.push('CONVERSATION HISTORY:');
+      for (const h of history) {
+        const role = h.role === 'user' ? 'User' : 'Assistant';
+        const content = (h.content || '').length > 500 ? h.content.substring(0, 500) + '...' : (h.content || '');
+        promptParts.push(`${role}: ${content}`);
+      }
+      promptParts.push('');
+    }
+
+    if (referenceKnowledge) {
+      promptParts.push('REFERENCE KNOWLEDGE (use this for accurate facts about the topic):');
+      promptParts.push(referenceKnowledge);
+      promptParts.push('');
+    }
+
+    promptParts.push(`User: ${message}`);
+    const userPrompt = promptParts.join('\n');
+
+    // 3. Call LLM via failover chain (Groq+Llama first, fast)
+    const response = await callLLMText(SYSTEM_PROMPT, userPrompt, 'chat_direct', {
+      maxTokens: 1024,
+      temperature: 0.7,
+      timeoutMs: 15_000,
+    });
+
+    // 4. Save to DB (non-blocking — don't make the user wait for this)
+    if (supabase) {
+      supabase.from('messages').insert({
+        id: messageId,
+        conversation_id: conversationId,
+        role: 'assistant',
+        content: response,
+        source: 'chat_direct',
+        metadata: { handler: 'chat_direct', has_reference: !!referenceKnowledge },
+        created_at: Date.now(),
+      }).then((result: any) => {
+        if (result?.error) {
+          console.warn(`[CHAT_DIRECT] DB save failed (non-fatal): ${result.error.message}`);
+        }
+      }, (err: any) => {
+        console.warn(`[CHAT_DIRECT] DB save threw (non-fatal): ${err?.message}`);
+      });
+    }
+
+    const durationMs = Date.now() - startTime;
+    console.log(`[CHAT_DIRECT] Responded in ${durationMs}ms — ${response.length} chars, conv=${conversationId.slice(0, 8)}, ref=${!!referenceKnowledge}`);
+
+    return res.json({
+      response,
+      messageId,
+      conversationId,
+      durationMs,
+    });
+  } catch (err: any) {
+    const durationMs = Date.now() - startTime;
+    console.error(`[CHAT_DIRECT] Failed in ${durationMs}ms: ${err.message}`);
+    return res.status(500).json({
+      error: err.message || 'Internal error',
+      durationMs,
+    });
+  }
+});
+
+CHANGE 2 — Register the new router in /server/routes.ts
+
+At the top of the file, near the other route imports (search for "outreachRouter" to find the area), add:
+
+  import { chatDirectRouter } from './routes/routes-chat-direct';
+
+In the registerRoutes function, near the line that registers the outreach router (search for "/api/outreach" to find it), add the new registration:
+
+  app.use('/api/chat', chatDirectRouter);
+  console.log('[ROUTES] Registered direct chat routes: /api/chat/direct');
+
+Do not modify any other routes.
+
+VALIDATION
+
+1. Typecheck passes (npx tsc --noEmit or equivalent).
+2. Restart the supervisor.
+3. Confirm startup log shows the new line: [ROUTES] Registered direct chat routes: /api/chat/direct
+4. Test with curl from the supervisor's Shell:
+
+   curl -X POST http://localhost:5000/api/chat/direct \
+     -H "Content-Type: application/json" \
+     -d '{"message":"tell me about red wine"}'
+
+   Expected:
+   - Response within 1-3 seconds (not 10+)
+   - JSON body with { response, messageId, conversationId, durationMs }
+   - durationMs typically 800-2500ms
+   - The response field contains a sensible answer about red wine
+
+5. Test with conversation history:
+
+   curl -X POST http://localhost:5000/api/chat/direct \
+     -H "Content-Type: application/json" \
+     -d '{"message":"how much is membership?","conversationHistory":[{"role":"user","content":"tell me about the wine society"},{"role":"assistant","content":"The Wine Society is a member-owned cooperative founded in 1874..."}]}'
+
+   Expected: response references Wine Society membership specifically (not generic). The reference-knowledge match for "wine society" should trigger because of conversation history.
+   Look in supervisor logs for: [CHAT_DIRECT] Responded in <Xms>ms ... ref=true
+
+OUT OF SCOPE — DO NOT TOUCH
+- Do not modify the existing chat handler (server/supervisor/chat-handler.ts)
+- Do not modify the existing conversation router
+- Do not modify the existing /api/chat or any agent task path
+- Do not modify llm-failover.ts
+- Do not add streaming yet (separate task)
+- Do not modify the UI repo
+- Do not modify reference-knowledge.ts
+
+FINAL SUMMARY
+1. Confirm new file created: /server/routes/routes-chat-direct.ts
+2. Confirm router registered in /server/routes.ts
+3. Paste the durationMs from the curl test in step 4
+4. Paste the durationMs and ref status from the curl test in step 5
+5. State whether typecheck passed
