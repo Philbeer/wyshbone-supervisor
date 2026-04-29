@@ -30,7 +30,7 @@ export interface CallLLMResult {
   durationMs: number;
 }
 
-const DEFAULT_ANTHROPIC_MODEL = 'claude-3-5-haiku-20241022';
+const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-4-5-20251001';
 const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
 const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
 const DEFAULT_TIMEOUT_MS = 15_000;
