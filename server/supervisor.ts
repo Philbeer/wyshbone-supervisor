@@ -865,7 +865,7 @@ class SupervisorService {
       // 1. Find the most recent completed run for this conversation
       const { data: recentRuns, error: runError } = await supabase
         .from('agent_runs')
-        .select('id, metadata, goal_summary')
+        .select('id, metadata')
         .eq('conversation_id', conversationId)
         .eq('status', 'completed')
         .order('created_at', { ascending: false })
@@ -883,14 +883,14 @@ class SupervisorService {
       for (const run of (recentRuns || [])) {
         const { data: missionArtefacts } = await supabase
           .from('artefacts')
-          .select('payload')
+          .select('payload_json')
           .eq('run_id', run.id)
           .eq('type', 'mission_extraction')
           .limit(1);
 
         if (missionArtefacts && missionArtefacts.length > 0) {
           sourceRunId = run.id;
-          const payload = missionArtefacts[0].payload;
+          const payload = missionArtefacts[0].payload_json;
           // The mission extraction payload contains the structured mission in layers.pass2_structured_mission
           const mission = payload?.layers?.pass2_structured_mission || payload?.pass2_structured_mission;
           if (mission && mission.entity_category) {
@@ -905,13 +905,13 @@ class SupervisorService {
         for (const run of (recentRuns || [])) {
           const { data: deliveryArts } = await supabase
             .from('artefacts')
-            .select('payload')
+            .select('payload_json')
             .eq('run_id', run.id)
             .eq('type', 'delivery_summary')
             .limit(1);
 
           if (deliveryArts && deliveryArts.length > 0) {
-            const dp = deliveryArts[0].payload;
+            const dp = deliveryArts[0].payload_json;
             if (dp?.original_user_goal) {
               sourceRunId = run.id;
               missionConfig = {
@@ -968,14 +968,14 @@ class SupervisorService {
       try {
         const { data: deliveryArts } = await supabase
           .from('artefacts')
-          .select('payload')
+          .select('payload_json')
           .eq('run_id', sourceRunId)
           .in('type', ['final_delivery', 'combined_delivery', 'leads_list'])
           .order('created_at', { ascending: false })
           .limit(1);
 
         if (deliveryArts && deliveryArts.length > 0) {
-          const leads = deliveryArts[0].payload?.leads || deliveryArts[0].payload?.payload_json?.leads || [];
+          const leads = deliveryArts[0].payload_json?.leads || [];
           baselineNames = leads.map((l: any) => l.name).filter(Boolean);
         }
       } catch (e: any) {
