@@ -1,0 +1,60 @@
+Two changes in server/supervisor.ts handleCreateMonitor function (around line 987).
+
+CHANGE 1 — Fix the bigint type mismatch:
+The scheduled_monitors.last_run_at column is bigint (epoch ms), not timestamptz. Find this line in handleCreateMonitor:
+
+  last_run_at: new Date().toISOString(),
+
+Change it to:
+
+  last_run_at: Date.now(),
+
+Leave next_wake_at alone — that one IS timestamptz so the ISO string is correct there.
+
+CHANGE 2 — Replace regex schedule parsing with structured input:
+Find this regex block in handleCreateMonitor:
+
+  const msgLower = userMessage.toLowerCase();
+  let schedule = 'weekly'; // default
+  if (/\b(hourly|every\s+hour)\b/.test(msgLower)) schedule = 'hourly';
+  else if (/\b(daily|every\s+day|each\s+day)\b/.test(msgLower)) schedule = 'daily';
+  else if (/\b(weekly|every\s+week|each\s+week|once\s+a\s+week)\b/.test(msgLower)) schedule = 'weekly';
+
+Replace it with:
+
+  // Schedule comes from structured request_data (UI buttons), not parsed from prose.
+  // Valid values: 'once' | 'hourly' | 'daily' | 'weekly'
+  const requestedSchedule = String(rd.schedule || '').toLowerCase().trim();
+  const validSchedules = ['once', 'hourly', 'daily', 'weekly'];
+  if (!validSchedules.includes(requestedSchedule)) {
+    throw new Error(`Monitor requires an explicit schedule. Use the schedule buttons in the search results.`);
+  }
+  const schedule = requestedSchedule;
+
+CHANGE 3 — Add 'once' to the intervals lookup:
+Find this block (just below where schedule was set):
+
+  const intervals: Record<string, number> = {
+    hourly: 3_600_000,
+    daily: 86_400_000,
+    weekly: 604_800_000,
+  };
+
+Replace with:
+
+  const intervals: Record<string, number> = {
+    once: 0,         // 'once' fires immediately on next wake-scheduler pass
+    hourly: 3_600_000,
+    daily: 86_400_000,
+    weekly: 604_800_000,
+  };
+
+CHANGE 4 — Mark 'once' monitors so wake-scheduler auto-deactivates after the first run:
+In the same handleCreateMonitor function, find the supabase.from('scheduled_monitors').insert({ ... }) block. Inside the config object, add:
+
+  config: {
+    ...existing fields...,
+    auto_deactivate_after_first_run: schedule === 'once',
+  },
+
+Do NOT change anything else. Do NOT touch the wake-scheduler or chat-handler. Restart the supervisor when done.
