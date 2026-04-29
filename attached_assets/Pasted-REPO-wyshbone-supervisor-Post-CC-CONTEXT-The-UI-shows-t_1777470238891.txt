@@ -1,0 +1,27 @@
+REPO: wyshbone-supervisor-Post-CC
+CONTEXT: The UI shows the supervisor's "I found N pharmacies" text bubble before the results card lands, with a 30-60 second gap when re-loop is involved. Root cause: the supervisor writes the delivery text message to the messages table at the end of the initial Mission execution, BUT the combined_delivery artefact (which the UI fetches to render the results card) is written later, AFTER the re-loop confirmation pass.
+We're going to defer the delivery text message write until AFTER the entire pipeline is complete — after combined_delivery, after final_delivery, after the Tower judgement on the run.
+Step 1 — Discovery (do not write code yet):
+The text response is built by buildNaturalResponse from ./supervisor/response-builder at server/supervisor.ts line 3586. After that build, the response text gets written somewhere as a supabase.from('messages').insert({...}) with metadata.actions.monitor_setup.run_id set on it (this is the UI's signal that this is a delivery message).
+Find:
+(a) The exact line range where the search-completion delivery text message is written (the supabase.from('messages').insert({...}) that pairs with the buildNaturalResponse call near line 3586). Show the full insert object including the metadata that sets actions.monitor_setup.run_id.
+(b) What stages/artefacts happen BEFORE this message-write in the same code path? List them in order. Include in particular the writes for: combined_delivery artefact, final_delivery artefact, delivery_summary artefact, tower_judgement artefact, the agent_run completion (storage.updateAgentRun(jobId, { status: 'completed', ... })).
+(c) What stages happen AFTER this message-write? Anything? Or is this near the end of processChatTask?
+(d) Does the re-loop path go through this same write site, or is there a separate write for re-loop runs? (Look for a second buildNaturalResponse call or a parallel messages.insert with actions.monitor_setup.)
+(e) Are there OTHER paths that write actions.monitor_setup.run_id messages? (Refine results, monitor wake, etc. — list them.)
+Report findings in this format:
+WRITE SITE: server/supervisor.ts line X-Y
+WRITE OBJECT: <paste the full insert literal>
+
+STAGES BEFORE THIS WRITE (in order):
+1. <stage> at line <Z>: <what happens>
+2. ...
+
+STAGES AFTER THIS WRITE:
+1. ...
+
+RE-LOOP HANDLING: <single path or separate path>
+
+OTHER MONITOR_SETUP MESSAGE WRITES:
+- <file>:<line>: <context>
+DO NOT change any code yet.
