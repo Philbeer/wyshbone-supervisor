@@ -3680,6 +3680,14 @@ class SupervisorService {
           ...(towerResult.towerVerdict ? { towerVerdict: towerResult.towerVerdict } : {}),
           ...(towerResult.leads.length > 0 ? { leads: towerResult.leads } : {}),
           ...(runFailed ? { run_failed: true, failure_reason: failureReason } : {}),
+          ...(!runFailed && towerResult.leads.length > 0 ? {
+            actions: {
+              monitor_setup: {
+                run_id: jobId,
+                source_run_id: jobId,
+              },
+            },
+          } : {}),
         },
         created_at: Date.now(),
       })
