@@ -944,12 +944,14 @@ class SupervisorService {
         return;
       }
 
-      // 3. Parse schedule from user message
-      const msgLower = userMessage.toLowerCase();
-      let schedule = 'weekly'; // default
-      if (/\b(hourly|every\s+hour)\b/.test(msgLower)) schedule = 'hourly';
-      else if (/\b(daily|every\s+day|each\s+day)\b/.test(msgLower)) schedule = 'daily';
-      else if (/\b(weekly|every\s+week|each\s+week|once\s+a\s+week)\b/.test(msgLower)) schedule = 'weekly';
+      // 3. Parse schedule from structured request_data (UI buttons), not parsed from prose.
+      // Valid values: 'once' | 'hourly' | 'daily' | 'weekly'
+      const requestedSchedule = String(rd.schedule || '').toLowerCase().trim();
+      const validSchedules = ['once', 'hourly', 'daily', 'weekly'];
+      if (!validSchedules.includes(requestedSchedule)) {
+        throw new Error(`Monitor requires an explicit schedule. Use the schedule buttons in the search results.`);
+      }
+      const schedule = requestedSchedule;
 
       const entity = missionConfig.entity_category || 'businesses';
       const location = missionConfig.location_text || 'unknown location';
@@ -957,6 +959,7 @@ class SupervisorService {
 
       // 4. Compute next_wake_at
       const intervals: Record<string, number> = {
+        once: 0,         // 'once' fires immediately on next wake-scheduler pass
         hourly: 3_600_000,
         daily: 86_400_000,
         weekly: 604_800_000,
@@ -1006,10 +1009,11 @@ class SupervisorService {
           })),
           mission_mode: 'monitor',
           source_run_id: sourceRunId,
+          auto_deactivate_after_first_run: schedule === 'once',
         },
         is_active: 1,
         status: 'active',
-        last_run_at: new Date().toISOString(),
+        last_run_at: Date.now(),
         last_run_id: sourceRunId,
         next_wake_at: nextWakeAt,
         baseline_entity_names: JSON.stringify(baselineNames),
