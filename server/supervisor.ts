@@ -862,84 +862,112 @@ class SupervisorService {
     console.log(`[CREATE_MONITOR] runId=${jobId} conversation=${conversationId} msg="${userMessage.slice(0, 80)}"`);
 
     try {
-      // 1. Find the most recent completed run for this conversation
-      const { data: recentRuns, error: runError } = await supabase
-        .from('agent_runs')
-        .select('id, metadata')
-        .eq('conversation_id', conversationId)
-        .eq('status', 'completed')
-        .order('created_at', { ascending: false })
-        .limit(5);
-
-      if (runError) {
-        console.error(`[CREATE_MONITOR] Failed to query runs: ${runError.message}`);
-        throw new Error('Could not find recent searches to monitor');
-      }
-
-      // 2. Find the most recent run that has a mission extraction artefact
-      let sourceRunId: string | null = null;
-      let missionConfig: any = null;
-
-      for (const run of (recentRuns || [])) {
-        const { data: missionArtefacts } = await supabase
-          .from('artefacts')
-          .select('payload_json')
-          .eq('run_id', run.id)
-          .eq('type', 'mission_extraction')
-          .limit(1);
-
-        if (missionArtefacts && missionArtefacts.length > 0) {
-          sourceRunId = run.id;
-          const payload = missionArtefacts[0].payload_json;
-          // The mission extraction payload contains the structured mission in layers.pass2_structured_mission
-          const mission = payload?.layers?.pass2_structured_mission || payload?.pass2_structured_mission;
-          if (mission && mission.entity_category) {
-            missionConfig = mission;
-            break;
-          }
-        }
-      }
-
-      if (!missionConfig || !sourceRunId) {
-        // Fallback: try to get config from delivery_summary artefact
-        for (const run of (recentRuns || [])) {
-          const { data: deliveryArts } = await supabase
-            .from('artefacts')
-            .select('payload_json')
-            .eq('run_id', run.id)
-            .eq('type', 'delivery_summary')
-            .limit(1);
-
-          if (deliveryArts && deliveryArts.length > 0) {
-            const dp = deliveryArts[0].payload_json;
-            if (dp?.original_user_goal) {
-              sourceRunId = run.id;
-              missionConfig = {
-                entity_category: dp.business_type || dp.original_user_goal,
-                location_text: dp.location || null,
-                constraints: dp.structured_constraints || [],
-              };
-              break;
-            }
-          }
-        }
-      }
-
+      // 1. Look up the explicit source run provided by the UI
+      const sourceRunId: string = String(rd.source_run_id || '').trim();
       if (!sourceRunId) {
-        const noSearchMsg = "I couldn't find a recent search to monitor. Run a search first, then ask me to set up a monitor for it.";
+        const noRunMsg = "I couldn't find that search to monitor — the run may have been deleted or it doesn't belong to you.";
         const messageId = randomUUID();
         await Promise.all([
           supabase.from('messages').insert({
             id: messageId,
             conversation_id: conversationId,
             role: 'assistant',
-            content: noSearchMsg,
+            content: noRunMsg,
             source: 'supervisor',
             metadata: { supervisor_task_id: task.id, run_id: jobId, create_monitor_failed: true },
             created_at: Date.now(),
           }),
           supabase.from('supervisor_tasks').update({ status: 'completed', result: { message_id: messageId, monitor_created: false } }).eq('id', task.id),
-          storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'no_search_to_monitor' } }).catch(() => {}),
+          storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'no_source_run_id' } }).catch(() => {}),
+        ]);
+        return;
+      }
+
+      const { data: sourceRun, error: runError } = await supabase
+        .from('agent_runs')
+        .select('id, metadata')
+        .eq('id', sourceRunId)
+        .eq('user_id', task.user_id)
+        .maybeSingle();
+
+      if (runError) {
+        console.error(`[CREATE_MONITOR] Failed to query run: ${runError.message}`);
+        throw new Error('Could not look up the source search run');
+      }
+
+      if (!sourceRun) {
+        const noRunMsg = "I couldn't find that search to monitor — the run may have been deleted or it doesn't belong to you.";
+        const messageId = randomUUID();
+        await Promise.all([
+          supabase.from('messages').insert({
+            id: messageId,
+            conversation_id: conversationId,
+            role: 'assistant',
+            content: noRunMsg,
+            source: 'supervisor',
+            metadata: { supervisor_task_id: task.id, run_id: jobId, create_monitor_failed: true },
+            created_at: Date.now(),
+          }),
+          supabase.from('supervisor_tasks').update({ status: 'completed', result: { message_id: messageId, monitor_created: false } }).eq('id', task.id),
+          storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'source_run_not_found' } }).catch(() => {}),
+        ]);
+        return;
+      }
+
+      // 2. Fetch mission_extraction artefact from the source run
+      let missionConfig: any = null;
+
+      const { data: missionArtefacts } = await supabase
+        .from('artefacts')
+        .select('payload_json')
+        .eq('run_id', sourceRunId)
+        .eq('type', 'mission_extraction')
+        .limit(1);
+
+      if (missionArtefacts && missionArtefacts.length > 0) {
+        const payload = missionArtefacts[0].payload_json;
+        const mission = payload?.layers?.pass2_structured_mission || payload?.pass2_structured_mission;
+        if (mission && mission.entity_category) {
+          missionConfig = mission;
+        }
+      }
+
+      if (!missionConfig) {
+        // Fallback: try delivery_summary artefact on the same source run
+        const { data: deliveryArts } = await supabase
+          .from('artefacts')
+          .select('payload_json')
+          .eq('run_id', sourceRunId)
+          .eq('type', 'delivery_summary')
+          .limit(1);
+
+        if (deliveryArts && deliveryArts.length > 0) {
+          const dp = deliveryArts[0].payload_json;
+          if (dp?.original_user_goal) {
+            missionConfig = {
+              entity_category: dp.business_type || dp.original_user_goal,
+              location_text: dp.location || null,
+              constraints: dp.structured_constraints || [],
+            };
+          }
+        }
+      }
+
+      if (!missionConfig) {
+        const noRunMsg = "I couldn't find that search to monitor — the run may have been deleted or it doesn't belong to you.";
+        const messageId = randomUUID();
+        await Promise.all([
+          supabase.from('messages').insert({
+            id: messageId,
+            conversation_id: conversationId,
+            role: 'assistant',
+            content: noRunMsg,
+            source: 'supervisor',
+            metadata: { supervisor_task_id: task.id, run_id: jobId, create_monitor_failed: true },
+            created_at: Date.now(),
+          }),
+          supabase.from('supervisor_tasks').update({ status: 'completed', result: { message_id: messageId, monitor_created: false } }).eq('id', task.id),
+          storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'no_mission_config' } }).catch(() => {}),
         ]);
         return;
       }
