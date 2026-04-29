@@ -3446,12 +3446,12 @@ class SupervisorService {
               source: 'supervisor',
               metadata: { supervisor_task_id: task.id, run_id: jobId, rescue_self_heal_failed: true },
               created_at: Date.now(),
-            }).catch((e: any) => console.warn(`[RESCUE] Failed to insert fallback message: ${e.message}`));
+            }).then(() => undefined, (e: any) => console.warn(`[RESCUE] Failed to insert fallback message: ${e.message}`));
 
             await supabase.from('supervisor_tasks').update({
               status: 'completed',
               result: { message_id: rescueFailMsgId, rescue_self_heal_failed: true },
-            }).eq('id', task.id).catch(() => {});
+            }).eq('id', task.id).then(() => undefined, () => {});
           }
           await storage.updateAgentRun(jobId, { status: 'completed', terminalState: 'completed', endedAt: new Date(), metadata: { verdict: 'rescue_self_heal_failed', rescue_exhausted: true } }).catch(() => {});
           await emitTaskExecutionCompleted('rescue_self_heal_failed');
@@ -3819,7 +3819,7 @@ class SupervisorService {
       await supabase!.from('supervisor_tasks').update({
         status: 'failed',
         error: `run_error: ${errMsg.substring(0, 200)}`,
-      }).eq('id', task.id).catch(() => {});
+      }).eq('id', task.id).then(() => undefined, () => {});
 
       await emitTaskExecutionCompleted('run_error', { error: errMsg.substring(0, 200) });
       throw topLevelErr;
