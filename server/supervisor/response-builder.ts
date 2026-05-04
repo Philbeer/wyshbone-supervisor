@@ -1,3 +1,5 @@
+import { callLLMText } from './llm-failover';
+
 export interface ResponseBuilderInput {
   businessType: string;
   location: string;
@@ -12,14 +14,24 @@ export interface ResponseBuilderInput {
   executorsUsed: string[];
   monitorCreated: boolean;
   deliveryNote: string | null;
+  loopSummaries?: Array<{ executor: string; found: number; verdict: string }> | null;
+  scarcityType?: 'A' | 'B' | 'C' | null;
+  scarcityNote?: string | null;
 }
 
-export function buildNaturalResponse(input: ResponseBuilderInput): string {
-  const {
-    businessType, location, requestedCount, deliveredCount, verifiedCount,
-    towerVerdict, runFailed, failureReason, circuitBreakerFired,
-    loopsUsed, executorsUsed, monitorCreated, deliveryNote,
-  } = input;
+const EXECUTOR_LABELS: Record<string, string> = {
+  gp_cascade: 'Google Places',
+  gpt4o_search: 'web search (GPT-4o)',
+  outreach: 'outreach',
+};
+
+function executorLabel(type: string): string {
+  return EXECUTOR_LABELS[type?.toLowerCase()] ?? type ?? 'search';
+}
+
+function buildFallbackResponse(input: ResponseBuilderInput): string {
+  const { businessType, location, requestedCount, deliveredCount, verifiedCount,
+    runFailed, failureReason, monitorCreated, deliveryNote, scarcityType } = input;
 
   if (runFailed) {
     return `I wasn't able to complete this search. ${failureReason ? failureReason.substring(0, 150) : 'An unexpected error occurred.'} You can try rephrasing your query or running it again.`;
@@ -27,56 +39,116 @@ export function buildNaturalResponse(input: ResponseBuilderInput): string {
 
   const parts: string[] = [];
 
-  // Main result line
   if (deliveredCount === 0) {
     parts.push(`I searched for ${businessType} in ${location} but couldn't find any verified results.`);
-    if (loopsUsed > 1) {
-      parts.push(`I tried ${executorsUsed.join(' and ')} across ${loopsUsed} search rounds.`);
-    }
-    parts.push(`Try broadening your search criteria or checking a wider area.`);
+    if (scarcityType === 'B') parts.push(`The market here appears genuinely thin.`);
+    else parts.push(`Try broadening your search or checking a wider area.`);
     return parts.join(' ');
   }
 
-  // Successful results
   if (requestedCount && deliveredCount >= requestedCount) {
-    parts.push(`I found ${deliveredCount} ${businessType} in ${location} — all ${requestedCount} you asked for.`);
+    parts.push(`I found ${deliveredCount} ${businessType} in ${location}.`);
   } else if (requestedCount && deliveredCount < requestedCount) {
     parts.push(`I found ${deliveredCount} ${businessType} in ${location} out of the ${requestedCount} you asked for.`);
   } else {
     parts.push(`I found ${deliveredCount} ${businessType} in ${location}.`);
   }
 
-  // Verification summary
-  if (verifiedCount > 0 && verifiedCount < deliveredCount) {
-    parts.push(`${verifiedCount} have verified evidence from their websites.`);
-  } else if (verifiedCount === deliveredCount && deliveredCount > 0) {
-    parts.push(`All have verified evidence.`);
-  }
+  if (verifiedCount === deliveredCount && deliveredCount > 0) parts.push(`All have verified evidence.`);
+  else if (verifiedCount > 0) parts.push(`${verifiedCount} have verified evidence.`);
 
-  // Shortfall explanation
-  if (deliveryNote) {
-    parts.push(deliveryNote);
-  }
+  if (deliveryNote) parts.push(deliveryNote);
+  if (monitorCreated) parts.push(`I've set up ongoing monitoring.`);
 
-  // Monitor note
-  if (monitorCreated) {
-    parts.push(`I've set up ongoing monitoring and will let you know when new results appear.`);
-  }
-
-  // Suggested next steps (only if no monitor was created)
   if (!monitorCreated && deliveredCount > 0) {
     const suggestions: string[] = [];
-    if (deliveredCount >= 3) {
-      suggestions.push(`"email the top one"`);
-    }
+    if (deliveredCount >= 3) suggestions.push(`"email the top one"`);
     suggestions.push(`"keep monitoring for new ones"`);
-    if (requestedCount && deliveredCount < requestedCount) {
-      suggestions.push(`"try a wider area"`);
-    }
-    if (suggestions.length > 0) {
-      parts.push(`You can say ${suggestions.join(', ')} or ask me to refine the results.`);
-    }
+    if (requestedCount && deliveredCount < requestedCount && scarcityType !== 'B') suggestions.push(`"try a wider area"`);
+    if (suggestions.length > 0) parts.push(`You can say ${suggestions.join(', ')} or ask me to refine the results.`);
   }
 
   return parts.join(' ');
+}
+
+export async function buildNaturalResponse(input: ResponseBuilderInput): Promise<string> {
+  const { businessType, location, requestedCount, deliveredCount, verifiedCount,
+    runFailed, loopsUsed, executorsUsed, loopSummaries,
+    scarcityType, circuitBreakerFired, monitorCreated, towerVerdict } = input;
+
+  if (runFailed) {
+    return buildFallbackResponse(input);
+  }
+
+  const facts: string[] = [];
+  facts.push(`Entity searched for: ${businessType} in ${location}`);
+  if (requestedCount) facts.push(`User asked for: ${requestedCount}`);
+  facts.push(`Delivered: ${deliveredCount}`);
+  if (verifiedCount > 0) facts.push(`Verified with evidence: ${verifiedCount}`);
+  facts.push(`Tower verdict: ${towerVerdict ?? 'unknown'}`);
+
+  if (loopSummaries && loopSummaries.length > 0) {
+    const loopLines = loopSummaries.map((s, i) =>
+      `Loop ${i + 1}: ${executorLabel(s.executor)} — found ${s.found} (${s.verdict})`
+    );
+    facts.push(`Search loops:\n${loopLines.join('\n')}`);
+  } else if (loopsUsed > 0 && executorsUsed.length > 0) {
+    facts.push(`Executors used: ${executorsUsed.map(executorLabel).join(', ')}`);
+    facts.push(`Loops: ${loopsUsed}`);
+  }
+
+  if (scarcityType === 'A') facts.push(`Scarcity type: A — hit batch limit, more may exist in a wider area`);
+  if (scarcityType === 'B') facts.push(`Scarcity type: B — real scarcity, this is likely all there is`);
+  if (scarcityType === 'C') facts.push(`Scarcity type: C — capability limit, constraint was hard to verify`);
+  if (circuitBreakerFired) facts.push(`Note: search was cut short after reaching the loop limit`);
+  if (monitorCreated) facts.push(`A monitor has been set up for ongoing checks`);
+
+  const suggestionsAvailable: string[] = [];
+  if (deliveredCount >= 3) suggestionsAvailable.push(`"email the top one"`);
+  if (!monitorCreated) suggestionsAvailable.push(`"keep monitoring for new ones"`);
+  if (requestedCount && deliveredCount < requestedCount && scarcityType !== 'B') suggestionsAvailable.push(`"try a wider area"`);
+  suggestionsAvailable.push(`"refine the results"`);
+
+  const prompt = `You are writing the delivery message for a B2B lead-generation agent called Wyshbone. The user just ran a search and you need to write a short, natural, human response summarising what happened.
+
+FACTS ABOUT THIS RUN:
+${facts.join('\n')}
+
+AVAILABLE NEXT-STEP SUGGESTIONS (include all that apply at the end):
+${suggestionsAvailable.map(s => `- ${s}`).join('\n')}
+
+RULES:
+- Write 2-4 short sentences maximum. No bullet points.
+- Be specific — use the actual numbers, location, entity type, and what happened.
+- Vary your phrasing — don't use the same sentence structure every time.
+- If multiple search loops ran, briefly explain what each found and why it switched if relevant.
+- If there's a shortfall (delivered < requested), explain it honestly based on the scarcity type.
+- If Type B scarcity: say this appears to be a genuinely thin market, not that the user should try again.
+- If Type A: suggest a wider area search exists.
+- If Type C: acknowledge the constraint was hard to verify reliably.
+- End with the next-step suggestions exactly as written above, naturally incorporated.
+- Do NOT use markdown formatting, bullet points, or line breaks in the response.
+- Do NOT start with "I'm happy to" or any sycophantic opener.
+- Keep it under 80 words.`;
+
+  try {
+    const response = await callLLMText(
+      'You write short, natural delivery summaries for a B2B lead-generation agent. Be specific, varied, and honest. Never use the same phrasing twice.',
+      prompt,
+      'response_builder',
+      {
+        providerChain: ['openai', 'anthropic'],
+        openaiModel: 'gpt-4o-mini',
+        anthropicModel: 'claude-haiku-4-5-20251001',
+        maxTokens: 150,
+        timeoutMs: 8000,
+      },
+    );
+    const cleaned = response.trim().replace(/^"|"$/g, '');
+    if (cleaned.length < 10) return buildFallbackResponse(input);
+    return cleaned;
+  } catch (err: any) {
+    console.warn(`[RESPONSE_BUILDER] LLM call failed (non-fatal): ${err.message} — using fallback`);
+    return buildFallbackResponse(input);
+  }
 }
