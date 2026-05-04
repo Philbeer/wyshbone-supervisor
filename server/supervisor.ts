@@ -3626,7 +3626,7 @@ class SupervisorService {
     const ds = towerResult.deliverySummary;
     let response: string;
     try {
-      response = buildNaturalResponse({
+      response = await buildNaturalResponse({
         businessType: earlyParsedGoal?.business_type ?? missionResult?.mission?.entity_category ?? 'results',
         location: earlyParsedGoal?.location ?? missionResult?.mission?.location_text ?? '',
         requestedCount: ds?.requested_count ?? earlyParsedGoal?.requested_count ?? null,
@@ -3640,6 +3640,33 @@ class SupervisorService {
         executorsUsed: ds?.plan_versions?.map((pv: any) => pv.changes_made?.[0] ?? 'search').filter(Boolean) ?? ['search'],
         monitorCreated,
         deliveryNote: ds?.delivery_note ?? null,
+        loopSummaries: (() => {
+          const chainSummary = (missionExecResult as any)?.deliverySummary?.loop_summaries
+            ?? (missionExecResult as any)?.loopSummaries
+            ?? null;
+          if (Array.isArray(chainSummary) && chainSummary.length > 1) {
+            return chainSummary.map((s: any) => ({
+              executor: s.executor_type ?? s.executor ?? '',
+              found: s.entities_found ?? s.found ?? 0,
+              verdict: s.verdict ?? '',
+            }));
+          }
+          return null;
+        })(),
+        scarcityType: (() => {
+          const ds = missionExecResult?.deliverySummary;
+          if (!ds) return null;
+          const delivered = ds.delivered_exact_count ?? 0;
+          const requested = ds.requested_count;
+          if (!requested || delivered >= requested) return null;
+          const towerPass = (ds.tower_verdict ?? '').toLowerCase() === 'pass';
+          const cb = (missionExecResult as any)?.circuitBreakerFired === true;
+          if (towerPass && !cb && delivered > 0 && delivered < requested * 0.6) return 'B';
+          if (cb) return 'A';
+          if (delivered === 0) return 'C';
+          return 'A';
+        })(),
+        scarcityNote: null,
       });
     } catch (respErr: any) {
       console.warn(`[RESPONSE_BUILDER] Failed (non-fatal), using neutral message: ${respErr.message}`);
