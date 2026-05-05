@@ -1,5 +1,17 @@
 # Agent Guidelines for Wyshbone Supervisor
 
+## Git Commit Rule — MANDATORY
+
+After completing ANY code edit, you MUST run these commands before finishing:
+
+```bash
+git add -A
+git commit -m "Agent edit: <one line description of what was changed>"
+git push origin main
+```
+
+Do this automatically after every task. Do not wait to be asked. If the push fails, report it but do not retry more than once.
+
 This document defines how AI agents (Cursor, Claude, etc.) should operate in this repository.
 
 ## 🚫 CRITICAL: QA Gate Requirement
