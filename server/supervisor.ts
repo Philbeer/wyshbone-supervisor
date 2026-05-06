@@ -3669,13 +3669,9 @@ class SupervisorService {
         scarcityNote: null,
       });
     } catch (respErr: any) {
-      console.warn(`[RESPONSE_BUILDER] Failed (non-fatal), using neutral message: ${respErr.message}`);
-      // response already set by buildNaturalResponse above — do not overwrite
-      // Strip any LLM-generated conversational preamble that leaked through
-      if (/I'd be happy to|I would be happy to|Could you tell me|what type of businesses|what kind of businesses/i.test(response)) {
-        console.warn(`[SUPERVISOR_MSG_GUARD] Blocked conversational preamble in response: "${response.substring(0, 120)}"`);
-        response = SUPERVISOR_NEUTRAL_MESSAGE;
-      }
+      console.warn(`[RESPONSE_BUILDER] Failed — using neutral fallback: ${respErr.message}`);
+      console.warn(`[RESPONSE_BUILDER] Stack:`, respErr.stack);
+      response = SUPERVISOR_NEUTRAL_MESSAGE;
     }
 
     // Override response if API billing errors caused empty results
@@ -3720,6 +3716,11 @@ class SupervisorService {
         }
       })
       .eq('id', task.id);
+
+    if (typeof response !== 'string' || response.trim().length === 0) {
+      console.error(`[SUPERVISOR] response is empty/invalid before insert — runId=${jobId} type=${typeof response} value=${JSON.stringify(response)?.substring(0, 100)}`);
+      response = SUPERVISOR_NEUTRAL_MESSAGE;
+    }
 
     const messageInsertPromise = supabase
       .from('messages')

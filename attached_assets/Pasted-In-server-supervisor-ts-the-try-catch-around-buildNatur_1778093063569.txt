@@ -1,0 +1,33 @@
+In server/supervisor.ts, the try/catch around buildNaturalResponse (~line 3629–3680) leaves response as undefined when buildNaturalResponse throws. This causes the downstream messages.insert at line 3730 to fail with a not-null constraint violation, and the user sees a generic error fallback instead of the delivery summary.
+Two fixes needed in this file. Do not change anything else.
+Fix 1 — Repair the catch block (~line 3671)
+Find the catch block:
+ts} catch (respErr: any) {
+  console.warn(`[RESPONSE_BUILDER] Failed (non-fatal), using neutral message: ${respErr.message}`);
+  // response already set by buildNaturalResponse above — do not overwrite
+  // Strip any LLM-generated conversational preamble that leaked through
+  if (/I'd be happy to|I would be happy to|Could you tell me|what type of businesses|what kind of businesses/i.test(response)) {
+    console.warn(`[SUPERVISOR_MSG_GUARD] Blocked conversational preamble in response: "${response.substring(0, 120)}"`);
+    response = SUPERVISOR_NEUTRAL_MESSAGE;
+  }
+}
+Replace with:
+ts} catch (respErr: any) {
+  console.warn(`[RESPONSE_BUILDER] Failed — using neutral fallback: ${respErr.message}`);
+  console.warn(`[RESPONSE_BUILDER] Stack:`, respErr.stack);
+  response = SUPERVISOR_NEUTRAL_MESSAGE;
+}
+This guarantees response is a non-null string when the catch fires, and adds a stack trace so we can find out WHY buildNaturalResponse is throwing.
+Fix 2 — Defensive guard before insert (~line 3725, just before the messages.insert call)
+Find the line in processChatTask immediately before the await supabase.from('messages').insert({...}) that has content: response,. Just above that insert, add:
+tsif (typeof response !== 'string' || response.trim().length === 0) {
+  console.error(`[SUPERVISOR] response is empty/invalid before insert — runId=${jobId} type=${typeof response} value=${JSON.stringify(response)?.substring(0, 100)}`);
+  response = SUPERVISOR_NEUTRAL_MESSAGE;
+}
+This is belt-and-braces — even if a future code path forgets to set response, the insert won't fail.
+Verification: After applying both fixes, restart the workflow, and run a search. Then report:
+
+The full content of the most recent messages row where role='assistant' AND source='supervisor' AND metadata->>'run_lane' = 'true'
+Any [RESPONSE_BUILDER] Stack: log entries from the workflow logs since the restart — paste the full stack trace if present
+
+Don't change anything else. Just these two surgical edits.
