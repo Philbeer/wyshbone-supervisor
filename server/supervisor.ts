@@ -3655,22 +3655,22 @@ class SupervisorService {
         })(),
         scarcityType: (() => {
           const ds = missionExecResult?.deliverySummary;
-          if (!ds) return null;
-          const delivered = ds.delivered_exact_count ?? 0;
-          const requested = ds.requested_count;
-          if (!requested || delivered >= requested) return null;
-          const towerPass = (ds.tower_verdict ?? '').toLowerCase() === 'pass';
+          const delivered = ds?.delivered_total_count ?? towerResult.leads.length;
+          const requested = requestedCount ?? 0;
           const cb = (missionExecResult as any)?.circuitBreakerFired === true;
-          if (towerPass && !cb && delivered > 0 && delivered < requested * 0.6) return 'B';
-          if (cb) return 'A';
-          if (delivered === 0) return 'C';
-          return 'A';
+          const towerPass = (towerResult.towerVerdict ?? '').toUpperCase() === 'PASS';
+
+          if (delivered === 0 && !cb) return 'B'; // zero results, no batch limit hit → real scarcity
+          if (cb) return 'A';                     // hit loop/batch limit → more may exist
+          if (requested > 0 && towerPass && delivered > 0 && delivered < requested * 0.6) return 'B'; // significant shortfall despite passing tower
+          if (delivered === 0) return 'C';        // zero results after CB somehow — capability issue
+          return null;                            // full or near-full delivery, no classification needed
         })(),
         scarcityNote: null,
       });
     } catch (respErr: any) {
       console.warn(`[RESPONSE_BUILDER] Failed (non-fatal), using neutral message: ${respErr.message}`);
-      response = sanitizeSupervisorMessage(towerResult.response);
+      // response already set by buildNaturalResponse above — do not overwrite
       // Strip any LLM-generated conversational preamble that leaked through
       if (/I'd be happy to|I would be happy to|Could you tell me|what type of businesses|what kind of businesses/i.test(response)) {
         console.warn(`[SUPERVISOR_MSG_GUARD] Blocked conversational preamble in response: "${response.substring(0, 120)}"`);
@@ -3692,7 +3692,7 @@ class SupervisorService {
       const monitorNote = missionModeResolved === 'alert_on_change'
         ? `\n\nI've also set up ongoing monitoring for this. I'll alert you when there are changes or new results.`
         : `\n\nI've also set up ongoing monitoring for this search. I'll check periodically and let you know about new results.`;
-      response = sanitizeSupervisorMessage(towerResult.response + monitorNote);
+      response = sanitizeSupervisorMessage(response + monitorNote);
     }
 
     const leadIds = towerResult.leadIds;
