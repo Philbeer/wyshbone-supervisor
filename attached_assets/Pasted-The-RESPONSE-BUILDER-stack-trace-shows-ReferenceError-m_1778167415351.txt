@@ -1,0 +1,72 @@
+The [RESPONSE_BUILDER] stack trace shows ReferenceError: missionExecResult is not defined at server/supervisor.ts:3645. The variable missionExecResult is not in scope inside processChatTask, but the loopSummaries and scarcityType IIFEs both reference it, causing buildNaturalResponse to throw on every run. The catch then writes the neutral fallback — so we always see boilerplate.
+Two surgical fixes in server/supervisor.ts. Do not change anything else.
+Fix 1 — Replace the loopSummaries IIFE (~line 3644)
+Find:
+tsloopSummaries: (() => {
+  const chainSummary = (missionExecResult as any)?.deliverySummary?.loop_summaries
+    ?? (missionExecResult as any)?.loopSummaries
+    ?? null;
+  if (Array.isArray(chainSummary) && chainSummary.length > 1) {
+    return chainSummary.map((s: any) => ({
+      executor: s.executor_type ?? s.executor ?? '',
+      found: s.entities_found ?? s.found ?? 0,
+      verdict: s.verdict ?? '',
+    }));
+  }
+  return null;
+})(),
+Replace with:
+tsloopSummaries: (() => {
+  const chainSummary = (ds as any)?.loop_summaries ?? null;
+  if (Array.isArray(chainSummary) && chainSummary.length > 1) {
+    return chainSummary.map((s: any) => ({
+      executor: s.executor_type ?? s.executor ?? '',
+      found: s.entities_found ?? s.found ?? 0,
+      verdict: s.verdict ?? '',
+    }));
+  }
+  return null;
+})(),
+Fix 2 — Replace the scarcityType IIFE (~line 3657)
+Find:
+tsscarcityType: (() => {
+  const ds = missionExecResult?.deliverySummary;
+  const delivered = ds?.delivered_total_count ?? towerResult.leads.length;
+  const requested = requestedCount ?? 0;
+  const cb = (missionExecResult as any)?.circuitBreakerFired === true;
+  const towerPass = (towerResult.towerVerdict ?? '').toUpperCase() === 'PASS';
+
+  if (delivered === 0 && !cb) return 'B';
+  if (cb) return 'A';
+  if (requested > 0 && towerPass && delivered > 0 && delivered < requested * 0.6) return 'B';
+  if (delivered === 0) return 'C';
+  return null;
+})(),
+Replace with:
+tsscarcityType: (() => {
+  // Use outer-scope ds (towerResult.deliverySummary) — do NOT redefine
+  const delivered = ds?.delivered_total_count ?? towerResult.leads.length;
+  const requested = ds?.requested_count ?? earlyParsedGoal?.requested_count ?? 0;
+  const cb = ds?.delivery_note?.includes('circuit') === true;
+  const towerPass = (towerResult.towerVerdict ?? '').toUpperCase() === 'PASS';
+
+  if (delivered === 0 && !cb) return 'B';
+  if (cb) return 'A';
+  if (requested > 0 && towerPass && delivered > 0 && delivered < requested * 0.6) return 'B';
+  if (delivered === 0) return 'C';
+  return null;
+})(),
+The two changes:
+
+Removed const ds = missionExecResult?.deliverySummary; (which shadowed the outer ds with undefined)
+Replaced requestedCount reference (which isn't in scope) with ds?.requested_count ?? earlyParsedGoal?.requested_count ?? 0
+Replaced missionExecResult.circuitBreakerFired with ds?.delivery_note?.includes('circuit') matching the pattern used at line 3639 of the same file
+
+Verification before reporting done:
+
+Run grep -n "missionExecResult" server/supervisor.ts — it must return zero matches.
+Show me lines 3644–3672 verbatim.
+Restart the workflow cleanly (kill all node, verify port 5000 free, start fresh).
+Confirm "ready — both IIFE fixes applied, missionExecResult fully removed, single process running" and stop.
+
+I'll trigger a fresh search after.

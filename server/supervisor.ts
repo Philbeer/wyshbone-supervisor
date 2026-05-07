@@ -3642,9 +3642,7 @@ class SupervisorService {
         monitorCreated,
         deliveryNote: ds?.delivery_note ?? null,
         loopSummaries: (() => {
-          const chainSummary = (missionExecResult as any)?.deliverySummary?.loop_summaries
-            ?? (missionExecResult as any)?.loopSummaries
-            ?? null;
+          const chainSummary = (ds as any)?.loop_summaries ?? null;
           if (Array.isArray(chainSummary) && chainSummary.length > 1) {
             return chainSummary.map((s: any) => ({
               executor: s.executor_type ?? s.executor ?? '',
@@ -3655,10 +3653,10 @@ class SupervisorService {
           return null;
         })(),
         scarcityType: (() => {
-          const ds = missionExecResult?.deliverySummary;
+          // Use outer-scope ds (towerResult.deliverySummary) — do NOT redefine
           const delivered = ds?.delivered_total_count ?? towerResult.leads.length;
-          const requested = requestedCount ?? 0;
-          const cb = (missionExecResult as any)?.circuitBreakerFired === true;
+          const requested = ds?.requested_count ?? earlyParsedGoal?.requested_count ?? 0;
+          const cb = ds?.delivery_note?.includes('circuit') === true;
           const towerPass = (towerResult.towerVerdict ?? '').toUpperCase() === 'PASS';
 
           if (delivered === 0 && !cb) return 'B'; // zero results, no batch limit hit → real scarcity
