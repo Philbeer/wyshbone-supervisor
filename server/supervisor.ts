@@ -3626,6 +3626,7 @@ class SupervisorService {
     const ds = towerResult.deliverySummary;
     let response: string;
     try {
+      console.log(`[BUBBLE_TRACE] About to call buildNaturalResponse for runId=${jobId}`);
       response = await buildNaturalResponse({
         businessType: earlyParsedGoal?.business_type ?? missionResult?.mission?.entity_category ?? 'results',
         location: earlyParsedGoal?.location ?? missionResult?.mission?.location_text ?? '',
@@ -3668,10 +3669,12 @@ class SupervisorService {
         })(),
         scarcityNote: null,
       });
+      console.log(`[BUBBLE_TRACE] buildNaturalResponse returned: type=${typeof response} length=${response?.length} preview="${(response ?? '').substring(0, 120)}"`);
     } catch (respErr: any) {
       console.warn(`[RESPONSE_BUILDER] Failed — using neutral fallback: ${respErr.message}`);
       console.warn(`[RESPONSE_BUILDER] Stack:`, respErr.stack);
       response = SUPERVISOR_NEUTRAL_MESSAGE;
+      console.error(`[BUBBLE_TRACE] CATCH FIRED — response set to neutral message for runId=${jobId}`);
     }
 
     // Override response if API billing errors caused empty results
@@ -3722,6 +3725,7 @@ class SupervisorService {
       response = SUPERVISOR_NEUTRAL_MESSAGE;
     }
 
+    console.log(`[BUBBLE_TRACE] About to insert message for runId=${jobId}: contentType=${typeof response} contentLength=${response?.length} contentPreview="${(response ?? '').substring(0, 120)}"`);
     const messageInsertPromise = supabase
       .from('messages')
       .insert({

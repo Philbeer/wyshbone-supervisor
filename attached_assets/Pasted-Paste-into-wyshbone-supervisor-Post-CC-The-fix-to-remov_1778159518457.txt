@@ -1,0 +1,21 @@
+Paste into wyshbone-supervisor-Post-CC
+The fix to remove the response overwrite is in the file (lines 3670–3685 confirmed earlier), but the most recent run still wrote Run complete. Results are available. to the messages table — i.e., the boilerplate is somehow still winning. We need to know whether buildNaturalResponse is being called at all, and if so, what it returns.
+Do these steps in order. Do not skip any.
+Step 1 — Add three definitive log lines around the buildNaturalResponse call.
+Open server/supervisor.ts. Find the line response = await buildNaturalResponse({ (around line 3629).
+Immediately BEFORE that line, add:
+tsconsole.log(`[BUBBLE_TRACE] About to call buildNaturalResponse for runId=${jobId}`);
+Immediately AFTER the closing }); of the await buildNaturalResponse({...}) call (the line that ends the function call, NOT the catch), add:
+tsconsole.log(`[BUBBLE_TRACE] buildNaturalResponse returned: type=${typeof response} length=${response?.length} preview="${(response ?? '').substring(0, 120)}"`);
+Inside the catch block at line 3671, immediately AFTER the existing two console.warn lines, add:
+tsconsole.error(`[BUBBLE_TRACE] CATCH FIRED — response set to neutral message for runId=${jobId}`);
+Step 2 — Find the messages.insert call and log right before it.
+Find the messages.insert call near line 3730 that has content: response,. Immediately BEFORE the await supabase.from('messages').insert({...}) line, add:
+tsconsole.log(`[BUBBLE_TRACE] About to insert message for runId=${jobId}: contentType=${typeof response} contentLength=${response?.length} contentPreview="${(response ?? '').substring(0, 120)}"`);
+Step 3 — Explicitly restart the workflow.
+Stop the workflow. Wait 3 seconds. Start it. Confirm it's running before continuing.
+Step 4 — Reply with "ready — please run a search now" and stop. Wait for confirmation.
+Step 5 — After the user confirms, fetch the workflow logs and report:
+a. Every [BUBBLE_TRACE] line in chronological order
+b. The ID and full content of the most recent run_lane=true row in the messages table
+c. If no [BUBBLE_TRACE] lines appear at all, that tells us the code path isn't being reached — report that explicitly
