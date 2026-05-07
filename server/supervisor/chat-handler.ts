@@ -307,6 +307,7 @@ async function saveChatMessage(conversationId: string, content: string): Promise
     const { supabase } = await import('../supabase');
     if (!supabase) return messageId;
 
+    console.log(`[BUBBLE_TRACE_INSERT_HERE] file=chat-handler.ts line=310 contentPreview="${String(content ?? '').substring(0, 120)}"`);
     await supabase.from('messages').insert({
       id: messageId,
       conversation_id: conversationId,

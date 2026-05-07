@@ -967,6 +967,7 @@ export async function runReloop(params: {
     delivery_note: deliveryNote,
   } : null;
 
+  console.log(`[BUBBLE_TRACE_LOOP_SKELETON] line=971 using neutral fallback — lastRawResult.response="${String((lastRawResult.response as string) ?? 'Run complete. Results are available.').substring(0, 120)}"`);
   const combinedResult: MissionExecutionResult = {
     response: (lastRawResult.response as string) ?? 'Run complete. Results are available.',
     leadIds: (lastRawResult.leadIds as string[]) ?? [],

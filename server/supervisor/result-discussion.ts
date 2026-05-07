@@ -219,6 +219,7 @@ async function saveAssistantMessage(
     const { supabase } = await import('../supabase');
     if (!supabase) return messageId;
 
+    console.log(`[BUBBLE_TRACE_INSERT_HERE] file=result-discussion.ts line=222 contentPreview="${String(content ?? '').substring(0, 120)}"`);
     await supabase.from('messages').insert({
       id: messageId,
       conversation_id: conversationId,

@@ -2997,6 +2997,7 @@ IMPORTANT:
     },
   });
 
+  console.log(`[BUBBLE_TRACE_MISSION_EXEC] line=3000 using neutral message as initial chatResponse for runId=${runId ?? 'unknown'}`);
   let chatResponse = SUPERVISOR_NEUTRAL_MESSAGE;
   if (
     relationshipPredicate.requires_relationship_evidence &&

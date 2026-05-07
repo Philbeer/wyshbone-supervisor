@@ -1,0 +1,35 @@
+Big finding — the [BUBBLE_TRACE] code at line 3629 is never reached. The completion is going through a completely different code path that bypasses buildNaturalResponse and writes the boilerplate directly. The fix is in the wrong place — we need to find the actual write path.
+The four files containing the neutral string are the candidates:
+
+server/supervisor.ts:35
+server/supervisor/mission-executor.ts:48
+server/supervisor/gpt4o-search.ts:817
+server/supervisor/reloop/loop-skeleton.ts:971
+
+Paste-ready prompt to trace which one is firing:
+
+Paste into wyshbone-supervisor-Post-CC
+The [BUBBLE_TRACE] logs at server/supervisor.ts line 3629 are not firing — meaning the search completion is being processed by a different code path that bypasses buildNaturalResponse entirely. We need to find that path.
+Do these steps. Do not change any code logic.
+Step 1 — Find every messages.insert call in the supervisor repo.
+Search the entire codebase for from('messages') and report every file:line where it appears. For each match, show ~5 lines of context — specifically the content: field and the role: field of the insert. I want to see every place a message can be written to the messages table.
+Step 2 — Add trace logs to every code path that uses the neutral string.
+For each of these four files, add a console.log with a unique tag immediately BEFORE the line that writes/uses the neutral string:
+a. server/supervisor.ts:35 — already traced via existing BUBBLE_TRACE logs, skip.
+b. server/supervisor/mission-executor.ts:48 — find every reference to SUPERVISOR_NEUTRAL_MESSAGE in this file. Before each one (assignment OR insert), add:
+tsconsole.log(`[BUBBLE_TRACE_MISSION_EXEC] line=<linenum> using neutral message for runId=${runId ?? 'unknown'}`);
+Replace <linenum> with the actual line number you're adding the log near.
+c. server/supervisor/gpt4o-search.ts:817 — find the response: 'Run complete. Results are available.' line and any other use of SUPERVISOR_NEUTRAL_MESSAGE in this file. Before each, add:
+tsconsole.log(`[BUBBLE_TRACE_GPT4O_SEARCH] line=<linenum> setting neutral response`);
+d. server/supervisor/reloop/loop-skeleton.ts:971 — same pattern:
+tsconsole.log(`[BUBBLE_TRACE_LOOP_SKELETON] line=<linenum> using neutral fallback`);
+Step 3 — Find any from('messages') insert that writes content from a non-supervisor.ts file.
+Specifically, in mission-executor.ts, gpt4o-search.ts, loop-skeleton.ts, and any other file under server/supervisor/, search for from('messages') or messages.insert. If any exist, add this trace log immediately before:
+tsconsole.log(`[BUBBLE_TRACE_INSERT_HERE] file=<filename> line=<linenum> contentPreview="<preview of content variable>"`);
+Step 4 — Restart the workflow (kill all node, verify port free, start fresh, confirm no EADDRINUSE).
+Step 5 — Reply with "ready — traces added, single process running" and stop. Wait for me to confirm a search has been run.
+Step 6 — After I confirm, report:
+a. Every [BUBBLE_TRACE*] line in chronological order, verbatim. Include all variants — BUBBLE_TRACE, BUBBLE_TRACE_MISSION_EXEC, BUBBLE_TRACE_GPT4O_SEARCH, BUBBLE_TRACE_LOOP_SKELETON, BUBBLE_TRACE_INSERT_HERE.
+b. The full content of the most recent supervisor message row inserted for that run.
+c. From step 1, the complete list of every messages.insert location in the supervisor repo.
+This will definitively show us which code path is writing the boilerplate.

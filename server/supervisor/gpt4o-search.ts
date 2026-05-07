@@ -812,6 +812,7 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
 
   console.log(`[GPT4O_SEARCH] ===== GPT-4o primary execution complete =====`);
   console.log(`[GPT4O_SEARCH] runId=${runId} leads=${cappedLeads.length} verdict=${finalVerdict} rounds=${roundsPerformed}`);
+  console.log(`[BUBBLE_TRACE_GPT4O_SEARCH] line=817 setting neutral response for runId=${runId ?? 'unknown'}`);
 
   return {
     response: 'Run complete. Results are available.',

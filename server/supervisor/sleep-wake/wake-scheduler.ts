@@ -90,6 +90,7 @@ export async function checkAndWakeGoals(): Promise<void> {
         const { randomUUID } = await import('crypto');
         const messageId = randomUUID();
 
+        console.log(`[BUBBLE_TRACE_INSERT_HERE] file=wake-scheduler.ts line=93 contentPreview="${nudgeContent.substring(0, 120)}"`);
         await supabase.from('messages').insert({
           id: messageId,
           conversation_id: goal.conversationId,
@@ -113,6 +114,7 @@ export async function checkAndWakeGoals(): Promise<void> {
         const messageId = randomUUID();
         const emptyNudge = `I've checked "${goal.label}" ${goal.consecutiveEmptyWakes + 1} times now with no new results. Would you like me to keep monitoring, change the schedule, or stop checking?`;
 
+        console.log(`[BUBBLE_TRACE_INSERT_HERE] file=wake-scheduler.ts line=116 contentPreview="${emptyNudge.substring(0, 120)}"`);
         await supabase.from('messages').insert({
           id: messageId,
           conversation_id: goal.conversationId,
