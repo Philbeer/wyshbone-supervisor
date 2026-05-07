@@ -1,0 +1,26 @@
+The natural language bubble currently produces one prose paragraph. The user wants a bulleted breakdown — four short lines, one each for: results, verification, scarcity/market note, suggestion. Update the LLM prompt in the response builder so it produces this format directly. Per the project's design philosophy (LLM-with-context, no regex/rules-engine post-processing), do not parse or restructure the LLM output — just instruct the LLM to produce the new format.
+Step 1 — Read the current prompt.
+Open server/supervisor/response-builder.ts. Find the LLM prompt that gets passed to callLLMText (the one that takes the input fields like businessType, location, deliveredCount, verifiedCount, scarcityType, etc. and asks for natural language back). Show me the entire prompt block verbatim so I can see what we're starting from.
+Step 2 — Update the prompt to produce a bulleted breakdown.
+Rewrite the prompt instructions so the LLM produces output in this exact shape (still natural language, but four bullets separated by blank lines, in markdown):
+- **Results:** <one line stating count + business type + location, e.g. "Found 19 pubs in Arundel">
+
+- **Verification:** <one line about how many were verified, e.g. "All 19 verified with on-page evidence">
+
+- **Market:** <one line about scarcity/abundance based on scarcityType. If scarcityType is null, say something like "Healthy supply in this area". If 'A', say "There may be more — try a wider search". If 'B', say "Market here looks genuinely thin". If 'C', say "Some constraints couldn't be verified reliably">
+
+- **Suggestion:** <one line: email a lead, refine the search, set up monitoring, or expand the area — pick the most relevant one based on context>
+Rules to add to the prompt explicitly:
+
+Use markdown bullets (-) and bold labels (**Results:**)
+Each bullet on its own line, separated by blank lines
+Each bullet's text must be a single sentence, no run-on
+No preamble, no closing summary — just the four bullets
+If monitorCreated is true, the Suggestion line should mention monitoring is already active rather than suggesting it
+If runFailed is true, the format should still be four bullets but Results should explain the failure plainly, Verification should say "n/a", Market should say "unknown — run did not complete", Suggestion should propose a retry or simpler query
+
+Step 3 — Update the fallback (buildFallbackResponse) to match the same format.
+If the LLM call fails internally and the fallback fires, it should also output the same four-bullet structure. Use plain string concatenation — no LLM call, since this is the fallback for when the LLM is down. Same labels, same line breaks, same logic for each bullet.
+Step 4 — Show me the diff.
+Show the before/after of both the prompt block and buildFallbackResponse. Don't restart yet — I want to review first.
+Step 5 — After I confirm, restart the workflow (kill all node, verify port 5000 free, start fresh, confirm no EADDRINUSE), then reply with "ready — bullet format applied, restart clean".

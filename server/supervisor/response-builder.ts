@@ -31,44 +31,52 @@ function executorLabel(type: string): string {
 
 function buildFallbackResponse(input: ResponseBuilderInput): string {
   const { businessType, location, requestedCount, deliveredCount, verifiedCount,
-    runFailed, failureReason, monitorCreated, deliveryNote, scarcityType } = input;
+    runFailed, failureReason, monitorCreated, scarcityType } = input;
 
   if (runFailed) {
-    return `I wasn't able to complete this search. ${failureReason ? failureReason.substring(0, 150) : 'An unexpected error occurred.'} You can try rephrasing your query or running it again.`;
+    const reason = failureReason ? failureReason.substring(0, 150) : 'An unexpected error occurred.';
+    return [
+      `- **Results:** ${reason}`,
+      `- **Verification:** n/a`,
+      `- **Market:** Unknown — run did not complete.`,
+      `- **Suggestion:** Try rephrasing your query or running it again.`,
+    ].join('\n\n');
   }
 
-  const parts: string[] = [];
+  const resultsLine = requestedCount && deliveredCount < requestedCount
+    ? `Found ${deliveredCount} of ${requestedCount} requested ${businessType} in ${location}.`
+    : `Found ${deliveredCount} ${businessType} in ${location}.`;
 
-  if (deliveredCount === 0) {
-    parts.push(`I searched for ${businessType} in ${location} but couldn't find any verified results.`);
-    if (scarcityType === 'B') parts.push(`The market here appears genuinely thin.`);
-    else parts.push(`Try broadening your search or checking a wider area.`);
-    return parts.join(' ');
-  }
+  const verificationLine = deliveredCount === 0
+    ? `No results to verify.`
+    : verifiedCount === deliveredCount
+      ? `All ${deliveredCount} verified with on-page evidence.`
+      : verifiedCount > 0
+        ? `${verifiedCount} of ${deliveredCount} verified with on-page evidence.`
+        : `None could be independently verified.`;
 
-  if (requestedCount && deliveredCount >= requestedCount) {
-    parts.push(`I found ${deliveredCount} ${businessType} in ${location}.`);
-  } else if (requestedCount && deliveredCount < requestedCount) {
-    parts.push(`I found ${deliveredCount} ${businessType} in ${location} out of the ${requestedCount} you asked for.`);
-  } else {
-    parts.push(`I found ${deliveredCount} ${businessType} in ${location}.`);
-  }
+  const marketLine = scarcityType === 'A'
+    ? `There may be more — try a wider search.`
+    : scarcityType === 'B'
+      ? `Market here looks genuinely thin.`
+      : scarcityType === 'C'
+        ? `Some constraints couldn't be verified reliably.`
+        : `Healthy supply in this area.`;
 
-  if (verifiedCount === deliveredCount && deliveredCount > 0) parts.push(`All have verified evidence.`);
-  else if (verifiedCount > 0) parts.push(`${verifiedCount} have verified evidence.`);
+  const suggestionLine = monitorCreated
+    ? `Monitoring is already active — I'll alert you when new results appear.`
+    : deliveredCount >= 3
+      ? `Say "email the top one" to reach out, or ask me to refine the results.`
+      : deliveredCount === 0
+        ? `Try a broader search term or a wider area.`
+        : `Ask me to monitor for new results or expand the search area.`;
 
-  if (deliveryNote) parts.push(deliveryNote);
-  if (monitorCreated) parts.push(`I've set up ongoing monitoring.`);
-
-  if (!monitorCreated && deliveredCount > 0) {
-    const suggestions: string[] = [];
-    if (deliveredCount >= 3) suggestions.push(`"email the top one"`);
-    suggestions.push(`"keep monitoring for new ones"`);
-    if (requestedCount && deliveredCount < requestedCount && scarcityType !== 'B') suggestions.push(`"try a wider area"`);
-    if (suggestions.length > 0) parts.push(`You can say ${suggestions.join(', ')} or ask me to refine the results.`);
-  }
-
-  return parts.join(' ');
+  return [
+    `- **Results:** ${resultsLine}`,
+    `- **Verification:** ${verificationLine}`,
+    `- **Market:** ${marketLine}`,
+    `- **Suggestion:** ${suggestionLine}`,
+  ].join('\n\n');
 }
 
 export async function buildNaturalResponse(input: ResponseBuilderInput): Promise<string> {
@@ -100,47 +108,45 @@ export async function buildNaturalResponse(input: ResponseBuilderInput): Promise
   if (scarcityType === 'A') facts.push(`Scarcity type: A — hit batch limit, more may exist in a wider area`);
   if (scarcityType === 'B') facts.push(`Scarcity type: B — real scarcity, this is likely all there is`);
   if (scarcityType === 'C') facts.push(`Scarcity type: C — capability limit, constraint was hard to verify`);
+  if (!scarcityType) facts.push(`Scarcity type: null — supply appears healthy`);
   if (circuitBreakerFired) facts.push(`Note: search was cut short after reaching the loop limit`);
   if (monitorCreated) facts.push(`A monitor has been set up for ongoing checks`);
 
-  const suggestionsAvailable: string[] = [];
-  if (deliveredCount >= 3) suggestionsAvailable.push(`"email the top one"`);
-  if (!monitorCreated) suggestionsAvailable.push(`"keep monitoring for new ones"`);
-  if (requestedCount && deliveredCount < requestedCount && scarcityType !== 'B') suggestionsAvailable.push(`"try a wider area"`);
-  suggestionsAvailable.push(`"refine the results"`);
-
-  const prompt = `You are writing the delivery message for a B2B lead-generation agent called Wyshbone. The user just ran a search and you need to write a short, natural, human response summarising what happened.
+  const prompt = `You are writing the delivery message for a B2B lead-generation agent called Wyshbone. The user just ran a search. Produce exactly four markdown bullets, nothing else — no preamble, no closing summary.
 
 FACTS ABOUT THIS RUN:
 ${facts.join('\n')}
 
-AVAILABLE NEXT-STEP SUGGESTIONS (include all that apply at the end):
-${suggestionsAvailable.map(s => `- ${s}`).join('\n')}
+OUTPUT FORMAT (copy this structure exactly):
+
+- **Results:** <one sentence: count + business type + location>
+
+- **Verification:** <one sentence: how many were verified with on-page evidence>
+
+- **Market:** <one sentence about supply or scarcity>
+
+- **Suggestion:** <one sentence: the single most relevant next action>
 
 RULES:
-- Write 2-4 short sentences maximum. No bullet points.
-- Be specific — use the actual numbers, location, entity type, and what happened.
-- Vary your phrasing — don't use the same sentence structure every time.
-- If multiple search loops ran, briefly explain what each found and why it switched if relevant.
-- If there's a shortfall (delivered < requested), explain it honestly based on the scarcity type.
-- If Type B scarcity: say this appears to be a genuinely thin market, not that the user should try again.
-- If Type A: suggest a wider area search exists.
-- If Type C: acknowledge the constraint was hard to verify reliably.
-- End with the next-step suggestions exactly as written above, naturally incorporated.
-- Do NOT use markdown formatting, bullet points, or line breaks in the response.
+- Use markdown bullets (-) and bold labels (**Results:**, **Verification:**, **Market:**, **Suggestion:**).
+- Each bullet on its own line, separated by a blank line.
+- Each bullet's text must be a single sentence — no run-ons.
+- Be specific — use the actual numbers, location, and entity type from the facts above.
+- Market bullet: if scarcityType is null, write "Healthy supply in this area." If Type A (batch limit hit), write "There may be more — try a wider search." If Type B (real scarcity), write "Market here looks genuinely thin." If Type C (constraint unverifiable), write "Some constraints couldn't be verified reliably."
+- Suggestion bullet: if a monitor has been set up, say monitoring is already active. Otherwise pick the single most relevant action — email a lead, refine results, set up monitoring, or expand the area.
 - Do NOT start with "I'm happy to" or any sycophantic opener.
-- Keep it under 80 words.`;
+- Do NOT add any text before the first bullet or after the last bullet.`;
 
   try {
     const response = await callLLMText(
-      'You write short, natural delivery summaries for a B2B lead-generation agent. Be specific, varied, and honest. Never use the same phrasing twice.',
+      'You write short, structured delivery summaries for a B2B lead-generation agent. Always output exactly four markdown bullets with bold labels. Be specific. Never add preamble or closing text.',
       prompt,
       'response_builder',
       {
         providerChain: ['openai', 'anthropic'],
         openaiModel: 'gpt-4o-mini',
         anthropicModel: 'claude-haiku-4-5-20251001',
-        maxTokens: 150,
+        maxTokens: 200,
         timeoutMs: 8000,
       },
     );
