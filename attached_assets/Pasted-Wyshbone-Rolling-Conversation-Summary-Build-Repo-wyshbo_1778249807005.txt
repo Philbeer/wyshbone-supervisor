@@ -1,0 +1,449 @@
+Wyshbone — Rolling Conversation Summary Build
+Repo: wyshbone-supervisor-Post-CC only. UI needs zero changes.
+What it does: New table + module + 3 small edits. After every chat reply, fires a non-blocking Haiku call that updates a per-conversation summary in the DB. Subsequent chat/router prompts pin that summary above the literal sliding window, giving the LLM long-term memory beyond the last 8 messages.
+Files touched
+FileChangemigrations/conversation-summaries.sqlNEWserver/supervisor/conversation-summary.tsNEWserver/supervisor/chat-handler.tsEDIT (2 hunks)server/supervisor/conversation-router.tsEDIT (4 hunks)server/supervisor.tsEDIT (2 hunks)
+
+Step 1 — DB migration
+Paste to Replit Agent:
+
+Create migrations/conversation-summaries.sql with the SQL below. Then run it manually in the Supabase SQL Editor. Do not run it as part of the app — one-time manual migration.
+
+sqlCREATE TABLE IF NOT EXISTS conversation_summaries (
+  conversation_id uuid PRIMARY KEY,
+  summary text NOT NULL,
+  last_summarized_message_count integer NOT NULL DEFAULT 0,
+  last_summarized_at timestamptz NOT NULL DEFAULT now(),
+  version integer NOT NULL DEFAULT 1,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_summaries_updated
+  ON conversation_summaries (last_summarized_at DESC);
+Verify: SELECT * FROM conversation_summaries LIMIT 1; returns zero rows, no error.
+Agent report expected: "Table created. Schema verified."
+
+Step 2 — Create the summary module
+Paste to Replit Agent:
+
+Create a new file at server/supervisor/conversation-summary.ts with the exact contents below. Do not import this from anywhere yet — that comes in later steps. Do not modify any other file.
+
+typescript/**
+ * Conversation Summary — rolling LLM-generated memory.
+ *
+ * Maintains one summary row per conversation that captures everything a
+ * future chat / router LLM call needs to stay coherent beyond the literal
+ * sliding window of recent messages.
+ *
+ * Read path:  getConversationSummary(conversationId) -> string | null
+ * Write path: maybeRefreshSummary(conversationId) -> void  (fire-and-forget)
+ *
+ * Failure modes are silent: if the table is missing, the LLM call fails,
+ * or any DB op errors, callers fall through to no-summary mode.
+ */
+
+import { supabase } from '../supabase';
+import { callLLMText } from './llm-failover';
+
+const SUMMARY_ENABLED = process.env.CONVERSATION_SUMMARY_ENABLED !== 'false';
+const REFRESH_THRESHOLD = parseInt(
+  process.env.CONVERSATION_SUMMARY_REFRESH_THRESHOLD || '6',
+  10,
+);
+const MAX_HISTORY = parseInt(
+  process.env.CONVERSATION_SUMMARY_MAX_HISTORY || '30',
+  10,
+);
+const SUMMARIZER_MODEL =
+  process.env.CONVERSATION_SUMMARY_MODEL || 'claude-haiku-4-5-20251001';
+const TIMEOUT_MS = parseInt(
+  process.env.CONVERSATION_SUMMARY_TIMEOUT_MS || '12000',
+  10,
+);
+
+const SUMMARY_SYSTEM_PROMPT = `You are a conversation memory summariser for Wyshbone, a B2B lead-generation app that finds and verifies businesses for users.
+
+Your job: read a recent conversation between a user and Wyshbone, and produce a tight, factual summary that captures everything a future Wyshbone reply will need to stay coherent.
+
+The summary will be pinned to the top of every future LLM call in this conversation as background context. It must let the assistant pick up exactly where things left off, even when older messages are no longer visible in the literal window.
+
+WHAT TO INCLUDE:
+- Topics and entities discussed (e.g. "pubs in Arundel", "wine merchants", "the Wine Society")
+- Locations and geographic constraints mentioned
+- The user's stated preferences, intent, and goals
+- Searches that were run (entity + location + key constraints) and roughly how many results were delivered
+- Open threads — questions the assistant asked that have not yet been answered, suggestions not yet acted on
+- Tone or relationship cues if clearly stated (e.g. "user prefers concise replies", "user is a brewery owner")
+- Any specific facts the user has shared that future replies must respect (names, dates, requirements)
+
+WHAT TO EXCLUDE:
+- Generic chitchat, greetings, sign-offs
+- Long verbatim retellings of search result lists — note what was searched and roughly how many delivered, not each business name
+- Inferred psychology or anything not actually said
+- Verbatim quotes — paraphrase tightly
+
+FORMAT:
+- Plain prose. 100 to 300 words.
+- No bullet points, no markdown headers, no lists.
+- Past tense, third-person ("the user asked about...", not "you asked about...").
+- If a previous summary is provided, integrate new information into it — do not append. The output replaces the old summary entirely.
+
+Return ONLY the summary text. No preamble, no commentary, no quotes around it.`;
+
+export async function getConversationSummary(
+  conversationId: string,
+): Promise<string | null> {
+  if (!SUMMARY_ENABLED || !supabase || !conversationId) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from('conversation_summaries')
+      .select('summary')
+      .eq('conversation_id', conversationId)
+      .maybeSingle();
+
+    if (error) {
+      if (error.code === 'PGRST205' || error.code === '42P01') return null;
+      console.warn(`[CONV_SUMMARY] Read failed (non-fatal): ${error.message}`);
+      return null;
+    }
+
+    return data?.summary || null;
+  } catch (err: any) {
+    console.warn(`[CONV_SUMMARY] Read exception (non-fatal): ${err.message}`);
+    return null;
+  }
+}
+
+export async function maybeRefreshSummary(
+  conversationId: string,
+): Promise<void> {
+  if (!SUMMARY_ENABLED || !supabase || !conversationId) return;
+
+  try {
+    const { data: existing, error: readErr } = await supabase
+      .from('conversation_summaries')
+      .select('last_summarized_message_count, summary')
+      .eq('conversation_id', conversationId)
+      .maybeSingle();
+
+    if (readErr) {
+      if (
+        readErr.code === 'PGRST205' ||
+        readErr.code === '42P01' ||
+        readErr.code === 'PGRST116'
+      ) {
+        // Table missing or no row — both fine, fall through.
+      } else {
+        console.warn(`[CONV_SUMMARY] Refresh read failed: ${readErr.message}`);
+        return;
+      }
+    }
+
+    const lastCount = existing?.last_summarized_message_count || 0;
+    const existingSummary = existing?.summary || null;
+
+    const { count: currentCount, error: countErr } = await supabase
+      .from('messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('conversation_id', conversationId);
+
+    if (countErr) {
+      console.warn(`[CONV_SUMMARY] Count failed: ${countErr.message}`);
+      return;
+    }
+
+    const messageCount = currentCount || 0;
+    const delta = messageCount - lastCount;
+
+    if (delta < REFRESH_THRESHOLD) return;
+
+    console.log(
+      `[CONV_SUMMARY] Refreshing — conversation=${conversationId.slice(0, 8)} ` +
+        `messages=${messageCount} lastSummarized=${lastCount} delta=${delta}`,
+    );
+
+    const { data: messages, error: msgErr } = await supabase
+      .from('messages')
+      .select('role, content, created_at')
+      .eq('conversation_id', conversationId)
+      .order('created_at', { ascending: false })
+      .limit(MAX_HISTORY);
+
+    if (msgErr || !messages || messages.length === 0) {
+      console.warn(
+        `[CONV_SUMMARY] Message fetch failed: ${msgErr?.message || 'no messages'}`,
+      );
+      return;
+    }
+
+    const ordered = messages.reverse();
+
+    const parts: string[] = [];
+    if (existingSummary) {
+      parts.push('PREVIOUS SUMMARY (update and integrate, do not just append):');
+      parts.push(existingSummary);
+      parts.push('');
+    }
+    parts.push('RECENT CONVERSATION:');
+    for (const msg of ordered) {
+      const role = msg.role === 'user' ? 'User' : 'Wyshbone';
+      const content = String(msg.content || '').substring(0, 1200);
+      parts.push(`${role}: ${content}`);
+    }
+    parts.push('');
+    parts.push('Produce the updated summary now.');
+
+    const userPrompt = parts.join('\n');
+
+    let summary: string;
+    try {
+      summary = await callLLMText(
+        SUMMARY_SYSTEM_PROMPT,
+        userPrompt,
+        'conv_summary',
+        {
+          preferredProvider: 'anthropic',
+          anthropicModel: SUMMARIZER_MODEL,
+          maxTokens: 800,
+          temperature: 0.3,
+          timeoutMs: TIMEOUT_MS,
+        },
+      );
+    } catch (llmErr: any) {
+      console.warn(`[CONV_SUMMARY] LLM failed: ${llmErr.message}`);
+      return;
+    }
+
+    summary = summary.trim();
+    if (summary.startsWith('```')) {
+      summary = summary
+        .replace(/^```(?:\w+)?\n?/, '')
+        .replace(/```$/, '')
+        .trim();
+    }
+
+    if (!summary || summary.length < 20) {
+      console.warn(
+        `[CONV_SUMMARY] LLM returned empty / too-short summary, skipping write`,
+      );
+      return;
+    }
+
+    const { error: writeErr } = await supabase
+      .from('conversation_summaries')
+      .upsert(
+        {
+          conversation_id: conversationId,
+          summary,
+          last_summarized_message_count: messageCount,
+          last_summarized_at: new Date().toISOString(),
+          version: 1,
+        },
+        { onConflict: 'conversation_id' },
+      );
+
+    if (writeErr) {
+      console.warn(`[CONV_SUMMARY] Write failed: ${writeErr.message}`);
+      return;
+    }
+
+    console.log(
+      `[CONV_SUMMARY] Refreshed conversation=${conversationId.slice(0, 8)} ` +
+        `length=${summary.length} chars messages=${messageCount}`,
+    );
+  } catch (err: any) {
+    console.warn(`[CONV_SUMMARY] Refresh exception (non-fatal): ${err.message}`);
+  }
+}
+Verify: File exists. TypeScript compiles. No other files touched.
+Agent report expected: "File created. TypeScript compiles. No other files touched."
+
+Step 3 — Wire summary into chat-handler.ts
+Paste to Replit Agent:
+
+Edit server/supervisor/chat-handler.ts. Make exactly two changes — nothing else.
+
+Change 1 — add import. Find:
+typescriptimport { callLLMText } from './llm-failover';
+import { getRelevantReferenceKnowledge } from './reference-knowledge';
+import { getCurrentContextPreamble } from './current-context';
+Add directly below:
+typescriptimport { getConversationSummary } from './conversation-summary';
+Change 2 — inject the summary block. Find this exact section in handleChat:
+typescript  // 1. Build user prompt with context
+  const parts: string[] = [];
+
+  if (conversationHistory.length > 0) {
+    parts.push('CONVERSATION HISTORY:');
+Replace with:
+typescript  // 1. Build user prompt with context
+
+  // Long-term memory: pull the rolling summary if one exists for this
+  // conversation. Sits ABOVE the literal sliding window so the LLM has
+  // continuity beyond the last 8 messages.
+  const longTermSummary = await getConversationSummary(conversationId);
+
+  const parts: string[] = [];
+
+  if (longTermSummary) {
+    parts.push('CONVERSATION SUMMARY (long-term memory of what we have been talking about — use this for continuity):');
+    parts.push(longTermSummary);
+    parts.push('');
+  }
+
+  if (conversationHistory.length > 0) {
+    parts.push('CONVERSATION HISTORY:');
+Do not change anything else. Not the system prompt, not the LLM call, not the circuit breaker, not the message save logic.
+Verify: Diff shows two hunks only. TypeScript compiles.
+Agent report expected: "Import added. Summary block injected before history. Diff shows two hunks only. TypeScript compiles."
+
+Step 4 — Wire summary into conversation-router.ts
+Paste to Replit Agent:
+
+Edit server/supervisor/conversation-router.ts. Four small changes — nothing else.
+
+Change 1 — add import. Find:
+typescriptimport { callLLMText } from './llm-failover';
+import { getCurrentDatePreamble } from './current-context';
+import type { TurnAnalysis } from './conversation-turn-classifier';
+Add below:
+typescriptimport { getConversationSummary } from './conversation-summary';
+Change 2 — extend RouterInput. Find the interface and add conversationId?: string; as the last field:
+typescriptexport interface RouterInput {
+  currentMessage: string;
+  conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }>;
+  previousResults: {
+    exists: boolean;
+    count: number;
+    entityType: string | null;
+    location: string | null;
+    lastSearchRunId: string | null;
+  };
+  urlContent: string | null;
+  userSearchHistory: Array<{ query: string; delivered: number }> | null;
+  turnAnalysis: TurnAnalysis;
+  conversationId?: string;
+}
+Change 3 — make buildRouterUserMessage async and inject the summary. Find:
+typescriptfunction buildRouterUserMessage(input: RouterInput): string {
+  const parts: string[] = [];
+
+  parts.push('TURN ANALYSIS (from context analyser — treat as authoritative):');
+Replace with:
+typescriptasync function buildRouterUserMessage(input: RouterInput): Promise<string> {
+  const parts: string[] = [];
+
+  // Long-term memory: rolling summary, if one exists for this conversation.
+  if (input.conversationId) {
+    const longTermSummary = await getConversationSummary(input.conversationId);
+    if (longTermSummary) {
+      parts.push('CONVERSATION SUMMARY (long-term memory of what we have been talking about):');
+      parts.push(longTermSummary);
+      parts.push('');
+    }
+  }
+
+  parts.push('TURN ANALYSIS (from context analyser — treat as authoritative):');
+The rest of the function body stays unchanged.
+Change 4 — update the caller. In routeConversation, find:
+typescript  const userMessage = buildRouterUserMessage(input);
+Replace with:
+typescript  const userMessage = await buildRouterUserMessage(input);
+Do not change anything else. Not the system prompt, not the parser, not the safety overrides.
+Verify: TypeScript compiles. Function is now async. Summary block appears at the top of the user message before TURN ANALYSIS.
+Agent report expected: "Import added. RouterInput extended. Function made async. Summary block injected at top. Caller awaited. TypeScript compiles."
+
+Step 5 — Pass conversationId to the router from supervisor.ts
+Paste to Replit Agent:
+
+Edit server/supervisor.ts. Find the existing block that creates routerInput (search for const routerInput = { inside processChatTask). Add one field.
+
+Find:
+typescript        const routerInput = {
+          currentMessage: rawMsg,
+          conversationHistory: routerHistory,
+          previousResults: routerPreviousResults,
+          urlContent: (requestData as any).url_content || null,
+          userSearchHistory: null,
+          turnAnalysis,
+        };
+Replace with:
+typescript        const routerInput = {
+          currentMessage: rawMsg,
+          conversationHistory: routerHistory,
+          previousResults: routerPreviousResults,
+          urlContent: (requestData as any).url_content || null,
+          userSearchHistory: null,
+          turnAnalysis,
+          conversationId: task.conversation_id,
+        };
+Do not change anything else. Single one-line addition.
+Verify: Diff shows one line added. TypeScript compiles.
+Agent report expected: "One line added to routerInput. No other changes. TypeScript compiles."
+
+Step 6 — Trigger refresh after every chat task
+Paste to Replit Agent:
+
+Edit server/supervisor.ts. We need to fire maybeRefreshSummary (non-blocking) at the end of every processChatTask invocation, regardless of code path. Add a finally block to the outermost try in processChatTask.
+
+Find the outermost try in processChatTask — the one that wraps the whole body and is followed by } catch (error) { near the end. Add a finally block after the existing catch:
+typescript    try {
+      // ... existing body unchanged ...
+    } catch (error) {
+      // ... existing catch unchanged ...
+    } finally {
+      // Long-term memory: refresh the rolling conversation summary.
+      // Fire-and-forget — never blocks the task and never throws to caller.
+      if (task.conversation_id) {
+        import('./supervisor/conversation-summary')
+          .then(({ maybeRefreshSummary }) => {
+            maybeRefreshSummary(task.conversation_id).catch(() => {});
+          })
+          .catch(() => {});
+      }
+    }
+  }
+If a finally block already exists on that try, just add the if (task.conversation_id) { ... } block inside it.
+Do not change anything else. Do not modify any of the existing code paths, returns, error handling, or anything inside the try or catch.
+Verify: Outermost try in processChatTask has a finally block calling maybeRefreshSummary via dynamic import. TypeScript compiles.
+Agent report expected: "Finally block added at outermost try in processChatTask. Fire-and-forget refresh wired. No existing logic touched. TypeScript compiles."
+
+Step 7 — Smoke test
+Paste to Replit Agent:
+
+Restart the server. Walk through this test sequence and report each stage. Do not auto-fix anything — just report.
+
+
+Cold start. New conversation. Send "hi". Reply works as before. Logs show NO [CONV_SUMMARY] Refreshing line yet.
+Below threshold. Send a couple more short messages. Refresh should fire on roughly the third reply.
+First refresh. Watch for [CONV_SUMMARY] Refreshing — conversation=... then [CONV_SUMMARY] Refreshed conversation=... length=... chars messages=.... Both lines should appear.
+DB check. In Supabase:
+
+sql   SELECT conversation_id, last_summarized_message_count, length(summary), last_summarized_at
+   FROM conversation_summaries
+   ORDER BY last_summarized_at DESC LIMIT 5;
+Confirm a row exists with summary length 100-2000 chars.
+
+Pin verification. Temporarily add a log line in chat-handler.ts printing the first 200 chars of userPrompt. Confirm the prompt now starts with CONVERSATION SUMMARY (long-term memory ...) followed by the summary, then CONVERSATION HISTORY:. Remove the log line after.
+Memory test (the real one). Fresh conversation. Send "tell me about pubs in Arundel — what makes a good village pub". Have a 6-8 message conversation about pubs (do NOT search). Then send 6-8 messages on a tangential topic — wine, marketing, brewery business — drift far from pubs. Then: "so going back to what we were chatting about earlier, what would you suggest". Reply must reference pubs / Arundel / village pubs explicitly, NOT ask "what businesses?".
+Refresh frequency. Check the DB row's last_summarized_message_count — should have grown by at least one refresh cycle.
+
+Agent report expected: Walkthrough of each step with observed log lines, DB rows, and final reply quality. Flag anything unexpected.
+
+Operational notes
+
+Cost: ~$0.005 per refresh on Haiku 4.5. A heavy session = a few cents. Negligible.
+Latency: Zero user-facing impact — refresh fires after the reply has already been sent.
+Toggle off: CONVERSATION_SUMMARY_ENABLED=false. Both functions become no-ops.
+Tuning knobs: CONVERSATION_SUMMARY_REFRESH_THRESHOLD (default 6), CONVERSATION_SUMMARY_MAX_HISTORY (30), CONVERSATION_SUMMARY_MODEL (Haiku 4.5 — flip to Sonnet for richer summaries), CONVERSATION_SUMMARY_TIMEOUT_MS (12000).
+What this does NOT do: Per-conversation only. Cross-conversation memory is a separate feature, same pattern keyed on user_id.
+
+
+After it ships
+
+Pull a few production summaries from the DB and read them. If they're missing the right things, tune the system prompt — one-line change, no code risk.
+Once summaries are healthy, you can probably shrink chat-handler.ts slice(-8) to slice(-6) — summary covers the older context. Saves tokens. Don't do this until summaries are confirmed good.
+
+
+That's the lot. Run steps 1-6 in order, run step 7 to verify. Each step has its own agent report so you can stop and check before moving on. Shout if anything goes sideways at any stage.
