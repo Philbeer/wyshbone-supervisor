@@ -11,6 +11,7 @@
 import { callLLMText } from './llm-failover';
 import { getCurrentDatePreamble } from './current-context';
 import type { TurnAnalysis } from './conversation-turn-classifier';
+import { getConversationSummary } from './conversation-summary';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -42,6 +43,7 @@ export interface RouterInput {
   urlContent: string | null;
   userSearchHistory: Array<{ query: string; delivered: number }> | null;
   turnAnalysis: TurnAnalysis;   // NEW — required
+  conversationId?: string;
 }
 
 // ─── System Prompt ──────────────────────────────────────────────────────────
@@ -179,8 +181,18 @@ What NOT to route as CHAT:
 
 // ─── User Message Builder ───────────────────────────────────────────────────
 
-function buildRouterUserMessage(input: RouterInput): string {
+async function buildRouterUserMessage(input: RouterInput): Promise<string> {
   const parts: string[] = [];
+
+  // Long-term memory: rolling summary, if one exists for this conversation.
+  if (input.conversationId) {
+    const longTermSummary = await getConversationSummary(input.conversationId);
+    if (longTermSummary) {
+      parts.push('CONVERSATION SUMMARY (long-term memory of what we have been talking about):');
+      parts.push(longTermSummary);
+      parts.push('');
+    }
+  }
 
   parts.push('TURN ANALYSIS (from context analyser — treat as authoritative):');
   parts.push(`  last_assistant_turn_type: ${input.turnAnalysis.last_assistant_turn_type}`);
@@ -307,7 +319,7 @@ export async function routeConversation(input: RouterInput): Promise<RouterDecis
 
   // ALL messages go through the LLM router — no fast paths, no regex
   // Build context and call LLM
-  const userMessage = buildRouterUserMessage(input);
+  const userMessage = await buildRouterUserMessage(input);
 
   let rawResponse: string;
   try {

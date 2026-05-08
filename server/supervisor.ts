@@ -1521,6 +1521,7 @@ class SupervisorService {
           urlContent: (requestData as any).url_content || null,
           userSearchHistory: null,
           turnAnalysis,
+          conversationId: task.conversation_id,
         };
 
         // Stage 2: router uses turn analysis as authoritative context
@@ -3896,6 +3897,16 @@ class SupervisorService {
 
       await emitTaskExecutionCompleted('run_error', { error: errMsg.substring(0, 200) });
       throw topLevelErr;
+    } finally {
+      // Long-term memory: refresh the rolling conversation summary.
+      // Fire-and-forget — never blocks the task and never throws to caller.
+      if (task.conversation_id) {
+        import('./supervisor/conversation-summary')
+          .then(({ maybeRefreshSummary }) => {
+            maybeRefreshSummary(task.conversation_id).catch(() => {});
+          })
+          .catch(() => {});
+      }
     }
   }
 

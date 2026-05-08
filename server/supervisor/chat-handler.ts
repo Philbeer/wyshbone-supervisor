@@ -1,6 +1,7 @@
 import { callLLMText } from './llm-failover';
 import { getRelevantReferenceKnowledge } from './reference-knowledge';
 import { getCurrentContextPreamble } from './current-context';
+import { getConversationSummary } from './conversation-summary';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -218,7 +219,19 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
   );
 
   // 1. Build user prompt with context
+
+  // Long-term memory: pull the rolling summary if one exists for this
+  // conversation. Sits ABOVE the literal sliding window so the LLM has
+  // continuity beyond the last 8 messages.
+  const longTermSummary = await getConversationSummary(conversationId);
+
   const parts: string[] = [];
+
+  if (longTermSummary) {
+    parts.push('CONVERSATION SUMMARY (long-term memory of what we have been talking about — use this for continuity):');
+    parts.push(longTermSummary);
+    parts.push('');
+  }
 
   if (conversationHistory.length > 0) {
     parts.push('CONVERSATION HISTORY:');
