@@ -1,0 +1,21 @@
+Two things in this step.
+Part A — fix the migration file to match what actually ran in Supabase.
+Open migrations/conversation-summaries-add-userid.sql. The UPDATE statement currently casts the wrong side. Change:
+sqlWHERE c.id::text = cs.conversation_id
+to:
+sqlWHERE c.id = cs.conversation_id::text
+(conversations.id is text, conversation_summaries.conversation_id is uuid — we cast the uuid side to text. The migration has already been applied to Supabase with this corrected version; this edit just brings the file in the repo into line with what actually ran.)
+Part B — thread user_id through the conversation-summary module and every caller.
+In server/supervisor/conversation-summary.ts:
+
+getConversationSummary(conversationId) — add a required second parameter userId: string. Add .eq('user_id', userId) to the .select('summary') query alongside the existing .eq('conversation_id', conversationId).
+maybeRefreshSummary(conversationId) — add a required second parameter userId: string. Add .eq('user_id', userId) to the .select('last_summarized_message_count, summary') read alongside the existing .eq('conversation_id', conversationId). Include user_id: userId in the .upsert({...}) payload alongside the existing fields. The onConflict clause stays as 'conversation_id' — that's still the natural key.
+
+Then update every caller. Find each call site and pass the userId through:
+
+server/supervisor/chat-handler.ts — find the call to getConversationSummary(conversationId). The userId is available in handleChat's input — pass it as the second arg.
+server/supervisor/conversation-router.ts — find the call to getConversationSummary. Add a userId: string field to the RouterInput type alongside the existing conversationId field. Pass userId as the second arg of the getConversationSummary call. Update the caller in supervisor.ts (the routerInput object construction inside processChatTask) to include userId: task.user_id.
+server/supervisor.ts — find the finally block in processChatTask that calls maybeRefreshSummary. Pass task.user_id as the second arg.
+
+Search the codebase for any other callers of getConversationSummary or maybeRefreshSummary and update them too. Don't leave any caller still on the old single-arg signature — TypeScript should catch any you miss once the function signatures are updated.
+After all edits, list every file you changed with the exact diff. Confirm TypeScript compiles. Restart the server and confirm no startup errors.
