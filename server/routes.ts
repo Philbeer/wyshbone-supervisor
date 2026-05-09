@@ -40,10 +40,13 @@ import { chatDirectRouter } from './routes/routes-chat-direct';
 
 // SUPERVISOR_EXECUTION_ENABLED: REMOVED — all execution goes through Supervisor unconditionally.
 
-// Helper to get userId from request (simple version for MVP)
+// Helper to get userId from request — throws if missing so callers surface a 401/400 rather than silently using a hardcoded fallback
 function getUserId(req: any): string {
-  // Priority: body.userId > query.user_id > default demo user
-  return req.body?.userId || req.query?.user_id || "8f9079b3ddf739fb0217373c92292e91";
+  const userId = req.body?.userId || req.query?.user_id;
+  if (!userId) {
+    throw new Error('No user_id on request — UI bootstrap must establish a session before calling supervisor endpoints.');
+  }
+  return userId;
 }
 
 /**
@@ -155,6 +158,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } catch (error: any) {
       console.error("[PLAN API] Error creating plan:", error);
+      if (error.message?.includes('No user_id')) return res.status(401).json({ error: error.message });
       res.status(500).json({ error: error.message || "Failed to create plan" });
     }
   });
@@ -162,7 +166,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // POST /api/plan/approve - Approve and execute a plan
   app.post("/api/plan/approve", async (req, res) => {
     const startTime = Date.now();
-    const userId = getUserId(req);
+    let userId: string;
+    try {
+      userId = getUserId(req);
+    } catch (err: any) {
+      return res.status(401).json({ error: err.message });
+    }
     const { planId, run_id: externalRunId, client_request_id: externalCrid } = req.body;
     const { randomUUID } = await import('crypto');
     const runId = externalRunId || randomUUID();
@@ -346,6 +355,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } catch (error: any) {
       console.error("[PLAN API] Error fetching progress:", error);
+      if (error.message?.includes('No user_id')) return res.status(401).json({ error: error.message });
       res.status(500).json({ error: error.message || "Failed to fetch progress" });
     }
   });
@@ -502,7 +512,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const { randomUUID } = await import('crypto');
 
     const goalText = (req.body?.goal as string) || (req.body?.user_message as string) || 'find pet shops kent';
-    const userId = getUserId(req);
+    let userId: string;
+    try {
+      userId = getUserId(req);
+    } catch (err: any) {
+      return res.status(401).json({ ok: false, error: err.message });
+    }
     const taskId = randomUUID();
     const conversationId = req.body?.conversation_id || `sim_conv_${taskId.substring(0, 8)}`;
     const runId = req.body?.run_id || randomUUID();
@@ -643,7 +658,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Test endpoint - create signal in Supabase
   app.post("/api/test/signal-supabase", async (req, res) => {
     try {
-      const userId = req.body.userId || "8f9079b3ddf739fb0217373c92292e91";
+      const userId = req.body.userId;
+      if (!userId) return res.status(400).json({ error: 'userId is required' });
       const industry = req.body.industry || "dental clinic";
       const city = req.body.city || "Bristol";
       
@@ -749,7 +765,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const clientRequestId = randomUUID();
       const runId = `demo_tr_${randomUUID().replace(/-/g, '').substring(0, 12)}`;
-      const userId = getUserId(req);
+      let userId: string;
+      try {
+        userId = getUserId(req);
+      } catch (err: any) {
+        return res.status(401).json({ ok: false, error: err.message });
+      }
       const goalText = req.body?.goal || 'find pet shops in Kent';
 
       console.log(`[DEBUG] demo-tool-registry: goal="${goalText}", runId=${runId}`);
@@ -1373,8 +1394,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get user context (profile, facts, messages, etc.)
   app.get("/api/user/context", async (req, res) => {
     try {
-      // Allow specifying user_id via query param, default to em@em.com's ID (Dental Sky)
-      const userId = (req.query.user_id as string) || "8f9079b3ddf739fb0217373c92292e91";
+      const userId = req.query.user_id as string;
+      if (!userId) return res.status(400).json({ error: 'user_id query parameter is required' });
       const context = await supervisor.getUserContext(userId);
       res.json(context);
     } catch (error) {
@@ -1386,8 +1407,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get suggested leads for demo user
   app.get("/api/leads", async (req, res) => {
     try {
-      // Allow specifying user_id via query param, default to em@em.com's ID (Dental Sky)
-      const userId = (req.query.user_id as string) || "8f9079b3ddf739fb0217373c92292e91";
+      const userId = req.query.user_id as string;
+      if (!userId) return res.status(400).json({ error: 'user_id query parameter is required' });
       const leads = await storage.getSuggestedLeads(userId);
       res.json(leads);
     } catch (error) {
@@ -1399,8 +1420,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get recent user signals (from both PostgreSQL and Supabase)
   app.get("/api/signals", async (req, res) => {
     try {
-      // Allow specifying user_id via query param, default to bobby@test.com's ID
-      const userId = (req.query.user_id as string) || "dd71d4fc24290b03e6327aa7467176a8";
+      const userId = req.query.user_id as string;
+      if (!userId) return res.status(400).json({ error: 'user_id query parameter is required' });
       
       // Fetch from PostgreSQL
       const pgSignals = await storage.getRecentSignals(userId);
@@ -2132,6 +2153,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } catch (error: any) {
       console.error("[MEMORY API] Error storing memory:", error);
+      if (error.message?.includes('No user_id')) return res.status(401).json({ error: error.message });
       res.status(500).json({ error: error.message || "Failed to store memory" });
     }
   });
@@ -2156,6 +2178,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } catch (error: any) {
       console.error("[MEMORY API] Error retrieving memories:", error);
+      if (error.message?.includes('No user_id')) return res.status(401).json({ error: error.message });
       res.status(500).json({ error: error.message || "Failed to retrieve memories" });
     }
   });
@@ -2177,6 +2200,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } catch (error: any) {
       console.error("[PREFERENCES API] Error retrieving preferences:", error);
+      if (error.message?.includes('No user_id')) return res.status(401).json({ error: error.message });
       res.status(500).json({
         success: false,
         error: error.message || "Failed to retrieve preferences"
@@ -2246,6 +2270,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     } catch (error: any) {
       console.error("[WABS FEEDBACK API] Error storing feedback:", error);
+      if (error.message?.includes('No user_id')) return res.status(401).json({ error: error.message });
       res.status(500).json({
         success: false,
         error: error.message || "Failed to store WABS feedback"
@@ -2432,7 +2457,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     const runId = (req.body.runId || req.body.run_id || '') as string;
     const crid = (req.body.crid || req.body.clientRequestId || '') as string;
-    const userId = getUserId(req);
+    let userId: string;
+    try {
+      userId = getUserId(req);
+    } catch (err: any) {
+      return res.status(401).json({ ok: false, error: err.message });
+    }
     const conversationId = (req.body.conversationId || req.body.conversation_id || '') as string;
     const goal = (req.body.goal || 'Manual judgement request') as string;
 
@@ -2549,7 +2579,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     const runId = (req.body.runId || req.body.run_id || '') as string;
     const crid = (req.body.crid || req.body.clientRequestId || '') as string;
-    const userId = getUserId(req);
+    let userId: string;
+    try {
+      userId = getUserId(req);
+    } catch (err: any) {
+      return res.status(401).json({ ok: false, error: err.message });
+    }
     const conversationId = (req.body.conversationId || req.body.conversation_id || '') as string;
     const goal = (req.body.goal || 'Manual judgement request') as string;
 
@@ -2666,7 +2701,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post('/api/feedback/accept', async (req, res) => {
     const { goal_id, run_id, payload } = req.body;
-    const userId = getUserId(req);
+    let userId: string;
+    try {
+      userId = getUserId(req);
+    } catch (err: any) {
+      return res.status(401).json({ ok: false, error: err.message });
+    }
     if (!goal_id || !run_id) return res.status(400).json({ ok: false, error: 'goal_id and run_id are required' });
     try {
       const event = await storage.createFeedbackEvent({
@@ -2685,7 +2725,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post('/api/feedback/retry', async (req, res) => {
     const { goal_id, run_id, payload } = req.body;
-    const userId = getUserId(req);
+    let userId: string;
+    try {
+      userId = getUserId(req);
+    } catch (err: any) {
+      return res.status(401).json({ ok: false, error: err.message });
+    }
     if (!goal_id || !run_id) return res.status(400).json({ ok: false, error: 'goal_id and run_id are required' });
     try {
       const event = await storage.createFeedbackEvent({
@@ -2704,7 +2749,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post('/api/feedback/abandon', async (req, res) => {
     const { goal_id, run_id, payload } = req.body;
-    const userId = getUserId(req);
+    let userId: string;
+    try {
+      userId = getUserId(req);
+    } catch (err: any) {
+      return res.status(401).json({ ok: false, error: err.message });
+    }
     if (!goal_id || !run_id) return res.status(400).json({ ok: false, error: 'goal_id and run_id are required' });
     try {
       const event = await storage.createFeedbackEvent({
@@ -2723,7 +2773,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post('/api/feedback/export', async (req, res) => {
     const { goal_id, run_id, payload } = req.body;
-    const userId = getUserId(req);
+    let userId: string;
+    try {
+      userId = getUserId(req);
+    } catch (err: any) {
+      return res.status(401).json({ ok: false, error: err.message });
+    }
     if (!goal_id || !run_id) return res.status(400).json({ ok: false, error: 'goal_id and run_id are required' });
     try {
       const event = await storage.createFeedbackEvent({

@@ -23,7 +23,11 @@ import {
 export const outreachRouter = Router();
 
 function getUserId(req: any): string {
-  return req.body?.userId || req.query?.user_id || '8f9079b3ddf739fb0217373c92292e91';
+  const userId = req.body?.userId || req.query?.user_id;
+  if (!userId) {
+    throw new Error('No user_id on request — UI bootstrap must establish a session before calling supervisor endpoints.');
+  }
+  return userId;
 }
 
 // GET /config
