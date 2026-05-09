@@ -5,8 +5,8 @@
  * future chat / router LLM call needs to stay coherent beyond the literal
  * sliding window of recent messages.
  *
- * Read path:  getConversationSummary(conversationId) -> string | null
- * Write path: maybeRefreshSummary(conversationId) -> void  (fire-and-forget)
+ * Read path:  getConversationSummary(conversationId, userId) -> string | null
+ * Write path: maybeRefreshSummary(conversationId, userId) -> void  (fire-and-forget)
  *
  * Failure modes are silent: if the table is missing, the LLM call fails,
  * or any DB op errors, callers fall through to no-summary mode.
@@ -62,6 +62,7 @@ Return ONLY the summary text. No preamble, no commentary, no quotes around it.`;
 
 export async function getConversationSummary(
   conversationId: string,
+  userId: string,
 ): Promise<string | null> {
   if (!SUMMARY_ENABLED || !supabase || !conversationId) return null;
 
@@ -70,6 +71,7 @@ export async function getConversationSummary(
       .from('conversation_summaries')
       .select('summary')
       .eq('conversation_id', conversationId)
+      .eq('user_id', userId)
       .maybeSingle();
 
     if (error) {
@@ -87,6 +89,7 @@ export async function getConversationSummary(
 
 export async function maybeRefreshSummary(
   conversationId: string,
+  userId: string,
 ): Promise<void> {
   if (!SUMMARY_ENABLED || !supabase || !conversationId) return;
 
@@ -95,6 +98,7 @@ export async function maybeRefreshSummary(
       .from('conversation_summaries')
       .select('last_summarized_message_count, summary')
       .eq('conversation_id', conversationId)
+      .eq('user_id', userId)
       .maybeSingle();
 
     if (readErr) {
@@ -205,6 +209,7 @@ export async function maybeRefreshSummary(
       .upsert(
         {
           conversation_id: conversationId,
+          user_id: userId,
           summary,
           last_summarized_message_count: messageCount,
           last_summarized_at: new Date().toISOString(),

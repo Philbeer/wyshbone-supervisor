@@ -223,7 +223,7 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
   // Long-term memory: pull the rolling summary if one exists for this
   // conversation. Sits ABOVE the literal sliding window so the LLM has
   // continuity beyond the last 8 messages.
-  const longTermSummary = await getConversationSummary(conversationId);
+  const longTermSummary = await getConversationSummary(conversationId, input.userId);
 
   const parts: string[] = [];
 

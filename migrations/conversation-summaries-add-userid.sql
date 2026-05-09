@@ -10,7 +10,7 @@ UPDATE conversation_summaries cs
 SET user_id = (
   SELECT c.user_id
   FROM conversations c
-  WHERE c.id = cs.conversation_id
+  WHERE c.id = cs.conversation_id::text
   LIMIT 1
 )
 WHERE cs.user_id IS NULL;

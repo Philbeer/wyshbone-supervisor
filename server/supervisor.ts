@@ -1522,6 +1522,7 @@ class SupervisorService {
           userSearchHistory: null,
           turnAnalysis,
           conversationId: task.conversation_id,
+          userId: task.user_id,
         };
 
         // Stage 2: router uses turn analysis as authoritative context
@@ -3903,7 +3904,7 @@ class SupervisorService {
       if (task.conversation_id) {
         import('./supervisor/conversation-summary')
           .then(({ maybeRefreshSummary }) => {
-            maybeRefreshSummary(task.conversation_id).catch(() => {});
+            maybeRefreshSummary(task.conversation_id, task.user_id).catch(() => {});
           })
           .catch(() => {});
       }

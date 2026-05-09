@@ -44,6 +44,7 @@ export interface RouterInput {
   userSearchHistory: Array<{ query: string; delivered: number }> | null;
   turnAnalysis: TurnAnalysis;   // NEW — required
   conversationId?: string;
+  userId: string;
 }
 
 // ─── System Prompt ──────────────────────────────────────────────────────────
@@ -186,7 +187,7 @@ async function buildRouterUserMessage(input: RouterInput): Promise<string> {
 
   // Long-term memory: rolling summary, if one exists for this conversation.
   if (input.conversationId) {
-    const longTermSummary = await getConversationSummary(input.conversationId);
+    const longTermSummary = await getConversationSummary(input.conversationId, input.userId);
     if (longTermSummary) {
       parts.push('CONVERSATION SUMMARY (long-term memory of what we have been talking about):');
       parts.push(longTermSummary);
