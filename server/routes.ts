@@ -1483,6 +1483,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Seed initial data
   app.post("/api/seed", async (req, res) => {
     try {
+      if (process.env.NODE_ENV === 'production') {
+        return res.status(403).json({ error: 'Seed endpoint disabled in production' });
+      }
       // Create some sample signals
       const signal1 = await storage.createSignal({
         userId: "demo-user",

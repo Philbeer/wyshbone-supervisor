@@ -1,0 +1,33 @@
+Two things in this step. Both are fixes the audit flagged.
+Part A — restore the handleCreateMonitor user_id ownership guard.
+In server/supervisor.ts, find handleCreateMonitor (around line 880, look for the function that processes create_monitor tasks). Inside it, find the block that currently looks like:
+ts// TODO(identity): user_id guard removed because demo mode has two
+// identity representations for the same user — "demo-user" literal in
+// supervisor_tasks (from auth fallback) and a real UUID in agent_runs
+// (from URL-param auth). Unifying them is a non-trivial refactor.
+// Acceptable for now because source_run_id is a non-guessable UUID
+// written by the supervisor onto a conversation-scoped message; possession
+// of source_run_id implies authorisation. Restore guard once demo
+// identity is unified.
+const { data: sourceRun, error: runError } = await supabase
+  .from('agent_runs')
+  .select('id, metadata')
+  .eq('id', sourceRunId)
+  .maybeSingle();
+Replace the entire TODO(identity) comment block with a single-line comment explaining the guard is in place. Add .eq('user_id', task.user_id) to the query so it only finds the source run if it belongs to the same user. The result should look like:
+ts// Ownership guard: source run must belong to the same user as the create_monitor task.
+const { data: sourceRun, error: runError } = await supabase
+  .from('agent_runs')
+  .select('id, metadata')
+  .eq('id', sourceRunId)
+  .eq('user_id', task.user_id)
+  .maybeSingle();
+The existing if (!sourceRun) { ... } fall-through already handles the "couldn't find that search to monitor" case gracefully — that's now also the case for cross-user attempts, which is the desired behaviour.
+Part B — gate /api/seed behind non-production environments.
+In server/routes.ts, find the app.post("/api/seed", ...) handler (around line 1450). The body of this endpoint creates demo signals and suggested leads tagged with the literal string "demo-user" as userId (8 occurrences inside that one handler). The cleanest fix isn't to rewrite all 8 occurrences — it's to make the endpoint un-callable in production, since it's a developer seed endpoint.
+At the very top of the handler body (immediately inside the try block), add:
+tsif (process.env.NODE_ENV === 'production') {
+  return res.status(403).json({ error: 'Seed endpoint disabled in production' });
+}
+Leave the rest of the handler — including the "demo-user" literals — alone. Once the endpoint is dev-only-gated, the literals are harmless: in dev the supervisor accepts whatever userId it receives, and in prod the endpoint can't be called.
+After both edits, list every file you changed with the exact diff. Confirm TypeScript compiles. Restart the server and confirm no startup errors.

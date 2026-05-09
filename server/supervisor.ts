@@ -883,18 +883,12 @@ class SupervisorService {
         return;
       }
 
-      // TODO(identity): user_id guard removed because demo mode has two
-      // identity representations for the same user — "demo-user" literal in
-      // supervisor_tasks (from auth fallback) and a real UUID in agent_runs
-      // (from URL-param auth). Unifying them is a non-trivial refactor.
-      // Acceptable for now because source_run_id is a non-guessable UUID
-      // written by the supervisor onto a conversation-scoped message; possession
-      // of source_run_id implies authorisation. Restore guard once demo
-      // identity is unified.
+      // Ownership guard: source run must belong to the same user as the create_monitor task.
       const { data: sourceRun, error: runError } = await supabase
         .from('agent_runs')
         .select('id, metadata')
         .eq('id', sourceRunId)
+        .eq('user_id', task.user_id)
         .maybeSingle();
 
       if (runError) {
