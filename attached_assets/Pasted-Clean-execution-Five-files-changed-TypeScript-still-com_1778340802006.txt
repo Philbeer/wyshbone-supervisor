@@ -1,0 +1,37 @@
+Clean execution. Five files changed, TypeScript still compiles, ClaudeService confirmed dead and removed. Step 3 done.
+
+Next: Step 4 (supervisor repo). Expanded scope per the audit — there are six runtime locations to fix, not just the one in the plan. The two seed scripts can stay as-is (manual one-off seeders, not route handlers).
+Paste this to Replit Agent in wyshbone-supervisor-Post-CC:
+
+Multi-tenancy fix Step 4: remove every hardcoded user identity fallback from the runtime route handlers, so requests without a real user_id fail loudly instead of silently being tagged as the wrong user. The UI side has been updated (Step 3) — every legitimate request now arrives with a real user_id. Anything missing one is either an unauth'd curl, a stale cached client, or a bug, and should 401/400 rather than quietly impersonate a real account.
+Make all six changes in this order:
+1. server/routes.ts, getUserId(req) near line 46 — the central helper. Currently:
+tsfunction getUserId(req: any): string {
+  return req.body?.userId || req.query?.user_id || "8f9079b3ddf739fb0217373c92292e91";
+}
+Change to throw if neither body nor query has a value:
+tsfunction getUserId(req: any): string {
+  const userId = req.body?.userId || req.query?.user_id;
+  if (!userId) {
+    throw new Error('No user_id on request — UI bootstrap must establish a session before calling supervisor endpoints.');
+  }
+  return userId;
+}
+2. Audit every catch block in server/routes.ts that wraps a route handler calling getUserId(req) and ensure the thrown "No user_id" error is translated to a 401 response, not a 500. The safest pattern is to catch by error message: if error.message includes 'No user_id', respond res.status(401).json({ error: error.message }). Apply this to every route that uses getUserId.
+3. server/routes.ts around line 646, /api/test/signal-supabase — currently has an inline fallback:
+tsconst userId = req.body.userId || "8f9079b3ddf739fb0217373c92292e91";
+Change to require the field:
+tsconst userId = req.body.userId;
+if (!userId) return res.status(400).json({ error: 'userId is required' });
+4. server/routes.ts around line 1377, /api/user/context — currently:
+tsconst userId = (req.query.user_id as string) || "8f9079b3ddf739fb0217373c92292e91";
+Change to:
+tsconst userId = req.query.user_id as string;
+if (!userId) return res.status(400).json({ error: 'user_id query parameter is required' });
+5. server/routes.ts around line 1390, /api/leads — same pattern as /api/user/context. Same fix.
+6. server/routes.ts, /api/signals GET handler — search for the literal "dd71d4fc24290b03e6327aa7467176a8". Currently:
+tsconst userId = (req.query.user_id as string) || "dd71d4fc24290b03e6327aa7467176a8";
+Same fix — require the param, 400 if missing. (Different hardcoded UUID — bobby@test.com, not em@em.com — but the same anti-pattern.)
+7. server/routes/routes-outreach.ts line 26 — separate getUserId helper inside the outreach router with the same hardcoded UUID fallback. Apply the same throw-on-missing fix as change 1.
+Do not change server/scripts/seed.ts or server/supervisor/seed-outreach-config.ts — those are manual seed scripts that run locally, not runtime route handlers, and the hardcoded UUID there is harmless.
+After all edits: list every file you changed and the exact diff. Confirm TypeScript still compiles. Restart the server and confirm there are no obvious startup errors in logs.
