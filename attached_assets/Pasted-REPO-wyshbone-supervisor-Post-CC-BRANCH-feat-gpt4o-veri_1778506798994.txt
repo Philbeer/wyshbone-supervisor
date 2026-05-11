@@ -1,0 +1,139 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/gpt4o-verified-executor
+
+CONFIRM BRANCH BEFORE STARTING
+Run: git branch --show-current
+Must print: feat/gpt4o-verified-executor
+If it prints anything else, stop and report — do not proceed.
+
+CONTEXT
+Step 1 of the gpt4o_verified plan: register a stub executor so the planner can discover the new executor type. No actual search/verification logic in this step — just a function that matches the ExecutorFn signature, returns empty results, and is wired into the registry. Future steps will replace the stub body with real discovery + per-constraint verification.
+
+The stub is gated behind an env flag ENABLE_GPT4O_VERIFIED=true so it can't be picked by the planner accidentally during development. Without the flag, the executor stays unregistered and invisible to the planner — production behaviour is unchanged.
+
+CHANGE 1 — CREATE NEW FILE
+Path: server/supervisor/reloop/gpt4o-verified-adapter.ts
+
+Full file contents:
+
+import type { ExecutorInput, ExecutorOutput } from './types';
+
+/**
+ * gpt4o_verified executor — STUB (Step 1 of plan)
+ *
+ * Future steps will implement:
+ *   - Step 2: loose-prompt GPT-4o websearch discovery (15-30 candidates)
+ *   - Step 3: per-lead per-constraint verification via cheap LLM (Haiku/Groq)
+ *   - Step 4: aggregation into full-match / partial-match / dropped
+ *
+ * This stub returns 0 entities so the planner can register the executor type
+ * without it producing fake results during development.
+ */
+export async function gpt4oVerifiedAdapter(input: ExecutorInput): Promise<ExecutorOutput> {
+  const startTime = Date.now();
+  console.log(
+    `[RELOOP_EXECUTOR] gpt4o_verified adapter starting (STUB) — ` +
+    `entity="${input.mission.businessType}" location="${input.mission.location}"`,
+  );
+  console.log(
+    `[RELOOP_EXECUTOR] gpt4o_verified is currently a stub. ` +
+    `Returning 0 entities. Real implementation is Step 2+ of the gpt4o_verified plan.`,
+  );
+
+  return {
+    executorType: 'gpt4o_verified',
+    entities: [],
+    entitiesAttempted: 0,
+    executionMetadata: {
+      toolsUsed: [],
+      apiCallsMade: 0,
+      timeMs: Date.now() - startTime,
+      errorsEncountered: ['stub_executor_not_yet_implemented'],
+      rateLimitsHit: false,
+    },
+    coverageSignals: {
+      maxResultsHit: false,
+      searchQueriesExhausted: true,
+      estimatedUniverseSize: null,
+    },
+    rawResult: {
+      stub: true,
+      message: 'gpt4o_verified executor is registered but not yet implemented (Step 1 of plan)',
+    },
+  };
+}
+
+CHANGE 2 — EDIT EXISTING FILE
+Path: server/supervisor/reloop/index.ts
+
+Find the existing imports at the top:
+
+  import { registerExecutor } from './executor-registry';
+  import { gpCascadeAdapter } from './gp-cascade-adapter';
+  import { gpt4oAdapter } from './gpt4o-adapter';
+  import { outreachAdapter } from './outreach-adapter';
+
+Add ONE new import line below them:
+
+  import { gpt4oVerifiedAdapter } from './gpt4o-verified-adapter';
+
+Then find the existing outreach registerExecutor block (last of the three):
+
+  registerExecutor('outreach', outreachAdapter, {
+    ...
+    costTier: 'moderate',
+  });
+
+Immediately AFTER that closing }); add this new block:
+
+  // gpt4o_verified — gated by env flag during development.
+  // Set ENABLE_GPT4O_VERIFIED=true to make this executor available to the planner.
+  // Without the flag, this executor stays unregistered and production behaviour is unchanged.
+  if (process.env.ENABLE_GPT4O_VERIFIED === 'true') {
+    registerExecutor('gpt4o_verified', gpt4oVerifiedAdapter, {
+      description: 'GPT-4o web search with decoupled per-constraint verification. Discovers candidates with a loose search prompt, then independently verifies each hard constraint against each lead using a separate LLM reasoning call. Surfaces partial matches honestly when not all constraints can be satisfied.',
+      strengths: 'Honest per-constraint verdicts. Produces full-match vs partial-match classification — surfaces zero exact matches plus closest matches with clear explanation of which constraints failed. Better than gpt4o_search for queries with multiple independent hard constraints that need verification.',
+      limitations: 'More LLM calls than gpt4o_search (one verification call per lead per hard constraint, batched where possible). Currently STUB — returns 0 entities until Step 2+ of the gpt4o_verified plan is implemented.',
+      typicalUse: 'Queries with multiple hard constraints that need independent verification, especially constraints unlikely to be in Google Places fields (Michelin-starred, B-Corp certified, founded after 2024, vegan-only). Loose discovery then strict per-constraint verification.',
+      costTier: 'expensive',
+    });
+    console.log('[EXECUTOR_REGISTRY] gpt4o_verified executor enabled via ENABLE_GPT4O_VERIFIED env flag');
+  }
+
+Leave the rest of index.ts (the existing three registerExecutor blocks, the export statements at the bottom) completely unchanged.
+
+DO NOT TOUCH
+- executor-registry.ts
+- Any other existing executor or adapter
+- The planner, loop-skeleton, or types
+- Any test files
+
+VERIFY AFTER CHANGES
+Run these commands and paste raw output for each:
+
+1. cat server/supervisor/reloop/gpt4o-verified-adapter.ts | head -20
+   — should print the file header and import.
+
+2. grep -n "gpt4o_verified\|gpt4oVerifiedAdapter\|ENABLE_GPT4O_VERIFIED" server/supervisor/reloop/index.ts
+   — should show the import line, the env flag check, and the registerExecutor call.
+
+3. npx tsc --noEmit 2>&1 | head -20
+   — should report no TypeScript errors related to the new file. (Pre-existing errors elsewhere in the codebase are fine — just confirm none mention gpt4o-verified-adapter or gpt4oVerifiedAdapter.)
+
+4. ENABLE_GPT4O_VERIFIED=true node -e "import('./server/supervisor/reloop/index.js').then(m => console.log('available:', m.getAvailableExecutors())).catch(e => console.error('err:', e.message))" 2>&1 | tail -5
+   — should print something like: available: [ 'gp_cascade', 'gpt4o_search', 'outreach', 'gpt4o_verified' ]
+   If this errors due to ESM/path issues that's fine — alternative: search the running server's logs for "[EXECUTOR_REGISTRY] gpt4o_verified executor enabled" after restarting with the env var set.
+
+5. git status
+   — should show two changes: new file gpt4o-verified-adapter.ts, modified index.ts.
+
+6. git diff --stat
+   — paste the output.
+
+DO NOT COMMIT YET
+Leave changes staged but uncommitted. I want to review the diff before committing.
+
+REPORT BACK
+- Paste raw output from all six commands above.
+- Paste the full gpt4o-verified-adapter.ts file contents as written to disk (cat output).
+- Paste the new lines you added to index.ts (the import line + the if-block).
