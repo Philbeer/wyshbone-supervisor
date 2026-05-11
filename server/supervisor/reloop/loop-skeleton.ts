@@ -724,6 +724,7 @@ export async function runReloop(params: {
     source: entity.source,
     verified: entity.verified,
     verificationStatus: entity.verificationStatus,
+    evidence: entity.evidence ?? [],
   }));
 
   // Only deliver entities that were actually verified by evidence
@@ -1024,8 +1025,15 @@ export async function runReloop(params: {
         match_evidence: lead.match_evidence || [],
       }));
 
-      const canonicalVerdict = deliveredLeads.length > 0 ? 'pass' : (combinedTowerVerdict || 'stop');
-      const canonicalAction = deliveredLeads.length > 0 ? 'accept' : 'stop';
+      // Honour the combined Tower verdict — do NOT hardcode pass just because leads exist.
+      // The combined Tower is the final gate; if it failed, the delivery summary must reflect that.
+      const towerSaidFail = combinedTowerVerdict === 'fail' || combinedTowerVerdict === 'stop' || combinedTowerVerdict === 'reject';
+      const canonicalVerdict = towerSaidFail
+        ? combinedTowerVerdict
+        : (deliveredLeads.length > 0 ? (combinedTowerVerdict || 'pass') : 'stop');
+      const canonicalAction = towerSaidFail
+        ? 'stop'
+        : (deliveredLeads.length > 0 ? 'accept' : 'stop');
 
       await emitDeliverySummary({
         runId,

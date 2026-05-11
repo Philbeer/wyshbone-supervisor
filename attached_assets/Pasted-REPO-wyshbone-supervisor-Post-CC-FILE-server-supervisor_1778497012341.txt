@@ -1,0 +1,72 @@
+REPO: wyshbone-supervisor-Post-CC
+FILE: server/supervisor/reloop/loop-skeleton.ts
+
+CONTEXT
+Two related bugs in this single file. Previous fix to gp-cascade-adapter.ts correctly attached evidence to entities in the accumulator, but two downstream steps in loop-skeleton.ts strip evidence and ignore the Tower verdict respectively.
+
+CHANGE 1 — preserve evidence on combined leads
+Find this block (it appears once, the only `allEntities.map` that builds combinedLeads):
+
+  const combinedLeads = allEntities.map(entity => ({
+    name: entity.name,
+    address: entity.address,
+    phone: entity.phone,
+    website: entity.website,
+    placeId: entity.placeId,
+    source: entity.source,
+    verified: entity.verified,
+    verificationStatus: entity.verificationStatus,
+  }));
+
+Replace with:
+
+  const combinedLeads = allEntities.map(entity => ({
+    name: entity.name,
+    address: entity.address,
+    phone: entity.phone,
+    website: entity.website,
+    placeId: entity.placeId,
+    source: entity.source,
+    verified: entity.verified,
+    verificationStatus: entity.verificationStatus,
+    evidence: entity.evidence ?? [],
+  }));
+
+CHANGE 2 — stop swallowing the combined Tower verdict
+Find this block (only place these two lines appear together):
+
+  const canonicalVerdict = deliveredLeads.length > 0 ? 'pass' : (combinedTowerVerdict || 'stop');
+  const canonicalAction = deliveredLeads.length > 0 ? 'accept' : 'stop';
+
+Replace with:
+
+  // Honour the combined Tower verdict — do NOT hardcode pass just because leads exist.
+  // The combined Tower is the final gate; if it failed, the delivery summary must reflect that.
+  const towerSaidFail = combinedTowerVerdict === 'fail' || combinedTowerVerdict === 'stop' || combinedTowerVerdict === 'reject';
+  const canonicalVerdict = towerSaidFail
+    ? combinedTowerVerdict
+    : (deliveredLeads.length > 0 ? (combinedTowerVerdict || 'pass') : 'stop');
+  const canonicalAction = towerSaidFail
+    ? 'stop'
+    : (deliveredLeads.length > 0 ? 'accept' : 'stop');
+
+DO NOT TOUCH
+- Anything else in this file
+- gp-cascade-adapter.ts (already fixed)
+- gpt4o-adapter.ts
+- evidenceQualityJudge.ts (control tower repo)
+- The fallback that builds delivered_exact from the accumulator (~line 990) — already reads entity.evidence correctly
+
+VERIFY AFTER EDIT
+1. Run `cat server/supervisor/reloop/loop-skeleton.ts | grep -n "evidence: entity.evidence\|towerSaidFail" ` — both strings must appear.
+2. Run the same test query as before: "find SaaS and software development agencies in London exploring AI agent integration".
+3. Expected outcomes:
+   - Combined-delivery Tower verdict: PASS (no more "verified but no supporting evidence")
+   - Delivery Summary: PASS — N delivered (matches Tower)
+   - Inspect the combined_delivery artefact's `leads[]` — each lead should now carry an `evidence` array.
+4. ALSO run a deliberately-broken sanity test: temporarily set the verified flag in gp-cascade-adapter.ts to `true` regardless and remove evidence (or just run with a constraint that can't be satisfied). Confirm that when combined Tower says FAIL, Delivery Summary also says FAIL — not PASS.
+
+REPORT BACK
+- Paste the full new combinedLeads map block and the full new canonicalVerdict/canonicalAction block (raw, from disk).
+- Paste the relevant trail lines from one happy-path test run: combined Tower verdict + Delivery Summary verdict.
+- Paste git log --oneline -3 to confirm the commit landed.
