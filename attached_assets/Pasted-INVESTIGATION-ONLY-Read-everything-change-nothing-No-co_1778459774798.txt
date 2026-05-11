@@ -1,0 +1,37 @@
+INVESTIGATION ONLY. Read everything, change nothing. No code edits, no installs, no commits.
+
+Goal: produce a comprehensive technical report on this codebase — the core agentic orchestration layer of Wyshbone — for someone evaluating the IP for valuation/investment. Be thorough, no credits spared on reading. Save the output to /docs/CODE_REPORT_SUPERVISOR.md.
+
+Use this EXACT section structure:
+
+1. Repository overview — purpose, relationship to wyshbone-ui-post-CC and wyshbone-control-tower-post-CC.
+2. Top-level metrics — total LOC, file count, test count, dependency count, migration count, deployment surface.
+3. Architecture map — full request lifecycle UI → supervisor → tower → UI, key seams, async boundaries, queue/event mechanics, where state lives.
+4. /server/supervisor module-by-module — every file with 1–3 line description of what it does, grouped by subsystem:
+   • Conversation layer (router, context, state, summary, turn classifier, chat handler, chat-fast-path, message-classifier)
+   • Intent / constraint extraction (canonical-intent, intent-extractor, intent-bridge, intent-shadow, constraint-led-extractor, constraint-gate, goal-to-constraints, implicit-constraint-expander)
+   • Mission orchestrator (mission-extractor, mission-bridge, mission-completeness-check, mission-executor, mission-planner, mission-schema)
+   • Re-loop subsystem — entire /reloop/* directory
+   • Tower integration (tower-judgement, tower-artefact-judge, tower-semantic-verify)
+   • Learning store / belief layer (learning-layer, learning-store, belief-writer, query-shape-key)
+   • Sleep/wake autonomous monitoring (entire /sleep-wake/* directory)
+   • Search/research providers (gpt4o-search, web-search, web-visit, image-search, google-places, search-iteration, search-query-compiled, research-provider)
+   • Outreach (outreach-drafter, outreach-transport, seed-outreach-config)
+   • Predicates and policies (relationship-predicate, relationship-direction, time-predicate, geo-regions, verification-policy, tool-planning-policy, cvl)
+   • Delivery and response (delivery-summary, delivery-classification, response-builder, run-narrative, final-message, run-receipt, explain-run)
+   • Everything else
+5. /server/core — event bus, scheduler, task runner — what's the architectural intent, how fully wired in is it?
+6. /server/subcon — pack registry, schedulers, vertical mapping — what's the multi-tenant story?
+7. /server/verticals — current vertical packs, scaffolding for new ones.
+8. /server/evaluator — benchmark logger, failure classifier — what's the evaluation infrastructure?
+9. Database schema and migrations — every file in /migrations and /server/migrations, one line each; describe current schema shape.
+10. LLM usage — every model called (Anthropic Sonnet/Haiku, GPT-4o, Groq, anything else), where, why, with what failover behaviour. Note any GPT4O_STRUCTURED_PROMPT-style feature flags.
+11. External integrations — Supabase, Google Places, web search providers, outreach transport, everything else.
+12. Testing — every .test.ts file, what it covers, framework, signal on real coverage vs token coverage.
+13. Notable engineering — patterns that show real institutional knowledge: LLM-first planner with rules fallback, narrative-layer trust for semantic search, canonical delivery_summary artefact discipline, query shape keys for cross-run learning, rescue/promotion, llm-failover, etc. Be specific.
+14. Technical debt and risk — files >800 lines, dead code, duplicated patterns, abandoned subsystems, hardcoded values that should be config, anything that smells like agent improvisation rather than design.
+15. Replication difficulty assessment — for a 4-engineer AI team given full design docs, how long to rebuild this from scratch? Which subsystems are the longest poles?
+
+Plain prose, bullets where they help scanning. Quote function and file names where concrete is clearer than abstract. No code blocks unless absolutely needed.
+
+Confirm at the end which files you read fully vs sampled, and any areas where you couldn't form a confident view.
