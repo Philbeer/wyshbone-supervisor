@@ -1,0 +1,62 @@
+REPO: wyshbone-supervisor-Post-CC
+FILE: server/supervisor/reloop/gp-cascade-adapter.ts
+
+CONTEXT
+The gp_cascade adapter currently hardcodes evidence: [] on every entity it returns. This means the combined-delivery Tower judge sees leads with verified=true but no supporting evidence, fires the VERIFIED_WITHOUT_EVIDENCE gap, and returns STOP. The Tower is correct — the evidence has been gathered upstream but is being stripped at this boundary.
+
+The sibling file gpt4o-adapter.ts (same directory) already implements the correct pattern: it pulls match_evidence (or supporting_evidence) from result.deliverySummary.delivered_exact by matching lead name, and attaches that array to each entity. We need gp-cascade-adapter.ts to do the same.
+
+CHANGE
+Replace the entire entities mapping block in gp-cascade-adapter.ts. Find this block:
+
+  const entities: ExecutorEntity[] = result.leads.map(lead => ({
+    name: lead.name,
+    address: lead.address,
+    phone: lead.phone,
+    website: lead.website,
+    placeId: lead.placeId,
+    source: 'gp_cascade',
+    verified: result.towerVerdict === 'pass' || result.towerVerdict === 'accept',
+    verificationStatus: result.towerVerdict ?? 'unknown',
+    evidence: [],
+  }));
+
+Replace it with:
+
+  const entities: ExecutorEntity[] = result.leads.map(lead => {
+    const dsLeads = (result.deliverySummary as any)?.delivered_exact || [];
+    const dsLead = dsLeads.find((dl: any) => dl.name === lead.name);
+    const matchEvidence = dsLead?.match_evidence || dsLead?.supporting_evidence || [];
+
+    return {
+      name: lead.name,
+      address: lead.address,
+      phone: lead.phone,
+      website: lead.website,
+      placeId: lead.placeId,
+      source: 'gp_cascade',
+      verified: result.towerVerdict === 'pass' || result.towerVerdict === 'accept',
+      verificationStatus: result.towerVerdict ?? 'unknown',
+      evidence: matchEvidence,
+    };
+  });
+
+DO NOT TOUCH
+- mission-executor.ts
+- gpt4o-adapter.ts (already correct — reference only)
+- loop-skeleton.ts
+- evidenceQualityJudge.ts (in control tower repo — already correct)
+- The MissionExecutionResult type — no schema change required, accessed via `as any` like gpt4o-adapter does
+
+VERIFY AFTER EDIT
+1. The file imports and surrounding code are unchanged
+2. Run a search query that triggers gp_cascade (e.g. a UK-based "find" query)
+3. In the AFR / activity trail check that:
+   - The combined-delivery Tower verdict is PASS (not "[Tower] fail: ...marked verified but have no supporting evidence")
+   - The Delivery Summary still reads "PASS — N delivered"
+4. Inspect the Re-loop iteration artefact's rawTowerPayload — the lead objects should now carry a non-empty evidence array (objects with source_url, quote, matched_phrase, etc).
+
+REPORT BACK
+- Confirm the single-file edit is done
+- Paste the new mapping block from the file as it now reads
+- Run one test query and paste the relevant trail lines (combined-delivery Tower verdict + Delivery Summary)
