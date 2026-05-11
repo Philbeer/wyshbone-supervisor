@@ -2,6 +2,7 @@ import { registerExecutor } from './executor-registry';
 import { gpCascadeAdapter } from './gp-cascade-adapter';
 import { gpt4oAdapter } from './gpt4o-adapter';
 import { outreachAdapter } from './outreach-adapter';
+import { gpt4oVerifiedAdapter } from './gpt4o-verified-adapter';
 
 registerExecutor('gp_cascade', gpCascadeAdapter, {
   description: 'Google Places discovery with website verification cascade. Finds businesses via structured Google Places data, visits their websites to verify constraints, falls back to GPT-4o web search for bot-blocked sites.',
@@ -26,6 +27,20 @@ registerExecutor('outreach', outreachAdapter, {
   typicalUse: 'Post-discovery phase. User reviews delivered leads, triggers outreach, reviews drafted emails, approves and sends. System tracks delivery and replies.',
   costTier: 'moderate',
 });
+
+// gpt4o_verified — gated by env flag during development.
+// Set ENABLE_GPT4O_VERIFIED=true to make this executor available to the planner.
+// Without the flag, this executor stays unregistered and production behaviour is unchanged.
+if (process.env.ENABLE_GPT4O_VERIFIED === 'true') {
+  registerExecutor('gpt4o_verified', gpt4oVerifiedAdapter, {
+    description: 'GPT-4o web search with decoupled per-constraint verification. Discovers candidates with a loose search prompt, then independently verifies each hard constraint against each lead using a separate LLM reasoning call. Surfaces partial matches honestly when not all constraints can be satisfied.',
+    strengths: 'Honest per-constraint verdicts. Produces full-match vs partial-match classification — surfaces zero exact matches plus closest matches with clear explanation of which constraints failed. Better than gpt4o_search for queries with multiple independent hard constraints that need verification.',
+    limitations: 'More LLM calls than gpt4o_search (one verification call per lead per hard constraint, batched where possible). Currently STUB — returns 0 entities until Step 2+ of the gpt4o_verified plan is implemented.',
+    typicalUse: 'Queries with multiple hard constraints that need independent verification, especially constraints unlikely to be in Google Places fields (Michelin-starred, B-Corp certified, founded after 2024, vegan-only). Loose discovery then strict per-constraint verification.',
+    costTier: 'expensive',
+  });
+  console.log('[EXECUTOR_REGISTRY] gpt4o_verified executor enabled via ENABLE_GPT4O_VERIFIED env flag');
+}
 
 export { runReloop } from './loop-skeleton';
 export { checkForResumableState } from './resume';
