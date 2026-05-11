@@ -3,6 +3,31 @@ import type { ExecutorInput, ExecutorOutput, ExecutorEntity } from './types';
 
 export async function gpt4oAdapter(input: ExecutorInput): Promise<ExecutorOutput> {
   const startTime = Date.now();
+
+  // TEST FLAG: force gpt4o_search to return 0 results so re-loop chain falls through to gp_cascade.
+  // Set DISABLE_GPT4O_SEARCH=true in env to enable. Default off — production unaffected.
+  if (process.env.DISABLE_GPT4O_SEARCH === 'true') {
+    console.log('[RELOOP_EXECUTOR] gpt4o_search adapter DISABLED via DISABLE_GPT4O_SEARCH env flag — returning 0 entities');
+    return {
+      executorType: 'gpt4o_search',
+      entities: [],
+      entitiesAttempted: 0,
+      executionMetadata: {
+        toolsUsed: [],
+        apiCallsMade: 0,
+        timeMs: Date.now() - startTime,
+        errorsEncountered: [],
+        rateLimitsHit: false,
+      },
+      coverageSignals: {
+        maxResultsHit: false,
+        searchQueriesExhausted: true,
+        estimatedUniverseSize: null,
+      },
+      rawResult: {},
+    };
+  }
+
   console.log(`[RELOOP_EXECUTOR] gpt4o_search adapter starting — entity="${input.mission.businessType}" location="${input.mission.location}"`);
 
   const plan = input.missionContext.plan as any;
