@@ -1,0 +1,59 @@
+REPO: wyshbone-supervisor-Post-CC
+FILE: server/supervisor/reloop/gpt4o-adapter.ts
+
+CONTEXT
+For testing the combined-delivery evidence bug, I need to force the re-loop chain to fall through from gpt4o_search to gp_cascade. The cleanest way is an env flag that makes the gpt4o adapter return 0 entities and report queries exhausted. This bypasses any actual GPT-4o call and is fully reversible by unsetting the env var. gp_cascade is unaffected — it uses Google Places and HTTP fetch, not GPT-4o's web search tool.
+
+CHANGE
+At the very start of the gpt4oAdapter function in server/supervisor/reloop/gpt4o-adapter.ts, immediately after the line:
+
+  const startTime = Date.now();
+
+Insert the following block:
+
+  // TEST FLAG: force gpt4o_search to return 0 results so re-loop chain falls through to gp_cascade.
+  // Set DISABLE_GPT4O_SEARCH=true in env to enable. Default off — production unaffected.
+  if (process.env.DISABLE_GPT4O_SEARCH === 'true') {
+    console.log('[RELOOP_EXECUTOR] gpt4o_search adapter DISABLED via DISABLE_GPT4O_SEARCH env flag — returning 0 entities');
+    return {
+      executorType: 'gpt4o_search',
+      entities: [],
+      entitiesAttempted: 0,
+      executionMetadata: {
+        toolsUsed: [],
+        apiCallsMade: 0,
+        timeMs: Date.now() - startTime,
+        errorsEncountered: [],
+        rateLimitsHit: false,
+      },
+      coverageSignals: {
+        maxResultsHit: false,
+        searchQueriesExhausted: true,
+        estimatedUniverseSize: null,
+      },
+      rawResult: {},
+    };
+  }
+
+Leave the rest of the function (the existing console.log, plan/verificationPolicy lookup, executeGpt4oPrimaryPath call, etc.) completely unchanged. The new block is a guarded early-return that runs ONLY when the env var is set.
+
+ENV
+After the edit, set the env var in the supervisor repl:
+  DISABLE_GPT4O_SEARCH=true
+
+Then restart the dev server so the env is picked up.
+
+VERIFY
+1. Run: cat server/supervisor/reloop/gpt4o-adapter.ts | grep -n "DISABLE_GPT4O_SEARCH"  — should show the env flag check.
+2. Confirm the env var is set: echo $DISABLE_GPT4O_SEARCH  — should print "true".
+3. Run a test query that the planner would normally route to GPT-4o first (e.g. "find independent record shops in Stockport" or any places-y query).
+4. Watch the trail: loop 1 should be gpt4o_search → 0 entities, then loop 2 should be gp_cascade with real results.
+
+TO REVERT
+Just unset the env var (DISABLE_GPT4O_SEARCH=) and restart. No code rollback needed. The flag is off by default.
+
+DO NOT TOUCH
+- gp_cascade adapter or executor
+- The actual gpt4o-search.ts file (the implementation)
+- Planner logic
+- Anything else in the loop-skeleton
