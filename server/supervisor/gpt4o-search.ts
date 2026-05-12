@@ -504,36 +504,6 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     conversationId,
   }).catch(() => {});
 
-  await createArtefact({
-    runId,
-    type: 'attribute_verification',
-    title: `Evidence verification: ${allLeads.length}/${allLeads.length} checks (GPT-4o web search)`,
-    summary: `${allLeads.length} results found via GPT-4o web search across ${roundsPerformed} round${roundsPerformed === 1 ? '' : 's'}`,
-    payload: {
-      execution_source: 'gpt4o_primary',
-      total_checks: allLeads.length,
-      checks_with_evidence: allLeads.length,
-      leads_checked: allLeads.length,
-      fallback_candidates: 0,
-      fallback_verified: 0,
-      search_method: 'gpt4o_web_search',
-      rounds_performed: roundsPerformed,
-      results: allLeads.map(lead => ({
-        lead: lead.name,
-        constraint: hardConstraints.join(', ') || 'general search',
-        type: 'attribute',
-        found: true,
-        strength: lead.confidence === 'high' ? 'strong' : 'weak',
-        tower_status: 'verified',
-        source_tier: 'gpt4o_web_search',
-        evidence: lead.evidence,
-        source_url: lead.source_url,
-      })),
-    },
-    userId,
-    conversationId,
-  }).catch(() => {});
-
   // Per-(lead × hard constraint) Tower semantic verification.
   // Mirrors mission-executor.ts gp_cascade pattern exactly.
   //
