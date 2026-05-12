@@ -683,56 +683,9 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
 
   console.log(`[GPT4O_SEARCH] Per-constraint Tower semantic verification complete for ${allLeads.length} leads × ${hardEvidenceConstraints.length} hard evidence constraints`);
 
-  // Filter out leads that failed Tower per-constraint judgement.
-  // A lead survives if it has no Tower agg (no hard evidence constraints
-  // were checked, fall back to GPT-4o confidence) OR Tower had no
-  // no_evidence/insufficient_evidence verdicts on any hard constraint.
-  const surviving: Array<{ lead: Gpt4oLead; originalIndex: number }> = [];
-  const droppedForNoEvidence: Array<{ name: string; reason: string }> = [];
-
-  for (let li = 0; li < allLeads.length; li++) {
-    const lead = allLeads[li];
-    const leadPlaceId = `gpt4o_${li}_${lead.name.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 30)}`;
-    const agg = perLeadAgg.get(leadPlaceId);
-    if (!agg || agg.perConstraint.length === 0 || !agg.anyNoEvidence) {
-      surviving.push({ lead, originalIndex: li });
-    } else {
-      const failedConstraints = agg.perConstraint
-        .filter(pc => pc.towerStatus === 'no_evidence' || pc.towerStatus === 'insufficient_evidence')
-        .map(pc => `${pc.constraintValue}: ${pc.towerStatus}`)
-        .join('; ');
-      droppedForNoEvidence.push({ name: lead.name, reason: failedConstraints });
-    }
-  }
-
-  console.log(`[GPT4O_SEARCH] Tower no_evidence filter: dropped ${droppedForNoEvidence.length}, surviving ${surviving.length}/${allLeads.length}`);
-
-  // Emit an artefact so the drop is visible in AFR
-  if (droppedForNoEvidence.length > 0) {
-    await createArtefact({
-      runId,
-      type: 'tower_no_evidence_filter',
-      title: `Filtered ${droppedForNoEvidence.length} no_evidence lead(s)`,
-      summary: `Dropped ${droppedForNoEvidence.length} leads with no_evidence Tower verdicts on hard constraints; ${surviving.length} surviving`,
-      payload: {
-        execution_source: 'gpt4o_primary',
-        dropped_count: droppedForNoEvidence.length,
-        surviving_count: surviving.length,
-        original_count: allLeads.length,
-        dropped: droppedForNoEvidence,
-      },
-      userId,
-      conversationId,
-    }).catch((e: any) => console.warn(`[GPT4O_SEARCH] no_evidence filter artefact failed (non-fatal): ${e.message}`));
-  }
-
-  // Build delivery from surviving leads, preserving original placeIds so
-  // the constraint_led_evidence artefacts still join.
-  const deliveryLeads = surviving.map(s => toDeliveryLead(s.lead, s.originalIndex));
+  const deliveryLeads = allLeads.map((lead, i) => toDeliveryLead(lead, i));
   const cappedLeads = requestedCount !== null ? deliveryLeads.slice(0, requestedCount) : deliveryLeads;
-  const cappedGpt4oLeads = requestedCount !== null
-    ? surviving.slice(0, requestedCount).map(s => s.lead)
-    : surviving.map(s => s.lead);
+  const cappedGpt4oLeads = requestedCount !== null ? allLeads.slice(0, requestedCount) : allLeads;
 
   const deliveredLeadsWithEvidence = cappedLeads.map((l, i) => {
     const gLead = cappedGpt4oLeads[i];
