@@ -1,0 +1,67 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/gpt4o-search-tower-judgement (same branch)
+FILE: server/supervisor/gpt4o-search.ts
+
+CONTEXT
+The buildSearchPrompt function injects a "CRITICAL TEMPORAL RULES" block
+into the GPT-4o web search prompt when a temporal constraint is present.
+The cutoffDate is currently hardcoded:
+
+    const cutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+That tells GPT-4o "find places opened after [1 year ago]" regardless of
+whether the user asked for "last month", "last 3 months", or "last year".
+This is why the Sussex run returned places opening in November (within
+the year window) instead of just the last 30 days.
+
+GOAL
+Derive the cutoff date from the actual time_constraint in
+ctx.structuredConstraints. Fall back to 365 days only if no time
+constraint exists or the value cannot be parsed.
+
+INSTRUCTIONS
+
+In buildSearchPrompt, replace this line:
+
+    const cutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+with:
+
+    const cutoffDate = (() => {
+      const tc = ctx.structuredConstraints.find(c =>
+        (c.type === 'time_constraint' || c.type === 'time_predicate') &&
+        c.hardness === 'hard' &&
+        c.value !== null && c.value !== undefined,
+      );
+      if (!tc) {
+        return new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      }
+      const value = String(tc.value).trim().toLowerCase();
+      const match = value.match(/^(\d+)\s*(day|days|week|weeks|month|months|year|years)$/);
+      if (!match) {
+        console.warn(`[GPT4O_SEARCH] Could not parse time_constraint value "${value}" — falling back to 365-day cutoff`);
+        return new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      }
+      const n = parseInt(match[1], 10);
+      const unit = match[2];
+      const daysPerUnit: Record<string, number> = {
+        day: 1, days: 1,
+        week: 7, weeks: 7,
+        month: 30, months: 30,
+        year: 365, years: 365,
+      };
+      const days = n * daysPerUnit[unit];
+      console.log(`[GPT4O_SEARCH] Derived temporal cutoff from constraint "${value}" → ${days} days back`);
+      return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    })();
+
+VERIFY
+1. kill 1
+2. Run: "micro pubs in Sussex that have recently opened in the last month"
+3. Look for log line: "[GPT4O_SEARCH] Derived temporal cutoff from constraint "1 month" → 30 days back"
+4. The GPT-4o prompt should now ask for places opened after a date roughly
+   30 days ago (April 12, 2026) instead of one year ago (May 12, 2025).
+5. With Prompt 1 also landed, expect 0 delivered; without Prompt 1, expect
+   GPT-4o to return fewer candidates because the date window is tighter.
+
+ROLLBACK: revert the commit.
