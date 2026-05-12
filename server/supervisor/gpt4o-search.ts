@@ -200,7 +200,33 @@ function buildSearchPrompt(ctx: Gpt4oSearchContext, angle: string): string {
     /\b(recent|opened|established|new|last\s+\d+\s+months?|within\s+\d+)\b/i.test(c),
   ) || /\b(recent|opened|new|last\s+\d+)\b/i.test(ctx.rawUserInput);
 
-  const cutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const cutoffDate = (() => {
+    const tc = ctx.structuredConstraints.find(c =>
+      (c.type === 'time_constraint' || c.type === 'time_predicate') &&
+      c.hardness === 'hard' &&
+      c.value !== null && c.value !== undefined,
+    );
+    if (!tc) {
+      return new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    }
+    const value = String(tc.value).trim().toLowerCase();
+    const match = value.match(/^(\d+)\s*(day|days|week|weeks|month|months|year|years)$/);
+    if (!match) {
+      console.warn(`[GPT4O_SEARCH] Could not parse time_constraint value "${value}" — falling back to 365-day cutoff`);
+      return new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    }
+    const n = parseInt(match[1], 10);
+    const unit = match[2];
+    const daysPerUnit: Record<string, number> = {
+      day: 1, days: 1,
+      week: 7, weeks: 7,
+      month: 30, months: 30,
+      year: 365, years: 365,
+    };
+    const days = n * daysPerUnit[unit];
+    console.log(`[GPT4O_SEARCH] Derived temporal cutoff from constraint "${value}" → ${days} days back`);
+    return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  })();
 
   const temporalRules = hasTemporalConstraint ? `
 
