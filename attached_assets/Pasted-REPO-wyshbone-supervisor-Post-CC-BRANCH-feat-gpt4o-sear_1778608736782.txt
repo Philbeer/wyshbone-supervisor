@@ -1,0 +1,88 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/gpt4o-search-tower-judgement (same branch — same theme: stop the lies)
+FILE: server/supervisor/response-builder.ts
+
+CONTEXT
+The user-visible 4-bullet response says "All N verified with on-page evidence"
+even when Tower's verdict is fail/stop/error. The verifiedCount value passed in
+is the supervisor's pre-Tower optimistic count (cvl_verified_exact_count) and
+never gets reset when Tower judges the run as a failure. The response builder
+treats verifiedCount and towerVerdict as independent inputs.
+
+GOAL
+Make verifiedCount honest at the top of response-builder by reconciling it
+against towerVerdict. If Tower failed/stopped/errored, no leads were truly
+verified — regardless of what the supervisor's optimistic count said.
+
+INSTRUCTIONS
+
+In server/supervisor/response-builder.ts, find buildNaturalResponse near line 82:
+
+  export async function buildNaturalResponse(input: ResponseBuilderInput): Promise<string> {
+    const { businessType, location, requestedCount, deliveredCount, verifiedCount,
+      runFailed, loopsUsed, executorsUsed, loopSummaries,
+      scarcityType, circuitBreakerFired, monitorCreated, towerVerdict } = input;
+
+Immediately after that destructuring block, insert this reconciliation:
+
+    // Honest verification count: if Tower returned a failure verdict, the
+    // supervisor's optimistic verifiedCount is a lie. The Tower verdict is
+    // the truth source — anything Tower didn't pass cannot be claimed as
+    // "verified" in the user-facing summary.
+    const towerFailed = ['fail', 'stop', 'error', 'stopped', 'failed'].includes(
+      String(towerVerdict ?? '').toLowerCase(),
+    );
+    const effectiveVerifiedCount = towerFailed ? 0 : verifiedCount;
+
+Then find every reference to `verifiedCount` in the rest of buildNaturalResponse
+and replace it with `effectiveVerifiedCount`. There should be these uses:
+
+  if (verifiedCount > 0) facts.push(`Verified with evidence: ${verifiedCount}`);
+
+Change to:
+
+  if (effectiveVerifiedCount > 0) facts.push(`Verified with evidence: ${effectiveVerifiedCount}`);
+
+Also add this line right after the facts array starts being populated, immediately
+before the Tower verdict push:
+
+  if (towerFailed) {
+    facts.push(`IMPORTANT: Tower judged this run as ${towerVerdict?.toUpperCase()}. Do NOT claim any leads were verified. The user-facing message must reflect that no leads were verified against the user's hard constraints.`);
+  }
+
+Now find buildFallbackResponse (around line 33). Apply the same reconciliation
+at the top of the function body, right after the destructuring:
+
+  function buildFallbackResponse(input: ResponseBuilderInput): string {
+    const { businessType, location, requestedCount, deliveredCount, verifiedCount,
+      runFailed, failureReason, monitorCreated, scarcityType } = input;
+
+Replace that line with:
+
+  function buildFallbackResponse(input: ResponseBuilderInput): string {
+    const { businessType, location, requestedCount, deliveredCount, verifiedCount: rawVerifiedCount,
+      runFailed, failureReason, monitorCreated, scarcityType, towerVerdict } = input;
+
+    const towerFailed = ['fail', 'stop', 'error', 'stopped', 'failed'].includes(
+      String(towerVerdict ?? '').toLowerCase(),
+    );
+    const verifiedCount = towerFailed ? 0 : rawVerifiedCount;
+
+(The rest of buildFallbackResponse already uses `verifiedCount` — by declaring it
+as a const at the top, the existing code automatically gets the honest value.)
+
+VERIFY
+1. kill 1
+2. Run: "find micropubs in Sussex that opened in the last month"
+3. The 4-bullet response should now say something like:
+   - Results: <count> micropubs found in Sussex.
+   - Verification: None could be independently verified.
+   - Market: Some constraints couldn't be verified reliably. / Healthy supply.
+   - Suggestion: <whatever the LLM picks>
+   
+   NOT "All N verified with on-page evidence" any more.
+4. Run "coffee shops in Soho" (passing run) — should still say "All N verified
+   with on-page evidence" because Tower returned pass for that run.
+
+ROLLBACK
+git revert the commit.
