@@ -30,8 +30,13 @@ function executorLabel(type: string): string {
 }
 
 function buildFallbackResponse(input: ResponseBuilderInput): string {
-  const { businessType, location, requestedCount, deliveredCount, verifiedCount,
-    runFailed, failureReason, monitorCreated, scarcityType } = input;
+  const { businessType, location, requestedCount, deliveredCount, verifiedCount: rawVerifiedCount,
+    runFailed, failureReason, monitorCreated, scarcityType, towerVerdict } = input;
+
+  const towerFailed = ['fail', 'stop', 'error', 'stopped', 'failed'].includes(
+    String(towerVerdict ?? '').toLowerCase(),
+  );
+  const verifiedCount = towerFailed ? 0 : rawVerifiedCount;
 
   if (runFailed) {
     const reason = failureReason ? failureReason.substring(0, 150) : 'An unexpected error occurred.';
@@ -84,6 +89,15 @@ export async function buildNaturalResponse(input: ResponseBuilderInput): Promise
     runFailed, loopsUsed, executorsUsed, loopSummaries,
     scarcityType, circuitBreakerFired, monitorCreated, towerVerdict } = input;
 
+  // Honest verification count: if Tower returned a failure verdict, the
+  // supervisor's optimistic verifiedCount is a lie. The Tower verdict is
+  // the truth source — anything Tower didn't pass cannot be claimed as
+  // "verified" in the user-facing summary.
+  const towerFailed = ['fail', 'stop', 'error', 'stopped', 'failed'].includes(
+    String(towerVerdict ?? '').toLowerCase(),
+  );
+  const effectiveVerifiedCount = towerFailed ? 0 : verifiedCount;
+
   if (runFailed) {
     return buildFallbackResponse(input);
   }
@@ -92,7 +106,10 @@ export async function buildNaturalResponse(input: ResponseBuilderInput): Promise
   facts.push(`Entity searched for: ${businessType} in ${location}`);
   if (requestedCount) facts.push(`User asked for: ${requestedCount}`);
   facts.push(`Delivered: ${deliveredCount}`);
-  if (verifiedCount > 0) facts.push(`Verified with evidence: ${verifiedCount}`);
+  if (effectiveVerifiedCount > 0) facts.push(`Verified with evidence: ${effectiveVerifiedCount}`);
+  if (towerFailed) {
+    facts.push(`IMPORTANT: Tower judged this run as ${towerVerdict?.toUpperCase()}. Do NOT claim any leads were verified. The user-facing message must reflect that no leads were verified against the user's hard constraints.`);
+  }
   facts.push(`Tower verdict: ${towerVerdict ?? 'unknown'}`);
 
   if (loopSummaries && loopSummaries.length > 0) {
