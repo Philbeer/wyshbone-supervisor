@@ -1,0 +1,313 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: create new branch `feat/gpt4o-search-tower-judgement` off `main`
+ESTIMATED EFFORT: half day
+
+CONTEXT — READ THIS FIRST
+
+The gpt4o_search executor returns leads stamped `verified=true` based purely on
+GPT-4o's own confidence rating. Tower's per-constraint semantic judge is never
+invoked. This is wrong: Tower must adjudicate per (lead × hard constraint), the
+same way it does for the gp_cascade executor.
+
+The gp_cascade reference pattern is in `server/supervisor/mission-executor.ts`
+inside `processOneLead` (~line 1600–1800). For each lead, for each evidence
+constraint, it calls `requestSemanticVerification(...)` from
+`server/supervisor/tower-semantic-verify.ts`. That returns a TowerSemanticStatus
+of 'verified' | 'weak_match' | 'no_evidence' | 'insufficient_evidence'. The
+supervisor then stamps that onto a `constraint_led_evidence` artefact and an
+in-memory EvidenceResult.
+
+DO NOT emit artefacts with type 'attribute_evidence'. The supervisor does not
+currently emit that type anywhere; emitting it would not connect to any live
+path. Use `constraint_led_evidence` to mirror gp_cascade exactly.
+
+DO NOT remove or weaken gpt4o_search's existing GPT-4o self-rating. It stays as
+the belt-and-braces pre-filter. Tower's verdict overrides its claims.
+
+DO NOT touch the planner metadata or which executor gets picked when.
+
+DO NOT change the date bug in the GPT-4o search prompt (~line 187 of
+gpt4o-search.ts: `Date.now() - 365 * 24 * 60 * 60 * 1000`). Park that for a
+separate branch.
+
+==============================================================================
+FILES TO CHANGE: 2 only
+- server/supervisor/gpt4o-search.ts
+- server/supervisor/reloop/gpt4o-adapter.ts
+==============================================================================
+
+CHANGE 1 — server/supervisor/gpt4o-search.ts
+
+Add an import at the top alongside the existing imports:
+
+  import { requestSemanticVerification, type TowerSemanticStatus } from './tower-semantic-verify';
+
+Find the block in `executeGpt4oPrimaryPath` that currently emits one
+`constraint_led_evidence` artefact per lead — it starts with the comment:
+
+  // Emit per-lead evidence artefacts matching GP cascade format for UI dropdowns
+  for (const lead of allLeads) {
+    const constraintValue = hardConstraints.join(', ') || 'general search';
+    await createArtefact({ ... type: 'constraint_led_evidence', ... });
+  }
+
+REPLACE that entire block with the following:
+
+  // Per-(lead × hard constraint) Tower semantic verification.
+  // Mirrors mission-executor.ts gp_cascade pattern exactly.
+  //
+  // We loop over structuredConstraints (which have real values and types),
+  // not hardConstraints (which are label strings like "time_constraint").
+  //
+  // Skip constraint types that don't need evidence judgement —
+  // location/numeric/ranking are handled structurally upstream.
+
+  const TOWER_JUDGED_TYPES = new Set([
+    'attribute_check',
+    'website_evidence',
+    'relationship_check',
+    'time_constraint',
+    'time_predicate',
+    'status_check',
+  ]);
+
+  const hardEvidenceConstraints = ctx.structuredConstraints.filter(
+    c => c.hardness === 'hard' && TOWER_JUDGED_TYPES.has(c.type),
+  );
+
+  // Track per-lead aggregated Tower status (for delivery rollup).
+  interface PerLeadAgg {
+    anyVerified: boolean;
+    anyWeak: boolean;
+    anyNoEvidence: boolean;
+    perConstraint: Array<{
+      constraintValue: string;
+      towerStatus: TowerSemanticStatus | null;
+      towerConfidence: number | null;
+      towerReasoning: string | null;
+    }>;
+  }
+  const perLeadAgg = new Map<string, PerLeadAgg>();
+
+  for (let li = 0; li < allLeads.length; li++) {
+    const lead = allLeads[li];
+    const leadPlaceId = `gpt4o_${li}_${lead.name.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 30)}`;
+    const agg: PerLeadAgg = {
+      anyVerified: false,
+      anyWeak: false,
+      anyNoEvidence: false,
+      perConstraint: [],
+    };
+
+    for (const constraint of hardEvidenceConstraints) {
+      const constraintValue = constraint.value === null || constraint.value === undefined
+        ? ''
+        : String(constraint.value).trim();
+      if (!constraintValue) continue;
+
+      let towerStatus: TowerSemanticStatus | null = null;
+      let towerConfidence: number | null = null;
+      let towerReasoning: string | null = null;
+
+      try {
+        const verifyResult = await requestSemanticVerification({
+          request: {
+            run_id: runId,
+            original_user_goal: rawUserInput,
+            lead_name: lead.name,
+            lead_place_id: leadPlaceId,
+            constraint_to_check: constraintValue,
+            source_url: lead.source_url || lead.website || 'gpt4o_web_search',
+            evidence_text: (lead.evidence || lead.description || '').substring(0, 5000),
+            extracted_quotes: lead.evidence ? [lead.evidence] : [],
+            page_title: null,
+          },
+          userId,
+          conversationId,
+          clientRequestId,
+        });
+        towerStatus = verifyResult.towerResponse.status;
+        towerConfidence = verifyResult.towerResponse.confidence;
+        towerReasoning = verifyResult.towerResponse.reasoning;
+        console.log(`[GPT4O_SEARCH] Tower semantic: "${lead.name}" + "${constraintValue}" → ${towerStatus} (confidence=${towerConfidence})`);
+      } catch (towerErr: any) {
+        console.warn(`[GPT4O_SEARCH] Tower semantic verify failed for "${lead.name}" + "${constraintValue}" (non-fatal): ${towerErr.message}`);
+      }
+
+      // Aggregate
+      if (towerStatus === 'verified') agg.anyVerified = true;
+      else if (towerStatus === 'weak_match') agg.anyWeak = true;
+      else if (towerStatus === 'no_evidence' || towerStatus === 'insufficient_evidence') agg.anyNoEvidence = true;
+
+      agg.perConstraint.push({
+        constraintValue,
+        towerStatus,
+        towerConfidence,
+        towerReasoning,
+      });
+
+      // Emit one constraint_led_evidence artefact per (lead × constraint) —
+      // same shape gp_cascade uses, with Tower verdict stamped honestly.
+      await createArtefact({
+        runId,
+        type: 'constraint_led_evidence',
+        title: `Evidence: "${lead.name}" — ${constraint.type}: "${constraintValue}"`,
+        summary: lead.evidence
+          ? `Tower ${towerStatus ?? 'unjudged'} for "${constraintValue}" on "${lead.name}" via GPT-4o web search`
+          : `No evidence for "${constraintValue}" on "${lead.name}"`,
+        payload: {
+          lead_name: lead.name,
+          lead_place_id: leadPlaceId,
+          constraint: {
+            type: constraint.type,
+            field: constraint.field,
+            operator: constraint.operator,
+            value: constraintValue,
+            hardness: 'hard',
+          },
+          pages_scanned: 0,
+          extraction_method: 'gpt4o_web_search',
+          no_evidence: !lead.evidence,
+          phrase_targets: [],
+          fallback_used: false,
+          evidence_items: lead.evidence ? [{
+            quote: lead.evidence.substring(0, 300),
+            url: lead.source_url || null,
+            page_title: null,
+            match_reason: `GPT-4o web search returned evidence (gpt4o_confidence: ${lead.confidence})`,
+            confidence: lead.confidence === 'high' ? 0.85 : lead.confidence === 'medium' ? 0.65 : 0.4,
+            keyword_matched: true,
+            source_url: lead.source_url || null,
+            constraint_type: constraint.type,
+            constraint_value: constraintValue,
+            matched_phrase: constraintValue,
+            direct_quote: lead.evidence.substring(0, 300),
+            context_snippet: lead.description || null,
+            constraint_match_reason: lead.evidence.substring(0, 200),
+            source_type: 'gpt4o_web_search',
+            source_tier: 'search_snippet',
+            confidence_score: lead.confidence === 'high' ? 0.85 : lead.confidence === 'medium' ? 0.65 : 0.4,
+          }] : [],
+          tower_status: towerStatus,
+          tower_confidence: towerConfidence,
+          tower_reasoning: towerReasoning,
+        },
+        userId,
+        conversationId,
+      }).catch((e: any) => console.warn(`[GPT4O_SEARCH] Per-constraint evidence artefact failed for "${lead.name}" + "${constraintValue}" (non-fatal): ${e.message}`));
+    }
+
+    perLeadAgg.set(leadPlaceId, agg);
+  }
+
+  console.log(`[GPT4O_SEARCH] Per-constraint Tower semantic verification complete for ${allLeads.length} leads × ${hardEvidenceConstraints.length} hard evidence constraints`);
+
+Now find the block that builds `deliveredLeadsWithEvidence` (it follows shortly
+after the artefact-emission block above). The current code sets:
+
+  verified: gLead?.confidence === 'high' || gLead?.confidence === 'medium',
+  verification_status: gLead?.confidence === 'high' ? 'verified' as const
+    : gLead?.confidence === 'medium' ? 'weak_match' as const
+    : 'no_evidence' as const,
+
+REPLACE those two lines (and the constraint_verdicts block immediately below
+them) with logic that honours the per-lead Tower aggregation:
+
+  const placeIdForRollup = l.placeId;
+  const agg = perLeadAgg.get(placeIdForRollup);
+  const towerRollup: 'verified' | 'weak_match' | 'no_evidence' =
+    !agg || agg.perConstraint.length === 0
+      ? (gLead?.confidence === 'high' ? 'verified'
+        : gLead?.confidence === 'medium' ? 'weak_match'
+        : 'no_evidence')
+      : agg.anyNoEvidence
+        ? 'no_evidence'
+        : agg.anyVerified && !agg.anyWeak
+          ? 'verified'
+          : 'weak_match';
+
+Then use towerRollup in place of the old expressions:
+
+  verified: towerRollup === 'verified' || towerRollup === 'weak_match',
+  verification_status: towerRollup,
+  constraint_verdicts: (agg?.perConstraint ?? []).map(pc => ({
+    constraint: pc.constraintValue,
+    verdict: pc.towerStatus === 'verified' ? 'verified' as const
+      : pc.towerStatus === 'weak_match' ? 'weak_match' as const
+      : 'unverified' as const,
+  })),
+
+If no Tower agg exists for a lead (e.g. no hard evidence constraints to check),
+fall back to GPT-4o self-rating — the conditional above already handles this.
+
+==============================================================================
+
+CHANGE 2 — server/supervisor/reloop/gpt4o-adapter.ts
+
+Find the entities mapping (~line 40–55):
+
+  return {
+    name: lead.name,
+    address: lead.address,
+    phone: lead.phone,
+    website: lead.website,
+    placeId: lead.placeId,
+    source: 'gpt4o_web_search',
+    verified: true,
+    verificationStatus: result.towerVerdict ?? 'unknown',
+    evidence: matchEvidence,
+  };
+
+REPLACE `verified: true,` with:
+
+  verified: result.towerVerdict === 'pass' || result.towerVerdict === 'accept',
+
+This mirrors gp-cascade-adapter.ts exactly. Now Tower's final-delivery verdict
+controls the verified flag at the adapter boundary, instead of being hardcoded.
+
+==============================================================================
+
+VERIFY STEPS
+
+1. `kill 1` to restart the supervisor.
+
+2. Run: "micro pubs in Sussex that have recently opened in the last month to
+   serve customers"
+
+3. Expected behaviour:
+   - Loop 1 (gp_cascade) → 0 verified (as before)
+   - Loop 2 (gpt4o_search) → returns candidates, but per-constraint
+     constraint_led_evidence artefacts now show:
+       * tower_status = "no_evidence" or "insufficient_evidence" on time
+         constraint for The Black Horse (no opening date evidence)
+       * tower_status = "weak_match" or "no_evidence" on time constraint
+         for The Pub at Crafted (ambiguous opening date)
+   - Final delivery: 0 verified exact (or 0 leads if Tower's final verdict
+     rejects them)
+   - No more false "verified=true" stamps on leads that lack evidence
+
+4. Run: "coffee shops in Soho"
+   - gp_cascade should handle cleanly. No regression.
+
+5. Run: "Michelin-starred restaurants in London"
+   - gpt4o_search runs, real Michelin restaurants get verified by Tower's
+     per-constraint judge, ship as verified.
+
+6. In the AFR export for the Sussex query, verify:
+   - Multiple `constraint_led_evidence` artefacts per lead (one per hard
+     evidence constraint), NOT one bundled
+   - Each carries `tower_status` populated by the real Tower call (not by
+     GPT-4o's self-rating)
+   - In the supervisor logs, look for lines starting with
+     `[GPT4O_SEARCH] Tower semantic: "<lead>" + "<constraint>" → <status>`
+
+ROLLBACK: revert the two-file branch, push, `kill 1`. No DB schema changes,
+no env var changes.
+
+REPORT BACK WITH:
+- Confirmation that both files compile and the supervisor restarts cleanly
+- Output of the Sussex query test (raw chat reply + AFR snippet showing
+  multiple per-constraint artefacts per lead with real tower_status values)
+- Output of the Soho query test
+- Output of the London Michelin query test
+- Any unexpected errors in the supervisor logs during these runs
