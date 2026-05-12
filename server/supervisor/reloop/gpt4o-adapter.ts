@@ -71,7 +71,7 @@ export async function gpt4oAdapter(input: ExecutorInput): Promise<ExecutorOutput
       website: lead.website,
       placeId: lead.placeId,
       source: 'gpt4o_web_search',
-      verified: true,
+      verified: result.towerVerdict === 'pass' || result.towerVerdict === 'accept',
       verificationStatus: result.towerVerdict ?? 'unknown',
       evidence: matchEvidence,
     };
