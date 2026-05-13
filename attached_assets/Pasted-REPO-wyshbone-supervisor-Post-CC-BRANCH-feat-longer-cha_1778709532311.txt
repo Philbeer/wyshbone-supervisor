@@ -1,0 +1,89 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/longer-chat-history-window (new branch off current main)
+FILES:
+  - server/supervisor/chat-handler.ts
+  - server/routes/routes-chat-direct.ts
+  - server/supervisor.ts (two places)
+
+CONTEXT
+The chat handler currently only sees the last 8 messages in CONVERSATION
+HISTORY. Older messages — including the user's original search query — fall
+outside this window, so questions like "what was the first thing I asked"
+can't be answered. The rolling summary helps but paraphrases, doesn't
+preserve verbatim text.
+
+Bumping the window to 50 messages costs ~2.5K extra tokens per chat call
+(~$0.008 on Groq, negligible). Keeps the original query in scope for any
+realistic conversation length.
+
+CHANGES
+
+=== CHANGE 1: chat-handler.ts ===
+
+In server/supervisor/chat-handler.ts, find:
+
+  const recentHistory = conversationHistory.slice(-8);
+
+Replace with:
+
+  const recentHistory = conversationHistory.slice(-50);
+
+=== CHANGE 2: routes-chat-direct.ts ===
+
+In server/routes/routes-chat-direct.ts, find:
+
+  Array.isArray(conversationHistory) ? conversationHistory.slice(-8) : [];
+
+Replace with:
+
+  Array.isArray(conversationHistory) ? conversationHistory.slice(-50) : [];
+
+=== CHANGE 3: supervisor.ts — fast-path history loader ===
+
+In server/supervisor.ts, around line 3450 (in the fast-path block that
+loads fpMsgs), find:
+
+          const { data: fpMsgs } = await supabase
+            .from('messages')
+            .select('role, content')
+            .eq('conversation_id', task.conversation_id)
+            .order('created_at', { ascending: false })
+            .limit(8);
+
+Replace the .limit(8) line with:
+
+            .limit(50);
+
+=== CHANGE 4: supervisor.ts — router history loader ===
+
+In server/supervisor.ts, around the conversation router block (search for
+"routerHistory" — should be ~50 lines below CHANGE 3), find:
+
+          const { data: msgs } = await supabase
+            .from('messages')
+            .select('role, content')
+            .eq('conversation_id', task.conversation_id)
+            .order('created_at', { ascending: false })
+            .limit(15);
+
+Replace the .limit(15) line with:
+
+            .limit(50);
+
+VERIFY
+
+1. In a new conversation, run: "find pubs in arundel"
+2. Have a few more exchanges (5-10 messages of chat) so the original query
+   is past message 8 but within message 50
+3. Ask: "what was the first thing I asked you to search for?"
+4. Expected: Wyshbone should now correctly say "you asked to find pubs in
+   arundel" or similar — citing the verbatim query
+
+ROLLBACK
+git revert. No schema change, just numbers.
+
+NOTE
+- Each message is still truncated to 500 chars per existing logic in
+  chat-handler.ts, so worst case 50 × 500 = 25K chars = ~6K tokens.
+- Total context size per chat call: ~10K tokens. Comfortable within all
+  models' context windows (Groq 128K, Sonnet 200K).
