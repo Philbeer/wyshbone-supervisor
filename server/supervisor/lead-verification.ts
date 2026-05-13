@@ -39,20 +39,30 @@ export function isLeadVerified(lead: LeadWithEvidence): boolean {
     ...(Array.isArray(lead.supporting_evidence) ? lead.supporting_evidence : []),
   ];
 
-  if (evidenceItems.length === 0) return false;
-
-  let hasVerified = false;
+  // Rule: a lead is verified iff NO evidence item has a failure status.
+  // Failure statuses come from Tower semantic verification saying "I
+  // checked and found no support" — these are real disqualifications.
+  //
+  // Everything else passes:
+  //   - 'verified' (Tower confirmed)
+  //   - 'weak_match' (partial Tower match)
+  //   - 'proxy' (strong evidence, no Tower confirmation needed)
+  //   - 'unverified' (no Tower verify ran — typical for location-only
+  //     queries with no hard semantic constraints)
+  //   - empty evidence array (executor returned the lead, nothing to fail)
+  //
+  // The executor has already filtered by location and basic constraints
+  // upstream. By the time a lead reaches this helper, it's a real
+  // candidate — we only drop it if Tower explicitly judged a hard
+  // constraint and the evidence failed.
   for (const ev of evidenceItems) {
     const status = ev?.verification_status;
     if (status === 'no_evidence' || status === 'insufficient_evidence' || status === 'no_relevant_evidence') {
       return false;
     }
-    if (status === 'verified') {
-      hasVerified = true;
-    }
   }
 
-  return hasVerified;
+  return true;
 }
 
 /**
