@@ -235,7 +235,7 @@ export async function handleChat(input: ChatHandlerInput): Promise<ChatHandlerOu
 
   if (conversationHistory.length > 0) {
     parts.push('CONVERSATION HISTORY:');
-    const recentHistory = conversationHistory.slice(-8);
+    const recentHistory = conversationHistory.slice(-50);
     for (const msg of recentHistory) {
       const role = msg.role === 'user' ? 'User' : 'Wyshbone';
       const content = msg.content.length > 500 ? msg.content.substring(0, 500) + '...' : msg.content;

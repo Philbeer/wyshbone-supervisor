@@ -99,7 +99,7 @@ chatDirectRouter.post('/direct', async (req: Request, res: Response) => {
     const messageId = randomUUID();
 
     const history: Array<{ role: 'user' | 'assistant'; content: string }> =
-      Array.isArray(conversationHistory) ? conversationHistory.slice(-8) : [];
+      Array.isArray(conversationHistory) ? conversationHistory.slice(-50) : [];
 
     // 1. Look up relevant reference knowledge (in-memory, ~10ms)
     const referenceKnowledge = getRelevantReferenceKnowledge(message, history);

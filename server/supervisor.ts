@@ -1387,7 +1387,7 @@ class SupervisorService {
             .select('role, content')
             .eq('conversation_id', task.conversation_id)
             .order('created_at', { ascending: false })
-            .limit(8);
+            .limit(50);
           if (fpMsgs) {
             fastPathHistory = fpMsgs.reverse().map((m: any) => ({
               role: m.role as 'user' | 'assistant',
@@ -1472,7 +1472,7 @@ class SupervisorService {
             .select('role, content')
             .eq('conversation_id', task.conversation_id)
             .order('created_at', { ascending: false })
-            .limit(15);
+            .limit(50);
           if (msgs) {
             routerHistory = msgs.reverse().map((m: any) => ({
               role: m.role as 'user' | 'assistant',
