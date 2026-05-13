@@ -1,0 +1,83 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/stop-constraint-fabrication (new branch off main)
+FILE: server/supervisor/mission-extractor.ts
+
+CONTEXT
+Since the April 11 entity-type enhancement, Pass 3 generates key_discriminator
+text in two parts:
+  (a) ENTITY TYPE: "Is a pub — an establishment primarily serving drinks with
+      a bar area open to walk-in customers. NOT a brewery, NOT a wine bar..."
+  (b) CONSTRAINT SATISFACTION: whatever specific requirements the user has
+
+Pass 2's current prompt says: "key_discriminator is the single most important
+signal separating a correct result from a plausible-but-wrong one. Ground your
+constraints in this signal."
+
+Pass 2 can't tell (a) from (b). It treats the entity-type definition as a
+constraint source and emits fabricated hard constraints like attribute_check:
+"serves drinks" and attribute_check: "bar area" for queries like "find pubs
+in arundel" — even though the user said neither phrase.
+
+The old rules-engine Tower was lenient and hid this for a month. Yesterday's
+LLM Tower judge is strict and surfaces the fabrications as honest failures.
+
+GOAL
+Stop Pass 2 from emitting constraints that were never in the user's request.
+Real user-stated constraints (e.g. "live music", "cask ale", "with cellar in
+the name") must continue to work exactly as today.
+
+CHANGES
+
+Open server/supervisor/mission-extractor.ts. Find the PASS2_SYSTEM_PROMPT
+constant. Inside that prompt, find the section that begins:
+
+  WHEN INTENT ANALYSIS CONTEXT IS PROVIDED, follow these rules before extracting any constraint:
+
+REPLACE the four bullets in that section with the following expanded rules:
+
+  WHEN INTENT ANALYSIS CONTEXT IS PROVIDED, follow these rules before extracting any constraint:
+
+  - entity_description tells you what the user actually wants. It MAY contain definitional language describing what kind of entity it is (e.g. "pubs that serve drinks and have a bar area"). Such definitional language describes the entity type, not user-required constraints. Use entity_description to understand intent — NOT as a literal source of constraints.
+
+  - entity_exclusions list things that look similar but are wrong. These are NOT constraints to verify — they are exclusion signals. NEVER create a constraint whose value matches or targets something in entity_exclusions.
+
+  - key_discriminator may contain TWO distinct parts that you MUST separate:
+    1. ENTITY TYPE DEFINITION — sentences of the form "Is a [type] — [defining properties]. NOT a [different type]." This text exists for the evidence layer to verify entity type. It is DEFINITIONAL. It is NEVER a source of constraints. Do not turn definitional properties (like "serves drinks", "has a bar area", "cuts hair", "serves meals") into attribute_check, status_check, or any other constraint.
+    2. USER REQUIREMENT SIGNALS — any other text describing what the user specifically asked for beyond entity type. This part MAY inform constraint extraction.
+
+  - commercial_context explains why the user wants this. Never a source of constraints.
+
+  ANCHOR RULE (applies to every constraint you emit):
+  Every constraint you emit MUST anchor to an explicit phrase in the Pass 1 semantic interpretation. Before emitting a constraint, ask: "Does the semantic interpretation contain a specific phrase that requires this?" If yes, emit it. If no — if you can only justify the constraint from key_discriminator's entity-type definition, from entity_description's definitional language, or from your own knowledge of what the entity type implies — DO NOT EMIT IT.
+
+  Examples of what NOT to do:
+  - User: "find pubs in Arundel" → semantic interpretation contains no attribute requirements → emit only location_constraint. Do NOT emit attribute_check: "serves drinks". Do NOT emit attribute_check: "bar area". These are part of what a pub IS, not what the user specifically asked for.
+  - User: "find hairdressers in Bath" → emit only location_constraint. Do NOT emit attribute_check: "cuts hair" or attribute_check: "styling services".
+  - User: "find restaurants in Brighton" → emit only location_constraint. Do NOT emit attribute_check: "serves meals" or "sit-down dining".
+
+  Examples of what to do:
+  - User: "find pubs in Arundel with live music" → semantic interpretation explicitly states "live music" → emit location_constraint AND attribute_check: "live music". Do NOT additionally emit "serves drinks" or "bar area".
+  - User: "find pubs in Arundel that serve cask ale" → emit location_constraint AND website_evidence: "cask ale". Do NOT additionally emit "serves drinks".
+
+VERIFY
+
+1. Run: "find pubs in arundel"
+   - AFR should show: Mission extraction (active): pubs in Arundel (1 constraint)
+   - Constraints extracted: 1 constraint (the location_constraint only)
+   - Tower should return PASS, not fail
+   - 4-bullet response should show "Verification: All N verified with on-page evidence" (or similar honest passing language)
+
+2. Run: "find pubs in arundel with live music"
+   - AFR should show: 2 constraints (location_constraint + attribute_check: live music)
+   - Tower should verify live music semantically and either pass or honestly fail based on real evidence — but ONLY for live music, not for fabricated extras
+
+3. Run: "find shoe shops in sussex"
+   - AFR should show: 1 constraint (location_constraint only)
+   - Tower should return PASS
+
+4. Run: "find micropubs in sussex that opened in the last month"
+   - AFR should show: 2 constraints (location + time_constraint)
+   - Tower honestly judges the time constraint (likely fail as before — that's correct because the constraint IS real)
+
+ROLLBACK
+git revert the commit.
