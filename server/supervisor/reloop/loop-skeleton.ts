@@ -975,24 +975,50 @@ export async function runReloop(params: {
     console.log(`[RELOOP_SKELETON] Fallback built ${mergedExact.length} delivered_exact entries with full UI fields`);
   }
 
+  // ── Filter to only verified leads ──
+  // Per-lead Tower semantic verification populates match_valid on each
+  // delivered_exact entry. Only leads with match_valid===true should be
+  // shown to the user as "verified results". Unverified candidates from
+  // GPT-4o web search (where evidence didn't support the hard constraint)
+  // get demoted to delivered_closest so they're not lost but aren't
+  // presented as verified.
+  const verifiedMergedExact = mergedExact.filter((l: any) => l.match_valid === true);
+  const unverifiedMergedExact = mergedExact.filter((l: any) => l.match_valid !== true);
+  const combinedClosest = [...mergedClosest, ...unverifiedMergedExact];
+
+  console.log(`[RELOOP_SKELETON] Verification filter: ${mergedExact.length} merged → ${verifiedMergedExact.length} verified (match_valid=true) + ${unverifiedMergedExact.length} demoted to closest`);
+
   const lastDs = allDeliverySummaries[allDeliverySummaries.length - 1];
   const mergedDeliverySummary = lastDs ? {
     ...lastDs,
-    delivered_exact: mergedExact,
-    delivered_closest: mergedClosest,
-    delivered_exact_count: mergedExact.length,
-    delivered_total_count: mergedExact.length + mergedClosest.length,
-    shortfall: requestedCount ? Math.max(0, requestedCount - mergedExact.length) : 0,
+    delivered_exact: verifiedMergedExact,
+    delivered_closest: combinedClosest,
+    delivered_exact_count: verifiedMergedExact.length,
+    delivered_total_count: verifiedMergedExact.length + combinedClosest.length,
+    shortfall: requestedCount ? Math.max(0, requestedCount - verifiedMergedExact.length) : 0,
     tower_verdict: combinedTowerVerdict,
     delivery_note: deliveryNote,
   } : null;
+
+  // Override deliveredLeads to match the verified subset so downstream
+  // surfaces (combinedResult.leads, milestone breadcrumb) all agree.
+  const verifiedDeliveredLeads = verifiedMergedExact.map((lead: any) => ({
+    name: lead.name,
+    address: lead.address || '',
+    phone: lead.phone || null,
+    website: lead.website || null,
+    placeId: lead.place_id || null,
+    source: lead.source || 'unknown',
+    verified: true,
+    verificationStatus: 'verified',
+  }));
 
   const combinedResult: MissionExecutionResult = {
     response: (lastRawResult.response as string) ?? 'Run complete. Results are available.',
     leadIds: (lastRawResult.leadIds as string[]) ?? [],
     deliverySummary: mergedDeliverySummary,
     towerVerdict: combinedTowerVerdict ?? (lastRawResult.towerVerdict as string) ?? null,
-    leads: deliveredLeads.map(l => ({
+    leads: verifiedDeliveredLeads.map((l: any) => ({
       name: l.name,
       address: l.address,
       phone: l.phone,
@@ -1020,7 +1046,7 @@ export async function runReloop(params: {
 
   emitResultsReady({
     ...protocolBase,
-    resultCount: deliveredLeads.length,
+    resultCount: verifiedDeliveredLeads.length,
     resultType: 'leads',
     towerVerdict: combinedTowerVerdict,
     totalLoops,
@@ -1030,9 +1056,12 @@ export async function runReloop(params: {
   // This supersedes the per-loop delivery_summary artefacts created by individual executors.
   // The UI reads the LATEST delivery_summary artefact for the run, so this combined one
   // will be the one rendered in the results card.
-  if (mergedExact.length > 0 || deliveredLeads.length > 0) {
+  // Emit canonical delivery_summary, but using only verified leads.
+  // If 0 verified, still emit the summary with 0 leads + stop verdict so
+  // the UI honestly shows "no verified matches" instead of stale state.
+  if (verifiedMergedExact.length > 0 || combinedClosest.length > 0) {
     try {
-      const canonicalDsLeads = mergedExact.map((lead: any) => ({
+      const canonicalDsLeads = verifiedMergedExact.map((lead: any) => ({
         entity_id: lead.entity_id || lead.place_id || `lead:${lead.name}`,
         name: lead.name,
         address: lead.address || '',
@@ -1044,15 +1073,13 @@ export async function runReloop(params: {
         match_evidence: lead.match_evidence || [],
       }));
 
-      // Honour the combined Tower verdict — do NOT hardcode pass just because leads exist.
-      // The combined Tower is the final gate; if it failed, the delivery summary must reflect that.
-      const towerSaidFail = combinedTowerVerdict === 'fail' || combinedTowerVerdict === 'stop' || combinedTowerVerdict === 'reject';
-      const canonicalVerdict = towerSaidFail
-        ? combinedTowerVerdict
-        : (deliveredLeads.length > 0 ? (combinedTowerVerdict || 'pass') : 'stop');
-      const canonicalAction = towerSaidFail
-        ? 'stop'
-        : (deliveredLeads.length > 0 ? 'accept' : 'stop');
+      // Verdict reflects verified count, not total candidates.
+      // 0 verified === honest "stop" with stop_reason explaining why.
+      const canonicalVerdict = verifiedDeliveredLeads.length > 0 ? 'pass' : (combinedTowerVerdict || 'stop');
+      const canonicalAction = verifiedDeliveredLeads.length > 0 ? 'accept' : 'stop';
+      const canonicalStopReason = verifiedDeliveredLeads.length > 0
+        ? null
+        : `Found ${combinedClosest.length} candidate${combinedClosest.length === 1 ? '' : 's'} but none had verifiable evidence for the hard constraints.`;
 
       await emitDeliverySummary({
         runId,
@@ -1067,17 +1094,20 @@ export async function runReloop(params: {
         leads: canonicalDsLeads,
         finalVerdict: canonicalVerdict,
         finalAction: canonicalAction,
-        stopReason: null,
+        stopReason: canonicalStopReason,
       });
 
       console.log(`[RELOOP_SKELETON] Emitted canonical delivery_summary with ${canonicalDsLeads.length} leads (supersedes per-loop summaries)`);
 
+      const breadcrumbText = verifiedDeliveredLeads.length > 0
+        ? `${verifiedDeliveredLeads.length} verified result${verifiedDeliveredLeads.length === 1 ? '' : 's'} delivered`
+        : `No verified matches — ${combinedClosest.length} candidate${combinedClosest.length === 1 ? '' : 's'} could not be verified against hard constraints`;
       emitMilestoneReached({
         ...protocolBase,
         milestoneKey: 'delivery_complete',
-        milestoneText: `${deliveredLeads.length} verified results delivered`,
+        milestoneText: breadcrumbText,
         phaseName: 'delivery',
-        detail: `${deliveredLeads.length} leads from ${totalLoops} loops`,
+        detail: `${verifiedDeliveredLeads.length} verified, ${combinedClosest.length} demoted | ${totalLoops} loops`,
       }).catch(() => {});
     } catch (dsErr: any) {
       console.warn(`[RELOOP_SKELETON] Canonical delivery_summary emit failed (non-fatal): ${dsErr.message}`);
