@@ -787,14 +787,23 @@ export async function runReloop(params: {
       conversationId,
     });
 
-    // Check if the per-loop Tower already passed for a single-loop run.
-    // If so, skip the combined Tower call — the combined delivery is identical
-    // to the per-loop delivery and re-judging it risks a contradictory verdict.
-    const perLoopTowerVerdict = (finalRawResult as any)?.towerVerdict ?? null;
-    const skipCombinedTower = totalLoops === 1 && perLoopTowerVerdict === 'pass';
+    // Trust per-loop Tower verdicts as source of truth.
+    // The combined Tower call has known input-data bugs (entity.verified flag
+    // set at wrong granularity) and re-judges what per-loop Tower already
+    // judged. If any per-loop Tower passed, use that and skip the combined
+    // call to avoid contradictory verdicts.
+    const perLoopVerdicts = loopHistory
+      .map(r => (r.executorOutput.rawResult as any)?.towerVerdict)
+      .filter((v): v is string => typeof v === 'string');
+    const anyPerLoopPass = perLoopVerdicts.some(v => v === 'pass' || v === 'accept');
+    const lastPerLoopVerdict = perLoopVerdicts[perLoopVerdicts.length - 1] ?? null;
+    const skipCombinedTower = anyPerLoopPass;
 
     if (skipCombinedTower) {
-      console.log(`[RELOOP_SKELETON] Single loop with per-loop Tower PASS — skipping combined Tower call. Using per-loop verdict.`);
+      const reason = totalLoops === 1
+        ? `Single loop with per-loop Tower PASS — skipping combined Tower call.`
+        : `Multi-loop run with at least one per-loop Tower PASS (verdicts: ${perLoopVerdicts.join(', ')}) — skipping combined Tower call to avoid contradictory verdict.`;
+      console.log(`[RELOOP_SKELETON] ${reason}`);
       combinedTowerVerdict = 'pass';
     } else {
       const towerResult = await judgeArtefact({
