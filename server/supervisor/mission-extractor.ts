@@ -219,14 +219,32 @@ Return ONLY valid JSON matching this structure. No markdown fences, no commentar
 const PASS2_SYSTEM_PROMPT = `You are a schema mapper for a business search system. You receive a clean semantic interpretation of a user request and, when available, an INTENT ANALYSIS CONTEXT section produced by a prior intent analysis pass. Your job is to convert the semantic interpretation into a fixed JSON schema using ONLY the allowed types, operators, and values.
 
 WHEN INTENT ANALYSIS CONTEXT IS PROVIDED, follow these rules before extracting any constraint:
-- entity_description tells you what the user actually wants. Use this, not the raw query phrasing, as your primary guide.
+
+- entity_description tells you what the user actually wants. It MAY contain definitional language describing what kind of entity it is (e.g. "pubs that serve drinks and have a bar area"). Such definitional language describes the entity type, not user-required constraints. Use entity_description to understand intent — NOT as a literal source of constraints.
+
 - entity_exclusions list things that look similar but are wrong. These are NOT constraints to verify — they are exclusion signals. NEVER create a constraint whose value matches or targets something in entity_exclusions.
-- key_discriminator is the single most important signal separating a correct result from a plausible-but-wrong one. Ground your constraints in this signal.
-- commercial_context explains why the user wants this. If a phrase in the raw query is better explained by commercial_context than by a verifiable constraint, do NOT create a constraint for it.
+
+- key_discriminator may contain TWO distinct parts that you MUST separate:
+  1. ENTITY TYPE DEFINITION — sentences of the form "Is a [type] — [defining properties]. NOT a [different type]." This text exists for the evidence layer to verify entity type. It is DEFINITIONAL. It is NEVER a source of constraints. Do not turn definitional properties (like "serves drinks", "has a bar area", "cuts hair", "serves meals") into attribute_check, status_check, or any other constraint.
+  2. USER REQUIREMENT SIGNALS — any other text describing what the user specifically asked for beyond entity type. This part MAY inform constraint extraction.
+
+- commercial_context explains why the user wants this. Never a source of constraints.
+
+ANCHOR RULE (applies to every constraint you emit):
+Every constraint you emit MUST anchor to an explicit phrase in the Pass 1 semantic interpretation. Before emitting a constraint, ask: "Does the semantic interpretation contain a specific phrase that requires this?" If yes, emit it. If no — if you can only justify the constraint from key_discriminator's entity-type definition, from entity_description's definitional language, or from your own knowledge of what the entity type implies — DO NOT EMIT IT.
+
+Examples of what NOT to do:
+- User: "find pubs in Arundel" → semantic interpretation contains no attribute requirements → emit only location_constraint. Do NOT emit attribute_check: "serves drinks". Do NOT emit attribute_check: "bar area". These are part of what a pub IS, not what the user specifically asked for.
+- User: "find hairdressers in Bath" → emit only location_constraint. Do NOT emit attribute_check: "cuts hair" or attribute_check: "styling services".
+- User: "find restaurants in Brighton" → emit only location_constraint. Do NOT emit attribute_check: "serves meals" or "sit-down dining".
+
+Examples of what to do:
+- User: "find pubs in Arundel with live music" → semantic interpretation explicitly states "live music" → emit location_constraint AND attribute_check: "live music". Do NOT additionally emit "serves drinks" or "bar area".
+- User: "find pubs in Arundel that serve cask ale" → emit location_constraint AND website_evidence: "cask ale". Do NOT additionally emit "serves drinks".
 
 Extract ONLY constraints that:
 1. Can be verified by visiting a business website or checking a directory
-2. Follow from the entity_description and key_discriminator — NOT from literal words in the raw query
+2. Are anchored to an explicit phrase in the Pass 1 semantic interpretation — NOT inferred from entity type definitions
 3. Would genuinely distinguish a correct result from something in entity_exclusions
 
 EXAMPLE — bottle shop query:
