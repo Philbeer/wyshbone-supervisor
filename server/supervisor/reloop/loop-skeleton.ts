@@ -762,118 +762,8 @@ export async function runReloop(params: {
 
   let combinedTowerVerdict: string | null = null;
 
-  // Judge the combined delivery — this is the final verdict for the whole run
-  try {
-    const combinedArtefact = await createArtefact({
-      runId,
-      type: 'combined_delivery',
-      title: `Combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loop${totalLoops === 1 ? '' : 's'}`,
-      summary: `${deliveredLeads.length} leads delivered | loops=${totalLoops} | executors=${executorsTriedSoFar.join(',')} | requested=${requestedCount ?? 'any'}`,
-      payload: {
-        chain_id: chainId,
-        total_loops: totalLoops,
-        executors_tried: executorsTriedSoFar,
-        requested_count: requestedCount,
-        delivered_count: deliveredLeads.length,
-        accumulated_total: allEntities.length,
-        leads: deliveredLeads,
-        per_loop_counts: loopHistory.map(r => ({
-          loop: r.loopNumber,
-          executor: r.plannerDecision.executorType,
-          found: r.executorOutput.entities.length,
-        })),
-        delivery_note: deliveryNote,
-        // Include constraint information so the LLM Tower judge sees the
-        // values it needs to verify (not just type labels). The judge
-        // primarily reads the artefact payload, so without this it
-        // produces misleading rationale like "no hard constraints to verify"
-        // even when there are real constraints with real values.
-        hard_constraints: hardConstraints,
-        soft_constraints: softConstraints,
-        structured_constraints: structuredConstraints,
-        original_user_goal: rawUserInput,
-        normalized_goal: normalizedGoal,
-      },
-      userId,
-      conversationId,
-    });
-
-    // Trust per-loop Tower verdicts as source of truth.
-    // The combined Tower call has known input-data bugs (entity.verified flag
-    // set at wrong granularity) and re-judges what per-loop Tower already
-    // judged. If any per-loop Tower passed, use that and skip the combined
-    // call to avoid contradictory verdicts.
-    const perLoopVerdicts = loopHistory
-      .map(r => (r.executorOutput.rawResult as any)?.towerVerdict)
-      .filter((v): v is string => typeof v === 'string');
-    const anyPerLoopPass = perLoopVerdicts.some(v => v === 'pass' || v === 'accept');
-    const lastPerLoopVerdict = perLoopVerdicts[perLoopVerdicts.length - 1] ?? null;
-    const skipCombinedTower = anyPerLoopPass;
-
-    if (skipCombinedTower) {
-      const reason = totalLoops === 1
-        ? `Single loop with per-loop Tower PASS — skipping combined Tower call.`
-        : `Multi-loop run with at least one per-loop Tower PASS (verdicts: ${perLoopVerdicts.join(', ')}) — skipping combined Tower call to avoid contradictory verdict.`;
-      console.log(`[RELOOP_SKELETON] ${reason}`);
-      combinedTowerVerdict = 'pass';
-    } else {
-      const towerResult = await judgeArtefact({
-        artefact: combinedArtefact,
-        runId,
-        goal: normalizedGoal,
-        userId,
-        conversationId,
-        successCriteria: {
-          mission_type: 'leadgen',
-          target_count: requestedCount ?? 20,
-          requested_count_user: requestedCount !== null ? 'explicit' : 'implicit',
-          requested_count_value: requestedCount,
-          hard_constraints: hardConstraints,
-          soft_constraints: softConstraints,
-          structured_constraints: structuredConstraints,
-          intent_narrative: intentNarrative ?? null,
-        },
-        intent_narrative: intentNarrative ?? null,
-        queryId: queryId ?? null,
-        queryShapeKey: queryShapeKey,
-      });
-
-      console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} delivered=${deliveredLeads.length}`);
-      combinedTowerVerdict = towerResult.judgement.verdict;
-    }
-
-    emitPhaseEntered({
-      ...protocolBase,
-      phaseName: 'quality_check',
-      phaseLabel: 'Quality check',
-      phaseIndex: isGpt4oPrimary ? 2 : 4,
-      totalPhases: isGpt4oPrimary ? 4 : 6,
-      detail: `Tower verdict: ${combinedTowerVerdict ?? 'unknown'}`,
-    }).catch(() => {});
-
-    emitMilestoneReached({
-      ...protocolBase,
-      milestoneKey: 'quality_check_complete',
-      milestoneText: 'Quality check complete',
-      phaseName: 'quality_check',
-      detail: `Tower verdict: ${combinedTowerVerdict ?? 'unknown'}`,
-    }).catch(() => {});
-  } catch (judgeErr: any) {
-    const errMsg = judgeErr?.message ?? String(judgeErr);
-    const errStack = judgeErr?.stack ?? '';
-    console.error(`[RELOOP_SKELETON] Combined delivery judgement failed (non-fatal): ${errMsg}`, errStack);
-    logRunEvent(runId, {
-      stage: 'combined_delivery_error',
-      level: 'error',
-      message: `Combined delivery failed: ${errMsg}`,
-      queryText: rawUserInput,
-      metadata: {
-        chain_id: chainId,
-        error: errMsg,
-        stack: errStack.substring(0, 500),
-      },
-    });
-  }
+  // Combined delivery artefact + Tower judgement runs AFTER the verification
+  // filter below so artefact counts reflect the verified set only.
 
   // Build the MissionExecutionResult from combined entities
   // Use the last loop's raw result as the base, then override leads
@@ -977,13 +867,14 @@ export async function runReloop(params: {
   }
 
   // ── Single source of truth: per-lead Tower verification status ──
-  // isLeadVerified reads match_evidence items directly. No more match_valid,
-  // entity.verified, or combined Tower verdict for this decision.
+  // isLeadVerified reads match_evidence items directly. Unverified leads
+  // are DROPPED, not demoted — if a lead doesn't verify against the user's
+  // hard constraints, it doesn't appear anywhere in the output.
   const verifiedMergedExact = mergedExact.filter(isLeadVerified);
-  const unverifiedMergedExact = mergedExact.filter((l: any) => !isLeadVerified(l));
-  const combinedClosest = [...mergedClosest, ...unverifiedMergedExact];
+  const unverifiedDroppedCount = mergedExact.length - verifiedMergedExact.length;
+  const combinedClosest = mergedClosest; // never includes unverified
 
-  console.log(`[RELOOP_SKELETON] Verification filter (single-truth): ${mergedExact.length} merged → ${verifiedMergedExact.length} verified (Tower per-lead = verified) + ${unverifiedMergedExact.length} demoted (no_evidence or weak/missing)`);
+  console.log(`[RELOOP_SKELETON] Verification filter (single-truth): ${mergedExact.length} merged → ${verifiedMergedExact.length} verified + ${unverifiedDroppedCount} dropped (no_evidence / weak / missing per-lead Tower verdict)`);
 
   const lastDs = allDeliverySummaries[allDeliverySummaries.length - 1];
   const mergedDeliverySummary = lastDs ? {
@@ -1009,6 +900,120 @@ export async function runReloop(params: {
     verified: true,
     verificationStatus: 'verified',
   }));
+
+  // Judge the combined delivery — uses verified leads only so artefact counts match UI
+  try {
+    const combinedArtefact = await createArtefact({
+      runId,
+      type: 'combined_delivery',
+      title: `Combined delivery: ${verifiedMergedExact.length} verified leads from ${totalLoops} loop${totalLoops === 1 ? '' : 's'}`,
+      summary: `${verifiedMergedExact.length} verified leads delivered | loops=${totalLoops} | executors=${executorsTriedSoFar.join(',')} | requested=${requestedCount ?? 'any'} | unverified dropped=${unverifiedDroppedCount}`,
+      payload: {
+        chain_id: chainId,
+        total_loops: totalLoops,
+        executors_tried: executorsTriedSoFar,
+        requested_count: requestedCount,
+        delivered_count: verifiedMergedExact.length,
+        accumulated_total: allEntities.length,
+        leads: verifiedDeliveredLeads,
+        unverified_dropped_count: unverifiedDroppedCount,
+        per_loop_counts: loopHistory.map(r => ({
+          loop: r.loopNumber,
+          executor: r.plannerDecision.executorType,
+          found: r.executorOutput.entities.length,
+        })),
+        delivery_note: deliveryNote,
+        // Include constraint information so the LLM Tower judge sees the
+        // values it needs to verify (not just type labels). The judge
+        // primarily reads the artefact payload, so without this it
+        // produces misleading rationale like "no hard constraints to verify"
+        // even when there are real constraints with real values.
+        hard_constraints: hardConstraints,
+        soft_constraints: softConstraints,
+        structured_constraints: structuredConstraints,
+        original_user_goal: rawUserInput,
+        normalized_goal: normalizedGoal,
+      },
+      userId,
+      conversationId,
+    });
+
+    // Trust per-loop Tower verdicts as source of truth.
+    // The combined Tower call has known input-data bugs (entity.verified flag
+    // set at wrong granularity) and re-judges what per-loop Tower already
+    // judged. If any per-loop Tower passed, use that and skip the combined
+    // call to avoid contradictory verdicts.
+    const perLoopVerdicts = loopHistory
+      .map(r => (r.executorOutput.rawResult as any)?.towerVerdict)
+      .filter((v): v is string => typeof v === 'string');
+    const anyPerLoopPass = perLoopVerdicts.some(v => v === 'pass' || v === 'accept');
+    const lastPerLoopVerdict = perLoopVerdicts[perLoopVerdicts.length - 1] ?? null;
+    const skipCombinedTower = anyPerLoopPass;
+
+    if (skipCombinedTower) {
+      const reason = totalLoops === 1
+        ? `Single loop with per-loop Tower PASS — skipping combined Tower call.`
+        : `Multi-loop run with at least one per-loop Tower PASS (verdicts: ${perLoopVerdicts.join(', ')}) — skipping combined Tower call to avoid contradictory verdict.`;
+      console.log(`[RELOOP_SKELETON] ${reason}`);
+      combinedTowerVerdict = 'pass';
+    } else {
+      const towerResult = await judgeArtefact({
+        artefact: combinedArtefact,
+        runId,
+        goal: normalizedGoal,
+        userId,
+        conversationId,
+        successCriteria: {
+          mission_type: 'leadgen',
+          target_count: requestedCount ?? 20,
+          requested_count_user: requestedCount !== null ? 'explicit' : 'implicit',
+          requested_count_value: requestedCount,
+          hard_constraints: hardConstraints,
+          soft_constraints: softConstraints,
+          structured_constraints: structuredConstraints,
+          intent_narrative: intentNarrative ?? null,
+        },
+        intent_narrative: intentNarrative ?? null,
+        queryId: queryId ?? null,
+        queryShapeKey: queryShapeKey,
+      });
+
+      console.log(`[RELOOP_SKELETON] Combined delivery Tower verdict: ${towerResult.judgement.verdict} action=${towerResult.judgement.action} verified=${verifiedMergedExact.length}`);
+      combinedTowerVerdict = towerResult.judgement.verdict;
+    }
+
+    emitPhaseEntered({
+      ...protocolBase,
+      phaseName: 'quality_check',
+      phaseLabel: 'Quality check',
+      phaseIndex: isGpt4oPrimary ? 2 : 4,
+      totalPhases: isGpt4oPrimary ? 4 : 6,
+      detail: `Tower verdict: ${combinedTowerVerdict ?? 'unknown'}`,
+    }).catch(() => {});
+
+    emitMilestoneReached({
+      ...protocolBase,
+      milestoneKey: 'quality_check_complete',
+      milestoneText: 'Quality check complete',
+      phaseName: 'quality_check',
+      detail: `Tower verdict: ${combinedTowerVerdict ?? 'unknown'}`,
+    }).catch(() => {});
+  } catch (judgeErr: any) {
+    const errMsg = judgeErr?.message ?? String(judgeErr);
+    const errStack = judgeErr?.stack ?? '';
+    console.error(`[RELOOP_SKELETON] Combined delivery judgement failed (non-fatal): ${errMsg}`, errStack);
+    logRunEvent(runId, {
+      stage: 'combined_delivery_error',
+      level: 'error',
+      message: `Combined delivery failed: ${errMsg}`,
+      queryText: rawUserInput,
+      metadata: {
+        chain_id: chainId,
+        error: errMsg,
+        stack: errStack.substring(0, 500),
+      },
+    });
+  }
 
   const combinedResult: MissionExecutionResult = {
     response: (lastRawResult.response as string) ?? 'Run complete. Results are available.',
