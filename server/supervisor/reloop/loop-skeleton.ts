@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import type { StructuredMission, MissionExtractionTrace, IntentNarrative } from '../mission-schema';
 import type { MissionPlan } from '../mission-planner';
 import type { MissionExecutionResult } from '../mission-executor';
+import { isLeadVerified, countVerifiedLeads } from '../lead-verification';
 import {
   deriveSearchParams,
   buildHardConstraintLabels,
@@ -975,18 +976,14 @@ export async function runReloop(params: {
     console.log(`[RELOOP_SKELETON] Fallback built ${mergedExact.length} delivered_exact entries with full UI fields`);
   }
 
-  // ── Filter to only verified leads ──
-  // Per-lead Tower semantic verification populates match_valid on each
-  // delivered_exact entry. Only leads with match_valid===true should be
-  // shown to the user as "verified results". Unverified candidates from
-  // GPT-4o web search (where evidence didn't support the hard constraint)
-  // get demoted to delivered_closest so they're not lost but aren't
-  // presented as verified.
-  const verifiedMergedExact = mergedExact.filter((l: any) => l.match_valid === true);
-  const unverifiedMergedExact = mergedExact.filter((l: any) => l.match_valid !== true);
+  // ── Single source of truth: per-lead Tower verification status ──
+  // isLeadVerified reads match_evidence items directly. No more match_valid,
+  // entity.verified, or combined Tower verdict for this decision.
+  const verifiedMergedExact = mergedExact.filter(isLeadVerified);
+  const unverifiedMergedExact = mergedExact.filter((l: any) => !isLeadVerified(l));
   const combinedClosest = [...mergedClosest, ...unverifiedMergedExact];
 
-  console.log(`[RELOOP_SKELETON] Verification filter: ${mergedExact.length} merged → ${verifiedMergedExact.length} verified (match_valid=true) + ${unverifiedMergedExact.length} demoted to closest`);
+  console.log(`[RELOOP_SKELETON] Verification filter (single-truth): ${mergedExact.length} merged → ${verifiedMergedExact.length} verified (Tower per-lead = verified) + ${unverifiedMergedExact.length} demoted (no_evidence or weak/missing)`);
 
   const lastDs = allDeliverySummaries[allDeliverySummaries.length - 1];
   const mergedDeliverySummary = lastDs ? {

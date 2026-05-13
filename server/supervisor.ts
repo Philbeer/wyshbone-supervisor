@@ -3622,12 +3622,19 @@ class SupervisorService {
     const ds = towerResult.deliverySummary;
     let response: string;
     try {
+      // Single source of truth: count verified leads from delivery_summary.
+      // This is the SAME rule used in loop-skeleton.ts — based on per-lead
+      // Tower verification_status in match_evidence.
+      const { countVerifiedLeads } = await import('./supervisor/lead-verification');
+      const computedVerifiedCount = countVerifiedLeads(
+        (ds?.delivered_exact as any[]) || []
+      );
       response = await buildNaturalResponse({
         businessType: earlyParsedGoal?.business_type ?? missionResult?.mission?.entity_category ?? 'results',
         location: earlyParsedGoal?.location ?? missionResult?.mission?.location_text ?? '',
         requestedCount: ds?.requested_count ?? earlyParsedGoal?.requested_count ?? null,
         deliveredCount: ds?.delivered_total_count ?? towerResult.leads.length,
-        verifiedCount: ds?.cvl_verified_exact_count ?? ds?.delivered_exact_count ?? 0,
+        verifiedCount: computedVerifiedCount,
         towerVerdict: towerResult.towerVerdict ?? ds?.tower_verdict ?? null,
         runFailed,
         failureReason,
