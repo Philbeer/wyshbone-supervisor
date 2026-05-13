@@ -1,0 +1,219 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/single-truth-verified (new branch off current main)
+FILES:
+  - server/supervisor/lead-verification.ts (NEW FILE)
+  - server/supervisor/reloop/loop-skeleton.ts (replace patches with helper)
+
+CONTEXT
+We have layered patches across multiple files to decide whether a lead is
+"verified":
+  - gp-cascade-adapter.ts sets entity.verified to the whole loop's Tower verdict
+  - gpt4o-adapter.ts hardcodes entity.verified=true
+  - gpt4o-search.ts hardcodes match_valid=true at the source
+  - mission-executor.ts overrides match_valid for some paths
+  - loop-skeleton.ts has a match_valid filter we added recently
+  - The combined Tower verdict overrides verification messaging in some paths
+  - response-builder.ts has its own logic reading verifiedCount
+
+These contradict each other. The user sees "All 2 verified" while per-lead
+cards show "Tower verdict: no_evidence" on the same screen.
+
+DESIGN PRINCIPLE
+There is ONE source of truth: each match_evidence item on a lead carries
+a verification_status (verified | weak_match | proxy | no_evidence |
+insufficient_evidence | unverified) that comes directly from per-lead Tower
+semantic verification. This is what the UI displays per lead.
+
+A SINGLE RULE decides if a lead is verified:
+
+  A lead is "verified" if its match_evidence contains at least one item
+  with verification_status === "verified" AND none with verification_status
+  of "no_evidence" or "insufficient_evidence".
+
+Everything downstream — counts, filters, messaging — reads from this
+single rule. No more match_valid, entity.verified, or combined-Tower-
+verdict reads for verification purposes.
+
+CHANGES
+
+=== CHANGE 1: Create the helper file ===
+
+Create a new file: server/supervisor/lead-verification.ts
+
+Contents:
+
+  /**
+   * Single source of truth for whether a delivered lead is "verified".
+   *
+   * Reads the per-lead Tower semantic verification status from match_evidence —
+   * the same data displayed on each result card in the UI. No other flags
+   * (match_valid, entity.verified, combined Tower verdict) participate in
+   * this decision.
+   *
+   * Rule:
+   *   A lead is verified iff:
+   *     - at least one match_evidence item has verification_status === 'verified', AND
+   *     - NO match_evidence item has verification_status of 'no_evidence' or
+   *       'insufficient_evidence' (a failed hard constraint check).
+   *
+   * Anything else (weak_match, proxy, unverified, empty evidence) is NOT verified.
+   */
+
+  export type EvidenceVerificationStatus =
+    | 'verified'
+    | 'weak_match'
+    | 'proxy'
+    | 'unverified'
+    | 'no_evidence'
+    | 'insufficient_evidence'
+    | 'no_relevant_evidence';
+
+  interface EvidenceItem {
+    verification_status?: EvidenceVerificationStatus | string | null;
+  }
+
+  interface LeadWithEvidence {
+    match_evidence?: EvidenceItem[] | null;
+    supporting_evidence?: EvidenceItem[] | null;
+  }
+
+  export function isLeadVerified(lead: LeadWithEvidence): boolean {
+    const evidenceItems: EvidenceItem[] = [
+      ...(Array.isArray(lead.match_evidence) ? lead.match_evidence : []),
+      ...(Array.isArray(lead.supporting_evidence) ? lead.supporting_evidence : []),
+    ];
+
+    if (evidenceItems.length === 0) return false;
+
+    let hasVerified = false;
+    for (const ev of evidenceItems) {
+      const status = ev?.verification_status;
+      if (status === 'no_evidence' || status === 'insufficient_evidence' || status === 'no_relevant_evidence') {
+        return false;
+      }
+      if (status === 'verified') {
+        hasVerified = true;
+      }
+    }
+
+    return hasVerified;
+  }
+
+  /**
+   * Count how many leads in a list are verified by the single rule.
+   */
+  export function countVerifiedLeads(leads: LeadWithEvidence[]): number {
+    let n = 0;
+    for (const l of leads) {
+      if (isLeadVerified(l)) n++;
+    }
+    return n;
+  }
+
+=== CHANGE 2: Use the helper in loop-skeleton.ts, remove the match_valid patch ===
+
+Open server/supervisor/reloop/loop-skeleton.ts.
+
+At the top of the file, add this import alongside the other imports:
+
+  import { isLeadVerified, countVerifiedLeads } from '../lead-verification';
+
+Find this block (the patch we added recently, around line 880-895, just
+after mergedExact is built and the fallback runs, right BEFORE the lastDs
+line):
+
+  // ── Filter to only verified leads ──
+  // Per-lead Tower semantic verification populates match_valid on each
+  // delivered_exact entry. Only leads with match_valid===true should be
+  // shown to the user as "verified results". Unverified candidates from
+  // GPT-4o web search (where evidence didn't support the hard constraint)
+  // get demoted to delivered_closest so they're not lost but aren't
+  // presented as verified.
+  const verifiedMergedExact = mergedExact.filter((l: any) => l.match_valid === true);
+  const unverifiedMergedExact = mergedExact.filter((l: any) => l.match_valid !== true);
+  const combinedClosest = [...mergedClosest, ...unverifiedMergedExact];
+
+  console.log(`[RELOOP_SKELETON] Verification filter: ${mergedExact.length} merged → ${verifiedMergedExact.length} verified (match_valid=true) + ${unverifiedMergedExact.length} demoted to closest`);
+
+REPLACE that entire block with:
+
+  // ── Single source of truth: per-lead Tower verification status ──
+  // isLeadVerified reads match_evidence items directly. No more match_valid,
+  // entity.verified, or combined Tower verdict for this decision.
+  const verifiedMergedExact = mergedExact.filter(isLeadVerified);
+  const unverifiedMergedExact = mergedExact.filter((l: any) => !isLeadVerified(l));
+  const combinedClosest = [...mergedClosest, ...unverifiedMergedExact];
+
+  console.log(`[RELOOP_SKELETON] Verification filter (single-truth): ${mergedExact.length} merged → ${verifiedMergedExact.length} verified (Tower per-lead = verified) + ${unverifiedMergedExact.length} demoted (no_evidence or weak/missing)`);
+
+Keep everything else in that section unchanged — verifiedDeliveredLeads,
+mergedDeliverySummary, combinedResult, emitDeliverySummary, the breadcrumb
+emit — they all read from verifiedMergedExact / verifiedDeliveredLeads
+correctly already.
+
+=== CHANGE 3: Use the helper for verifiedCount in supervisor.ts ===
+
+Open server/supervisor.ts. Find where buildNaturalResponse is called around
+line 3625. Find the line that sets verifiedCount in the call (it may be
+something like `verifiedCount: missionExecResult.deliverySummary?.delivered_exact_count`
+or similar — search nearby for "verifiedCount").
+
+Just BEFORE the buildNaturalResponse call, add:
+
+  // Single source of truth: count verified leads from delivery_summary.
+  // This is the SAME rule used in loop-skeleton.ts — based on per-lead
+  // Tower verification_status in match_evidence.
+  const { countVerifiedLeads } = await import('./supervisor/lead-verification');
+  const computedVerifiedCount = countVerifiedLeads(
+    (missionExecResult.deliverySummary?.delivered_exact as any[]) || []
+  );
+
+Then in the buildNaturalResponse call, replace the `verifiedCount:` argument
+with `verifiedCount: computedVerifiedCount`.
+
+If the line in question reads something other than that pattern, find the
+verifiedCount input parameter to buildNaturalResponse and replace it with
+computedVerifiedCount.
+
+VERIFY
+
+1. Run: "find micro pubs that opened in the last 6 months in sussex"
+   - If per-lead Tower says no_evidence for both candidates → 0 verified
+     delivered, no result cards shown, breadcrumb honest
+   - If per-lead Tower says verified for one (e.g. Arundel Taphouse) → 1
+     delivered, 4-bullet says "1 of N verified" or similar — honest
+
+2. Run: "find organisations that work with the local authority in kent"
+   - Involve Kent has Tower verdict: no_evidence — should NOT appear
+   - The other 4 with Tower verdict: verified should appear
+   - 4-bullet: "All 4 were verified with on-page evidence"
+
+3. Run: "find pubs in arundel" (no extra constraints)
+   - All location-verified leads should appear (no hard attribute checks)
+   - Watch for regression: if location_constraint has no match_evidence
+     entry on the lead, this rule would treat them as not verified.
+     If that happens, the lead-verification helper needs an "if no
+     hard-constraint evidence required, default to verified" branch — but
+     check the AFR first before adding that.
+
+ROLLBACK
+git revert the commit.
+
+NOTES ON LEFTOVER PATCHES (NOT TOUCHED HERE)
+- gpt4o-search.ts:583 and 761 still hardcode match_valid: true. These don't
+  matter for the verified count anymore (isLeadVerified doesn't read
+  match_valid). Leave as-is — separate cleanup later.
+- gp-cascade-adapter.ts:41 and gpt4o-adapter.ts:49 still set entity.verified
+  at the wrong granularity. Same: doesn't matter for the verified count
+  anymore. The entity.verified flag is now ignored. Leave as-is.
+- Eventually we should rip these out in a follow-up cleanup. But the user-
+  visible behaviour is correct after this change without touching them.
+
+ONE THING TO WATCH
+If pubs in arundel (no attribute constraints) now shows 0 verified because
+location-only leads don't have evidence items, that's the "false negative"
+edge case. The lead-verification helper has a clear definition: empty
+evidence = not verified. If that's wrong for plain location-only queries,
+we update the helper to also treat "no hard constraint to verify" as
+verified. But check the AFR first — most location-only queries do produce
+at least one match_evidence item for the location_constraint.
