@@ -1,0 +1,257 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/only-deliver-verified-leads (new branch off current main)
+FILE: server/supervisor/reloop/loop-skeleton.ts
+
+CONTEXT
+After per-lead Tower semantic verification, each lead in mergedExact has a
+match_valid flag indicating whether evidence actually supports the hard
+constraints. Currently the final user-facing delivery uses all of mergedExact
+regardless of match_valid, which means leads that Tower flagged as
+"no_evidence" or "insufficient_evidence" still appear in the UI as
+"verified results delivered" — misleading the user and making the system
+look broken when those leads clearly don't match the constraint.
+
+For example: "find micro pubs that opened in the last 6 months in sussex"
+returns 2 candidates from GPT-4o web search, but per-lead Tower
+verification finds no evidence either of them opened recently. Both have
+match_valid=false. Yet the UI says "2 verified results delivered" and
+shows them as results.
+
+GOAL
+Only deliver leads where per-lead match_valid is true. If 0 verified,
+deliver 0 leads with an honest "no verified matches" message instead of
+shipping unverified candidates.
+
+CHANGES
+
+Open server/supervisor/reloop/loop-skeleton.ts. Find the block that builds
+the merged delivery (around line 880, starting with the comment
+"// Build merged delivered_exact from all loops' delivery summaries").
+
+After the mergedExact array is built and the fallback block runs, find this
+section (around line 945):
+
+  const lastDs = allDeliverySummaries[allDeliverySummaries.length - 1];
+  const mergedDeliverySummary = lastDs ? {
+    ...lastDs,
+    delivered_exact: mergedExact,
+    delivered_closest: mergedClosest,
+    delivered_exact_count: mergedExact.length,
+    delivered_total_count: mergedExact.length + mergedClosest.length,
+    shortfall: requestedCount ? Math.max(0, requestedCount - mergedExact.length) : 0,
+    tower_verdict: combinedTowerVerdict,
+    delivery_note: deliveryNote,
+  } : null;
+
+REPLACE that block with:
+
+  // ── Filter to only verified leads ──
+  // Per-lead Tower semantic verification populates match_valid on each
+  // delivered_exact entry. Only leads with match_valid===true should be
+  // shown to the user as "verified results". Unverified candidates from
+  // GPT-4o web search (where evidence didn't support the hard constraint)
+  // get demoted to delivered_closest so they're not lost but aren't
+  // presented as verified.
+  const verifiedMergedExact = mergedExact.filter((l: any) => l.match_valid === true);
+  const unverifiedMergedExact = mergedExact.filter((l: any) => l.match_valid !== true);
+  const combinedClosest = [...mergedClosest, ...unverifiedMergedExact];
+
+  console.log(`[RELOOP_SKELETON] Verification filter: ${mergedExact.length} merged → ${verifiedMergedExact.length} verified (match_valid=true) + ${unverifiedMergedExact.length} demoted to closest`);
+
+  const lastDs = allDeliverySummaries[allDeliverySummaries.length - 1];
+  const mergedDeliverySummary = lastDs ? {
+    ...lastDs,
+    delivered_exact: verifiedMergedExact,
+    delivered_closest: combinedClosest,
+    delivered_exact_count: verifiedMergedExact.length,
+    delivered_total_count: verifiedMergedExact.length + combinedClosest.length,
+    shortfall: requestedCount ? Math.max(0, requestedCount - verifiedMergedExact.length) : 0,
+    tower_verdict: combinedTowerVerdict,
+    delivery_note: deliveryNote,
+  } : null;
+
+  // Override deliveredLeads to match the verified subset so downstream
+  // surfaces (combinedResult.leads, milestone breadcrumb) all agree.
+  const verifiedDeliveredLeads = verifiedMergedExact.map((lead: any) => ({
+    name: lead.name,
+    address: lead.address || '',
+    phone: lead.phone || null,
+    website: lead.website || null,
+    placeId: lead.place_id || null,
+    source: lead.source || 'unknown',
+    verified: true,
+    verificationStatus: 'verified',
+  }));
+
+Now find the combinedResult construction (a few lines below, around line 970):
+
+  const combinedResult: MissionExecutionResult = {
+    response: (lastRawResult.response as string) ?? 'Run complete. Results are available.',
+    leadIds: (lastRawResult.leadIds as string[]) ?? [],
+    deliverySummary: mergedDeliverySummary,
+    towerVerdict: combinedTowerVerdict ?? (lastRawResult.towerVerdict as string) ?? null,
+    leads: deliveredLeads.map(l => ({
+      name: l.name,
+      address: l.address,
+      phone: l.phone,
+      website: l.website,
+      placeId: l.placeId,
+    })),
+  };
+
+REPLACE the leads array to use verifiedDeliveredLeads:
+
+  const combinedResult: MissionExecutionResult = {
+    response: (lastRawResult.response as string) ?? 'Run complete. Results are available.',
+    leadIds: (lastRawResult.leadIds as string[]) ?? [],
+    deliverySummary: mergedDeliverySummary,
+    towerVerdict: combinedTowerVerdict ?? (lastRawResult.towerVerdict as string) ?? null,
+    leads: verifiedDeliveredLeads.map((l: any) => ({
+      name: l.name,
+      address: l.address,
+      phone: l.phone,
+      website: l.website,
+      placeId: l.placeId,
+    })),
+  };
+
+Now find the emitResultsReady call:
+
+  emitResultsReady({
+    ...protocolBase,
+    resultCount: deliveredLeads.length,
+    resultType: 'leads',
+    towerVerdict: combinedTowerVerdict,
+    totalLoops,
+  }).catch(() => {});
+
+REPLACE with:
+
+  emitResultsReady({
+    ...protocolBase,
+    resultCount: verifiedDeliveredLeads.length,
+    resultType: 'leads',
+    towerVerdict: combinedTowerVerdict,
+    totalLoops,
+  }).catch(() => {});
+
+Now find the canonical delivery_summary emit block (around line 1000+,
+starting with the comment "// ── Emit canonical delivery_summary for the
+combined delivery ──"). Find this part:
+
+  if (mergedExact.length > 0 || deliveredLeads.length > 0) {
+    try {
+      const canonicalDsLeads = mergedExact.map((lead: any) => ({
+
+REPLACE with:
+
+  // Emit canonical delivery_summary, but using only verified leads.
+  // If 0 verified, still emit the summary with 0 leads + stop verdict so
+  // the UI honestly shows "no verified matches" instead of stale state.
+  if (verifiedMergedExact.length > 0 || combinedClosest.length > 0) {
+    try {
+      const canonicalDsLeads = verifiedMergedExact.map((lead: any) => ({
+
+A few lines below, find:
+
+      const canonicalVerdict = deliveredLeads.length > 0 ? 'pass' : (combinedTowerVerdict || 'stop');
+      const canonicalAction = deliveredLeads.length > 0 ? 'accept' : 'stop';
+
+REPLACE with:
+
+      // Verdict reflects verified count, not total candidates.
+      // 0 verified === honest "stop" with stop_reason explaining why.
+      const canonicalVerdict = verifiedDeliveredLeads.length > 0 ? 'pass' : (combinedTowerVerdict || 'stop');
+      const canonicalAction = verifiedDeliveredLeads.length > 0 ? 'accept' : 'stop';
+      const canonicalStopReason = verifiedDeliveredLeads.length > 0
+        ? null
+        : `Found ${combinedClosest.length} candidate${combinedClosest.length === 1 ? '' : 's'} but none had verifiable evidence for the hard constraints.`;
+
+Then find the emitDeliverySummary call:
+
+      await emitDeliverySummary({
+        runId,
+        userId,
+        conversationId,
+        originalUserGoal: rawUserInput,
+        requestedCount,
+        hardConstraints,
+        softConstraints,
+        planVersions: [{ version: 1, changes_made: ['Combined re-loop delivery'] }],
+        softRelaxations: [],
+        leads: canonicalDsLeads,
+        finalVerdict: canonicalVerdict,
+        finalAction: canonicalAction,
+        stopReason: null,
+      });
+
+REPLACE the stopReason argument:
+
+      await emitDeliverySummary({
+        runId,
+        userId,
+        conversationId,
+        originalUserGoal: rawUserInput,
+        requestedCount,
+        hardConstraints,
+        softConstraints,
+        planVersions: [{ version: 1, changes_made: ['Combined re-loop delivery'] }],
+        softRelaxations: [],
+        leads: canonicalDsLeads,
+        finalVerdict: canonicalVerdict,
+        finalAction: canonicalAction,
+        stopReason: canonicalStopReason,
+      });
+
+Finally, find the milestone breadcrumb emit at the end of that try block:
+
+      emitMilestoneReached({
+        ...protocolBase,
+        milestoneKey: 'delivery_complete',
+        milestoneText: `${deliveredLeads.length} verified results delivered`,
+        phaseName: 'delivery',
+        detail: `${deliveredLeads.length} leads from ${totalLoops} loops`,
+      }).catch(() => {});
+
+REPLACE with:
+
+      const breadcrumbText = verifiedDeliveredLeads.length > 0
+        ? `${verifiedDeliveredLeads.length} verified result${verifiedDeliveredLeads.length === 1 ? '' : 's'} delivered`
+        : `No verified matches — ${combinedClosest.length} candidate${combinedClosest.length === 1 ? '' : 's'} could not be verified against hard constraints`;
+      emitMilestoneReached({
+        ...protocolBase,
+        milestoneKey: 'delivery_complete',
+        milestoneText: breadcrumbText,
+        phaseName: 'delivery',
+        detail: `${verifiedDeliveredLeads.length} verified, ${combinedClosest.length} demoted | ${totalLoops} loops`,
+      }).catch(() => {});
+
+VERIFY
+
+1. Run: "find micro pubs that opened in the last 6 months in sussex"
+   - Both leads should be filtered out (match_valid=false for the 6-month constraint)
+   - Breadcrumb should say "No verified matches — 2 candidates could not be verified against hard constraints"
+   - UI should NOT show the 2 unverified pubs as results
+   - 4-bullet should say "Couldn't verify any matches" or similar (response builder reads delivery_summary)
+   - Tower verdict still surfaces honestly
+
+2. Run: "find organisations that work with the local authority in kent"
+   - 4 verified + 1 unverified (Involve Kent had Tower verdict no_evidence)
+   - After fix: 4 verified delivered, 1 demoted to closest
+   - Breadcrumb says "4 verified results delivered"
+   - 4-bullet honestly says "All 4 were verified" (not "all 5")
+   - Involve Kent does NOT appear in the main results
+
+3. Run: "find pubs in arundel" (no extra constraints)
+   - All 20 should pass (no hard constraint to fail against)
+   - No regression — single loop, all verified
+
+ROLLBACK
+git revert the commit. Single-file change.
+
+NOTE
+This change does NOT touch the executor adapters (gp-cascade-adapter.ts /
+gpt4o-adapter.ts) — their entity.verified flag still has the granularity
+bug, but it's now irrelevant because the final delivery uses match_valid
+from delivery_summary instead. The adapter-level fix can land separately
+in v1 hardening as a cleanup.
