@@ -782,6 +782,16 @@ export async function runReloop(params: {
           found: r.executorOutput.entities.length,
         })),
         delivery_note: deliveryNote,
+        // Include constraint information so the LLM Tower judge sees the
+        // values it needs to verify (not just type labels). The judge
+        // primarily reads the artefact payload, so without this it
+        // produces misleading rationale like "no hard constraints to verify"
+        // even when there are real constraints with real values.
+        hard_constraints: hardConstraints,
+        soft_constraints: softConstraints,
+        structured_constraints: structuredConstraints,
+        original_user_goal: rawUserInput,
+        normalized_goal: normalizedGoal,
       },
       userId,
       conversationId,
