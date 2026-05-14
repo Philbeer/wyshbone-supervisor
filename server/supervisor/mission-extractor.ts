@@ -360,11 +360,82 @@ status_check: ${JSON.stringify(STATUS_CHECK_OPERATORS)}
     "accepting new patients" → { "type": "status_check", "field": "availability", "operator": "equals", "value": "accepting new patients", "hardness": "hard" }
 
 relationship_check: ${JSON.stringify(RELATIONSHIP_CHECK_OPERATORS)}
-  field: the relationship domain (e.g. "client", "supplier", "partner")
-  value: the related entity
-  Examples:
-    "has relationship with NHS" → { "type": "relationship_check", "field": "client", "operator": "serves", "value": "NHS", "hardness": "hard" }
-    "supplied by local farms" → { "type": "relationship_check", "field": "supplier", "operator": "has", "value": "local farms", "hardness": "hard" }
+  USE THIS TYPE WHENEVER the user's request describes a RELATIONSHIP
+  between the entity they want and another entity, organisation, or
+  institution. The relationship VERB is the critical semantic signal —
+  it determines whether the result is correct.
+
+  DETECTION — emit relationship_check whenever the query contains a
+  relational verb between entity and target, including but not limited to:
+    "works with", "works for", "partners with", "partnered with",
+    "supplies", "supplied by", "sells to", "buys from", "contracts with",
+    "is approved by", "is accredited by", "is certified by",
+    "is a vendor to", "delivers services to", "consults for",
+    "represents", "manages", "is owned by", "is operated by",
+    "serves [an organisation]" (not "serves food/customers"),
+    "affiliated with", "endorsed by", "subcontracts to".
+
+  field: the relationship domain — choose the most natural label for
+    what the entity IS to the target: "client" (entity serves the
+    target), "supplier" (entity supplies the target), "partner"
+    (mutual partnership), "vendor", "contractor", "service_provider",
+    "owner", etc.
+  operator: MUST be one of ${JSON.stringify(RELATIONSHIP_CHECK_OPERATORS)}.
+    Map the user's verb to the closest allowed operator:
+    - "works with" / "partners with" / "partnered with" /
+      "affiliated with" / "collaborates with" → "partners_with"
+    - "supplies" / "supplied by" / "sells to" / "is a vendor to" /
+      "delivers services to" / "contracts with" → "serves"
+    - "is owned by" / "is a subsidiary of" → "owned_by"
+    - "is operated by" / "is managed by" / "is run by" → "managed_by"
+    - "has [a relationship with]" / "is approved by" /
+      "is accredited by" → "has"
+  value: the target organisation or entity (the OTHER side of the
+    relationship — never the verb, never the entity_category, never
+    both combined into one string).
+  hardness: hard unless hedged ("preferably", "ideally").
+
+  CRITICAL — the relationship verb belongs in OPERATOR, not VALUE:
+    WRONG: { "type": "relationship_check", "value": "works with local authority" }
+    WRONG: { "type": "attribute_check", "value": "local authority" }
+    WRONG: { "type": "attribute_check", "value": "works with local authority" }
+    RIGHT: { "type": "relationship_check", "field": "partner", "operator": "partners_with", "value": "local authority", "hardness": "hard" }
+
+  EXAMPLES (study these — they cover the common shapes):
+
+  "find solicitors that work with the NHS"
+  → { "type": "relationship_check", "field": "client", "operator": "partners_with", "value": "NHS", "hardness": "hard" }
+
+  "find organisations that work with the local authority in sussex"
+  → { "type": "relationship_check", "field": "partner", "operator": "partners_with", "value": "local authority", "hardness": "hard" }
+    (PLUS a separate location_constraint for "sussex" — locations are
+    ALWAYS separate from relationships, never merged into the value)
+
+  "find suppliers that supply Marks and Spencer"
+  → { "type": "relationship_check", "field": "client", "operator": "serves", "value": "Marks and Spencer", "hardness": "hard" }
+
+  "find consultancies that are accredited by the Cabinet Office"
+  → { "type": "relationship_check", "field": "accreditor", "operator": "has", "value": "Cabinet Office", "hardness": "hard" }
+
+  "find brewers that supply pubs in Sussex"
+  → { "type": "relationship_check", "field": "client", "operator": "serves", "value": "pubs", "hardness": "hard" }
+    (PLUS location_constraint for Sussex)
+
+  "find catering companies that supply schools"
+  → { "type": "relationship_check", "field": "client", "operator": "serves", "value": "schools", "hardness": "hard" }
+
+  DO NOT CONFUSE WITH ATTRIBUTE_CHECK:
+  - "serves food" / "serves drinks" / "has parking" = attribute_check
+    (amenity the entity offers to anyone)
+  - "serves [an organisation/institution]" = relationship_check
+    (specific named or categorical institutional client)
+  If unsure: if the noun after the verb is an ORGANISATION, INSTITUTION,
+  SECTOR, or NAMED COMPANY → relationship_check. If it's a GENERIC
+  AMENITY (food, drinks, parking, wifi) → attribute_check.
+
+  NEVER drop the relationship verb. NEVER fold the verb into the value.
+  NEVER convert a relationship into a plain attribute_check on the
+  target noun alone — that loses the whole meaning of the query.
 
 numeric_range: ${JSON.stringify(NUMERIC_OPERATORS)}
   field: "rating", "review_count", "price_level", etc.
