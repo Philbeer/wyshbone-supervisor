@@ -1,0 +1,201 @@
+Branch: feat/pass2-watchdog-llm (continue on existing branch — verify with `git branch --show-current`).
+
+GOAL: When the watchdog returns verdict != 'pass' AND mode is 'retry' or 'full', re-run Pass 2 mission extraction ONCE with the watchdog's feedback injected into the Pass 2 prompt, then re-run the watchdog on the new mission. Replace missionResult with the corrected version so downstream code uses it. One retry maximum. Fail-open everywhere.
+
+SCOPE — STRICT:
+- Modify ONLY:
+    1. server/supervisor/mission-extractor.ts
+    2. server/supervisor.ts
+- Do NOT modify pass2-watchdog.ts, mission-completeness-check.ts, or any other file
+- Do NOT add tests
+- Do NOT refactor anything outside the specified anchors
+- If you want to do anything beyond the list below, STOP and report
+
+═══════════════════════════════════════════════════════════════════════════════
+CHANGE 1 — mission-extractor.ts: accept optional watchdog feedback
+═══════════════════════════════════════════════════════════════════════════════
+
+Find the exported function `extractStructuredMission`. It has an options object as its third parameter (the one containing `jobId`, `userId`, `conversationId`).
+
+1a. Add a new optional field to that options object's type:
+        watchdogFeedback?: string;
+
+1b. In the function body, locate where the Pass 2 system prompt string is assembled (the prompt that contains the verb-to-operator mapping for relationship_check — look for "works with → partners_with" or "relationship_check" in the prompt text).
+
+1c. IMMEDIATELY BEFORE that verb-mapping section is added to the prompt string, conditionally inject the watchdog feedback. If the prompt is built with template literals or string concatenation, insert this:
+
+    ${options?.watchdogFeedback ? `\n\n${options.watchdogFeedback}\n\n` : ''}
+
+If the prompt is built with array.push or .concat, use the equivalent shape:
+    if (options?.watchdogFeedback) {
+      pass2SystemPromptParts.push('\n\n' + options.watchdogFeedback + '\n\n');
+    }
+
+The feedback is supplied by the caller as a fully-formed prompt fragment — DO NOT add framing, headers, or boilerplate around it.
+
+1d. Backward compatibility check: when watchdogFeedback is undefined/null, behaviour must be identical to before. Do not change any other code path.
+
+═══════════════════════════════════════════════════════════════════════════════
+CHANGE 2 — supervisor.ts: replace the watchdog block with retry-capable version
+═══════════════════════════════════════════════════════════════════════════════
+
+Find the existing watchdog block in supervisor.ts. It starts with:
+    // ─── PASS 2 WATCHDOG (shadow rollout — see PASS2_WATCHDOG_MODE env var) ──────
+and ends with:
+    // ─── END PASS 2 WATCHDOG ──────────────────────────────────────────────────────
+
+Replace that ENTIRE block (including the comment markers) with the block below. Do not touch anything outside those markers.
+
+IMPORTANT — variable name matching:
+- The retry call to `extractStructuredMission` must use the SAME argument names the original call site in supervisor.ts uses. Find the original `extractStructuredMission(...)` call earlier in the function (likely around the mission extraction section) and mirror its arguments EXACTLY, only adding `watchdogFeedback` to the options. Do NOT invent variable names like `effectiveMsg` or `conversationContextStr` if those aren't what the original call uses.
+- `missionResult` must already be declared with `let` for reassignment to work. If it's `const`, STOP and report — do not change the declaration without flagging.
+
+Block to insert:
+
+---
+// ─── PASS 2 WATCHDOG (with retry handler) ─────────────────────────────────────
+const watchdogMode = getPass2WatchdogMode();
+let watchdogAttempt1: WatchdogResult | null = null;
+let watchdogAttempt2: WatchdogResult | null = null;
+let retryAttempted = false;
+let retrySucceeded = false;
+
+if (watchdogMode !== 'off' && missionResult?.trace?.pass2_structured_mission) {
+  try {
+    // Attempt 1 — initial audit
+    watchdogAttempt1 = await runPass2Watchdog(
+      rawMsg,
+      missionResult.trace.pass1_semantic_interpretation || null,
+      missionResult.trace.pass2_structured_mission,
+      { runId: jobId, userId: task.user_id, conversationId: task.conversation_id },
+    );
+
+    console.log(
+      `[PASS2_WATCHDOG] runId=${jobId} mode=${watchdogMode} attempt=1 verdict=${watchdogAttempt1.verdict} ` +
+      `dropped=${watchdogAttempt1.dropped_concepts.length} latency=${watchdogAttempt1.latency_ms}ms`
+    );
+
+    // Retry only if mode allows action AND watchdog flagged dropped concepts
+    const shouldRetry =
+      (watchdogMode === 'retry' || watchdogMode === 'full') &&
+      watchdogAttempt1.verdict !== 'pass' &&
+      watchdogAttempt1.dropped_concepts.length > 0;
+
+    if (shouldRetry) {
+      retryAttempted = true;
+
+      // Build feedback fragment for Pass 2 prompt injection
+      const droppedList = watchdogAttempt1.dropped_concepts.map(d =>
+        `  - category=${d.category} severity=${d.severity}: phrase "${d.matched_phrase}" should map to ${d.expected_constraint_type}. Reason: ${d.reasoning}`
+      ).join('\n');
+
+      const watchdogFeedback =
+        `PREVIOUS EXTRACTION FAILED A WATCHDOG AUDIT. You MUST address the following dropped concepts:\n` +
+        `${droppedList}\n\n` +
+        `Re-extract the structured mission including the missed constraints above. Each "phrase" indicates meaning the previous attempt dropped — preserve it as the indicated constraint type.`;
+
+      console.log(`[PASS2_WATCHDOG] runId=${jobId} retry triggered — re-extracting Pass 2 with feedback`);
+
+      try {
+        // Mirror the original extractStructuredMission call args from earlier in this function.
+        // Add watchdogFeedback to the options object.
+        // ⚠ AGENT: replace this comment with the actual call, copying arg shape from the original call site.
+        // const retryMissionResult = await extractStructuredMission(<same args as original>, { ...originalOptions, watchdogFeedback });
+
+        const retryMissionResult = await extractStructuredMission(
+          /* RAW_INPUT_ARG */ effectiveMsg,
+          /* CONTEXT_ARG */ conversationContextStr,
+          {
+            /* ORIGINAL_OPTIONS — copy from original call */
+            jobId,
+            userId: task.user_id,
+            conversationId: task.conversation_id,
+            watchdogFeedback,
+          }
+        );
+
+        if (retryMissionResult?.trace?.pass2_structured_mission) {
+          // Replace missionResult so downstream code uses the corrected version
+          missionResult = retryMissionResult;
+
+          // Attempt 2 — audit the retry
+          watchdogAttempt2 = await runPass2Watchdog(
+            rawMsg,
+            retryMissionResult.trace.pass1_semantic_interpretation || null,
+            retryMissionResult.trace.pass2_structured_mission,
+            { runId: jobId, userId: task.user_id, conversationId: task.conversation_id },
+          );
+
+          retrySucceeded = watchdogAttempt2.verdict === 'pass';
+
+          console.log(
+            `[PASS2_WATCHDOG] runId=${jobId} attempt=2 verdict=${watchdogAttempt2.verdict} ` +
+            `dropped=${watchdogAttempt2.dropped_concepts.length} latency=${watchdogAttempt2.latency_ms}ms ` +
+            `retry_${retrySucceeded ? 'succeeded' : 'failed'}`
+          );
+        } else {
+          console.warn(`[PASS2_WATCHDOG] runId=${jobId} retry extraction returned no structured mission — keeping original`);
+        }
+      } catch (retryErr: any) {
+        console.warn(`[PASS2_WATCHDOG] runId=${jobId} retry extraction threw (non-fatal): ${retryErr.message}`);
+      }
+
+      // FULL mode user-facing clarify not yet wired — behaves as RETRY for now
+      if (watchdogMode === 'full' && !retrySucceeded) {
+        console.log(`[PASS2_WATCHDOG] runId=${jobId} FULL mode: retry did not fix it, user-facing clarify not yet wired — proceeding with current mission`);
+      }
+    }
+
+    // Single summary diagnostic artefact covering attempt 1 (+ retry if attempted)
+    createArtefact({
+      runId: jobId,
+      type: 'diagnostic',
+      title: `Pass 2 watchdog (${watchdogMode}): ${retryAttempted ? (retrySucceeded ? 'retry-fixed' : 'retry-failed') : watchdogAttempt1.verdict}`,
+      summary: retryAttempted
+        ? `attempt1=${watchdogAttempt1.verdict} (${watchdogAttempt1.dropped_concepts.length} dropped) → retry → attempt2=${watchdogAttempt2?.verdict ?? 'n/a'} (${watchdogAttempt2?.dropped_concepts.length ?? 'n/a'} dropped)`
+        : (watchdogAttempt1.reasoning?.slice(0, 240) || `verdict=${watchdogAttempt1.verdict}`),
+      payload: {
+        diagnostic_type: 'pass2_watchdog',
+        mode: watchdogMode,
+        retry_attempted: retryAttempted,
+        retry_succeeded: retrySucceeded,
+        attempt_1: {
+          verdict: watchdogAttempt1.verdict,
+          dropped_concepts: watchdogAttempt1.dropped_concepts,
+          reasoning: watchdogAttempt1.reasoning,
+          parse_ok: watchdogAttempt1.parse_ok,
+          latency_ms: watchdogAttempt1.latency_ms,
+          failure_reason: watchdogAttempt1.failure_reason,
+        },
+        attempt_2: watchdogAttempt2 ? {
+          verdict: watchdogAttempt2.verdict,
+          dropped_concepts: watchdogAttempt2.dropped_concepts,
+          reasoning: watchdogAttempt2.reasoning,
+          parse_ok: watchdogAttempt2.parse_ok,
+          latency_ms: watchdogAttempt2.latency_ms,
+          failure_reason: watchdogAttempt2.failure_reason,
+        } : null,
+        regex_check_action: completenessResult.recommended_action,
+        regex_check_dropped_count: completenessResult.dropped_concepts.length,
+      },
+      userId: task.user_id,
+      conversationId: task.conversation_id,
+    }).catch((e: any) => console.warn(`[PASS2_WATCHDOG] Artefact creation failed (non-fatal): ${e.message}`));
+
+  } catch (watchdogErr: any) {
+    console.warn(`[PASS2_WATCHDOG] runId=${jobId} threw unexpectedly (non-fatal): ${watchdogErr.message}`);
+  }
+}
+// ─── END PASS 2 WATCHDOG ──────────────────────────────────────────────────────
+---
+
+═══════════════════════════════════════════════════════════════════════════════
+AFTER BOTH CHANGES
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Run `npx tsc --noEmit` and report ONLY new errors compared to the 202-error baseline. New errors should be confined to the two modified files.
+2. If clean (no new errors), commit with message:
+   `feat(watchdog): add Pass 2 retry handler with feedback injection`
+3. Confirm with final commit hash.
+
+Do NOT push. Do NOT merge. Stay on the feature branch.
