@@ -20,6 +20,7 @@ import { buildConstraintsExtractedPayload, buildCapabilityCheck } from './superv
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe, neutraliseClarifyIfNeeded } from './supervisor/intent-shadow';
 import { extractStructuredMission, getMissionExtractorMode } from './supervisor/mission-extractor';
 import { checkMissionCompleteness, logCompletenessToAFR, type CompletenessCheckResult } from './supervisor/mission-completeness-check';
+import { runPass2Watchdog, getPass2WatchdogMode, type WatchdogResult } from './supervisor/pass2-watchdog';
 import { logMissionShadow, buildMissionDiagnosticPayload, missionToParsedGoal, buildHandoffDiagnostic, type HandoffDiagnostic } from './supervisor/mission-bridge';
 import { buildMissionPlan, logMissionPlan, persistMissionPlan, type MissionPlan } from './supervisor/mission-planner';
 import { executeMissionDrivenPlan, executeMissionWithReloop, type MissionExecutionContext, type MissionExecutionResult } from './supervisor/mission-executor';
@@ -2338,6 +2339,64 @@ class SupervisorService {
             } else {
               console.log(`[COMPLETENESS_CHECK] runId=${jobId} PASSED — no dropped concepts`);
             }
+
+            // ─── PASS 2 WATCHDOG (shadow rollout — see PASS2_WATCHDOG_MODE env var) ──────
+            // Audits the same inputs the regex completeness check looked at, but via a
+            // single LLM call. In shadow mode, the result is logged + emitted as a
+            // diagnostic artefact but does NOT gate execution. Will graduate to retry-only
+            // then full enforcement in later changes, at which point the regex check
+            // above will be retired.
+            const watchdogMode = getPass2WatchdogMode();
+            if (watchdogMode !== 'off' && missionResult?.trace?.pass2_structured_mission) {
+              try {
+                const watchdogResult: WatchdogResult = await runPass2Watchdog(
+                  rawMsg,
+                  missionResult.trace.pass1_semantic_interpretation || null,
+                  missionResult.trace.pass2_structured_mission,
+                  { runId: jobId, userId: task.user_id, conversationId: task.conversation_id },
+                );
+
+                console.log(
+                  `[PASS2_WATCHDOG] runId=${jobId} mode=${watchdogMode} verdict=${watchdogResult.verdict} ` +
+                  `dropped=${watchdogResult.dropped_concepts.length} parse_ok=${watchdogResult.parse_ok} ` +
+                  `latency=${watchdogResult.latency_ms}ms`
+                );
+
+                createArtefact({
+                  runId: jobId,
+                  type: 'diagnostic',
+                  title: `Pass 2 watchdog (${watchdogMode}): ${watchdogResult.verdict} — ${watchdogResult.dropped_concepts.length} dropped`,
+                  summary: watchdogResult.reasoning?.slice(0, 240) || `verdict=${watchdogResult.verdict}`,
+                  payload: {
+                    diagnostic_type: 'pass2_watchdog',
+                    mode: watchdogMode,
+                    verdict: watchdogResult.verdict,
+                    dropped_concepts: watchdogResult.dropped_concepts,
+                    reasoning: watchdogResult.reasoning,
+                    parse_ok: watchdogResult.parse_ok,
+                    latency_ms: watchdogResult.latency_ms,
+                    failure_reason: watchdogResult.failure_reason,
+                    // Side-by-side comparison with the regex check on the same run
+                    regex_check_action: completenessResult.recommended_action,
+                    regex_check_dropped_count: completenessResult.dropped_concepts.length,
+                  },
+                  userId: task.user_id,
+                  conversationId: task.conversation_id,
+                }).catch((e: any) => console.warn(`[PASS2_WATCHDOG] Artefact creation failed (non-fatal): ${e.message}`));
+
+                // SHADOW MODE: log only. RETRY/FULL modes are not yet implemented — they
+                // currently behave identically to SHADOW. Implementation lands in a later
+                // change once shadow data confirms watchdog accuracy.
+                if (watchdogMode === 'retry' || watchdogMode === 'full') {
+                  console.log(`[PASS2_WATCHDOG] runId=${jobId} mode=${watchdogMode} not yet wired to act — behaving as shadow`);
+                }
+              } catch (watchdogErr: any) {
+                // The watchdog module fails open internally; this catch is a final
+                // defensive layer in case anything above throws unexpectedly.
+                console.warn(`[PASS2_WATCHDOG] runId=${jobId} threw unexpectedly (non-fatal): ${watchdogErr.message}`);
+              }
+            }
+            // ─── END PASS 2 WATCHDOG ──────────────────────────────────────────────────────
           } catch (checkErr: any) {
             console.warn(`[COMPLETENESS_CHECK] Check failed (non-fatal): ${checkErr.message}`);
           }

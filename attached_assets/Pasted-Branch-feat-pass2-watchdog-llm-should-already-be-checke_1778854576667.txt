@@ -1,0 +1,99 @@
+Branch: feat/pass2-watchdog-llm (should already be checked out — verify with `git branch --show-current` before starting).
+
+GOAL: Run the Pass 2 watchdog after every successful Pass 2 mission extraction. SHADOW mode only — log + emit diagnostic artefact, do NOT act on the verdict. The existing checkMissionCompleteness call stays exactly as it is and continues to run alongside.
+
+SCOPE — STRICT:
+- Modify ONLY server/supervisor.ts
+- Do NOT modify mission-completeness-check.ts
+- Do NOT modify pass2-watchdog.ts (the module created in the previous commit)
+- Do NOT refactor any nearby code, extract helpers, or "improve" anything you weren't asked to touch
+- Do NOT add tests or new files
+- If you find yourself wanting to do anything beyond what is listed below, STOP and report instead
+
+CHANGE 1 — Add the import.
+Find the existing import line:
+  import { checkMissionCompleteness, logCompletenessToAFR, type CompletenessCheckResult } from './supervisor/mission-completeness-check';
+
+Add a new line immediately below it:
+  import { runPass2Watchdog, getPass2WatchdogMode, type WatchdogResult } from './supervisor/pass2-watchdog';
+
+CHANGE 2 — Insert the watchdog call.
+Locate the existing checkMissionCompleteness call site (around line 2268 in current main) and the surrounding completeness check block. That block ends with the line:
+  console.log(`[COMPLETENESS_CHECK] runId=${jobId} PASSED — no dropped concepts`);
+
+The whole structure is: `if (!completenessResult.ok) { ... } else { console.log('PASSED') }`.
+
+IMMEDIATELY AFTER the closing brace of that entire if/else block (NOT inside either branch), insert the following block:
+
+---
+// ─── PASS 2 WATCHDOG (shadow rollout — see PASS2_WATCHDOG_MODE env var) ──────
+// Audits the same inputs the regex completeness check looked at, but via a
+// single LLM call. In shadow mode, the result is logged + emitted as a
+// diagnostic artefact but does NOT gate execution. Will graduate to retry-only
+// then full enforcement in later changes, at which point the regex check
+// above will be retired.
+const watchdogMode = getPass2WatchdogMode();
+if (watchdogMode !== 'off' && missionResult?.trace?.pass2_structured_mission) {
+  try {
+    const watchdogResult: WatchdogResult = await runPass2Watchdog(
+      rawMsg,
+      missionResult.trace.pass1_semantic_interpretation || null,
+      missionResult.trace.pass2_structured_mission,
+      { runId: jobId, userId: task.user_id, conversationId: task.conversation_id },
+    );
+
+    console.log(
+      `[PASS2_WATCHDOG] runId=${jobId} mode=${watchdogMode} verdict=${watchdogResult.verdict} ` +
+      `dropped=${watchdogResult.dropped_concepts.length} parse_ok=${watchdogResult.parse_ok} ` +
+      `latency=${watchdogResult.latency_ms}ms`
+    );
+
+    createArtefact({
+      runId: jobId,
+      type: 'diagnostic',
+      title: `Pass 2 watchdog (${watchdogMode}): ${watchdogResult.verdict} — ${watchdogResult.dropped_concepts.length} dropped`,
+      summary: watchdogResult.reasoning?.slice(0, 240) || `verdict=${watchdogResult.verdict}`,
+      payload: {
+        diagnostic_type: 'pass2_watchdog',
+        mode: watchdogMode,
+        verdict: watchdogResult.verdict,
+        dropped_concepts: watchdogResult.dropped_concepts,
+        reasoning: watchdogResult.reasoning,
+        parse_ok: watchdogResult.parse_ok,
+        latency_ms: watchdogResult.latency_ms,
+        failure_reason: watchdogResult.failure_reason,
+        // Side-by-side comparison with the regex check on the same run
+        regex_check_action: completenessResult.recommended_action,
+        regex_check_dropped_count: completenessResult.dropped_concepts.length,
+      },
+      userId: task.user_id,
+      conversationId: task.conversation_id,
+    }).catch((e: any) => console.warn(`[PASS2_WATCHDOG] Artefact creation failed (non-fatal): ${e.message}`));
+
+    // SHADOW MODE: log only. RETRY/FULL modes are not yet implemented — they
+    // currently behave identically to SHADOW. Implementation lands in a later
+    // change once shadow data confirms watchdog accuracy.
+    if (watchdogMode === 'retry' || watchdogMode === 'full') {
+      console.log(`[PASS2_WATCHDOG] runId=${jobId} mode=${watchdogMode} not yet wired to act — behaving as shadow`);
+    }
+  } catch (watchdogErr: any) {
+    // The watchdog module fails open internally; this catch is a final
+    // defensive layer in case anything above throws unexpectedly.
+    console.warn(`[PASS2_WATCHDOG] runId=${jobId} threw unexpectedly (non-fatal): ${watchdogErr.message}`);
+  }
+}
+// ─── END PASS 2 WATCHDOG ──────────────────────────────────────────────────────
+---
+
+Notes on the inputs:
+- `rawMsg` is the variable name the existing checkMissionCompleteness call uses for the raw user input. If your local copy uses a different variable name at that call site, MATCH WHATEVER THE EXISTING CALL USES — do not invent new variables.
+- `missionResult` is the variable from `extractStructuredMission`. It should be in scope at this point since checkMissionCompleteness ran successfully just above.
+- `completenessResult` is referenced for side-by-side comparison in the artefact payload. It is in scope.
+
+AFTER THE EDIT:
+1. Run `npx tsc --noEmit` and report only NEW errors compared to the previous baseline (202 pre-existing errors). Any new errors should be in supervisor.ts only.
+2. If clean (no new errors), commit with message:
+   `feat(watchdog): wire Pass 2 watchdog into supervisor.ts in shadow mode`
+3. Confirm with the final commit hash.
+
+Do NOT push to origin. Do NOT merge. Stay on the feature branch.
