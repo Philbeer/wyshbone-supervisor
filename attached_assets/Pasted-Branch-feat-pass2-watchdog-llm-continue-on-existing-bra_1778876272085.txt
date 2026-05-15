@@ -1,0 +1,164 @@
+Branch: feat/pass2-watchdog-llm (continue on existing branch — verify with `git branch --show-current`).
+
+GOAL: When the watchdog is in FULL mode AND the retry did NOT fix the dropped concepts (attempt 2 verdict is still 'block' or 'retry'), do NOT proceed with a broken mission. Instead: generate a clarify question from the dropped concepts, insert it as an assistant message, mark the supervisor task as completed, and return early. Mirror the existing smart-clarify pattern at lines ~3015-3061.
+
+SCOPE — STRICT:
+- Modify ONLY:
+    1. server/supervisor/pass2-watchdog.ts (add one new exported helper)
+    2. server/supervisor.ts (add FULL mode early-return inside the existing watchdog block)
+- Do NOT touch mission-extractor.ts, mission-completeness-check.ts, constraint-gate.ts, or any other file
+- Do NOT add tests
+- Do NOT refactor anything outside the specified anchors
+- If you want to do anything beyond the list below, STOP and report
+
+═══════════════════════════════════════════════════════════════════════════════
+CHANGE 1 — pass2-watchdog.ts: add the clarify message builder
+═══════════════════════════════════════════════════════════════════════════════
+
+At the bottom of pass2-watchdog.ts, ADD this new exported function (do not modify any existing code in the file):
+
+---
+/**
+ * Build a user-facing clarify question from watchdog-dropped concepts.
+ * Template-based so it's deterministic and zero-latency. Can be upgraded
+ * to LLM-generated in a future iteration if the templated message feels
+ * robotic.
+ */
+export function buildWatchdogClarifyMessage(droppedConcepts: WatchdogDroppedConcept[]): string {
+  if (!droppedConcepts || droppedConcepts.length === 0) {
+    return "I want to make sure I understand your request correctly. Could you rephrase it?";
+  }
+
+  const intros = [
+    "I want to make sure I capture your request correctly.",
+  ];
+
+  const lines: string[] = [intros[0]];
+
+  for (const d of droppedConcepts) {
+    const phrase = d.matched_phrase || '(unspecified phrase)';
+    switch (d.category) {
+      case 'relationship':
+        lines.push(`When you said "${phrase}", do you mean an actual relationship between the entity and another party — or just a mention on a website?`);
+        break;
+      case 'exclusion':
+        lines.push(`When you said "${phrase}", should I strictly exclude that category from the results?`);
+        break;
+      case 'time':
+        lines.push(`When you said "${phrase}", what time range do you want me to apply?`);
+        break;
+      case 'status':
+        lines.push(`When you said "${phrase}", how would you like me to verify current status?`);
+        break;
+      case 'scoping':
+        lines.push(`When you said "${phrase}", how strict should that scoping be?`);
+        break;
+      case 'website_evidence':
+        lines.push(`When you said "${phrase}", should I look for evidence on the entity's own website?`);
+        break;
+      case 'ranking':
+        lines.push(`When you said "${phrase}", what ranking criteria should I use?`);
+        break;
+      default:
+        lines.push(`I'm not sure how to handle "${phrase}" — could you clarify what you mean?`);
+    }
+  }
+
+  lines.push("Could you confirm or rephrase?");
+
+  return lines.join("\n\n");
+}
+---
+
+═══════════════════════════════════════════════════════════════════════════════
+CHANGE 2 — supervisor.ts: add FULL-mode early-return inside the watchdog block
+═══════════════════════════════════════════════════════════════════════════════
+
+In supervisor.ts:
+
+2a. Update the existing import line:
+        import { runPass2Watchdog, getPass2WatchdogMode, type WatchdogResult } from './supervisor/pass2-watchdog';
+    to:
+        import { runPass2Watchdog, getPass2WatchdogMode, buildWatchdogClarifyMessage, type WatchdogResult } from './supervisor/pass2-watchdog';
+
+2b. Inside the existing watchdog block, find the stub that currently reads:
+        // FULL mode user-facing clarify not yet wired — behaves as RETRY for now
+        if (watchdogMode === 'full' && !retrySucceeded) {
+          console.log(`[PASS2_WATCHDOG] runId=${jobId} FULL mode: retry did not fix it, user-facing clarify not yet wired — proceeding with current mission`);
+        }
+
+    REPLACE that entire stub block with the real FULL-mode handler shown below. The handler must mirror the smart-clarify early-return pattern used at supervisor.ts lines ~3015-3061 (insert assistant message into the `messages` table, update the `supervisor_tasks` row to status='completed', return from the function).
+
+    IMPORTANT — agent instruction: BEFORE writing the replacement, read lines 3000-3070 of supervisor.ts to see the exact shape of the existing smart-clarify early-return pattern (the part using `outerGateClarifyMsg`, `outerGateMessageId`, the `supabase!.from('supervisor_tasks').update(...)` and `supabase!.from('messages').insert(...)` calls). MIRROR that pattern exactly — same fields, same metadata shape, same status — substituting in the watchdog clarify message and a watchdog-specific metadata tag (e.g. `clarify_source: 'pass2_watchdog'`).
+
+    Replacement skeleton (agent fills in the early-return mirror):
+
+---
+// FULL mode: if retry failed to fix dropped concepts, stop and ask the user
+if (
+  watchdogMode === 'full' &&
+  retryAttempted &&
+  !retrySucceeded &&
+  watchdogAttempt2 &&
+  watchdogAttempt2.dropped_concepts.length > 0
+) {
+  const watchdogClarifyMsg = buildWatchdogClarifyMessage(watchdogAttempt2.dropped_concepts);
+
+  console.log(
+    `[PASS2_WATCHDOG] runId=${jobId} FULL mode: retry failed — asking user to clarify. ` +
+    `Categories: ${watchdogAttempt2.dropped_concepts.map(d => d.category).join(',')}`
+  );
+
+  // Emit the diagnostic artefact BEFORE returning so AFR captures the full picture
+  await createArtefact({
+    runId: jobId,
+    type: 'diagnostic',
+    title: `Pass 2 watchdog (full): clarify-asked`,
+    summary: `attempt1=${watchdogAttempt1.verdict} → retry → attempt2=${watchdogAttempt2.verdict} → asked user to clarify`,
+    payload: {
+      diagnostic_type: 'pass2_watchdog',
+      mode: watchdogMode,
+      retry_attempted: true,
+      retry_succeeded: false,
+      clarify_asked: true,
+      clarify_message: watchdogClarifyMsg,
+      attempt_1: {
+        verdict: watchdogAttempt1.verdict,
+        dropped_concepts: watchdogAttempt1.dropped_concepts,
+        reasoning: watchdogAttempt1.reasoning,
+        latency_ms: watchdogAttempt1.latency_ms,
+      },
+      attempt_2: {
+        verdict: watchdogAttempt2.verdict,
+        dropped_concepts: watchdogAttempt2.dropped_concepts,
+        reasoning: watchdogAttempt2.reasoning,
+        latency_ms: watchdogAttempt2.latency_ms,
+      },
+      regex_check_action: completenessResult.recommended_action,
+    },
+    userId: task.user_id,
+    conversationId: task.conversation_id,
+  }).catch((e: any) => console.warn(`[PASS2_WATCHDOG] Artefact creation failed (non-fatal): ${e.message}`));
+
+  // ⚠ AGENT: insert the early-return block here, mirroring lines ~3015-3061.
+  // - generate a messageId (mirror how outerGateMessageId is generated)
+  // - update supervisor_tasks row: status='completed', result contains response preview + clarify_source='pass2_watchdog'
+  // - insert into messages: role='assistant', content=sanitizeMessageContent(watchdogClarifyMsg), source='supervisor', metadata.clarify_source='pass2_watchdog'
+  // - return from the supervisor function in the same shape the smart-clarify path returns
+
+  // DO NOT INVENT the return shape — copy it from the existing pattern.
+}
+---
+
+2c. The existing diagnostic-artefact emission later in the watchdog block (the one that fires regardless) should NOT also fire when FULL mode asks for clarify (we've already emitted a clarify-specific one above and returned). Verify this is the case after your edit — if FULL clarify returns early, the later artefact won't be reached. Confirm no double-emission.
+
+═══════════════════════════════════════════════════════════════════════════════
+AFTER BOTH CHANGES
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Run `npx tsc --noEmit` and report ONLY new errors compared to the 202-error baseline. New errors should be confined to the two modified files.
+2. If clean, commit with message:
+   `feat(watchdog): wire FULL mode — user-facing clarify on retry-failed`
+3. Confirm with final commit hash.
+
+Do NOT push. Do NOT merge. Stay on the feature branch.
