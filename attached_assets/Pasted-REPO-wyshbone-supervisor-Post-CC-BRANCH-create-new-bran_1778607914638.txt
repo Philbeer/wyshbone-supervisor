@@ -1,0 +1,71 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: create new branch `chore/remove-stale-attribute-verification` off main
+FILE: server/supervisor/gpt4o-search.ts
+
+CONTEXT
+gpt4o-search.ts emits a bundled `attribute_verification` artefact AFTER it
+also emits the proper per-lead `constraint_led_evidence` artefacts. The
+bundled one is redundant (same data, less precise) and dishonest (hardcodes
+`tower_status: 'verified'` for every lead regardless of actual verdict).
+Now that the LLM Tower judge is live and per-constraint Tower verdicts are
+honoured, the bundled artefact is pure clutter — and the hardcoded verdict
+is a lingering source of the lies we just eliminated.
+
+GOAL
+Delete the bundled `attribute_verification` emit. Keep everything else
+unchanged.
+
+INSTRUCTIONS
+
+In server/supervisor/gpt4o-search.ts, find this block (it begins after the
+`step_result` artefact emit, roughly lines 478–507):
+
+  await createArtefact({
+    runId,
+    type: 'attribute_verification',
+    title: `Evidence verification: ${allLeads.length}/${allLeads.length} checks (GPT-4o web search)`,
+    summary: `${allLeads.length} results found via GPT-4o web search across ${roundsPerformed} round${roundsPerformed === 1 ? '' : 's'}`,
+    payload: {
+      execution_source: 'gpt4o_primary',
+      total_checks: allLeads.length,
+      checks_with_evidence: allLeads.length,
+      leads_checked: allLeads.length,
+      fallback_candidates: 0,
+      fallback_verified: 0,
+      search_method: 'gpt4o_web_search',
+      rounds_performed: roundsPerformed,
+      results: allLeads.map(lead => ({
+        lead: lead.name,
+        constraint: hardConstraints.join(', ') || 'general search',
+        type: 'attribute',
+        found: true,
+        strength: lead.confidence === 'high' ? 'strong' : 'weak',
+        tower_status: 'verified',
+        source_tier: 'gpt4o_web_search',
+        evidence: lead.evidence,
+        source_url: lead.source_url,
+      })),
+    },
+    userId,
+    conversationId,
+  }).catch(() => {});
+
+Delete the entire `await createArtefact({ ... }).catch(() => {});` call
+(everything shown above). Do not touch any code before it (the
+`step_result` artefact emit) or after it (the `constraint_led_evidence`
+per-lead emit loop).
+
+VERIFY
+1. kill 1
+2. Run: "find micropubs in Sussex that opened in the last month"
+3. In the AFR, confirm:
+   - NO artefact of type `attribute_verification` for the gpt4o_search run
+   - The `step_result` artefact "Step 1: GPT4O_WEB_SEARCH — N results"
+     still appears
+   - Per-lead `constraint_led_evidence` artefacts still appear
+   - Tower verdict still STOP for Sussex (proves nothing downstream broke)
+4. In the chat UI, the "Evidence verified: N/N checks passed" ticker line
+   may no longer appear — this is expected and fine.
+
+ROLLBACK
+git revert the commit.

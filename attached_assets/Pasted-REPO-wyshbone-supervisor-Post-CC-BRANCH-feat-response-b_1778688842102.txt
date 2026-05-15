@@ -1,0 +1,113 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/response-builder-trust-verified-count (new branch off current main)
+FILE: server/supervisor/response-builder.ts
+
+CONTEXT
+The response builder constructs a 4-bullet delivery message. It receives
+both `verifiedCount` (the number of leads with per-lead match_valid=true)
+and `towerVerdict` (the combined Tower's overall verdict — pass/fail/error).
+
+When per-lead verification succeeds but the combined Tower call fails for
+unrelated reasons (e.g. Tower service 502, combined-call constraint
+plumbing not yet matching per-lead truth), the LLM-generated 4-bullet
+reads `Tower verdict: fail` from the facts list and writes "No leads were
+verified against your hard constraints" — directly contradicting the
+verifiedCount of 1+ above it.
+
+For example: "find micro pubs that opened in last 6 months in sussex"
+- Per-lead Tower verify: 1 verified (Arundel Taphouse, with quote evidence)
+- Combined Tower verdict: fail
+- 4-bullet says "No leads were verified" — wrong
+
+The verification line should reflect the COUNT (the truth), not the
+combined Tower verdict (a separate signal that belongs to Market/Suggestion).
+
+GOAL
+Make the LLM-generated 4-bullet's Verification line always reflect
+verifiedCount and deliveredCount, regardless of towerVerdict. Tower's
+overall verdict can still influence Market/Suggestion phrasing.
+
+CHANGES
+
+Open server/supervisor/response-builder.ts. Find the buildNaturalResponse
+function (around line 82). Find this block within it (around line 92-99):
+
+  const facts: string[] = [];
+  facts.push(`Entity searched for: ${businessType} in ${location}`);
+  if (requestedCount) facts.push(`User asked for: ${requestedCount}`);
+  facts.push(`Delivered: ${deliveredCount}`);
+  if (verifiedCount > 0) facts.push(`Verified with evidence: ${verifiedCount}`);
+  facts.push(`Tower verdict: ${towerVerdict ?? 'unknown'}`);
+
+REPLACE the `verifiedCount` line and the lines around it with explicit
+guidance that ALWAYS surfaces the verified count and tells the LLM how to
+treat it relative to Tower:
+
+  const facts: string[] = [];
+  facts.push(`Entity searched for: ${businessType} in ${location}`);
+  if (requestedCount) facts.push(`User asked for: ${requestedCount}`);
+  facts.push(`Delivered: ${deliveredCount}`);
+  // Always surface verifiedCount — even when zero. The LLM needs to see
+  // it explicitly to avoid defaulting to "none verified" when Tower errored.
+  facts.push(`Per-lead verified with evidence: ${verifiedCount} (this is the source of truth for the Verification bullet)`);
+  facts.push(`Tower verdict: ${towerVerdict ?? 'unknown'} (use this only for Market/Suggestion bullets, NOT Verification)`);
+
+Now find the OUTPUT FORMAT rules section in the same function's prompt
+(further down, around the "RULES:" line). Find this rule line:
+
+- Be specific — use the actual numbers, location, and entity type from the facts above.
+
+REPLACE that rule with two new, more explicit rules:
+
+- Be specific — use the actual numbers, location, and entity type from the facts above.
+- Verification bullet MUST use the "Per-lead verified with evidence" number. If verified > 0, say "N of M were verified with on-page evidence" (or "all N verified" when N === M). If verified === 0, say "None could be independently verified." NEVER use Tower verdict to write the Verification bullet — Tower verdict is for Market/Suggestion only.
+- If Tower verdict is "error", do NOT mention it in the bullets. The user does not need to know about service errors.
+
+Now find the buildFallbackResponse function (top of the file, around line 32).
+Find this block (around lines 47-53):
+
+  const verificationLine = deliveredCount === 0
+    ? `No results to verify.`
+    : verifiedCount === deliveredCount
+      ? `All ${deliveredCount} verified with on-page evidence.`
+      : verifiedCount > 0
+        ? `${verifiedCount} of ${deliveredCount} verified with on-page evidence.`
+        : `None could be independently verified.`;
+
+This already has the correct logic — it reads verifiedCount, not towerVerdict.
+LEAVE THIS UNCHANGED. The fix is only in the LLM-driven buildNaturalResponse.
+
+VERIFY
+
+1. Run: "find micro pubs that opened in the last 6 months in sussex"
+   - Expect: 1 lead delivered (Arundel Taphouse), per-lead verified
+   - 4-bullet Verification should say: "All 1 verified with on-page evidence"
+     or "1 of 1 verified" — NOT "No leads were verified"
+   - Tower verdict may still say fail/error in the activity feed (separate bug)
+   - But the 4-bullet message must honor the per-lead truth
+
+2. Run: "find organisations that work with the local authority in kent"
+   - After yesterday's match_valid filter, ~4 verified out of 4 delivered
+   - 4-bullet: "All 4 verified with on-page evidence"
+   - Honest about per-lead count
+
+3. Run: "find pubs in arundel"
+   - 20 delivered, 20 verified
+   - 4-bullet: "All 20 verified with on-page evidence"
+   - No regression
+
+ROLLBACK
+git revert the commit. Single-file change.
+
+NOTE
+This fix narrows the response-builder to TRUST verifiedCount as the
+source of truth for verification messaging. The towerVerdict is still
+useful for Market/Suggestion phrasing (e.g. when Tower says fail and
+scarcity Type B is set, "Market here looks genuinely thin" makes sense)
+but it cannot OVERRIDE the per-lead verification count.
+
+The underlying combined-Tower-verdict-says-fail-when-per-lead-passes bug
+is separate — a follow-up investigation should find why skipCombinedTower
+didn't fire for the micro pubs run. But fixing the response-builder
+isolation here means a stale or wrong towerVerdict can never lie about
+how many leads were actually verified.

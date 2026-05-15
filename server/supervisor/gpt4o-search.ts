@@ -23,6 +23,7 @@ import { storage } from '../storage';
 import type { IntentNarrative } from './mission-schema';
 import type { VerificationPolicy } from './verification-policy';
 import type { StructuredConstraintPayload } from './mission-executor';
+import { requestSemanticVerification, type TowerSemanticStatus } from './tower-semantic-verify';
 
 const MAX_SEARCH_ROUNDS = 3;
 const LOW_RESULT_THRESHOLD = 5;
@@ -199,7 +200,33 @@ function buildSearchPrompt(ctx: Gpt4oSearchContext, angle: string): string {
     /\b(recent|opened|established|new|last\s+\d+\s+months?|within\s+\d+)\b/i.test(c),
   ) || /\b(recent|opened|new|last\s+\d+)\b/i.test(ctx.rawUserInput);
 
-  const cutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const cutoffDate = (() => {
+    const tc = ctx.structuredConstraints.find(c =>
+      (c.type === 'time_constraint' || c.type === 'time_predicate') &&
+      c.hardness === 'hard' &&
+      c.value !== null && c.value !== undefined,
+    );
+    if (!tc) {
+      return new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    }
+    const value = String(tc.value).trim().toLowerCase();
+    const match = value.match(/^(\d+)\s*(day|days|week|weeks|month|months|year|years)$/);
+    if (!match) {
+      console.warn(`[GPT4O_SEARCH] Could not parse time_constraint value "${value}" — falling back to 365-day cutoff`);
+      return new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    }
+    const n = parseInt(match[1], 10);
+    const unit = match[2];
+    const daysPerUnit: Record<string, number> = {
+      day: 1, days: 1,
+      week: 7, weeks: 7,
+      month: 30, months: 30,
+      year: 365, years: 365,
+    };
+    const days = n * daysPerUnit[unit];
+    console.log(`[GPT4O_SEARCH] Derived temporal cutoff from constraint "${value}" → ${days} days back`);
+    return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  })();
 
   const temporalRules = hasTemporalConstraint ? `
 
@@ -477,88 +504,154 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     conversationId,
   }).catch(() => {});
 
-  await createArtefact({
-    runId,
-    type: 'attribute_verification',
-    title: `Evidence verification: ${allLeads.length}/${allLeads.length} checks (GPT-4o web search)`,
-    summary: `${allLeads.length} results found via GPT-4o web search across ${roundsPerformed} round${roundsPerformed === 1 ? '' : 's'}`,
-    payload: {
-      execution_source: 'gpt4o_primary',
-      total_checks: allLeads.length,
-      checks_with_evidence: allLeads.length,
-      leads_checked: allLeads.length,
-      fallback_candidates: 0,
-      fallback_verified: 0,
-      search_method: 'gpt4o_web_search',
-      rounds_performed: roundsPerformed,
-      results: allLeads.map(lead => ({
-        lead: lead.name,
-        constraint: hardConstraints.join(', ') || 'general search',
-        type: 'attribute',
-        found: true,
-        strength: lead.confidence === 'high' ? 'strong' : 'weak',
-        tower_status: 'verified',
-        source_tier: 'gpt4o_web_search',
-        evidence: lead.evidence,
-        source_url: lead.source_url,
-      })),
-    },
-    userId,
-    conversationId,
-  }).catch(() => {});
+  // Per-(lead × hard constraint) Tower semantic verification.
+  // Mirrors mission-executor.ts gp_cascade pattern exactly.
+  //
+  // We loop over structuredConstraints (which have real values and types),
+  // not hardConstraints (which are label strings like "time_constraint").
+  //
+  // Skip constraint types that don't need evidence judgement —
+  // location/numeric/ranking are handled structurally upstream.
 
-  // Emit per-lead evidence artefacts matching GP cascade format for UI dropdowns
-  for (const lead of allLeads) {
-    const constraintValue = hardConstraints.join(', ') || 'general search';
-    await createArtefact({
-      runId,
-      type: 'constraint_led_evidence',
-      title: `Evidence: "${lead.name}" — ${constraintValue}`,
-      summary: lead.evidence
-        ? `Evidence found for "${constraintValue}" on "${lead.name}" via GPT-4o web search`
-        : `No evidence found for "${constraintValue}" on "${lead.name}"`,
-      payload: {
-        lead_name: lead.name,
-        lead_place_id: `gpt4o_${allLeads.indexOf(lead)}_${lead.name.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 30)}`,
-        constraint: {
-          type: 'attribute_check',
-          field: 'web_search',
-          operator: 'verified_by',
-          value: constraintValue,
-          hardness: 'hard',
+  const TOWER_JUDGED_TYPES = new Set([
+    'attribute_check',
+    'website_evidence',
+    'relationship_check',
+    'time_constraint',
+    'time_predicate',
+    'status_check',
+  ]);
+
+  const hardEvidenceConstraints = ctx.structuredConstraints.filter(
+    c => c.hardness === 'hard' && TOWER_JUDGED_TYPES.has(c.type),
+  );
+
+  // Track per-lead aggregated Tower status (for delivery rollup).
+  interface PerLeadAgg {
+    anyVerified: boolean;
+    anyWeak: boolean;
+    anyNoEvidence: boolean;
+    perConstraint: Array<{
+      constraintValue: string;
+      towerStatus: TowerSemanticStatus | null;
+      towerConfidence: number | null;
+      towerReasoning: string | null;
+    }>;
+  }
+  const perLeadAgg = new Map<string, PerLeadAgg>();
+
+  for (let li = 0; li < allLeads.length; li++) {
+    const lead = allLeads[li];
+    const leadPlaceId = `gpt4o_${li}_${lead.name.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 30)}`;
+    const agg: PerLeadAgg = {
+      anyVerified: false,
+      anyWeak: false,
+      anyNoEvidence: false,
+      perConstraint: [],
+    };
+
+    for (const constraint of hardEvidenceConstraints) {
+      const constraintValue = constraint.value === null || constraint.value === undefined
+        ? ''
+        : String(constraint.value).trim();
+      if (!constraintValue) continue;
+
+      let towerStatus: TowerSemanticStatus | null = null;
+      let towerConfidence: number | null = null;
+      let towerReasoning: string | null = null;
+
+      try {
+        const verifyResult = await requestSemanticVerification({
+          request: {
+            run_id: runId,
+            original_user_goal: rawUserInput,
+            lead_name: lead.name,
+            lead_place_id: leadPlaceId,
+            constraint_to_check: constraintValue,
+            source_url: lead.source_url || lead.website || 'gpt4o_web_search',
+            evidence_text: (lead.evidence || lead.description || '').substring(0, 5000),
+            extracted_quotes: lead.evidence ? [lead.evidence] : [],
+            page_title: null,
+          },
+          userId,
+          conversationId,
+          clientRequestId,
+        });
+        towerStatus = verifyResult.towerResponse.status;
+        towerConfidence = verifyResult.towerResponse.confidence;
+        towerReasoning = verifyResult.towerResponse.reasoning;
+        console.log(`[GPT4O_SEARCH] Tower semantic: "${lead.name}" + "${constraintValue}" → ${towerStatus} (confidence=${towerConfidence})`);
+      } catch (towerErr: any) {
+        console.warn(`[GPT4O_SEARCH] Tower semantic verify failed for "${lead.name}" + "${constraintValue}" (non-fatal): ${towerErr.message}`);
+      }
+
+      // Aggregate
+      if (towerStatus === 'verified') agg.anyVerified = true;
+      else if (towerStatus === 'weak_match') agg.anyWeak = true;
+      else if (towerStatus === 'no_evidence' || towerStatus === 'insufficient_evidence') agg.anyNoEvidence = true;
+
+      agg.perConstraint.push({
+        constraintValue,
+        towerStatus,
+        towerConfidence,
+        towerReasoning,
+      });
+
+      // Emit one constraint_led_evidence artefact per (lead × constraint) —
+      // same shape gp_cascade uses, with Tower verdict stamped honestly.
+      await createArtefact({
+        runId,
+        type: 'constraint_led_evidence',
+        title: `Evidence: "${lead.name}" — ${constraint.type}: "${constraintValue}"`,
+        summary: lead.evidence
+          ? `Tower ${towerStatus ?? 'unjudged'} for "${constraintValue}" on "${lead.name}" via GPT-4o web search`
+          : `No evidence for "${constraintValue}" on "${lead.name}"`,
+        payload: {
+          lead_name: lead.name,
+          lead_place_id: leadPlaceId,
+          constraint: {
+            type: constraint.type,
+            field: constraint.field,
+            operator: constraint.operator,
+            value: constraintValue,
+            hardness: 'hard',
+          },
+          pages_scanned: 0,
+          extraction_method: 'gpt4o_web_search',
+          no_evidence: !lead.evidence,
+          phrase_targets: [],
+          fallback_used: false,
+          evidence_items: lead.evidence ? [{
+            quote: lead.evidence.substring(0, 300),
+            url: lead.source_url || null,
+            page_title: null,
+            match_reason: `GPT-4o web search returned evidence (gpt4o_confidence: ${lead.confidence})`,
+            confidence: lead.confidence === 'high' ? 0.85 : lead.confidence === 'medium' ? 0.65 : 0.4,
+            keyword_matched: true,
+            source_url: lead.source_url || null,
+            constraint_type: constraint.type,
+            constraint_value: constraintValue,
+            matched_phrase: constraintValue,
+            direct_quote: lead.evidence.substring(0, 300),
+            context_snippet: lead.description || null,
+            constraint_match_reason: lead.evidence.substring(0, 200),
+            source_type: 'gpt4o_web_search',
+            source_tier: 'search_snippet',
+            confidence_score: lead.confidence === 'high' ? 0.85 : lead.confidence === 'medium' ? 0.65 : 0.4,
+          }] : [],
+          tower_status: towerStatus,
+          tower_confidence: towerConfidence,
+          tower_reasoning: towerReasoning,
         },
-        pages_scanned: 0,
-        extraction_method: 'gpt4o_web_search',
-        no_evidence: !lead.evidence,
-        phrase_targets: [],
-        fallback_used: false,
-        evidence_items: lead.evidence ? [{
-          quote: lead.evidence.substring(0, 300),
-          url: lead.source_url || null,
-          page_title: null,
-          match_reason: `GPT-4o web search found evidence (confidence: ${lead.confidence})`,
-          confidence: lead.confidence === 'high' ? 0.85 : lead.confidence === 'medium' ? 0.65 : 0.4,
-          keyword_matched: true,
-          source_url: lead.source_url || null,
-          constraint_type: 'attribute_check',
-          constraint_value: constraintValue,
-          matched_phrase: constraintValue,
-          direct_quote: lead.evidence.substring(0, 300),
-          context_snippet: lead.description || null,
-          constraint_match_reason: `Verified via GPT-4o web search: ${lead.evidence.substring(0, 150)}`,
-          source_type: 'gpt4o_web_search',
-          source_tier: 'gpt4o_web_search',
-          confidence_score: lead.confidence === 'high' ? 0.85 : lead.confidence === 'medium' ? 0.65 : 0.4,
-        }] : [],
-        tower_status: lead.confidence === 'high' ? 'verified' : lead.confidence === 'medium' ? 'weak_match' : null,
-        tower_confidence: lead.confidence === 'high' ? 0.85 : lead.confidence === 'medium' ? 0.65 : null,
-      },
-      userId,
-      conversationId,
-    }).catch((e: any) => console.warn(`[GPT4O_SEARCH] Per-lead evidence artefact failed for "${lead.name}" (non-fatal): ${e.message}`));
+        userId,
+        conversationId,
+      }).catch((e: any) => console.warn(`[GPT4O_SEARCH] Per-constraint evidence artefact failed for "${lead.name}" + "${constraintValue}" (non-fatal): ${e.message}`));
+    }
+
+    perLeadAgg.set(leadPlaceId, agg);
   }
 
-  console.log(`[GPT4O_SEARCH] Emitted ${allLeads.length} per-lead evidence artefacts for UI dropdowns`);
+  console.log(`[GPT4O_SEARCH] Per-constraint Tower semantic verification complete for ${allLeads.length} leads × ${hardEvidenceConstraints.length} hard evidence constraints`);
 
   const deliveryLeads = allLeads.map((lead, i) => toDeliveryLead(lead, i));
   const cappedLeads = requestedCount !== null ? deliveryLeads.slice(0, requestedCount) : deliveryLeads;
@@ -569,16 +662,30 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     return {
       ...l,
       source: 'gpt4o_web_search',
-      verified: gLead?.confidence === 'high' || gLead?.confidence === 'medium',
-      verification_status: gLead?.confidence === 'high' ? 'verified' as const
-        : gLead?.confidence === 'medium' ? 'weak_match' as const
-        : 'no_evidence' as const,
-      constraint_verdicts: hardConstraints.map(c => ({
-        constraint: c,
-        verdict: gLead?.confidence === 'high' ? 'verified' as const
-          : gLead?.confidence === 'medium' ? 'weak_match' as const
-          : 'unverified' as const,
-      })),
+      ...(() => {
+        const placeIdForRollup = l.placeId;
+        const agg = perLeadAgg.get(placeIdForRollup);
+        const towerRollup: 'verified' | 'weak_match' | 'no_evidence' =
+          !agg || agg.perConstraint.length === 0
+            ? (gLead?.confidence === 'high' ? 'verified'
+              : gLead?.confidence === 'medium' ? 'weak_match'
+              : 'no_evidence')
+            : agg.anyNoEvidence
+              ? 'no_evidence'
+              : agg.anyVerified && !agg.anyWeak
+                ? 'verified'
+                : 'weak_match';
+        return {
+          verified: towerRollup === 'verified' || towerRollup === 'weak_match',
+          verification_status: towerRollup,
+          constraint_verdicts: (agg?.perConstraint ?? []).map(pc => ({
+            constraint: pc.constraintValue,
+            verdict: pc.towerStatus === 'verified' ? 'verified' as const
+              : pc.towerStatus === 'weak_match' ? 'weak_match' as const
+              : 'unverified' as const,
+          })),
+        };
+      })(),
       evidence: gLead ? [{ source_url: gLead.source_url, text: gLead.evidence, snippet: gLead.evidence, quote: gLead.evidence, confidence: gLead.confidence }] : [],
       match_valid: true,
       match_summary: gLead

@@ -1,0 +1,173 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/discard-unverified-leads (new branch off current main)
+FILE: server/supervisor/reloop/loop-skeleton.ts
+
+CONTEXT
+After our single-truth verification fix, unverified leads still appear in
+the UI because:
+  1. We demote them to combinedClosest (kept for "also-rans" rendering)
+  2. The older combined_delivery artefact still has the full unfiltered
+     deliveredLeads in its payload
+
+User wants the simplest possible rule: if a lead isn't verified, it
+doesn't exist in the output. No also-rans, no demoted candidates, no
+"we tried but couldn't verify" cards. Just nothing.
+
+GOAL
+Discard unverified leads completely. Every downstream artefact and the
+user-facing UI sees only the verified set.
+
+CHANGES
+
+=== CHANGE 1: Drop unverified leads instead of demoting them ===
+
+Open server/supervisor/reloop/loop-skeleton.ts. Find this block (the
+single-truth verification filter we added last time, around line 880):
+
+  // ── Single source of truth: per-lead Tower verification status ──
+  // isLeadVerified reads match_evidence items directly. No more match_valid,
+  // entity.verified, or combined Tower verdict for this decision.
+  const verifiedMergedExact = mergedExact.filter(isLeadVerified);
+  const unverifiedMergedExact = mergedExact.filter((l: any) => !isLeadVerified(l));
+  const combinedClosest = [...mergedClosest, ...unverifiedMergedExact];
+
+  console.log(`[RELOOP_SKELETON] Verification filter (single-truth): ${mergedExact.length} merged → ${verifiedMergedExact.length} verified (Tower per-lead = verified) + ${unverifiedMergedExact.length} demoted (no_evidence or weak/missing)`);
+
+REPLACE with:
+
+  // ── Single source of truth: per-lead Tower verification status ──
+  // isLeadVerified reads match_evidence items directly. Unverified leads
+  // are DROPPED, not demoted — if a lead doesn't verify against the user's
+  // hard constraints, it doesn't appear anywhere in the output.
+  const verifiedMergedExact = mergedExact.filter(isLeadVerified);
+  const unverifiedDroppedCount = mergedExact.length - verifiedMergedExact.length;
+  const combinedClosest = mergedClosest; // never includes unverified
+
+  console.log(`[RELOOP_SKELETON] Verification filter (single-truth): ${mergedExact.length} merged → ${verifiedMergedExact.length} verified + ${unverifiedDroppedCount} dropped (no_evidence / weak / missing per-lead Tower verdict)`);
+
+=== CHANGE 2: combined_delivery artefact uses verified leads only ===
+
+Same file. Find this block (around line 763-785) where combinedArtefact is
+created. The payload currently has `leads: deliveredLeads`. Find the lines:
+
+  const combinedArtefact = await createArtefact({
+    runId,
+    type: 'combined_delivery',
+    title: `Combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loop${totalLoops === 1 ? '' : 's'}`,
+    summary: `${deliveredLeads.length} leads delivered | loops=${totalLoops} | executors=${executorsTriedSoFar.join(',')} | requested=${requestedCount ?? 'any'}`,
+    payload: {
+      ...
+      delivered_count: deliveredLeads.length,
+      accumulated_total: allEntities.length,
+      leads: deliveredLeads,
+      ...
+    },
+    ...
+  });
+
+NOTE: deliveredLeads is built earlier in the file from the wrong filter
+(entity.verified). This artefact gets created BEFORE we know
+verifiedMergedExact, so we can't use that variable here directly. The
+simplest fix is to defer the artefact creation OR override its content
+after we have verified set.
+
+The cleanest move: rebuild deliveredLeads from verifiedMergedExact
+right before this artefact is created. Find this earlier block (around
+line 745-755):
+
+  // Only deliver entities that were actually verified by evidence
+  const verifiedLeads = combinedLeads.filter(l => l.verified === true);
+  const deliveredLeads = requestedCount
+    ? verifiedLeads.slice(0, requestedCount)
+    : verifiedLeads;
+
+LEAVE THIS UNCHANGED — deliveredLeads is used by the Tower judge path which
+needs the pre-verification set. But add this AFTER the verifiedMergedExact
+filter (around line 885, right after the new filter block from Change 1):
+
+  // Rebuild deliveredLeads to match the verified set so downstream
+  // artefacts and counts are consistent. This shadows the earlier
+  // declaration intentionally — from this point on, only verified leads
+  // are visible to downstream code.
+  const verifiedDeliveredLeads = verifiedMergedExact.map((lead: any) => ({
+    name: lead.name,
+    address: lead.address || '',
+    phone: lead.phone || null,
+    website: lead.website || null,
+    placeId: lead.place_id || null,
+    source: lead.source || 'unknown',
+    verified: true,
+    verificationStatus: 'verified',
+  }));
+
+If this declaration already exists from the previous fix, leave it. If not,
+add it.
+
+=== CHANGE 3: Update the run summary text + counts to use verified set ===
+
+Same file. Search for "Combined delivery:" log line and related artefact
+title strings that use deliveredLeads.length. Anywhere you see:
+
+  `Combined delivery: ${deliveredLeads.length} leads from ${totalLoops}...`
+
+or similar count references using deliveredLeads.length, those should be
+updated to use verifiedMergedExact.length or verifiedDeliveredLeads.length.
+Specifically the combinedArtefact title and summary fields.
+
+Find this combinedArtefact title and summary string area and update:
+
+OLD:
+  title: `Combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loop${totalLoops === 1 ? '' : 's'}`,
+  summary: `${deliveredLeads.length} leads delivered | loops=${totalLoops} | executors=${executorsTriedSoFar.join(',')} | requested=${requestedCount ?? 'any'}`,
+  payload: {
+    ...
+    delivered_count: deliveredLeads.length,
+    leads: deliveredLeads,
+    ...
+  }
+
+REPLACE WITH (verified count, verified leads only):
+  title: `Combined delivery: ${verifiedMergedExact.length} verified leads from ${totalLoops} loop${totalLoops === 1 ? '' : 's'}`,
+  summary: `${verifiedMergedExact.length} verified leads delivered | loops=${totalLoops} | executors=${executorsTriedSoFar.join(',')} | requested=${requestedCount ?? 'any'} | unverified dropped=${unverifiedDroppedCount}`,
+  payload: {
+    ...
+    delivered_count: verifiedMergedExact.length,
+    leads: verifiedDeliveredLeads,
+    unverified_dropped_count: unverifiedDroppedCount,
+    ...
+  }
+
+NOTE on order: this artefact is created BEFORE the verification filter
+runs in the current code. You'll need to move the artefact creation block
+to AFTER the verification filter (Change 1's block) so verifiedMergedExact
+is in scope. Or alternatively, refactor to build the artefact AFTER the
+filter. Either way is fine — the goal is that this artefact, by the time
+it's emitted, reflects the verified set.
+
+VERIFY
+
+1. Run: "find micro pubs that opened in the last 6 months in sussex"
+   - If per-lead Tower says no_evidence for all candidates → 0 delivered,
+     UI shows NO result cards, no also-rans, just the 4-bullet saying
+     0 found / no verified matches
+   - Activity log shows: "Combined delivery: 0 verified leads from X loops"
+     and "unverified dropped=N" for transparency
+
+2. Run: "find pubs in arundel" (no extra hard constraints)
+   - All leads should still appear (location is the only constraint, and
+     should produce match_evidence at the location level)
+   - Watch for regression: if pubs disappear, the lead-verification rule
+     needs the "no hard constraint = default verified" branch added
+
+3. Run: "find organisations that work with the local authority in kent"
+   - 4 verified should appear (Involve Kent dropped — no_evidence)
+   - 4-bullet says "All 4 verified"
+
+ROLLBACK
+git revert the commit. Single-file change.
+
+NOTE
+The unverified leads are NOT lost — they're still in the AFR trail and
+in the per-loop delivery_summary artefacts for forensic review. They just
+don't appear in the user-facing UI or final delivery_summary. If you want
+a "candidates we couldn't verify" debug view later, the data is there.

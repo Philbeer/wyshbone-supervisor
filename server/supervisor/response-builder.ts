@@ -30,8 +30,13 @@ function executorLabel(type: string): string {
 }
 
 function buildFallbackResponse(input: ResponseBuilderInput): string {
-  const { businessType, location, requestedCount, deliveredCount, verifiedCount,
-    runFailed, failureReason, monitorCreated, scarcityType } = input;
+  const { businessType, location, requestedCount, deliveredCount, verifiedCount: rawVerifiedCount,
+    runFailed, failureReason, monitorCreated, scarcityType, towerVerdict } = input;
+
+  const towerFailed = ['fail', 'stop', 'error', 'stopped', 'failed'].includes(
+    String(towerVerdict ?? '').toLowerCase(),
+  );
+  const verifiedCount = towerFailed ? 0 : rawVerifiedCount;
 
   if (runFailed) {
     const reason = failureReason ? failureReason.substring(0, 150) : 'An unexpected error occurred.';
@@ -92,8 +97,10 @@ export async function buildNaturalResponse(input: ResponseBuilderInput): Promise
   facts.push(`Entity searched for: ${businessType} in ${location}`);
   if (requestedCount) facts.push(`User asked for: ${requestedCount}`);
   facts.push(`Delivered: ${deliveredCount}`);
-  if (verifiedCount > 0) facts.push(`Verified with evidence: ${verifiedCount}`);
-  facts.push(`Tower verdict: ${towerVerdict ?? 'unknown'}`);
+  // Always surface verifiedCount — even when zero. The LLM needs to see
+  // it explicitly to avoid defaulting to "none verified" when Tower errored.
+  facts.push(`Per-lead verified with evidence: ${verifiedCount} (this is the source of truth for the Verification bullet)`);
+  facts.push(`Tower verdict: ${towerVerdict ?? 'unknown'} (use this only for Market/Suggestion bullets, NOT Verification)`);
 
   if (loopSummaries && loopSummaries.length > 0) {
     const loopLines = loopSummaries.map((s, i) =>
@@ -132,6 +139,8 @@ RULES:
 - Each bullet on its own line, separated by a blank line.
 - Each bullet's text must be a single sentence — no run-ons.
 - Be specific — use the actual numbers, location, and entity type from the facts above.
+- Verification bullet MUST use the "Per-lead verified with evidence" number. If verified > 0, say "N of M were verified with on-page evidence" (or "all N verified" when N === M). If verified === 0, say "None could be independently verified." NEVER use Tower verdict to write the Verification bullet — Tower verdict is for Market/Suggestion only.
+- If Tower verdict is "error", do NOT mention it in the bullets. The user does not need to know about service errors.
 - Market bullet: if scarcityType is null, write "Healthy supply in this area." If Type A (batch limit hit), write "There may be more — try a wider search." If Type B (real scarcity), write "Market here looks genuinely thin." If Type C (constraint unverifiable), write "Some constraints couldn't be verified reliably."
 - Suggestion bullet: if a monitor has been set up, say monitoring is already active. Otherwise pick the single most relevant action — email a lead, refine results, set up monitoring, or expand the area.
 - Do NOT start with "I'm happy to" or any sycophantic opener.

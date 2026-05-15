@@ -1,0 +1,79 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/lead-verification-rule-fix (new branch off current main)
+FILE: server/supervisor/lead-verification.ts
+
+CONTEXT
+The isLeadVerified rule is too strict. It requires at least one
+match_evidence item with verification_status === 'verified'. For
+location-only queries with no hard evidence-bearing constraints (e.g.
+"find pubs in arundel"), no per-lead Tower semantic verify runs. The
+leads then have verification_status of 'proxy' or 'unverified' (no
+failure, but no positive Tower confirmation) — and our rule rejects all
+20 of them as "not verified", producing 0 results.
+
+The right rule is the OPPOSITE: a lead is verified iff no evidence item
+has a FAILURE status. If Tower checked something and said no_evidence or
+insufficient_evidence, that's a fail. Anything else — verified, weak_match,
+proxy, unverified, even empty — is fine, because the lead was returned by
+the executor and no hard check failed.
+
+CHANGE
+
+Open server/supervisor/lead-verification.ts. Find the isLeadVerified
+function. Replace its body with:
+
+  export function isLeadVerified(lead: LeadWithEvidence): boolean {
+    const evidenceItems: EvidenceItem[] = [
+      ...(Array.isArray(lead.match_evidence) ? lead.match_evidence : []),
+      ...(Array.isArray(lead.supporting_evidence) ? lead.supporting_evidence : []),
+    ];
+
+    // Rule: a lead is verified iff NO evidence item has a failure status.
+    // Failure statuses come from Tower semantic verification saying "I
+    // checked and found no support" — these are real disqualifications.
+    //
+    // Everything else passes:
+    //   - 'verified' (Tower confirmed)
+    //   - 'weak_match' (partial Tower match)
+    //   - 'proxy' (strong evidence, no Tower confirmation needed)
+    //   - 'unverified' (no Tower verify ran — typical for location-only
+    //     queries with no hard semantic constraints)
+    //   - empty evidence array (executor returned the lead, nothing to fail)
+    //
+    // The executor has already filtered by location and basic constraints
+    // upstream. By the time a lead reaches this helper, it's a real
+    // candidate — we only drop it if Tower explicitly judged a hard
+    // constraint and the evidence failed.
+    for (const ev of evidenceItems) {
+      const status = ev?.verification_status;
+      if (status === 'no_evidence' || status === 'insufficient_evidence' || status === 'no_relevant_evidence') {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+Leave countVerifiedLeads unchanged — it just calls isLeadVerified.
+
+VERIFY
+
+1. Run: "find pubs in arundel"
+   - Expect ~20 leads, all visible, Tower PASS
+   - 4-bullet: "Found 20 pubs in Arundel" / "All 20 verified" or similar
+
+2. Run: "find micro pubs that opened in the last 6 months in sussex"
+   - Expect 0 leads, Tower STOP
+   - 4-bullet: "0 found" / "None could be independently verified"
+   - No regression on the strict case
+
+3. Run: "find organisations that work with the local authority in kent"
+   - Expect 4 leads (Involve Kent excluded — has no_evidence on relationship)
+   - 4-bullet: "All 4 verified"
+
+4. Run: "find pubs in arundel with live music"
+   - Expect leads where Tower verified live music
+   - Per-lead cards show "Tower verdict: verified" + quote
+
+ROLLBACK
+git revert. Single-file change.

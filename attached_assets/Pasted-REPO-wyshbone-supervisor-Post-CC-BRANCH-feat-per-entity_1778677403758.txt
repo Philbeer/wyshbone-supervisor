@@ -1,0 +1,160 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/per-entity-verified-flag (new branch off current main)
+FILES: 
+  - server/supervisor/reloop/gp-cascade-adapter.ts
+  - server/supervisor/reloop/gpt4o-adapter.ts
+
+CONTEXT
+Both executor adapters set entity.verified at the wrong granularity:
+
+- gp-cascade-adapter.ts:41 sets verified to the WHOLE LOOP's Tower verdict
+  (result.towerVerdict). If that loop's Tower said fail (e.g. live music
+  constraint missing on most GP results), ALL 14 entities get verified=false,
+  even leads where the per-lead match_valid is true.
+
+- gpt4o-adapter.ts:49 hardcodes verified: true for every entity, regardless
+  of whether that specific lead's match_valid is true.
+
+This breaks loop-skeleton.ts line 749's combinedLeads.filter(l =>
+l.verified === true), causing:
+- Wrong artefact title ("Combined delivery: 1 leads from 2 loops" when 15
+  were delivered)
+- Wrong Tower input when the combined call fires (rare now that yesterday's
+  skip logic is in place, but still a latent bug)
+
+THE TRUTH PER LEAD already exists at result.deliverySummary.delivered_exact[i].match_valid.
+mission-executor.ts:2720 sets it per-lead based on actual per-lead semantic
+verification. We just need both adapters to read it.
+
+CHANGES
+
+=== CHANGE 1: gp-cascade-adapter.ts ===
+
+Open server/supervisor/reloop/gp-cascade-adapter.ts. Find this block (around lines 32-45):
+
+  const entities: ExecutorEntity[] = result.leads.map(lead => {
+    const dsLeads = (result.deliverySummary as any)?.delivered_exact || [];
+    const dsLead = dsLeads.find((dl: any) => dl.name === lead.name);
+    const matchEvidence = dsLead?.match_evidence || dsLead?.supporting_evidence || [];
+
+    return {
+      name: lead.name,
+      address: lead.address,
+      phone: lead.phone,
+      website: lead.website,
+      placeId: lead.placeId,
+      source: 'gp_cascade',
+      verified: result.towerVerdict === 'pass' || result.towerVerdict === 'accept',
+      verificationStatus: result.towerVerdict ?? 'unknown',
+      evidence: matchEvidence,
+    };
+  });
+
+REPLACE with:
+
+  const entities: ExecutorEntity[] = result.leads.map(lead => {
+    const dsLeads = (result.deliverySummary as any)?.delivered_exact || [];
+    const dsLead = dsLeads.find((dl: any) => dl.name === lead.name);
+    const matchEvidence = dsLead?.match_evidence || dsLead?.supporting_evidence || [];
+
+    // Per-lead verified flag — source of truth is dsLead.match_valid which
+    // mission-executor.ts sets based on per-lead semantic verification.
+    // Fall back to whole-loop Tower verdict only when match_valid is undefined
+    // (preserves current behaviour for runs without per-lead data).
+    const wholeLoopPassed = result.towerVerdict === 'pass' || result.towerVerdict === 'accept';
+    const verifiedFlag = dsLead?.match_valid === true
+      ? true
+      : dsLead?.match_valid === false
+        ? false
+        : wholeLoopPassed;
+
+    return {
+      name: lead.name,
+      address: lead.address,
+      phone: lead.phone,
+      website: lead.website,
+      placeId: lead.placeId,
+      source: 'gp_cascade',
+      verified: verifiedFlag,
+      verificationStatus: dsLead?.match_valid === true ? 'verified' : (result.towerVerdict ?? 'unknown'),
+      evidence: matchEvidence,
+    };
+  });
+
+=== CHANGE 2: gpt4o-adapter.ts ===
+
+Open server/supervisor/reloop/gpt4o-adapter.ts. Find this block (around lines 38-53):
+
+  const entities: ExecutorEntity[] = result.leads.map(lead => {
+    const dsLeads = (result.deliverySummary as any)?.delivered_exact || [];
+    const dsLead = dsLeads.find((dl: any) => dl.name === lead.name);
+    const matchEvidence = dsLead?.match_evidence || dsLead?.supporting_evidence || [];
+
+    return {
+      name: lead.name,
+      address: lead.address,
+      phone: lead.phone,
+      website: lead.website,
+      placeId: lead.placeId,
+      source: 'gpt4o_web_search',
+      verified: true,
+      verificationStatus: result.towerVerdict ?? 'unknown',
+      evidence: matchEvidence,
+    };
+  });
+
+REPLACE with:
+
+  const entities: ExecutorEntity[] = result.leads.map(lead => {
+    const dsLeads = (result.deliverySummary as any)?.delivered_exact || [];
+    const dsLead = dsLeads.find((dl: any) => dl.name === lead.name);
+    const matchEvidence = dsLead?.match_evidence || dsLead?.supporting_evidence || [];
+
+    // Per-lead verified flag — match_valid from delivery_summary is the truth.
+    // GPT-4o search currently hardcodes match_valid: true at source, so this
+    // typically resolves to true here too — but if that source ever marks a
+    // lead invalid, we honour it instead of overriding with a blanket true.
+    const verifiedFlag = dsLead?.match_valid === false ? false : true;
+
+    return {
+      name: lead.name,
+      address: lead.address,
+      phone: lead.phone,
+      website: lead.website,
+      placeId: lead.placeId,
+      source: 'gpt4o_web_search',
+      verified: verifiedFlag,
+      verificationStatus: dsLead?.match_valid === true ? 'verified' : (result.towerVerdict ?? 'unknown'),
+      evidence: matchEvidence,
+    };
+  });
+
+VERIFY
+
+1. Run: "find pubs in arundel with live music"
+   - Loop 1 cascade → Tower fail (live music not on first-party pages)
+   - Loop 2 web search → Tower pass
+   - Look for the combined_delivery artefact title — should now show the
+     correct count (e.g. "Combined delivery: 14 leads from 2 loops" or
+     similar, not "1 leads from 2 loops")
+   - Tower final verdict: PASS (per yesterday's skip logic)
+   - 4-bullet: honest "N were verified with on-page evidence"
+
+2. Run: "find pubs in arundel" (no extra constraints)
+   - Single loop cascade, Tower pass, all 20 entities marked verified
+   - No regression
+
+3. Run: "find shoe shops in sussex"  
+   - Single loop, no regression
+
+ROLLBACK
+git revert the commit.
+
+KNOWN LIMITATION (not fixed here)
+The gpt4o-search.ts source itself hardcodes match_valid: true for every
+lead. So for runs that go purely through the gpt4o_search executor with no
+real per-lead verification, every entity still gets verified=true regardless
+of evidence quality. Fixing this means changing gpt4o-search.ts to compute
+match_valid per-lead from its own verification results — bigger change,
+belongs in v1 hardening pass (item 9) if the gpt4o path needs honest
+per-lead truth.

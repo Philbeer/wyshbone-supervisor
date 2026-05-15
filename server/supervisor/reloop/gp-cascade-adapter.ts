@@ -32,6 +32,17 @@ export async function gpCascadeAdapter(input: ExecutorInput): Promise<ExecutorOu
     const dsLead = dsLeads.find((dl: any) => dl.name === lead.name);
     const matchEvidence = dsLead?.match_evidence || dsLead?.supporting_evidence || [];
 
+    // Per-lead verified flag — source of truth is dsLead.match_valid which
+    // mission-executor.ts sets based on per-lead semantic verification.
+    // Fall back to whole-loop Tower verdict only when match_valid is undefined
+    // (preserves current behaviour for runs without per-lead data).
+    const wholeLoopPassed = result.towerVerdict === 'pass' || result.towerVerdict === 'accept';
+    const verifiedFlag = dsLead?.match_valid === true
+      ? true
+      : dsLead?.match_valid === false
+        ? false
+        : wholeLoopPassed;
+
     return {
       name: lead.name,
       address: lead.address,
@@ -39,8 +50,8 @@ export async function gpCascadeAdapter(input: ExecutorInput): Promise<ExecutorOu
       website: lead.website,
       placeId: lead.placeId,
       source: 'gp_cascade',
-      verified: result.towerVerdict === 'pass' || result.towerVerdict === 'accept',
-      verificationStatus: result.towerVerdict ?? 'unknown',
+      verified: verifiedFlag,
+      verificationStatus: dsLead?.match_valid === true ? 'verified' : (result.towerVerdict ?? 'unknown'),
       evidence: matchEvidence,
     };
   });

@@ -219,14 +219,32 @@ Return ONLY valid JSON matching this structure. No markdown fences, no commentar
 const PASS2_SYSTEM_PROMPT = `You are a schema mapper for a business search system. You receive a clean semantic interpretation of a user request and, when available, an INTENT ANALYSIS CONTEXT section produced by a prior intent analysis pass. Your job is to convert the semantic interpretation into a fixed JSON schema using ONLY the allowed types, operators, and values.
 
 WHEN INTENT ANALYSIS CONTEXT IS PROVIDED, follow these rules before extracting any constraint:
-- entity_description tells you what the user actually wants. Use this, not the raw query phrasing, as your primary guide.
+
+- entity_description tells you what the user actually wants. It MAY contain definitional language describing what kind of entity it is (e.g. "pubs that serve drinks and have a bar area"). Such definitional language describes the entity type, not user-required constraints. Use entity_description to understand intent — NOT as a literal source of constraints.
+
 - entity_exclusions list things that look similar but are wrong. These are NOT constraints to verify — they are exclusion signals. NEVER create a constraint whose value matches or targets something in entity_exclusions.
-- key_discriminator is the single most important signal separating a correct result from a plausible-but-wrong one. Ground your constraints in this signal.
-- commercial_context explains why the user wants this. If a phrase in the raw query is better explained by commercial_context than by a verifiable constraint, do NOT create a constraint for it.
+
+- key_discriminator may contain TWO distinct parts that you MUST separate:
+  1. ENTITY TYPE DEFINITION — sentences of the form "Is a [type] — [defining properties]. NOT a [different type]." This text exists for the evidence layer to verify entity type. It is DEFINITIONAL. It is NEVER a source of constraints. Do not turn definitional properties (like "serves drinks", "has a bar area", "cuts hair", "serves meals") into attribute_check, status_check, or any other constraint.
+  2. USER REQUIREMENT SIGNALS — any other text describing what the user specifically asked for beyond entity type. This part MAY inform constraint extraction.
+
+- commercial_context explains why the user wants this. Never a source of constraints.
+
+ANCHOR RULE (applies to every constraint you emit):
+Every constraint you emit MUST anchor to an explicit phrase in the Pass 1 semantic interpretation. Before emitting a constraint, ask: "Does the semantic interpretation contain a specific phrase that requires this?" If yes, emit it. If no — if you can only justify the constraint from key_discriminator's entity-type definition, from entity_description's definitional language, or from your own knowledge of what the entity type implies — DO NOT EMIT IT.
+
+Examples of what NOT to do:
+- User: "find pubs in Arundel" → semantic interpretation contains no attribute requirements → emit only location_constraint. Do NOT emit attribute_check: "serves drinks". Do NOT emit attribute_check: "bar area". These are part of what a pub IS, not what the user specifically asked for.
+- User: "find hairdressers in Bath" → emit only location_constraint. Do NOT emit attribute_check: "cuts hair" or attribute_check: "styling services".
+- User: "find restaurants in Brighton" → emit only location_constraint. Do NOT emit attribute_check: "serves meals" or "sit-down dining".
+
+Examples of what to do:
+- User: "find pubs in Arundel with live music" → semantic interpretation explicitly states "live music" → emit location_constraint AND attribute_check: "live music". Do NOT additionally emit "serves drinks" or "bar area".
+- User: "find pubs in Arundel that serve cask ale" → emit location_constraint AND website_evidence: "cask ale". Do NOT additionally emit "serves drinks".
 
 Extract ONLY constraints that:
 1. Can be verified by visiting a business website or checking a directory
-2. Follow from the entity_description and key_discriminator — NOT from literal words in the raw query
+2. Are anchored to an explicit phrase in the Pass 1 semantic interpretation — NOT inferred from entity type definitions
 3. Would genuinely distinguish a correct result from something in entity_exclusions
 
 EXAMPLE — bottle shop query:
@@ -342,11 +360,82 @@ status_check: ${JSON.stringify(STATUS_CHECK_OPERATORS)}
     "accepting new patients" → { "type": "status_check", "field": "availability", "operator": "equals", "value": "accepting new patients", "hardness": "hard" }
 
 relationship_check: ${JSON.stringify(RELATIONSHIP_CHECK_OPERATORS)}
-  field: the relationship domain (e.g. "client", "supplier", "partner")
-  value: the related entity
-  Examples:
-    "has relationship with NHS" → { "type": "relationship_check", "field": "client", "operator": "serves", "value": "NHS", "hardness": "hard" }
-    "supplied by local farms" → { "type": "relationship_check", "field": "supplier", "operator": "has", "value": "local farms", "hardness": "hard" }
+  USE THIS TYPE WHENEVER the user's request describes a RELATIONSHIP
+  between the entity they want and another entity, organisation, or
+  institution. The relationship VERB is the critical semantic signal —
+  it determines whether the result is correct.
+
+  DETECTION — emit relationship_check whenever the query contains a
+  relational verb between entity and target, including but not limited to:
+    "works with", "works for", "partners with", "partnered with",
+    "supplies", "supplied by", "sells to", "buys from", "contracts with",
+    "is approved by", "is accredited by", "is certified by",
+    "is a vendor to", "delivers services to", "consults for",
+    "represents", "manages", "is owned by", "is operated by",
+    "serves [an organisation]" (not "serves food/customers"),
+    "affiliated with", "endorsed by", "subcontracts to".
+
+  field: the relationship domain — choose the most natural label for
+    what the entity IS to the target: "client" (entity serves the
+    target), "supplier" (entity supplies the target), "partner"
+    (mutual partnership), "vendor", "contractor", "service_provider",
+    "owner", etc.
+  operator: MUST be one of ${JSON.stringify(RELATIONSHIP_CHECK_OPERATORS)}.
+    Map the user's verb to the closest allowed operator:
+    - "works with" / "partners with" / "partnered with" /
+      "affiliated with" / "collaborates with" → "partners_with"
+    - "supplies" / "supplied by" / "sells to" / "is a vendor to" /
+      "delivers services to" / "contracts with" → "serves"
+    - "is owned by" / "is a subsidiary of" → "owned_by"
+    - "is operated by" / "is managed by" / "is run by" → "managed_by"
+    - "has [a relationship with]" / "is approved by" /
+      "is accredited by" → "has"
+  value: the target organisation or entity (the OTHER side of the
+    relationship — never the verb, never the entity_category, never
+    both combined into one string).
+  hardness: hard unless hedged ("preferably", "ideally").
+
+  CRITICAL — the relationship verb belongs in OPERATOR, not VALUE:
+    WRONG: { "type": "relationship_check", "value": "works with local authority" }
+    WRONG: { "type": "attribute_check", "value": "local authority" }
+    WRONG: { "type": "attribute_check", "value": "works with local authority" }
+    RIGHT: { "type": "relationship_check", "field": "partner", "operator": "partners_with", "value": "local authority", "hardness": "hard" }
+
+  EXAMPLES (study these — they cover the common shapes):
+
+  "find solicitors that work with the NHS"
+  → { "type": "relationship_check", "field": "client", "operator": "partners_with", "value": "NHS", "hardness": "hard" }
+
+  "find organisations that work with the local authority in sussex"
+  → { "type": "relationship_check", "field": "partner", "operator": "partners_with", "value": "local authority", "hardness": "hard" }
+    (PLUS a separate location_constraint for "sussex" — locations are
+    ALWAYS separate from relationships, never merged into the value)
+
+  "find suppliers that supply Marks and Spencer"
+  → { "type": "relationship_check", "field": "client", "operator": "serves", "value": "Marks and Spencer", "hardness": "hard" }
+
+  "find consultancies that are accredited by the Cabinet Office"
+  → { "type": "relationship_check", "field": "accreditor", "operator": "has", "value": "Cabinet Office", "hardness": "hard" }
+
+  "find brewers that supply pubs in Sussex"
+  → { "type": "relationship_check", "field": "client", "operator": "serves", "value": "pubs", "hardness": "hard" }
+    (PLUS location_constraint for Sussex)
+
+  "find catering companies that supply schools"
+  → { "type": "relationship_check", "field": "client", "operator": "serves", "value": "schools", "hardness": "hard" }
+
+  DO NOT CONFUSE WITH ATTRIBUTE_CHECK:
+  - "serves food" / "serves drinks" / "has parking" = attribute_check
+    (amenity the entity offers to anyone)
+  - "serves [an organisation/institution]" = relationship_check
+    (specific named or categorical institutional client)
+  If unsure: if the noun after the verb is an ORGANISATION, INSTITUTION,
+  SECTOR, or NAMED COMPANY → relationship_check. If it's a GENERIC
+  AMENITY (food, drinks, parking, wifi) → attribute_check.
+
+  NEVER drop the relationship verb. NEVER fold the verb into the value.
+  NEVER convert a relationship into a plain attribute_check on the
+  target noun alone — that loses the whole meaning of the query.
 
 numeric_range: ${JSON.stringify(NUMERIC_OPERATORS)}
   field: "rating", "review_count", "price_level", etc.

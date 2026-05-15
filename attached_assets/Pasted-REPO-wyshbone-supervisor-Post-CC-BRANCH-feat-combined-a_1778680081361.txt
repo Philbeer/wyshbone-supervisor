@@ -1,0 +1,120 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/combined-artefact-includes-constraints (new branch off current main)
+FILE: server/supervisor/reloop/loop-skeleton.ts
+
+CONTEXT
+The combined Tower judge receives constraints two ways:
+  1. Via successCriteria.hard_constraints (labels like 'attribute_check')
+     and successCriteria.structured_constraints (full payloads with values)
+  2. Via the artefact payload itself (the thing the LLM judge primarily reads)
+
+The combined_delivery artefact payload currently includes leads, counts,
+and per-loop info, but does NOT include the constraint values. So when the
+LLM Tower judge looks at the artefact, it sees no constraint values inside
+the payload and produces a misleading narrative like:
+
+  "[Tower] pass: Delivered 10 pubs in Arundel with no hard constraints to verify."
+
+— even when the query has a clear hard constraint like "live music" that
+per-lead semantic verification has already verified.
+
+The user-facing 4-bullet message is still honest (it reads from
+delivery_summary, not from the combined Tower rationale). But the activity
+feed shows the misleading rationale, which is confusing for diagnostic and
+demo purposes.
+
+GOAL
+Include the mission's constraints in the combined_delivery artefact payload
+so the LLM Tower judge sees them inside the artefact it judges, and can
+produce accurate rationale text.
+
+CHANGE
+
+Open server/supervisor/reloop/loop-skeleton.ts. Find the combined_delivery
+artefact creation block (around line 763-785). It currently looks like this:
+
+    const combinedArtefact = await createArtefact({
+      runId,
+      type: 'combined_delivery',
+      title: `Combined delivery: ${deliveredLeads.length} leads from ${totalLoops} loop${totalLoops === 1 ? '' : 's'}`,
+      summary: `${deliveredLeads.length} leads delivered | loops=${totalLoops} | executors=${executorsTriedSoFar.join(',')} | requested=${requestedCount ?? 'any'}`,
+      payload: {
+        chain_id: chainId,
+        total_loops: totalLoops,
+        executors_tried: executorsTriedSoFar,
+        requested_count: requestedCount,
+        delivered_count: deliveredLeads.length,
+        accumulated_total: allEntities.length,
+        leads: deliveredLeads,
+        per_loop_counts: loopHistory.map(r => ({
+          loop: r.loopNumber,
+          executor: r.plannerDecision.executorType,
+          found: r.executorOutput.entities.length,
+        })),
+        delivery_note: deliveryNote,
+      },
+      userId,
+      conversationId,
+    });
+
+REPLACE the payload object (only the payload — keep the title, summary,
+userId, conversationId unchanged) with:
+
+      payload: {
+        chain_id: chainId,
+        total_loops: totalLoops,
+        executors_tried: executorsTriedSoFar,
+        requested_count: requestedCount,
+        delivered_count: deliveredLeads.length,
+        accumulated_total: allEntities.length,
+        leads: deliveredLeads,
+        per_loop_counts: loopHistory.map(r => ({
+          loop: r.loopNumber,
+          executor: r.plannerDecision.executorType,
+          found: r.executorOutput.entities.length,
+        })),
+        delivery_note: deliveryNote,
+        // Include constraint information so the LLM Tower judge sees the
+        // values it needs to verify (not just type labels). The judge
+        // primarily reads the artefact payload, so without this it
+        // produces misleading rationale like "no hard constraints to verify"
+        // even when there are real constraints with real values.
+        hard_constraints: hardConstraints,
+        soft_constraints: softConstraints,
+        structured_constraints: structuredConstraints,
+        original_user_goal: rawUserInput,
+        normalized_goal: normalizedGoal,
+      },
+
+The variables hardConstraints, softConstraints, structuredConstraints,
+rawUserInput, and normalizedGoal are already in scope at this point in the
+function (they are declared at the top of runReloop).
+
+VERIFY
+
+1. Run: "find pubs in arundel with live music"
+   - Live activity feed should show a Tower rationale that mentions the
+     constraints — something like:
+     "[Tower] pass: Delivered N pubs in Arundel with live music constraint
+      verified."
+   - Should NOT show "no hard constraints to verify"
+   - 4-bullet message stays as before ("N were verified with on-page
+     evidence")
+
+2. Run: "find pubs in arundel" (no extra constraints)
+   - structured_constraints will contain just the location_constraint
+   - Tower rationale should mention Arundel as the location constraint
+   - Should NOT regress to a worse message
+
+3. Run: "find shoe shops in sussex"
+   - Single location constraint, similar to test 2
+   - No regression
+
+ROLLBACK
+git revert the commit. Single-file change.
+
+NOTE
+This does NOT change what the supervisor sends to Tower via successCriteria
+(that already includes structured_constraints). It only adds the
+constraints to the artefact payload itself so the LLM Tower judge sees them
+in the place it's primarily reading from.

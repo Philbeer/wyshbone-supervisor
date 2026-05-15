@@ -64,6 +64,12 @@ export async function gpt4oAdapter(input: ExecutorInput): Promise<ExecutorOutput
     const dsLead = dsLeads.find((dl: any) => dl.name === lead.name);
     const matchEvidence = dsLead?.match_evidence || dsLead?.supporting_evidence || [];
 
+    // Per-lead verified flag — match_valid from delivery_summary is the truth.
+    // GPT-4o search currently hardcodes match_valid: true at source, so this
+    // typically resolves to true here too — but if that source ever marks a
+    // lead invalid, we honour it instead of overriding with a blanket true.
+    const verifiedFlag = dsLead?.match_valid === false ? false : true;
+
     return {
       name: lead.name,
       address: lead.address,
@@ -71,8 +77,8 @@ export async function gpt4oAdapter(input: ExecutorInput): Promise<ExecutorOutput
       website: lead.website,
       placeId: lead.placeId,
       source: 'gpt4o_web_search',
-      verified: true,
-      verificationStatus: result.towerVerdict ?? 'unknown',
+      verified: verifiedFlag,
+      verificationStatus: dsLead?.match_valid === true ? 'verified' : (result.towerVerdict ?? 'unknown'),
       evidence: matchEvidence,
     };
   });

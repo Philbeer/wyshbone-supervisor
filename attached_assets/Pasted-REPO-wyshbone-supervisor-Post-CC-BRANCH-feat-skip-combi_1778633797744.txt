@@ -1,0 +1,112 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/skip-combined-tower-when-per-loop-passed (new branch off feat/stop-constraint-fabrication or main, whichever has yesterday's work)
+FILE: server/supervisor/reloop/loop-skeleton.ts
+
+CONTEXT
+After the re-loop chain completes, the combined-delivery Tower call (around
+line 763) judges the merged delivery from all loops. This call has two
+problems:
+
+1. It receives deliveredLeads filtered by entity.verified === true. The
+   entity.verified flag is set at wrong granularity in both adapters
+   (gp-cascade-adapter.ts:41 ties it to the whole loop's Tower verdict;
+   gpt4o-adapter.ts:49 hardcodes it to true). Neither reflects per-lead
+   verification.
+
+2. It re-judges leads that per-loop Tower already judged. When per-loop
+   Tower passed for at least one loop, the combined call risks producing
+   a contradictory verdict (e.g. per-loop Loop 2 PASS, combined FAIL).
+
+The current skip condition is too narrow — it only skips for single-loop
+runs that passed:
+
+  const skipCombinedTower = totalLoops === 1 && perLoopTowerVerdict === 'pass';
+
+This leaves the combined call active for ANY multi-loop run, including the
+cascade-then-web-search pattern where Loop 1 fails (cascade) and Loop 2
+passes (web search). The combined call then fails wrongly, the response
+builder honestly reads the bad verdict, and the user sees "0 verified"
+when 15 leads were delivered.
+
+GOAL
+Trust per-loop Tower verdicts as source of truth. Skip the combined Tower
+call whenever at least one per-loop Tower already passed. Use the best
+per-loop verdict as the final combined verdict.
+
+CHANGES
+
+Open server/supervisor/reloop/loop-skeleton.ts. Find this block (around
+line 786-790):
+
+    // Check if the per-loop Tower already passed for a single-loop run.
+    // If so, skip the combined Tower call — the combined delivery is identical
+    // to the per-loop delivery and re-judging it risks a contradictory verdict.
+    const perLoopTowerVerdict = (finalRawResult as any)?.towerVerdict ?? null;
+    const skipCombinedTower = totalLoops === 1 && perLoopTowerVerdict === 'pass';
+
+REPLACE that block with:
+
+    // Trust per-loop Tower verdicts as source of truth.
+    // The combined Tower call has known input-data bugs (entity.verified flag
+    // set at wrong granularity) and re-judges what per-loop Tower already
+    // judged. If any per-loop Tower passed, use that and skip the combined
+    // call to avoid contradictory verdicts.
+    const perLoopVerdicts = loopHistory
+      .map(r => (r.executorOutput.rawResult as any)?.towerVerdict)
+      .filter((v): v is string => typeof v === 'string');
+    const anyPerLoopPass = perLoopVerdicts.some(v => v === 'pass' || v === 'accept');
+    const lastPerLoopVerdict = perLoopVerdicts[perLoopVerdicts.length - 1] ?? null;
+    const skipCombinedTower = anyPerLoopPass;
+
+Then find the block that handles the skipCombinedTower case (around line 793):
+
+    if (skipCombinedTower) {
+      console.log(`[RELOOP_SKELETON] Single loop with per-loop Tower PASS — skipping combined Tower call. Using per-loop verdict.`);
+      combinedTowerVerdict = 'pass';
+    } else {
+
+REPLACE the first two lines (the if/log/assign) with:
+
+    if (skipCombinedTower) {
+      const reason = totalLoops === 1
+        ? `Single loop with per-loop Tower PASS — skipping combined Tower call.`
+        : `Multi-loop run with at least one per-loop Tower PASS (verdicts: ${perLoopVerdicts.join(', ')}) — skipping combined Tower call to avoid contradictory verdict.`;
+      console.log(`[RELOOP_SKELETON] ${reason}`);
+      combinedTowerVerdict = 'pass';
+
+The closing brace and rest of the else branch stay unchanged.
+
+VERIFY
+
+1. Run: "find pubs in arundel with live music"
+   - Loop 1 should be cascade (gp_cascade) → Tower fail (no live music
+     evidence on most GP results)
+   - Loop 2 should be web search (gpt4o_search) → Tower pass (web search
+     finds evidence)
+   - At combined-delivery phase, look for log line:
+     "Multi-loop run with at least one per-loop Tower PASS — skipping
+     combined Tower call to avoid contradictory verdict."
+   - Tower final verdict should be PASS, not fail
+   - 4-bullet response should say "Verification: N were verified with
+     on-page evidence" honestly
+   - Live activity should show "Sequence complete — Tower: PASS"
+
+2. Run: "find pubs in arundel" (no extra constraints)
+   - Single loop, Tower PASS as before
+   - Existing skip logic still fires correctly
+   - No regression
+
+3. Run any query that fails everywhere
+   - All per-loop Towers fail → skipCombinedTower is false → combined
+     Tower call still fires (current behaviour preserved)
+   - Response builder honestly reflects the fail
+
+ROLLBACK
+git revert the commit.
+
+KNOWN LIMITATION (not fixed by this change, on roadmap)
+The entity.verified flag granularity issue (gp-cascade-adapter.ts:41 and
+gpt4o-adapter.ts:49) is the root cause of why the combined Tower call gets
+bad input. This change works around it by trusting per-loop verdicts. The
+proper fix — setting entity.verified per-entity based on per-lead semantic
+verification results — belongs in the v1 hardening pass.
