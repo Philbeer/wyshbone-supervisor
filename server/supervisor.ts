@@ -2340,16 +2340,17 @@ class SupervisorService {
               console.log(`[COMPLETENESS_CHECK] runId=${jobId} PASSED — no dropped concepts`);
             }
 
-            // ─── PASS 2 WATCHDOG (shadow rollout — see PASS2_WATCHDOG_MODE env var) ──────
-            // Audits the same inputs the regex completeness check looked at, but via a
-            // single LLM call. In shadow mode, the result is logged + emitted as a
-            // diagnostic artefact but does NOT gate execution. Will graduate to retry-only
-            // then full enforcement in later changes, at which point the regex check
-            // above will be retired.
+            // ─── PASS 2 WATCHDOG (with retry handler) ─────────────────────────────────────
             const watchdogMode = getPass2WatchdogMode();
+            let watchdogAttempt1: WatchdogResult | null = null;
+            let watchdogAttempt2: WatchdogResult | null = null;
+            let retryAttempted = false;
+            let retrySucceeded = false;
+
             if (watchdogMode !== 'off' && missionResult?.trace?.pass2_structured_mission) {
               try {
-                const watchdogResult: WatchdogResult = await runPass2Watchdog(
+                // Attempt 1 — initial audit
+                watchdogAttempt1 = await runPass2Watchdog(
                   rawMsg,
                   missionResult.trace.pass1_semantic_interpretation || null,
                   missionResult.trace.pass2_structured_mission,
@@ -2357,26 +2358,104 @@ class SupervisorService {
                 );
 
                 console.log(
-                  `[PASS2_WATCHDOG] runId=${jobId} mode=${watchdogMode} verdict=${watchdogResult.verdict} ` +
-                  `dropped=${watchdogResult.dropped_concepts.length} parse_ok=${watchdogResult.parse_ok} ` +
-                  `latency=${watchdogResult.latency_ms}ms`
+                  `[PASS2_WATCHDOG] runId=${jobId} mode=${watchdogMode} attempt=1 verdict=${watchdogAttempt1.verdict} ` +
+                  `dropped=${watchdogAttempt1.dropped_concepts.length} latency=${watchdogAttempt1.latency_ms}ms`
                 );
 
+                // Retry only if mode allows action AND watchdog flagged dropped concepts
+                const shouldRetry =
+                  (watchdogMode === 'retry' || watchdogMode === 'full') &&
+                  watchdogAttempt1.verdict !== 'pass' &&
+                  watchdogAttempt1.dropped_concepts.length > 0;
+
+                if (shouldRetry) {
+                  retryAttempted = true;
+
+                  // Build feedback fragment for Pass 2 prompt injection
+                  const droppedList = watchdogAttempt1.dropped_concepts.map(d =>
+                    `  - category=${d.category} severity=${d.severity}: phrase "${d.matched_phrase}" should map to ${d.expected_constraint_type}. Reason: ${d.reasoning}`
+                  ).join('\n');
+
+                  const watchdogFeedback =
+                    `PREVIOUS EXTRACTION FAILED A WATCHDOG AUDIT. You MUST address the following dropped concepts:\n` +
+                    `${droppedList}\n\n` +
+                    `Re-extract the structured mission including the missed constraints above. Each "phrase" indicates meaning the previous attempt dropped — preserve it as the indicated constraint type.`;
+
+                  console.log(`[PASS2_WATCHDOG] runId=${jobId} retry triggered — re-extracting Pass 2 with feedback`);
+
+                  try {
+                    const retryMissionResult = await extractStructuredMission(
+                      effectiveMsg,
+                      conversationContextStr,
+                      {
+                        runId: jobId,
+                        userId: task.user_id,
+                        conversationId: task.conversation_id,
+                        watchdogFeedback,
+                      }
+                    );
+
+                    if (retryMissionResult?.trace?.pass2_structured_mission) {
+                      // Replace missionResult so downstream code uses the corrected version
+                      missionResult = retryMissionResult;
+
+                      // Attempt 2 — audit the retry
+                      watchdogAttempt2 = await runPass2Watchdog(
+                        rawMsg,
+                        retryMissionResult.trace.pass1_semantic_interpretation || null,
+                        retryMissionResult.trace.pass2_structured_mission,
+                        { runId: jobId, userId: task.user_id, conversationId: task.conversation_id },
+                      );
+
+                      retrySucceeded = watchdogAttempt2.verdict === 'pass';
+
+                      console.log(
+                        `[PASS2_WATCHDOG] runId=${jobId} attempt=2 verdict=${watchdogAttempt2.verdict} ` +
+                        `dropped=${watchdogAttempt2.dropped_concepts.length} latency=${watchdogAttempt2.latency_ms}ms ` +
+                        `retry_${retrySucceeded ? 'succeeded' : 'failed'}`
+                      );
+                    } else {
+                      console.warn(`[PASS2_WATCHDOG] runId=${jobId} retry extraction returned no structured mission — keeping original`);
+                    }
+                  } catch (retryErr: any) {
+                    console.warn(`[PASS2_WATCHDOG] runId=${jobId} retry extraction threw (non-fatal): ${retryErr.message}`);
+                  }
+
+                  // FULL mode user-facing clarify not yet wired — behaves as RETRY for now
+                  if (watchdogMode === 'full' && !retrySucceeded) {
+                    console.log(`[PASS2_WATCHDOG] runId=${jobId} FULL mode: retry did not fix it, user-facing clarify not yet wired — proceeding with current mission`);
+                  }
+                }
+
+                // Single summary diagnostic artefact covering attempt 1 (+ retry if attempted)
                 createArtefact({
                   runId: jobId,
                   type: 'diagnostic',
-                  title: `Pass 2 watchdog (${watchdogMode}): ${watchdogResult.verdict} — ${watchdogResult.dropped_concepts.length} dropped`,
-                  summary: watchdogResult.reasoning?.slice(0, 240) || `verdict=${watchdogResult.verdict}`,
+                  title: `Pass 2 watchdog (${watchdogMode}): ${retryAttempted ? (retrySucceeded ? 'retry-fixed' : 'retry-failed') : watchdogAttempt1.verdict}`,
+                  summary: retryAttempted
+                    ? `attempt1=${watchdogAttempt1.verdict} (${watchdogAttempt1.dropped_concepts.length} dropped) → retry → attempt2=${watchdogAttempt2?.verdict ?? 'n/a'} (${watchdogAttempt2?.dropped_concepts.length ?? 'n/a'} dropped)`
+                    : (watchdogAttempt1.reasoning?.slice(0, 240) || `verdict=${watchdogAttempt1.verdict}`),
                   payload: {
                     diagnostic_type: 'pass2_watchdog',
                     mode: watchdogMode,
-                    verdict: watchdogResult.verdict,
-                    dropped_concepts: watchdogResult.dropped_concepts,
-                    reasoning: watchdogResult.reasoning,
-                    parse_ok: watchdogResult.parse_ok,
-                    latency_ms: watchdogResult.latency_ms,
-                    failure_reason: watchdogResult.failure_reason,
-                    // Side-by-side comparison with the regex check on the same run
+                    retry_attempted: retryAttempted,
+                    retry_succeeded: retrySucceeded,
+                    attempt_1: {
+                      verdict: watchdogAttempt1.verdict,
+                      dropped_concepts: watchdogAttempt1.dropped_concepts,
+                      reasoning: watchdogAttempt1.reasoning,
+                      parse_ok: watchdogAttempt1.parse_ok,
+                      latency_ms: watchdogAttempt1.latency_ms,
+                      failure_reason: watchdogAttempt1.failure_reason,
+                    },
+                    attempt_2: watchdogAttempt2 ? {
+                      verdict: watchdogAttempt2.verdict,
+                      dropped_concepts: watchdogAttempt2.dropped_concepts,
+                      reasoning: watchdogAttempt2.reasoning,
+                      parse_ok: watchdogAttempt2.parse_ok,
+                      latency_ms: watchdogAttempt2.latency_ms,
+                      failure_reason: watchdogAttempt2.failure_reason,
+                    } : null,
                     regex_check_action: completenessResult.recommended_action,
                     regex_check_dropped_count: completenessResult.dropped_concepts.length,
                   },
@@ -2384,15 +2463,7 @@ class SupervisorService {
                   conversationId: task.conversation_id,
                 }).catch((e: any) => console.warn(`[PASS2_WATCHDOG] Artefact creation failed (non-fatal): ${e.message}`));
 
-                // SHADOW MODE: log only. RETRY/FULL modes are not yet implemented — they
-                // currently behave identically to SHADOW. Implementation lands in a later
-                // change once shadow data confirms watchdog accuracy.
-                if (watchdogMode === 'retry' || watchdogMode === 'full') {
-                  console.log(`[PASS2_WATCHDOG] runId=${jobId} mode=${watchdogMode} not yet wired to act — behaving as shadow`);
-                }
               } catch (watchdogErr: any) {
-                // The watchdog module fails open internally; this catch is a final
-                // defensive layer in case anything above throws unexpectedly.
                 console.warn(`[PASS2_WATCHDOG] runId=${jobId} threw unexpectedly (non-fatal): ${watchdogErr.message}`);
               }
             }

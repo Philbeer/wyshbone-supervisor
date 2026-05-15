@@ -899,6 +899,7 @@ export async function extractStructuredMission(
     runId: string;
     userId: string;
     conversationId?: string;
+    watchdogFeedback?: string;
   },
 ): Promise<MissionExtractionResult> {
   const model = selectModel();
@@ -1091,7 +1092,11 @@ Convert this semantic interpretation into the structured mission JSON schema:
   let pass2RawResponse = '';
   const pass2Start = Date.now();
   try {
-    pass2RawResponse = await callLLM(model, `${getCurrentDatePreamble()}\n\n${PASS2_SYSTEM_PROMPT}`, pass2Prompt);
+    const pass2SystemPromptParts = PASS2_SYSTEM_PROMPT.split('\n\nrelationship_check:');
+    const pass2SystemPromptFull = pass2SystemPromptParts.length === 2
+      ? `${getCurrentDatePreamble()}\n\n${pass2SystemPromptParts[0]}${earlyEmit?.watchdogFeedback ? `\n\n${earlyEmit.watchdogFeedback}\n\n` : ''}\n\nrelationship_check:${pass2SystemPromptParts[1]}`
+      : `${getCurrentDatePreamble()}\n\n${PASS2_SYSTEM_PROMPT}`;
+    pass2RawResponse = await callLLM(model, pass2SystemPromptFull, pass2Prompt);
   } catch (err: any) {
     const pass2Duration = Date.now() - pass2Start;
     const totalDuration = pass1Duration + pass3DurationMs + pass2Duration;
