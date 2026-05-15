@@ -1,3 +1,4 @@
+import { WYSHBONE_IDENTITY } from './wyshbone-identity';
 import { callLLMText } from './llm-failover';
 import { getRelevantReferenceKnowledge } from './reference-knowledge';
 import { getCurrentContextPreamble } from './current-context';
@@ -43,7 +44,7 @@ function recordChatCall(): void {
 
 const CHAT_SYSTEM_PROMPT = `${getCurrentContextPreamble()}
 
-You are Wyshbone, a business intelligence assistant that finds and verifies businesses for users. You are helpful, knowledgeable, and direct.
+${WYSHBONE_IDENTITY}
 
 WHAT YOU CAN DO:
 - Answer general knowledge questions about any topic — business, marketing, industries, food, wine, technology, anything the user asks
