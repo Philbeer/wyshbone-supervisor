@@ -2407,7 +2407,15 @@ class SupervisorService {
                         { runId: jobId, userId: task.user_id, conversationId: task.conversation_id },
                       );
 
-                      retrySucceeded = watchdogAttempt2.verdict === 'pass';
+                      // TEMP TEST — force clarify branch to fire by simulating a retry that didn't fix the dropped concepts
+                      retrySucceeded = false;
+                      if (watchdogAttempt2 && watchdogAttempt1) {
+                        watchdogAttempt2 = {
+                          ...watchdogAttempt2,
+                          verdict: 'block',
+                          dropped_concepts: watchdogAttempt1.dropped_concepts,
+                        };
+                      }
 
                       console.log(
                         `[PASS2_WATCHDOG] runId=${jobId} attempt=2 verdict=${watchdogAttempt2.verdict} ` +
