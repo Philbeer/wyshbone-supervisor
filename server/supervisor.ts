@@ -20,7 +20,7 @@ import { buildConstraintsExtractedPayload, buildCapabilityCheck } from './superv
 import { runIntentExtractorShadow, getIntentExtractorMode, emitProbe, neutraliseClarifyIfNeeded } from './supervisor/intent-shadow';
 import { extractStructuredMission, getMissionExtractorMode } from './supervisor/mission-extractor';
 import { checkMissionCompleteness, logCompletenessToAFR, type CompletenessCheckResult } from './supervisor/mission-completeness-check';
-import { runPass2Watchdog, getPass2WatchdogMode, type WatchdogResult } from './supervisor/pass2-watchdog';
+import { runPass2Watchdog, getPass2WatchdogMode, buildWatchdogClarifyMessage, type WatchdogResult } from './supervisor/pass2-watchdog';
 import { logMissionShadow, buildMissionDiagnosticPayload, missionToParsedGoal, buildHandoffDiagnostic, type HandoffDiagnostic } from './supervisor/mission-bridge';
 import { buildMissionPlan, logMissionPlan, persistMissionPlan, type MissionPlan } from './supervisor/mission-planner';
 import { executeMissionDrivenPlan, executeMissionWithReloop, type MissionExecutionContext, type MissionExecutionResult } from './supervisor/mission-executor';
@@ -2421,9 +2421,72 @@ class SupervisorService {
                     console.warn(`[PASS2_WATCHDOG] runId=${jobId} retry extraction threw (non-fatal): ${retryErr.message}`);
                   }
 
-                  // FULL mode user-facing clarify not yet wired — behaves as RETRY for now
-                  if (watchdogMode === 'full' && !retrySucceeded) {
-                    console.log(`[PASS2_WATCHDOG] runId=${jobId} FULL mode: retry did not fix it, user-facing clarify not yet wired — proceeding with current mission`);
+                  // FULL mode: if retry failed to fix dropped concepts, stop and ask the user
+                  if (
+                    watchdogMode === 'full' &&
+                    retryAttempted &&
+                    !retrySucceeded &&
+                    watchdogAttempt2 &&
+                    watchdogAttempt2.dropped_concepts.length > 0
+                  ) {
+                    const watchdogClarifyMsg = buildWatchdogClarifyMessage(watchdogAttempt2.dropped_concepts);
+
+                    console.log(
+                      `[PASS2_WATCHDOG] runId=${jobId} FULL mode: retry failed — asking user to clarify. ` +
+                      `Categories: ${watchdogAttempt2.dropped_concepts.map(d => d.category).join(',')}`
+                    );
+
+                    // Emit the diagnostic artefact BEFORE returning so AFR captures the full picture
+                    await createArtefact({
+                      runId: jobId,
+                      type: 'diagnostic',
+                      title: `Pass 2 watchdog (full): clarify-asked`,
+                      summary: `attempt1=${watchdogAttempt1.verdict} → retry → attempt2=${watchdogAttempt2.verdict} → asked user to clarify`,
+                      payload: {
+                        diagnostic_type: 'pass2_watchdog',
+                        mode: watchdogMode,
+                        retry_attempted: true,
+                        retry_succeeded: false,
+                        clarify_asked: true,
+                        clarify_message: watchdogClarifyMsg,
+                        attempt_1: {
+                          verdict: watchdogAttempt1.verdict,
+                          dropped_concepts: watchdogAttempt1.dropped_concepts,
+                          reasoning: watchdogAttempt1.reasoning,
+                          latency_ms: watchdogAttempt1.latency_ms,
+                        },
+                        attempt_2: {
+                          verdict: watchdogAttempt2.verdict,
+                          dropped_concepts: watchdogAttempt2.dropped_concepts,
+                          reasoning: watchdogAttempt2.reasoning,
+                          latency_ms: watchdogAttempt2.latency_ms,
+                        },
+                        regex_check_action: completenessResult.recommended_action,
+                      },
+                      userId: task.user_id,
+                      conversationId: task.conversation_id,
+                    }).catch((e: any) => console.warn(`[PASS2_WATCHDOG] Artefact creation failed (non-fatal): ${e.message}`));
+
+                    const watchdogMessageId = randomUUID();
+
+                    await Promise.all([
+                      supabase!.from('supervisor_tasks').update({ status: 'completed', result: { response: watchdogClarifyMsg.substring(0, 200), message_id: watchdogMessageId, clarify_source: 'pass2_watchdog' } }).eq('id', task.id),
+                      supabase!.from('messages').insert({ id: watchdogMessageId, conversation_id: task.conversation_id, role: 'assistant', content: sanitizeMessageContent(watchdogClarifyMsg), source: 'supervisor', metadata: { supervisor_task_id: task.id, run_id: jobId, clarify_source: 'pass2_watchdog', dropped_concepts: watchdogAttempt2.dropped_concepts }, created_at: Date.now() }).select().single(),
+                    ]);
+
+                    await storage.updateAgentRun(jobId, {
+                      status: 'clarifying',
+                      terminalState: null,
+                      metadata: {
+                        verdict: 'pass2_watchdog_clarify',
+                        awaiting: 'user_input',
+                        dropped_concepts: watchdogAttempt2.dropped_concepts,
+                      },
+                    }).catch(() => {});
+
+                    console.log(`[PASS2_WATCHDOG] CLARIFY — asking user about dropped concepts, run paused`);
+                    await emitTaskExecutionCompleted('pass2_watchdog_clarify');
+                    return;
                   }
                 }
 

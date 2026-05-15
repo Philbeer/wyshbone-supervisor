@@ -249,3 +249,54 @@ export async function runPass2Watchdog(
 
   return result;
 }
+
+/**
+ * Build a user-facing clarify question from watchdog-dropped concepts.
+ * Template-based so it's deterministic and zero-latency. Can be upgraded
+ * to LLM-generated in a future iteration if the templated message feels
+ * robotic.
+ */
+export function buildWatchdogClarifyMessage(droppedConcepts: WatchdogDroppedConcept[]): string {
+  if (!droppedConcepts || droppedConcepts.length === 0) {
+    return "I want to make sure I understand your request correctly. Could you rephrase it?";
+  }
+
+  const intros = [
+    "I want to make sure I capture your request correctly.",
+  ];
+
+  const lines: string[] = [intros[0]];
+
+  for (const d of droppedConcepts) {
+    const phrase = d.matched_phrase || '(unspecified phrase)';
+    switch (d.category) {
+      case 'relationship':
+        lines.push(`When you said "${phrase}", do you mean an actual relationship between the entity and another party — or just a mention on a website?`);
+        break;
+      case 'exclusion':
+        lines.push(`When you said "${phrase}", should I strictly exclude that category from the results?`);
+        break;
+      case 'time':
+        lines.push(`When you said "${phrase}", what time range do you want me to apply?`);
+        break;
+      case 'status':
+        lines.push(`When you said "${phrase}", how would you like me to verify current status?`);
+        break;
+      case 'scoping':
+        lines.push(`When you said "${phrase}", how strict should that scoping be?`);
+        break;
+      case 'website_evidence':
+        lines.push(`When you said "${phrase}", should I look for evidence on the entity's own website?`);
+        break;
+      case 'ranking':
+        lines.push(`When you said "${phrase}", what ranking criteria should I use?`);
+        break;
+      default:
+        lines.push(`I'm not sure how to handle "${phrase}" — could you clarify what you mean?`);
+    }
+  }
+
+  lines.push("Could you confirm or rephrase?");
+
+  return lines.join("\n\n");
+}
