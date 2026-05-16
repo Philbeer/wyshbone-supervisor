@@ -1,0 +1,44 @@
+Open server/supervisor/pass2-watchdog.ts.
+
+Make four changes in this file. All four together.
+
+CHANGE 1 — TypeScript type at the top of the file:
+
+Find the line:
+  category: 'relationship' | 'time' | 'status' | 'website_evidence' | 'scoping' | 'exclusion' | 'ranking' | 'other';
+
+Replace it with:
+  category: 'relationship' | 'time' | 'status' | 'website_evidence' | 'scoping' | 'exclusion' | 'ranking' | 'inferential_qualifier' | 'other';
+
+CHANGE 2 — WATCHDOG_SYSTEM_PROMPT categories list:
+
+Find the numbered list of categories that starts with "1. RELATIONSHIP" and ends with "7. RANKING — "best", "top 10", "highest rated" require ranking.".
+
+Immediately after the line for "7. RANKING" and before the line that starts with "Critical distinction between attribute_check and relationship_check:", insert the following new line:
+
+8. INFERENTIAL_QUALIFIER — qualifying adjectives in the raw query that modify the entity (examples: "independent", "family-run", "boutique", "high-end", "vegan-only", "specialist", "artisan", "sustainable", "ethical", "luxury", "budget", "local"). Test: if you removed the adjective, would the remaining noun still be a valid entity type? If YES, the adjective is a qualifier and MUST appear as a website_evidence constraint with reasoning_mode: "inferential" in the structured mission. If the structured mission contains the adjective only inside entity_category (and NOT as a separate constraint), that IS a dropped concept and must be flagged. Severity is HARD unless the user explicitly hedged (e.g. "preferably independent"). Do NOT flag adjectives that are part of the entity type itself (e.g. "wine" in "wine bar", "Italian" in "Italian restaurant", "fish and chip" in "fish and chip shop").
+
+CHANGE 3 — JSON schema in the same prompt:
+
+Find the line:
+  "category": "relationship" | "time" | "status" | "website_evidence" | "scoping" | "exclusion" | "ranking" | "other",
+
+Replace it with:
+  "category": "relationship" | "time" | "status" | "website_evidence" | "scoping" | "exclusion" | "ranking" | "inferential_qualifier" | "other",
+
+CHANGE 4 — buildWatchdogClarifyMessage function:
+
+Find the switch statement inside buildWatchdogClarifyMessage. Locate the case for 'ranking':
+
+      case 'ranking':
+        lines.push(`When you said "${phrase}", what ranking criteria should I use?`);
+        break;
+
+Immediately after that case (before "default:"), insert a new case:
+
+      case 'inferential_qualifier':
+        lines.push(`When you said "${phrase}", should I strictly filter for that — or treat it as a soft preference?`);
+        break;
+
+
+Make ONLY these four changes. Do not touch any other code, file, or test. Do not commit. Report when done with the line numbers of each change.
