@@ -1,0 +1,40 @@
+REPO: wyshbone-supervisor-Post-CC
+GOAL: Stop the system from silently collapsing forward-looking temporal queries ("upcoming", "next", "this weekend") into today's date as a string match. Teach the LLM, via the existing temporal rules block, what to do with future-tense temporal queries instead.
+
+ONE-FILE EDIT — server/supervisor/current-context.ts
+
+Open server/supervisor/current-context.ts.
+
+Find the function `getTemporalVerificationRules(cutoffDate: string)`. It currently returns a string containing 6 numbered rules, all of which are about PAST events (opened, established, etc.). 
+
+LEAVE all 6 existing rules unchanged. We're appending a new section at the end of the returned string, just before the closing backtick.
+
+Find the line that reads:
+   6. If no opening date can be found, the constraint is NOT met (cannot verify without evidence).`;
+
+Replace it with this — same line 6 unchanged, then a new section appended:
+
+   6. If no opening date can be found, the constraint is NOT met (cannot verify without evidence).
+
+FUTURE / UPCOMING EVENTS (apply when constraint involves future-tense words like "upcoming", "next", "future", "soon", "this weekend", "this month", "this year" referring to events that have not happened yet):
+A. These queries are NOT date-cutoff checks. The user is asking about events scheduled for a date AFTER today.
+B. DO NOT emit today's date (${cutoffDate} or any literal date string) as the constraint value. Today's date is the REFERENCE point, not the value to match against.
+C. The correct treatment is to flag the constraint as inherently uncertain. Either:
+   - emit the time_constraint with verifiability="proxy" and a chosen_proxy of "event_listing_sites" (Eventbrite, festival aggregators, news mentions of upcoming dates), OR
+   - emit it with verifiability="unverifiable" if no proxy can confirm the event will happen as scheduled.
+D. Valid evidence of an upcoming event:
+   - An explicit future date on the page (e.g. "23-25 May 2026", "this June", "Summer 2026") that parses to a date AFTER today (${cutoffDate})
+   - A "tickets on sale" / "book now" / "register" call-to-action paired with a future date
+   - Recent news mentions of the event with a future date
+E. NOT valid evidence:
+   - The word "annual" or "yearly" alone (an event being annual does not mean it is upcoming THIS year)
+   - A historical page about past editions of the event with no current date
+   - Today's date appearing anywhere on the page (this is just the current date, not evidence of a scheduled event)
+F. If the page only describes that the event exists, with no future date, mark the lead's time_constraint as "no_evidence" — do NOT use today's date as a fallback match.`;
+
+Save the file. Do not change anything else in current-context.ts. Do not touch any other file.
+
+VALIDATION:
+Run `npx tsc --noEmit` and confirm zero new errors.
+
+Report back with: (1) confirmation of zero new TypeScript errors, (2) the exact line range where the new block was inserted.
