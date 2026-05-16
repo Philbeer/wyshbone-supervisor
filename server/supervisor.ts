@@ -3822,6 +3822,39 @@ class SupervisorService {
       const computedVerifiedCount = countVerifiedLeads(
         (ds?.delivered_exact as any[]) || []
       );
+      // Pull the latest tower_judgement artefact for this run so the response
+      // builder can surface Tower's honest explanation when it failed.
+      // Defensive: if anything fails or no artefact exists, both fields stay null
+      // and the response builder behaves exactly as before.
+      let towerRationale: string | null = null;
+      let towerFailingConstraintReason: string | null = null;
+      try {
+        const towerArtefacts = await storage.getArtefactsByRunId(jobId);
+        const towerJudgements = (towerArtefacts || []).filter((a: any) => a.type === 'tower_judgement');
+        if (towerJudgements.length > 0) {
+          // Sort by created_at descending and take the most recent
+          towerJudgements.sort((a: any, b: any) => {
+            const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+            const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+            return tb - ta;
+          });
+          const latestJudgement = towerJudgements[0];
+          const payload = ((latestJudgement.payloadJson as any) || {}) as any;
+          // Tower's main rationale lives at payload.rationale OR payload.reasons[0]
+          if (typeof payload.rationale === 'string' && payload.rationale.trim().length > 0) {
+            towerRationale = payload.rationale.trim();
+          } else if (Array.isArray(payload.reasons) && payload.reasons.length > 0 && typeof payload.reasons[0] === 'string') {
+            towerRationale = payload.reasons[0].trim();
+          }
+          // Specific failing constraint reason (from PHASE_5 Tower output)
+          if (typeof payload.failing_constraint_reason === 'string' && payload.failing_constraint_reason.trim().length > 0) {
+            towerFailingConstraintReason = payload.failing_constraint_reason.trim();
+          }
+        }
+      } catch (towerFetchErr: any) {
+        console.warn(`[RESPONSE_BUILDER] Failed to fetch tower_judgement for honest-message surfacing (non-fatal): ${towerFetchErr.message}`);
+      }
+
       response = await buildNaturalResponse({
         businessType: earlyParsedGoal?.business_type ?? missionResult?.mission?.entity_category ?? 'results',
         location: earlyParsedGoal?.location ?? missionResult?.mission?.location_text ?? '',
@@ -3861,6 +3894,8 @@ class SupervisorService {
           return null;                            // full or near-full delivery, no classification needed
         })(),
         scarcityNote: null,
+        towerRationale,
+        towerFailingConstraintReason,
       });
     } catch (respErr: any) {
       console.warn(`[RESPONSE_BUILDER] Failed — using neutral fallback: ${respErr.message}`);

@@ -17,6 +17,8 @@ export interface ResponseBuilderInput {
   loopSummaries?: Array<{ executor: string; found: number; verdict: string }> | null;
   scarcityType?: 'A' | 'B' | 'C' | null;
   scarcityNote?: string | null;
+  towerRationale?: string | null;
+  towerFailingConstraintReason?: string | null;
 }
 
 const EXECUTOR_LABELS: Record<string, string> = {
@@ -76,6 +78,19 @@ function buildFallbackResponse(input: ResponseBuilderInput): string {
         ? `Try a broader search term or a wider area.`
         : `Ask me to monitor for new results or expand the search area.`;
 
+  // If Tower failed AND we have a rationale, override the Results line to be honest.
+  // This is the fallback path — used only when the LLM call fails. It keeps the
+  // user-facing message coherent even without the LLM.
+  if (towerFailed && input.towerRationale && deliveredCount > 0) {
+    const honestResultsLine = `Found ${deliveredCount} ${businessType} in ${location}, but the search couldn't fully verify all requirements.`;
+    return [
+      `- **Results:** ${honestResultsLine}`,
+      `- **Verification:** ${verificationLine}`,
+      `- **Market:** ${input.towerRationale.substring(0, 200)}`,
+      `- **Suggestion:** Try refining the search or relaxing one of the constraints.`,
+    ].join('\n\n');
+  }
+
   return [
     `- **Results:** ${resultsLine}`,
     `- **Verification:** ${verificationLine}`,
@@ -101,6 +116,19 @@ export async function buildNaturalResponse(input: ResponseBuilderInput): Promise
   // it explicitly to avoid defaulting to "none verified" when Tower errored.
   facts.push(`Per-lead verified with evidence: ${verifiedCount} (this is the source of truth for the Verification bullet)`);
   facts.push(`Tower verdict: ${towerVerdict ?? 'unknown'} (use this only for Market/Suggestion bullets, NOT Verification)`);
+
+  // Tower's own honest reasoning — included verbatim when Tower failed the run.
+  // The Tower has already done the LLM reasoning about what went wrong; we surface it
+  // here so the user gets a clear explanation instead of a generic verified-count line.
+  const towerFailed = ['fail', 'stop', 'change_plan', 'error', 'stopped', 'failed'].includes(
+    String(towerVerdict ?? '').toLowerCase(),
+  );
+  if (towerFailed && input.towerRationale) {
+    facts.push(`Tower's reason for failing this run: "${input.towerRationale}"`);
+  }
+  if (towerFailed && input.towerFailingConstraintReason) {
+    facts.push(`Specific constraint that could not be verified: "${input.towerFailingConstraintReason}"`);
+  }
 
   if (loopSummaries && loopSummaries.length > 0) {
     const loopLines = loopSummaries.map((s, i) =>
@@ -140,6 +168,7 @@ RULES:
 - Each bullet's text must be a single sentence — no run-ons.
 - Be specific — use the actual numbers, location, and entity type from the facts above.
 - Verification bullet MUST use the "Per-lead verified with evidence" number. If verified > 0, say "N of M were verified with on-page evidence" (or "all N verified" when N === M). If verified === 0, say "None could be independently verified." NEVER use Tower verdict to write the Verification bullet — Tower verdict is for Market/Suggestion only.
+- If Tower's reason for failing this run is provided in the facts, the Results bullet MUST explain in plain English what was delivered AND what could not be verified, paraphrasing the Tower's reason naturally. Do NOT copy the Tower's wording verbatim. The Suggestion bullet should offer a concrete alternative or next step that addresses the unverifiable constraint (e.g. rank by a proxy, relax the constraint, refine the search). Never claim something was verified that the Tower says was not.
 - If Tower verdict is "error", do NOT mention it in the bullets. The user does not need to know about service errors.
 - Market bullet: if scarcityType is null, write "Healthy supply in this area." If Type A (batch limit hit), write "There may be more — try a wider search." If Type B (real scarcity), write "Market here looks genuinely thin." If Type C (constraint unverifiable), write "Some constraints couldn't be verified reliably."
 - Suggestion bullet: if a monitor has been set up, say monitoring is already active. Otherwise pick the single most relevant action — email a lead, refine results, set up monitoring, or expand the area.
