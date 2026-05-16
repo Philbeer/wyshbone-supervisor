@@ -34,7 +34,23 @@ export function getTemporalVerificationRules(cutoffDate: string): string {
    - "New micropub" or "newly opened" with supporting date evidence
    - First Google reviews appearing only after ${cutoffDate}
 5. If the opening date is BEFORE ${cutoffDate}, the constraint is NOT met regardless of any other recent activity.
-6. If no opening date can be found, the constraint is NOT met (cannot verify without evidence).`;
+6. If no opening date can be found, the constraint is NOT met (cannot verify without evidence).
+
+FUTURE / UPCOMING EVENTS (apply when constraint involves future-tense words like "upcoming", "next", "future", "soon", "this weekend", "this month", "this year" referring to events that have not happened yet):
+A. These queries are NOT date-cutoff checks. The user is asking about events scheduled for a date AFTER today.
+B. DO NOT emit today's date (${cutoffDate} or any literal date string) as the constraint value. Today's date is the REFERENCE point, not the value to match against.
+C. The correct treatment is to flag the constraint as inherently uncertain. Either:
+   - emit the time_constraint with verifiability="proxy" and a chosen_proxy of "event_listing_sites" (Eventbrite, festival aggregators, news mentions of upcoming dates), OR
+   - emit it with verifiability="unverifiable" if no proxy can confirm the event will happen as scheduled.
+D. Valid evidence of an upcoming event:
+   - An explicit future date on the page (e.g. "23-25 May 2026", "this June", "Summer 2026") that parses to a date AFTER today (${cutoffDate})
+   - A "tickets on sale" / "book now" / "register" call-to-action paired with a future date
+   - Recent news mentions of the event with a future date
+E. NOT valid evidence:
+   - The word "annual" or "yearly" alone (an event being annual does not mean it is upcoming THIS year)
+   - A historical page about past editions of the event with no current date
+   - Today's date appearing anywhere on the page (this is just the current date, not evidence of a scheduled event)
+F. If the page only describes that the event exists, with no future date, mark the lead's time_constraint as "no_evidence" — do NOT use today's date as a fallback match.`;
 }
 
 export function getCurrentContextPreamble(): string {
