@@ -815,23 +815,59 @@ function selectModel(): string {
   return 'none';
 }
 
+function isRateLimitError(err: any): boolean {
+  if (!err) return false;
+  if (err?.status === 429) return true;
+  if (err?.status === 529) return true; // Anthropic overloaded
+  const msg = String(err?.message ?? '').toLowerCase();
+  return msg.includes('429') || msg.includes('rate limit') || msg.includes('insufficient_quota') || msg.includes('overloaded') || msg.includes('too many requests');
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function callLLM(model: string, systemPrompt: string, userPrompt: string): Promise<string> {
-  if (model === 'gpt-4o-mini') {
+  const MAX_RETRIES = 3;
+  const BASE_BACKOFF_MS = 2_000;
+
+  let lastErr: any = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      return await callOpenAI(systemPrompt, userPrompt);
-    } catch (err: any) {
-      const is429 = err?.status === 429 || String(err?.message ?? '').includes('429');
-      if (is429 && process.env.ANTHROPIC_API_KEY) {
-        console.warn('[MISSION_EXTRACTOR] OpenAI 429 — falling back to Claude haiku for routing');
-        return callAnthropic('claude-3-5-haiku-20241022', systemPrompt, userPrompt);
+      if (model === 'gpt-4o-mini') {
+        return await callOpenAI(systemPrompt, userPrompt);
       }
-      throw err;
+      if (model.startsWith('claude-')) {
+        return await callAnthropic(model, systemPrompt, userPrompt);
+      }
+      throw new Error('No LLM API key available (OPENAI_API_KEY or ANTHROPIC_API_KEY required)');
+    } catch (err: any) {
+      lastErr = err;
+      const rateLimit = isRateLimitError(err);
+
+      // If OpenAI rate-limited and we have Anthropic, try the fallback immediately first
+      if (rateLimit && model === 'gpt-4o-mini' && process.env.ANTHROPIC_API_KEY && attempt === 0) {
+        console.warn(`[MISSION_EXTRACTOR] OpenAI rate-limited — trying Anthropic Haiku fallback`);
+        try {
+          return await callAnthropic('claude-3-5-haiku-20241022', systemPrompt, userPrompt);
+        } catch (fallbackErr: any) {
+          lastErr = fallbackErr;
+          if (!isRateLimitError(fallbackErr)) throw fallbackErr;
+          // Both rate-limited — fall through to backoff retry
+        }
+      }
+
+      if (!rateLimit) throw err; // non-rate-limit errors fail fast
+      if (attempt === MAX_RETRIES) break;
+
+      const backoff = BASE_BACKOFF_MS * Math.pow(2, attempt); // 2s, 4s, 8s
+      console.warn(`[MISSION_EXTRACTOR] Rate-limited (attempt ${attempt + 1}/${MAX_RETRIES + 1}) — backing off ${backoff}ms`);
+      await sleep(backoff);
     }
   }
-  if (model.startsWith('claude-')) {
-    return callAnthropic(model, systemPrompt, userPrompt);
-  }
-  throw new Error('No LLM API key available (OPENAI_API_KEY or ANTHROPIC_API_KEY required)');
+
+  throw lastErr || new Error('callLLM exhausted retries');
 }
 
 async function callOpenAI(systemPrompt: string, userPrompt: string): Promise<string> {
