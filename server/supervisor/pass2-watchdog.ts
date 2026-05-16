@@ -6,7 +6,7 @@ export type WatchdogVerdict = 'pass' | 'retry' | 'block';
 export type WatchdogMode = 'off' | 'shadow' | 'retry' | 'full';
 
 export interface WatchdogDroppedConcept {
-  category: 'relationship' | 'time' | 'status' | 'website_evidence' | 'scoping' | 'exclusion' | 'ranking' | 'other';
+  category: 'relationship' | 'time' | 'status' | 'website_evidence' | 'scoping' | 'exclusion' | 'ranking' | 'inferential_qualifier' | 'other';
   matched_phrase: string;
   expected_constraint_type: string;
   severity: 'hard' | 'soft';
@@ -43,6 +43,7 @@ Categories to check:
 5. STATUS — "currently trading", "still operating", "for sale" require status_check.
 6. WEBSITE_EVIDENCE — "mentions X on their website", "their site says Y" require website_evidence.
 7. RANKING — "best", "top 10", "highest rated" require ranking.
+8. INFERENTIAL_QUALIFIER — qualifying adjectives in the raw query that modify the entity (examples: "independent", "family-run", "boutique", "high-end", "vegan-only", "specialist", "artisan", "sustainable", "ethical", "luxury", "budget", "local"). Test: if you removed the adjective, would the remaining noun still be a valid entity type? If YES, the adjective is a qualifier and MUST appear as a website_evidence constraint with reasoning_mode: "inferential" in the structured mission. If it is missing, flag it here.
 
 Critical distinction between attribute_check and relationship_check:
 - "restaurants that serve food in Bath" → attribute_check (serving food is an inherent attribute of being a restaurant — no other entity involved)
@@ -61,7 +62,7 @@ Output STRICT JSON ONLY. No preamble, no commentary, no markdown fences. Schema:
   "verdict": "pass" | "retry" | "block",
   "dropped_concepts": [
     {
-      "category": "relationship" | "time" | "status" | "website_evidence" | "scoping" | "exclusion" | "ranking" | "other",
+      "category": "relationship" | "time" | "status" | "website_evidence" | "scoping" | "exclusion" | "ranking" | "inferential_qualifier" | "other",
       "matched_phrase": "exact phrase from raw query",
       "expected_constraint_type": "relationship_check | time_constraint | status_check | website_evidence | ranking | location_constraint",
       "severity": "hard" | "soft",
@@ -290,6 +291,9 @@ export function buildWatchdogClarifyMessage(droppedConcepts: WatchdogDroppedConc
         break;
       case 'ranking':
         lines.push(`When you said "${phrase}", what ranking criteria should I use?`);
+        break;
+      case 'inferential_qualifier':
+        lines.push(`When you said "${phrase}", should I strictly filter for that — or treat it as a soft preference?`);
         break;
       default:
         lines.push(`I'm not sure how to handle "${phrase}" — could you clarify what you mean?`);
