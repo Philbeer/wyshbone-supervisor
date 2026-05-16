@@ -96,7 +96,7 @@ interface DiscoveredLead {
   lng: number | null;
 }
 
-interface EvidenceResult {
+export interface EvidenceResult {
   leadIndex: number;
   leadName: string;
   leadPlaceId: string;
@@ -252,6 +252,135 @@ function buildMatchSummary(
     }
   }
   return `Included because ${reasons.join('; ')}.`;
+}
+
+export interface ConstraintResult {
+  constraint_id: string;
+  constraint_type: string;
+  constraint_field: string;
+  constraint_value: string;
+  hardness: 'hard' | 'soft';
+  status: 'verified' | 'unverified' | 'not_attempted';
+  total_checked: number;
+  verified_count: number;
+  unverified_count: number;
+  sample_evidence: Array<{
+    lead_name: string;
+    quote: string | null;
+    source_url: string | null;
+    matched_phrase: string;
+    verification_status: string;
+  }>;
+}
+
+export interface VerificationSummary {
+  verified_exact_count: number;
+  total_constraints: number;
+  hard_constraints_satisfied: number;
+  hard_constraints_total: number;
+  constraint_results: ConstraintResult[];
+}
+
+export function buildVerificationSummary(
+  evidenceResults: EvidenceResult[],
+  structuredConstraints: StructuredConstraintPayload[],
+  deliveredLeads: Array<{ name: string; placeId: string }>,
+): VerificationSummary {
+  const byConstraint = new Map<string, EvidenceResult[]>();
+  for (const er of evidenceResults) {
+    const key = `${er.constraintType}::${er.constraintField}::${er.constraintValue}`;
+    const arr = byConstraint.get(key) || [];
+    arr.push(er);
+    byConstraint.set(key, arr);
+  }
+
+  const constraint_results: ConstraintResult[] = structuredConstraints.map((sc) => {
+    const key = `${sc.type}::${sc.field}::${String(sc.value ?? '')}`;
+    const group = byConstraint.get(key) || [];
+
+    if (sc.type === 'location_constraint') {
+      return {
+        constraint_id: sc.id,
+        constraint_type: sc.type,
+        constraint_field: sc.field,
+        constraint_value: String(sc.value ?? ''),
+        hardness: sc.hardness,
+        status: 'verified',
+        total_checked: deliveredLeads.length,
+        verified_count: deliveredLeads.length,
+        unverified_count: 0,
+        sample_evidence: [],
+      };
+    }
+
+    const verified_count = group.filter(g => g.evidenceFound).length;
+    const total_checked = group.length;
+    const unverified_count = total_checked - verified_count;
+
+    const status: ConstraintResult['status'] =
+      total_checked === 0 ? 'not_attempted' :
+      verified_count > 0 ? 'verified' :
+      'unverified';
+
+    const sample_evidence = group
+      .filter(g => g.evidenceFound && g.snippets.length > 0)
+      .slice(0, 3)
+      .map(g => ({
+        lead_name: g.leadName,
+        quote: g.snippets[0]?.substring(0, 300) ?? null,
+        source_url: g.sourceUrl,
+        matched_phrase: g.constraintValue,
+        verification_status: g.towerStatus === 'verified' ? 'verified'
+          : g.towerStatus === 'weak_match' ? 'weak_match'
+          : g.evidenceStrength === 'strong' ? 'proxy'
+          : 'unverified',
+      }));
+
+    return {
+      constraint_id: sc.id,
+      constraint_type: sc.type,
+      constraint_field: sc.field,
+      constraint_value: String(sc.value ?? ''),
+      hardness: sc.hardness,
+      status,
+      total_checked,
+      verified_count,
+      unverified_count,
+      sample_evidence,
+    };
+  });
+
+  const verifiedLeadPlaceIds = new Set<string>();
+  for (const lead of deliveredLeads) {
+    let allHardSatisfied = true;
+    for (const sc of structuredConstraints) {
+      if (sc.hardness !== 'hard') continue;
+      if (sc.type === 'location_constraint') continue;
+      if (sc.type === 'text_compare') continue;
+
+      const key = `${sc.type}::${sc.field}::${String(sc.value ?? '')}`;
+      const group = byConstraint.get(key) || [];
+      const leadEvidence = group.find(g => g.leadPlaceId === lead.placeId);
+      if (!leadEvidence || !leadEvidence.evidenceFound) {
+        allHardSatisfied = false;
+        break;
+      }
+    }
+    if (allHardSatisfied) verifiedLeadPlaceIds.add(lead.placeId);
+  }
+
+  const hard_constraints_total = constraint_results.filter(cr => cr.hardness === 'hard').length;
+  const hard_constraints_satisfied = constraint_results.filter(
+    cr => cr.hardness === 'hard' && cr.status === 'verified',
+  ).length;
+
+  return {
+    verified_exact_count: verifiedLeadPlaceIds.size,
+    total_constraints: structuredConstraints.length,
+    hard_constraints_satisfied,
+    hard_constraints_total,
+    constraint_results,
+  };
 }
 
 export function deriveSearchParams(mission: StructuredMission): {
@@ -2750,6 +2879,13 @@ IMPORTANT:
     conversationId,
   }).catch(() => {});
 
+  const verificationSummary = buildVerificationSummary(
+    evidenceResults,
+    structuredConstraints,
+    finalLeads.map(l => ({ name: l.name, placeId: l.placeId })),
+  );
+  console.log(`[MISSION_EXEC] Verification summary: ${verificationSummary.verified_exact_count} leads with all hard constraints verified, ${verificationSummary.hard_constraints_satisfied}/${verificationSummary.hard_constraints_total} hard constraints met`);
+
   const finalDeliveryArtefact = await createArtefact({
     runId,
     type: 'final_delivery',
@@ -2770,6 +2906,7 @@ IMPORTANT:
       replans_used: replansUsed,
       candidate_count_from_google: candidateCountFromGoogle,
       evidence_summary: evidenceSummary,
+      verification_summary: verificationSummary,
       evidence_ready_for_tower: evidenceWasAttempted,
       run_deadline_exceeded: runDeadlineExceeded,
       verification_policy: plan.verification_policy.verification_policy,

@@ -22,7 +22,8 @@ import { logAFREvent } from './afr-logger';
 import { storage } from '../storage';
 import type { IntentNarrative } from './mission-schema';
 import type { VerificationPolicy } from './verification-policy';
-import type { StructuredConstraintPayload } from './mission-executor';
+import type { StructuredConstraintPayload, EvidenceResult, ConstraintResult, VerificationSummary } from './mission-executor';
+import { buildVerificationSummary } from './mission-executor';
 import { requestSemanticVerification, type TowerSemanticStatus } from './tower-semantic-verify';
 
 const MAX_SEARCH_ROUNDS = 3;
@@ -697,6 +698,44 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
     };
   });
 
+  const gpt4oEvidenceResults: EvidenceResult[] = [];
+  for (let li = 0; li < cappedLeads.length; li++) {
+    const lead = cappedGpt4oLeads[li];
+    const placeId = cappedLeads[li].placeId;
+    const agg = perLeadAgg.get(placeId);
+    for (const constraint of hardEvidenceConstraints) {
+      const constraintValue = String(constraint.value ?? '').trim();
+      if (!constraintValue) continue;
+      const perCon = agg?.perConstraint.find(pc => pc.constraintValue === constraintValue);
+      const towerStatus = perCon?.towerStatus ?? null;
+      const evidenceFound = !!lead.evidence && towerStatus !== 'no_evidence' && towerStatus !== 'insufficient_evidence';
+      gpt4oEvidenceResults.push({
+        leadIndex: li,
+        leadName: lead.name,
+        leadPlaceId: placeId,
+        constraintField: constraint.field,
+        constraintValue,
+        constraintType: constraint.type,
+        evidenceFound,
+        evidenceStrength: towerStatus === 'verified' ? 'strong' : towerStatus === 'weak_match' ? 'weak' : 'none',
+        isBotBlocked: false,
+        towerStatus,
+        towerConfidence: perCon?.towerConfidence ?? null,
+        towerReasoning: perCon?.towerReasoning ?? null,
+        sourceUrl: lead.source_url || null,
+        snippets: lead.evidence ? [lead.evidence.substring(0, 300)] : [],
+        verdict: towerStatus === 'verified' ? 'verified' : towerStatus === 'weak_match' ? 'plausible' : 'no_evidence',
+      });
+    }
+  }
+
+  const verificationSummary = buildVerificationSummary(
+    gpt4oEvidenceResults,
+    structuredConstraints,
+    cappedLeads.map(l => ({ name: l.name, placeId: l.placeId })),
+  );
+  console.log(`[GPT4O_SEARCH] Verification summary: ${verificationSummary.verified_exact_count} leads with all hard constraints verified, ${verificationSummary.hard_constraints_satisfied}/${verificationSummary.hard_constraints_total} hard constraints met`);
+
   const finalDeliveryArtefact = await createArtefact({
     runId,
     type: 'final_delivery',
@@ -724,13 +763,7 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
         findability: intentNarrative?.findability ?? null,
         supplementary_search_fired: roundsPerformed > 1,
       },
-      // Include verification summary inline so Tower doesn't need a DB lookup
-      verification_summary: {
-        verified_exact_count: cappedGpt4oLeads.filter(l => l.confidence === 'high').length,
-        verified_weak_count: cappedGpt4oLeads.filter(l => l.confidence === 'medium').length,
-        unverified_count: cappedGpt4oLeads.filter(l => l.confidence === 'low').length,
-        total_leads: cappedLeads.length,
-      },
+      verification_summary: verificationSummary,
       // Include delivered count and requested count at top level for Tower resolution
       delivered_count: cappedLeads.length,
       accumulated_count: cappedLeads.length,
