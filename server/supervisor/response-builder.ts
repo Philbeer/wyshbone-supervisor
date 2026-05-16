@@ -167,13 +167,44 @@ RULES:
 - Each bullet on its own line, separated by a blank line.
 - Each bullet's text must be a single sentence — no run-ons.
 - Be specific — use the actual numbers, location, and entity type from the facts above.
+- **Results** bullet ALWAYS states the "Delivered" count from the facts. NEVER use "Per-lead verified with evidence" in the Results bullet. The Results bullet answers "how many leads did we surface to the user?" — that is always Delivered, regardless of how many were verified. Example: if Delivered=16 and verified=0, Results says "Found 16 dentists in Brighton." NOT "0 dentists were found."
+- The Results and Verification bullets describe DIFFERENT things and must NEVER contradict each other. Results = count delivered. Verification = count independently confirmed. Both can be true at the same time. Example pair: "Results: Found 16 dentists in Brighton. Verification: None could be independently verified." — both correct, no contradiction.
 - Verification bullet MUST use the "Per-lead verified with evidence" number. If verified > 0, say "N of M were verified with on-page evidence" (or "all N verified" when N === M). If verified === 0, say "None could be independently verified." NEVER use Tower verdict to write the Verification bullet — Tower verdict is for Market/Suggestion only.
-- If Tower's reason for failing this run is provided in the facts, the Results bullet MUST explain in plain English what was delivered AND what could not be verified, paraphrasing the Tower's reason naturally. Do NOT copy the Tower's wording verbatim. The Suggestion bullet should offer a concrete alternative or next step that addresses the unverifiable constraint (e.g. rank by a proxy, relax the constraint, refine the search). Never claim something was verified that the Tower says was not.
+- If Tower's reason for failing this run is provided in the facts, the **Market** bullet MUST paraphrase the Tower's reason naturally (do NOT copy verbatim) — this overrides the default scarcityType-based Market wording for this case. The **Suggestion** bullet should offer a concrete alternative or next step that addresses the unverifiable constraint (e.g. rank by a proxy, relax the constraint, refine the search). The **Results** bullet stays clean — it states the delivered count only. Never claim something was verified that the Tower says was not.
 - If Tower verdict is "error", do NOT mention it in the bullets. The user does not need to know about service errors.
 - Market bullet: if scarcityType is null, write "Healthy supply in this area." If Type A (batch limit hit), write "There may be more — try a wider search." If Type B (real scarcity), write "Market here looks genuinely thin." If Type C (constraint unverifiable), write "Some constraints couldn't be verified reliably."
 - Suggestion bullet: if a monitor has been set up, say monitoring is already active. Otherwise pick the single most relevant action — email a lead, refine results, set up monitoring, or expand the area.
 - Do NOT start with "I'm happy to" or any sycophantic opener.
-- Do NOT add any text before the first bullet or after the last bullet.`;
+- Do NOT add any text before the first bullet or after the last bullet.
+
+EXAMPLES OF CORRECT OUTPUT (use these to anchor the pattern, not as literal templates):
+
+Example 1 — Tower passed, all verified:
+- **Results:** Found 12 accountants in Kent.
+
+- **Verification:** All 12 verified with on-page evidence.
+
+- **Market:** Healthy supply in this area.
+
+- **Suggestion:** Say "email the top one" to reach out, or ask me to refine the results.
+
+Example 2 — Tower failed, some delivered, none verified:
+- **Results:** Found 16 dentists in Brighton.
+
+- **Verification:** None could be independently verified.
+
+- **Market:** Ranking by "best" needs comparing reviews across sources, which wasn't done.
+
+- **Suggestion:** Try ranking by Google rating, or refine to specific dental services.
+
+Example 3 — Tower passed, partial verification:
+- **Results:** Found 9 upcoming festivals in Bristol.
+
+- **Verification:** 5 of 9 verified with on-page evidence.
+
+- **Market:** Healthy supply in this area.
+
+- **Suggestion:** Ask me to monitor for new results or expand the search area.`;
 
   try {
     const response = await callLLMText(
