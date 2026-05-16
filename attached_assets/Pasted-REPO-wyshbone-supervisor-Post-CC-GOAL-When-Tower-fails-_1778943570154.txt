@@ -1,0 +1,112 @@
+REPO: wyshbone-supervisor-Post-CC
+GOAL: When Tower fails a run, surface Tower's own honest explanation in the user-facing message instead of just showing a generic "verified count: 0" line.
+
+This is a contained fix that only affects the failure case. Pass cases are unchanged.
+
+═══ CHANGE 1 — server/supervisor/response-builder.ts ═══
+
+Open server/supervisor/response-builder.ts.
+
+(a) Find the ResponseBuilderInput interface near the top of the file. Add two new optional fields AFTER the existing scarcityNote field and BEFORE the closing brace. Both must be optional with `| null`:
+
+  towerRationale?: string | null;
+  towerFailingConstraintReason?: string | null;
+
+(b) Find the buildNaturalResponse function. Inside it, find the block where `facts` is being assembled (starts with `const facts: string[] = [];` and continues with multiple `facts.push(...)` calls).
+
+AFTER the existing `facts.push(`Tower verdict: ${towerVerdict ?? 'unknown'}...` line and BEFORE the loopSummaries block, add this new block:
+
+  // Tower's own honest reasoning — included verbatim when Tower failed the run.
+  // The Tower has already done the LLM reasoning about what went wrong; we surface it
+  // here so the user gets a clear explanation instead of a generic verified-count line.
+  const towerFailed = ['fail', 'stop', 'change_plan', 'error', 'stopped', 'failed'].includes(
+    String(towerVerdict ?? '').toLowerCase(),
+  );
+  if (towerFailed && input.towerRationale) {
+    facts.push(`Tower's reason for failing this run: "${input.towerRationale}"`);
+  }
+  if (towerFailed && input.towerFailingConstraintReason) {
+    facts.push(`Specific constraint that could not be verified: "${input.towerFailingConstraintReason}"`);
+  }
+
+(c) Still inside buildNaturalResponse, find the system prompt string (starts with `const prompt = \`You are writing the delivery message...`).
+
+Find the "RULES:" block. AFTER the existing rule that starts "- Verification bullet MUST use the..." and BEFORE the rule that starts "- If Tower verdict is...", insert this new rule (keep the existing rules unchanged):
+
+- If Tower's reason for failing this run is provided in the facts, the Results bullet MUST explain in plain English what was delivered AND what could not be verified, paraphrasing the Tower's reason naturally. Do NOT copy the Tower's wording verbatim. The Suggestion bullet should offer a concrete alternative or next step that addresses the unverifiable constraint (e.g. rank by a proxy, relax the constraint, refine the search). Never claim something was verified that the Tower says was not.
+
+(d) In buildFallbackResponse (the deterministic fallback path), find the line where `verificationLine` is built. After the existing definition of `suggestionLine`, BEFORE the final return statement, add this block:
+
+  // If Tower failed AND we have a rationale, override the Results line to be honest.
+  // This is the fallback path — used only when the LLM call fails. It keeps the
+  // user-facing message coherent even without the LLM.
+  if (towerFailed && input.towerRationale && deliveredCount > 0) {
+    const honestResultsLine = `Found ${deliveredCount} ${businessType} in ${location}, but the search couldn't fully verify all requirements.`;
+    return [
+      `- **Results:** ${honestResultsLine}`,
+      `- **Verification:** ${verificationLine}`,
+      `- **Market:** ${input.towerRationale.substring(0, 200)}`,
+      `- **Suggestion:** Try refining the search or relaxing one of the constraints.`,
+    ].join('\n\n');
+  }
+
+Save the file. Do not change any other code in response-builder.ts.
+
+═══ CHANGE 2 — server/supervisor.ts (call site) ═══
+
+Open server/supervisor.ts. Find the line `response = await buildNaturalResponse({` (around line 3825).
+
+BEFORE that line, add this block to fetch the latest tower_judgement artefact and extract its rationale fields. Be defensive — if anything fails, fall back to null so the existing behaviour is preserved:
+
+      // Pull the latest tower_judgement artefact for this run so the response
+      // builder can surface Tower's honest explanation when it failed.
+      // Defensive: if anything fails or no artefact exists, both fields stay null
+      // and the response builder behaves exactly as before.
+      let towerRationale: string | null = null;
+      let towerFailingConstraintReason: string | null = null;
+      try {
+        const towerArtefacts = await storage.getArtefactsByRunId(jobId);
+        const towerJudgements = (towerArtefacts || []).filter((a: any) => a.type === 'tower_judgement');
+        if (towerJudgements.length > 0) {
+          // Sort by created_at descending and take the most recent
+          towerJudgements.sort((a: any, b: any) => {
+            const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+            const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+            return tb - ta;
+          });
+          const latestJudgement = towerJudgements[0];
+          const payload = (latestJudgement.payload_json || latestJudgement.payload || {}) as any;
+          // Tower's main rationale lives at payload.rationale OR payload.reasons[0]
+          if (typeof payload.rationale === 'string' && payload.rationale.trim().length > 0) {
+            towerRationale = payload.rationale.trim();
+          } else if (Array.isArray(payload.reasons) && payload.reasons.length > 0 && typeof payload.reasons[0] === 'string') {
+            towerRationale = payload.reasons[0].trim();
+          }
+          // Specific failing constraint reason (from PHASE_5 Tower output)
+          if (typeof payload.failing_constraint_reason === 'string' && payload.failing_constraint_reason.trim().length > 0) {
+            towerFailingConstraintReason = payload.failing_constraint_reason.trim();
+          }
+        }
+      } catch (towerFetchErr: any) {
+        console.warn(`[RESPONSE_BUILDER] Failed to fetch tower_judgement for honest-message surfacing (non-fatal): ${towerFetchErr.message}`);
+      }
+
+Then in the existing `response = await buildNaturalResponse({` call, add these two new arguments to the object passed in. Add them at the END of the existing argument list, AFTER the last existing field but BEFORE the closing brace:
+
+        towerRationale,
+        towerFailingConstraintReason,
+
+Do not change ANY other code in this call site. Do not change the response handling after the call. Do not change error handling.
+
+═══ VALIDATION ═══
+
+After both changes, run:
+
+  npx tsc --noEmit
+
+Confirm there are zero new TypeScript errors. If there are any, do not commit — show me the errors first.
+
+Report back with:
+1. Confirmation that both files compiled with zero new errors
+2. The exact line numbers where each change landed
+3. A diff snippet of the new code in each file (just the additions, not the whole file)
