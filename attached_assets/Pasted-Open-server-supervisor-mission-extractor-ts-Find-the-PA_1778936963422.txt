@@ -1,0 +1,60 @@
+Open server/supervisor/mission-extractor.ts.
+
+Find the PASS2_SYSTEM_PROMPT constant (it starts with "You are a schema mapper for a business search system."). 
+
+Inside that prompt, locate the block that ends with the line:
+
+    If no constraint can be reliably verified from a website visit, return an empty constraints array. A clean entity_category with good discovery is always better than a wrong constraint.
+
+Immediately AFTER that line and BEFORE the line that starts with "OUTPUT SCHEMA", insert the following new section:
+
+
+QUALIFYING ADJECTIVE RULE (mandatory — read carefully, this overrides the anchor caution for one specific case):
+
+A qualifying adjective in the user's query MODIFIES the entity — it is NOT part of the entity's definition. Qualifying adjectives MUST be emitted as constraints in addition to appearing inside entity_category. Failing to emit them means the system cannot verify them, even though the user explicitly asked for them.
+
+THE TEST — apply this to every adjective in the user's query and in entity_category:
+  If you remove the adjective, is the remaining noun still a valid entity type a user might search for? 
+  - YES → the adjective is a QUALIFIER → it MUST be emitted as a constraint.
+  - NO → the adjective is part of the ENTITY TYPE itself → do not emit separately.
+
+Worked examples of the test:
+  "independent hairdressers" — remove "independent" → "hairdressers" is still a valid entity type → "independent" is a QUALIFIER → emit as constraint.
+  "vegan restaurants" — remove "vegan" → "restaurants" is still valid → "vegan" is a QUALIFIER → emit.
+  "family-run hotels" — remove "family-run" → "hotels" is still valid → "family-run" is a QUALIFIER → emit.
+  "boutique gyms" — remove "boutique" → "gyms" is still valid → "boutique" is a QUALIFIER → emit.
+  "specialist tax accountants" — remove "specialist" → "tax accountants" is still valid → "specialist" is a QUALIFIER → emit.
+  "wine bar" — remove "wine" → "bar" is a different entity type (not what was asked for) → "wine" is part of the ENTITY TYPE → do NOT emit separately.
+  "Italian restaurants" — remove "Italian" → "restaurants" is generic, but "Italian" defines the cuisine which IS the entity type the user wants → part of ENTITY TYPE → do NOT emit separately.
+  "fish and chip shops" — "fish and chip" defines what type of shop → ENTITY TYPE → do NOT emit.
+
+Qualifying adjectives are almost always INFERENTIAL signals (see INFERENTIAL CONSTRAINT RULE below). Emit them as website_evidence constraints with reasoning_mode: "inferential" and a full synonyms array of signal phrases.
+
+CRITICAL: do NOT skip a qualifying adjective just because it already appears inside entity_category. The entity_category preserves it as a LABEL for discovery routing; the constraint preserves it as a VERIFIABLE REQUIREMENT for the evidence pipeline. Both must exist for the system to work correctly.
+
+EXAMPLE — User: "find independent hairdressers in Kent":
+{
+  "entity_category": "independent hairdressers",
+  "location_text": "Kent",
+  "requested_count": null,
+  "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Kent", "hardness": "hard" },
+    { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "independent", "hardness": "hard", "reasoning_mode": "inferential", "synonyms": ["independently owned", "family-run", "owner-operated", "family business", "established by", "founded by", "locally owned", "not a chain", "single location"] }
+  ],
+  "mission_mode": "research_now"
+}
+
+EXAMPLE — User: "find family-run hotels in the Cotswolds":
+{
+  "entity_category": "family-run hotels",
+  "location_text": "Cotswolds",
+  "requested_count": null,
+  "constraints": [
+    { "type": "location_constraint", "field": "address", "operator": "within", "value": "Cotswolds", "hardness": "hard" },
+    { "type": "website_evidence", "field": "website_text", "operator": "contains", "value": "family-run", "hardness": "hard", "reasoning_mode": "inferential", "synonyms": ["family business", "family owned", "run by the family", "family name", "father and son", "husband and wife", "generations", "family-owned"] }
+  ],
+  "mission_mode": "research_now"
+}
+
+
+Make ONLY this change. Do NOT touch any other prompt, file, or line. Do not commit. Report when done with the exact line numbers where the insertion was made.
