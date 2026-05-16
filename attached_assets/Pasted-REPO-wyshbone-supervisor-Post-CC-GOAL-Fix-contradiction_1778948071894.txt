@@ -1,0 +1,79 @@
+REPO: wyshbone-supervisor-Post-CC
+GOAL: Fix contradictions in the 4-bullet response message. Two known issues:
+1. When Tower fails and delivered>0, Results says "0 [entities] were found" when N were actually delivered (LLM is using verifiedCount in Results bullet).
+2. When Tower passes but a constraint was low-confidence, Results and Verification contradict each other ("delivered 9 ... all could not be verified" + "All 9 verified with on-page evidence").
+
+Both are LLM prompt issues — the Results bullet doesn't have a hard rule to always use the delivered count, and the Gap 2 rule tells the LLM to mix the narrative across bullets.
+
+ONE-FILE EDIT — server/supervisor/response-builder.ts
+
+Open server/supervisor/response-builder.ts. Find the buildNaturalResponse function. Inside it, find the `const prompt = \`You are writing the delivery message...\`` template literal. Within that template, find the RULES section.
+
+═══ EDIT 1 — Add a hard rule about the Results bullet ═══
+
+Find this rule (it currently sits before the Verification rule):
+  - Be specific — use the actual numbers, location, and entity type from the facts above.
+
+Immediately AFTER that line and BEFORE the Verification rule, insert this new rule:
+
+- **Results** bullet ALWAYS states the "Delivered" count from the facts. NEVER use "Per-lead verified with evidence" in the Results bullet. The Results bullet answers "how many leads did we surface to the user?" — that is always Delivered, regardless of how many were verified. Example: if Delivered=16 and verified=0, Results says "Found 16 dentists in Brighton." NOT "0 dentists were found."
+- The Results and Verification bullets describe DIFFERENT things and must NEVER contradict each other. Results = count delivered. Verification = count independently confirmed. Both can be true at the same time. Example pair: "Results: Found 16 dentists in Brighton. Verification: None could be independently verified." — both correct, no contradiction.
+
+═══ EDIT 2 — Revise the Gap 2 rule so the Results bullet stops doing two jobs ═══
+
+Find this existing rule (added in the previous Gap 2 fix):
+- If Tower's reason for failing this run is provided in the facts, the Results bullet MUST explain in plain English what was delivered AND what could not be verified, paraphrasing the Tower's reason naturally. Do NOT copy the Tower's wording verbatim. The Suggestion bullet should offer a concrete alternative or next step that addresses the unverifiable constraint (e.g. rank by a proxy, relax the constraint, refine the search). Never claim something was verified that the Tower says was not.
+
+Replace it ENTIRELY with this:
+
+- If Tower's reason for failing this run is provided in the facts, the **Market** bullet MUST paraphrase the Tower's reason naturally (do NOT copy verbatim) — this overrides the default scarcityType-based Market wording for this case. The **Suggestion** bullet should offer a concrete alternative or next step that addresses the unverifiable constraint (e.g. rank by a proxy, relax the constraint, refine the search). The **Results** bullet stays clean — it states the delivered count and entity only, without explaining what failed (the Market and Verification bullets handle that). Never claim something was verified that the Tower says was not.
+
+═══ EDIT 3 — Add concrete anchoring examples at the end of the RULES section ═══
+
+Find the final rule in the RULES section:
+- Do NOT add any text before the first bullet or after the last bullet.
+
+Immediately AFTER that line and BEFORE the closing backtick of the template literal, add these examples:
+
+EXAMPLES OF CORRECT OUTPUT (use these to anchor the pattern, not as literal templates):
+
+Example 1 — Tower passed, all verified:
+- **Results:** Found 12 accountants in Kent.
+
+- **Verification:** All 12 verified with on-page evidence.
+
+- **Market:** Healthy supply in this area.
+
+- **Suggestion:** Say "email the top one" to reach out, or ask me to refine the results.
+
+Example 2 — Tower failed, some delivered, none verified:
+- **Results:** Found 16 dentists in Brighton.
+
+- **Verification:** None could be independently verified.
+
+- **Market:** Ranking by "best" needs comparing reviews across sources, which wasn't done.
+
+- **Suggestion:** Try ranking by Google rating, or refine to specific dental services.
+
+Example 3 — Tower passed, partial verification:
+- **Results:** Found 9 upcoming festivals in Bristol.
+
+- **Verification:** 5 of 9 verified with on-page evidence.
+
+- **Market:** Healthy supply in this area.
+
+- **Suggestion:** Ask me to monitor for new results or expand the search area.
+
+═══ DO NOT CHANGE ═══
+
+- The ResponseBuilderInput interface
+- The buildFallbackResponse function (the deterministic fallback path is fine as-is)
+- The facts assembly block above the prompt
+- The LLM call configuration
+- Any other file
+
+═══ VALIDATION ═══
+
+Run `npx tsc --noEmit` and confirm zero new TypeScript errors.
+
+Report back with: (1) confirmation of zero new TS errors, (2) the line range where edits landed, (3) a short diff showing the changed RULES section.
