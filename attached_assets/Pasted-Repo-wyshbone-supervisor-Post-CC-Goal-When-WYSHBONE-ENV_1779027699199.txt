@@ -1,0 +1,71 @@
+Repo: wyshbone-supervisor-Post-CC
+Goal: When WYSHBONE_ENV=dev is set in environment, seven direct-OpenAI callers should prefer Anthropic Haiku 3.5 (claude-3-5-haiku-20241022) instead of gpt-4o-mini. When unset or set to anything other than dev, behaviour is unchanged. Web-search callers (gpt4o-search.ts, web-search fallbacks in mission-executor.ts and refine-executor.ts, and research-provider.ts) are NOT touched — they stay on OpenAI regardless.
+Files to edit:
+
+server/supervisor/mission-extractor.ts
+server/supervisor/constraint-led-extractor.ts
+server/supervisor/goal-to-constraints.ts
+server/supervisor/intent-extractor.ts
+server/supervisor/outreach-drafter.ts
+server/supervisor/explain-run.ts
+server/supervisor/run-narrative.ts
+
+Pattern for files 1–4 and 6–7 (the model-selecting ones):
+Each of these files has a model-selection function — usually called selectModel() or an inline check like if (process.env.OPENAI_API_KEY) return 'gpt-4o-mini'. Add a dev-mode check as the FIRST branch inside the existing selection logic. Example, before:
+tsfunction selectModel(): string {
+  if (process.env.OPENAI_API_KEY) return 'gpt-4o-mini';
+  if (process.env.ANTHROPIC_API_KEY) return 'claude-3-5-haiku-20241022';
+  return 'none';
+}
+After:
+tsfunction selectModel(): string {
+  // Dev mode: prefer Anthropic Haiku 3.5 — saves OpenAI quota during dev/benchmarking
+  if (process.env.WYSHBONE_ENV === 'dev' && process.env.ANTHROPIC_API_KEY) {
+    return 'claude-3-5-haiku-20241022';
+  }
+  if (process.env.OPENAI_API_KEY) return 'gpt-4o-mini';
+  if (process.env.ANTHROPIC_API_KEY) return 'claude-3-5-haiku-20241022';
+  return 'none';
+}
+The existing callLLM helper in each file already dispatches correctly based on the model name (calls callAnthropic for claude-* model names). Do not change callLLM, callOpenAI, or callAnthropic — only the selection function. If a file has the selection logic inline rather than in a function, add the same WYSHBONE_ENV check at the inline site, preserving any 429 fallback logic that's already there.
+Pattern for file 5 (outreach-drafter.ts) — special case:
+This file drafts cold outreach emails — wasteful to run in dev. Add an early return at the TOP of the main exported function (likely draftOutreachEmail):
+tsif (process.env.WYSHBONE_ENV === 'dev') {
+  console.log('[OUTREACH_DRAFTER] Dev mode — returning stub email, no LLM call');
+  return {
+    subject: '[dev mode] outreach skipped',
+    body: '[dev mode] outreach skipped — set WYSHBONE_ENV=production to enable',
+  };
+}
+Preserve the return shape — match whatever the function currently returns. Do NOT also apply the model-switch pattern to this file; the early return makes it unnecessary.
+Verification steps:
+
+Set WYSHBONE_ENV=dev in Replit Secrets
+Restart the supervisor
+Run a search query in chat: "find pubs in York"
+Tail the console logs; you should see lines like:
+
+[MISSION_EXTRACTOR] Success — ... model=claude-3-5-haiku-20241022 ...
+[CONSTRAINT_LED_EXTRACTOR] references to the Anthropic model
+NO gpt-4o-mini references in those modules
+
+
+Web search ([GPT4O_SEARCH]) lines should still show gpt-4o — confirming web search is untouched
+Unset WYSHBONE_ENV (or set to production) and confirm logs flip back to gpt-4o-mini for the 7 callers
+
+Do not change:
+
+Any callLLM, callOpenAI, callAnthropic, or callGroq helper functions
+Any prompt strings
+Any control flow beyond the model selection
+gpt4o-search.ts, research-provider.ts, web-search fallback logic in mission-executor.ts or refine-executor.ts
+The default Anthropic model name — must stay claude-3-5-haiku-20241022 (the 429 fallback already uses this in some files; keep it consistent)
+
+Out of scope:
+
+No new env vars beyond WYSHBONE_ENV
+No central config file
+No UI changes
+No matrix table
+
+This is a minimal token-saving switch. Keep edits surgical and identical in shape across files.
