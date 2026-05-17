@@ -1039,7 +1039,8 @@ Return JSON array only: ["term1", "term2", ...]`;
           }
         }
 
-        if (fallbackTexts.length > 0 && openaiKey && leadName) {
+        // Dev mode: prefer Anthropic Haiku 3.5 — saves OpenAI quota during dev/benchmarking
+        if (fallbackTexts.length > 0 && openaiKey && leadName && process.env.WYSHBONE_ENV !== 'dev') {
           const cutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
           try {
             const { default: OpenAI } = await import('openai');
@@ -1171,6 +1172,8 @@ Respond with JSON: {"match": true/false, "evidence_sentence": "one sentence summ
       }
 
       // LAYER 2 — gpt-4o judges the windows
+      // Dev mode: prefer Anthropic Haiku 3.5 — saves OpenAI quota during dev/benchmarking
+      if (process.env.WYSHBONE_ENV !== 'dev') {
       const { default: OpenAI } = await import('openai');
       const client = new OpenAI({ apiKey: openaiKey });
       const layer2CutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -1318,6 +1321,7 @@ Respond with JSON only: {"evidence_sentences": ["..."]}. Return {"evidence_sente
           phrase_targets: phraseTargets,
         };
       }
+      } // end WYSHBONE_ENV !== 'dev' guard
     } catch (llmErr: any) {
       console.warn(`[EVIDENCE_EXTRACT_L2] LLM judge failed for "${leadName}" + "${constraintValue}" (falling back to keyword scoring): ${(llmErr as Error).message}`);
     }

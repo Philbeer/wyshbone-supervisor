@@ -36,6 +36,17 @@ export interface DraftOutput {
 }
 
 export async function draftOutreachEmail(input: DraftInput): Promise<DraftOutput> {
+  if (process.env.WYSHBONE_ENV === 'dev') {
+    console.log('[OUTREACH_DRAFTER] Dev mode — returning stub email, no LLM call');
+    return {
+      subject: '[dev mode] outreach skipped',
+      bodyHtml: '[dev mode] outreach skipped — set WYSHBONE_ENV=production to enable',
+      bodyText: '[dev mode] outreach skipped — set WYSHBONE_ENV=production to enable',
+      model: 'none',
+      personalisationNotes: '',
+    };
+  }
+
   const openaiKey = process.env.OPENAI_API_KEY;
   if (!openaiKey) {
     throw new Error('OPENAI_API_KEY not set — cannot draft outreach emails');

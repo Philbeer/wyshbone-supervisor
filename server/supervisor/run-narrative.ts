@@ -396,7 +396,8 @@ async function callLLMForNarrative(factsBundle: RunFactsBundle): Promise<string>
 
   const userPrompt = `Generate a plain-English narrative report for this factory run. Use ONLY facts from this bundle:\n\n${JSON.stringify(factsBundle, null, 2)}`;
 
-  if (openaiKey) {
+  // Dev mode: prefer Anthropic Haiku 3.5 — saves OpenAI quota during dev/benchmarking
+  if (openaiKey && process.env.WYSHBONE_ENV !== 'dev') {
     const { default: OpenAI } = await import('openai');
     const client = new OpenAI({ apiKey: openaiKey });
     const response = await client.chat.completions.create({

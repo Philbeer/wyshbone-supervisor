@@ -142,7 +142,8 @@ async function callLLM(evidenceBundle: Record<string, unknown>): Promise<string>
 
   const userPrompt = `Analyse this run and produce a factual report. Evidence bundle:\n\n${JSON.stringify(evidenceBundle, null, 2)}`;
 
-  if (openaiKey) {
+  // Dev mode: prefer Anthropic Haiku 3.5 — saves OpenAI quota during dev/benchmarking
+  if (openaiKey && process.env.WYSHBONE_ENV !== 'dev') {
     const { default: OpenAI } = await import('openai');
     const client = new OpenAI({ apiKey: openaiKey });
     const response = await client.chat.completions.create({

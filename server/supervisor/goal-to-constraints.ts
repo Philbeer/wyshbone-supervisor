@@ -198,7 +198,8 @@ async function callLLMForParsing(goal: string): Promise<Record<string, unknown>>
 
   const userPrompt = buildUserPrompt(goal);
 
-  if (openaiKey) {
+  // Dev mode: prefer Anthropic Haiku 3.5 — saves OpenAI quota during dev/benchmarking
+  if (openaiKey && process.env.WYSHBONE_ENV !== 'dev') {
     try {
       const { default: OpenAI } = await import('openai');
       const client = new OpenAI({ apiKey: openaiKey });
