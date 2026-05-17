@@ -810,10 +810,6 @@ export interface MissionExtractionResult {
 }
 
 function selectModel(): string {
-  // Dev mode: prefer Anthropic Haiku 3.5 — saves OpenAI quota during dev/benchmarking
-  if (process.env.WYSHBONE_ENV === 'dev' && process.env.ANTHROPIC_API_KEY) {
-    return 'claude-3-5-haiku-20241022';
-  }
   if (process.env.OPENAI_API_KEY) return 'gpt-4o-mini';
   if (process.env.ANTHROPIC_API_KEY) return 'claude-3-5-haiku-20241022';
   return 'none';
