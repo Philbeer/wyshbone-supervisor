@@ -2902,6 +2902,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   }
 
   // ========================================
+  // SYSTEM MODE
+  // ========================================
+  app.get('/api/system/mode', (_req, res) => {
+    const mode = process.env.WYSHBONE_ENV === 'dev' ? 'dev' : 'production';
+    res.json({ mode });
+  });
+
+  // ========================================
   // RUN LOGS API
   // ========================================
   app.get('/api/logs', async (req, res) => {

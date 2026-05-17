@@ -1,0 +1,94 @@
+Task: Add "DEV MODE" red banner to supervisor's built-in UI when WYSHBONE_ENV=dev
+Repo: wyshbone-supervisor-Post-CC (everything stays in this one repo — both the endpoint and the banner)
+Step 1 — Add the mode endpoint.
+File: server/routes.ts
+Add near the other simple GET endpoints (no auth required — returns only the env mode string, no sensitive data):
+tsapp.get('/api/system/mode', (_req, res) => {
+  const mode = process.env.WYSHBONE_ENV === 'dev' ? 'dev' : 'production';
+  res.json({ mode });
+});
+Step 2 — Create the banner component.
+New file: client/src/components/DevModeBanner.tsx
+tsximport { useEffect, useState } from 'react';
+
+export function DevModeBanner() {
+  const [isDev, setIsDev] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/system/mode')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!cancelled && data?.mode === 'dev') setIsDev(true);
+      })
+      .catch(() => {
+        // silent — production behaviour if fetch fails
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (!isDev) return null;
+
+  return (
+    <div
+      role="alert"
+      data-testid="dev-mode-banner"
+      style={{
+        backgroundColor: '#dc2626',
+        color: 'white',
+        padding: '8px 16px',
+        textAlign: 'center',
+        fontWeight: 700,
+        fontSize: '14px',
+        letterSpacing: '0.5px',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+      }}
+    >
+      🚧 DEV MODE — Mission extraction & evidence judging using Claude Haiku 3.5 (cheaper, separate quota pool). Unset WYSHBONE_ENV in Replit secrets to return to production models (gpt-4o-mini).
+    </div>
+  );
+}
+Step 3 — Mount the banner at the top of the supervisor app.
+File: client/src/App.tsx
+Add the import at the top with the other component imports:
+tsximport { DevModeBanner } from "@/components/DevModeBanner";
+Then place the <DevModeBanner /> element so it sits ABOVE the sidebar+content flex layout — at the top level of the SidebarProvider so it spans the full width. The cleanest edit is to wrap the existing flex container in a vertical flex column and put the banner first.
+Find this block:
+tsx<SidebarProvider style={style as React.CSSProperties}>
+  <div className="flex h-screen w-full">
+    <AppSidebar />
+    ...
+  </div>
+</SidebarProvider>
+Replace with:
+tsx<SidebarProvider style={style as React.CSSProperties}>
+  <div className="flex flex-col h-screen w-full">
+    <DevModeBanner />
+    <div className="flex flex-1 w-full overflow-hidden">
+      <AppSidebar />
+      <div className="flex flex-col flex-1 overflow-hidden">
+        <header className="flex items-center justify-between p-2 border-b">
+          <SidebarTrigger data-testid="button-sidebar-toggle" />
+        </header>
+        <main className="flex-1 overflow-hidden">
+          <Router />
+        </main>
+      </div>
+    </div>
+  </div>
+</SidebarProvider>
+Key change: the outer div becomes flex flex-col (vertical stack) with the banner first, then a horizontal flex row containing sidebar + main content. This way the banner spans the full width above everything and pushes the sidebar+content down. The banner renders null when not in dev mode, so it's a zero-pixel no-op in production.
+Verification:
+
+Set WYSHBONE_ENV=dev in Replit Secrets, restart supervisor
+Open the supervisor dashboard — red banner appears at the very top spanning the full width above the sidebar
+Sidebar and main content sit beneath the banner; nothing overlaps
+Unset WYSHBONE_ENV (or set to anything else), restart, refresh — banner gone, layout returns to original
+Banner fetch failures are silent — UI works normally if endpoint is unreachable
+
+Do not change:
+
+Any other route in routes.ts
+The sidebar component, page components, or routing
+Existing flex/sizing on <AppSidebar />, <main>, or <header>
+Any styles outside the banner component

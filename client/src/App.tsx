@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/AppSidebar";
+import { DevModeBanner } from "@/components/DevModeBanner";
 import Dashboard from "@/pages/Dashboard";
 import Leads from "@/pages/Leads";
 import Settings from "@/pages/Settings";
@@ -35,15 +36,18 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <SidebarProvider style={style as React.CSSProperties}>
-          <div className="flex h-screen w-full">
-            <AppSidebar />
-            <div className="flex flex-col flex-1 overflow-hidden">
-              <header className="flex items-center justify-between p-2 border-b">
-                <SidebarTrigger data-testid="button-sidebar-toggle" />
-              </header>
-              <main className="flex-1 overflow-hidden">
-                <Router />
-              </main>
+          <div className="flex flex-col h-screen w-full">
+            <DevModeBanner />
+            <div className="flex flex-1 w-full overflow-hidden">
+              <AppSidebar />
+              <div className="flex flex-col flex-1 overflow-hidden">
+                <header className="flex items-center justify-between p-2 border-b">
+                  <SidebarTrigger data-testid="button-sidebar-toggle" />
+                </header>
+                <main className="flex-1 overflow-hidden">
+                  <Router />
+                </main>
+              </div>
             </div>
           </div>
         </SidebarProvider>
