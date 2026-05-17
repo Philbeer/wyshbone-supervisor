@@ -28,6 +28,7 @@ import {
   buildDeliverySummaryPayload,
   type DeliverySummaryPayload,
   type DeliverySummaryInput,
+  type DeliverySummaryLeadInput,
   type PlanVersionEntry,
   type SoftRelaxation,
   type MatchEvidenceItem,
@@ -35,6 +36,12 @@ import {
   type SupportingEvidenceItem,
 } from './delivery-summary';
 import { logAFREvent } from './afr-logger';
+import {
+  finalizeDelivery,
+  type RawLeadInput,
+  type PerConstraintVerification,
+  type EvidenceVerificationStatus,
+} from './finalize-delivery';
 import { logRunEvent } from './run-logger';
 import { emitProgressTick } from './protocol-logger';
 import { storage } from '../storage';
@@ -3067,21 +3074,66 @@ IMPORTANT:
     },
   }).catch((e: any) => console.warn(`[MISSION_EXEC] agent_run completion update failed: ${e.message}`));
 
-  const evidenceLookup = new Map(deliveredLeadsWithEvidence.map(l => [l.placeId, l]));
-  const dsLeads = finalLeads.map(l => {
-    const ev = evidenceLookup.get(l.placeId);
+  // Build raw lead inputs for the gateway
+  const rawLeadInputsForGateway: RawLeadInput[] = finalLeads.map(l => {
+    const leadEvidence = evidenceByPlaceId.get(l.placeId) || [];
+    const verifications: PerConstraintVerification[] = leadEvidence.map(er => ({
+      constraint_type: er.constraintType,
+      constraint_value: er.constraintValue,
+      tower_status: er.towerStatus as EvidenceVerificationStatus | null,
+      tower_confidence: er.towerConfidence ?? null,
+      tower_reasoning: er.towerReasoning ?? null,
+      source_url: er.sourceUrl ?? null,
+      quote: er.snippets?.[0] ?? null,
+    }));
     return {
-      entity_id: l.placeId,
       name: l.name,
       address: l.address,
-      found_in_plan_version: 1,
-      match_valid: ev?.match_valid,
-      match_summary: ev?.match_summary,
-      match_basis: ev?.match_basis,
-      supporting_evidence: ev?.supporting_evidence,
-      match_evidence: ev?.match_evidence,
+      phone: l.phone ?? null,
+      website: l.website ?? null,
+      placeId: l.placeId,
+      source: l.source || 'mission',
+      verifications,
     };
   });
+
+  // THE GATEWAY: single source of truth for verified delivery
+  const finalized = finalizeDelivery({
+    leads: rawLeadInputsForGateway,
+    structuredConstraints,
+    requestedCount,
+  });
+
+  console.log(`[MISSION_EXEC] Gateway result: ${finalized.count} verified leads, ${finalized.dropped.length} dropped`);
+
+  if (finalized.dropped.length > 0) {
+    await createArtefact({
+      runId,
+      type: 'leads_dropped_at_gateway',
+      title: `Gateway dropped ${finalized.dropped.length} unverified leads`,
+      summary: finalized.dropped.map(d => `${d.name} (${d.rollup_status})`).join('; '),
+      payload: {
+        execution_source: 'mission',
+        dropped: finalized.dropped,
+        total_candidates: finalized.totalCandidates,
+        verified_count: finalized.count,
+      },
+      userId,
+      conversationId,
+    }).catch(() => {});
+  }
+
+  const dsLeads: DeliverySummaryLeadInput[] = finalized.verifiedLeads.map(fl => ({
+    entity_id: fl.entity_id,
+    name: fl.name,
+    address: fl.address,
+    found_in_plan_version: 1,
+    match_valid: fl.match_valid,
+    match_summary: fl.match_summary,
+    match_basis: [],
+    supporting_evidence: fl.supporting_evidence as any,
+    match_evidence: fl.match_evidence as any,
+  }));
 
   const dsInput: DeliverySummaryInput = {
     runId,

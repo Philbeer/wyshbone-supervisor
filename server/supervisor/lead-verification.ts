@@ -1,4 +1,15 @@
 /**
+ * @deprecated As of feat-delivery-gateway: the canonical verification rule
+ * is now applied inside finalize-delivery.ts at the gateway. New code should
+ * not call isLeadVerified — instead, trust that leads reaching downstream
+ * consumers have already been filtered by the gateway.
+ *
+ * This function remains exported for any legacy callers but should not be
+ * relied upon for new code. It uses a deny-list rule that lets some unverified
+ * leads through (e.g. leads with verification_status === 'unverified').
+ */
+
+/**
  * Single source of truth for whether a delivered lead is "verified".
  *
  * Reads the per-lead Tower semantic verification status from match_evidence —

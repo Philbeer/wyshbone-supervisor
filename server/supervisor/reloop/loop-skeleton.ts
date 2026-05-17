@@ -866,15 +866,13 @@ export async function runReloop(params: {
     console.log(`[RELOOP_SKELETON] Fallback built ${mergedExact.length} delivered_exact entries with full UI fields`);
   }
 
-  // ── Single source of truth: per-lead Tower verification status ──
-  // isLeadVerified reads match_evidence items directly. Unverified leads
-  // are DROPPED, not demoted — if a lead doesn't verify against the user's
-  // hard constraints, it doesn't appear anywhere in the output.
-  const verifiedMergedExact = mergedExact.filter(isLeadVerified);
-  const unverifiedDroppedCount = mergedExact.length - verifiedMergedExact.length;
-  const combinedClosest = mergedClosest; // never includes unverified
+  // Each per-loop delivery summary is ALREADY pre-filtered by the gateway.
+  // The merge step is now a simple concatenation with dedup, no re-filtering.
+  const verifiedMergedExact = mergedExact; // already only verified
+  const unverifiedDroppedCount = 0; // dropping happens at the gateway, per-loop
+  const combinedClosest = mergedClosest;
 
-  console.log(`[RELOOP_SKELETON] Verification filter (single-truth): ${mergedExact.length} merged → ${verifiedMergedExact.length} verified + ${unverifiedDroppedCount} dropped (no_evidence / weak / missing per-lead Tower verdict)`);
+  console.log(`[RELOOP_SKELETON] Merge (gateway-trusted): ${mergedExact.length} verified leads accumulated across ${loopHistory.length} loop(s)`);
 
   const lastDs = allDeliverySummaries[allDeliverySummaries.length - 1];
   const mergedDeliverySummary = lastDs ? {

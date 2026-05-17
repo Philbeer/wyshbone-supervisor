@@ -15,6 +15,7 @@ import {
   buildDeliverySummaryPayload,
   type DeliverySummaryPayload,
   type DeliverySummaryInput,
+  type DeliverySummaryLeadInput,
   type PlanVersionEntry,
   type SoftRelaxation,
 } from './delivery-summary';
@@ -25,6 +26,12 @@ import type { VerificationPolicy } from './verification-policy';
 import type { StructuredConstraintPayload, EvidenceResult, ConstraintResult, VerificationSummary } from './mission-executor';
 import { buildVerificationSummary } from './mission-executor';
 import { requestSemanticVerification, type TowerSemanticStatus } from './tower-semantic-verify';
+import {
+  finalizeDelivery,
+  type RawLeadInput,
+  type PerConstraintVerification,
+  type EvidenceVerificationStatus,
+} from './finalize-delivery';
 
 const MAX_SEARCH_ROUNDS = 3;
 const LOW_RESULT_THRESHOLD = 5;
@@ -658,45 +665,89 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
   const cappedLeads = requestedCount !== null ? deliveryLeads.slice(0, requestedCount) : deliveryLeads;
   const cappedGpt4oLeads = requestedCount !== null ? allLeads.slice(0, requestedCount) : allLeads;
 
-  const deliveredLeadsWithEvidence = cappedLeads.map((l, i) => {
-    const gLead = cappedGpt4oLeads[i];
+  // Build raw lead inputs for the gateway (from ALL leads, not capped — gateway applies the cap)
+  const rawLeadInputs: RawLeadInput[] = allLeads.map((lead, li) => {
+    const leadPlaceId = `gpt4o_${li}_${lead.name.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 30)}`;
+    const agg = perLeadAgg.get(leadPlaceId);
+
+    const verifications: PerConstraintVerification[] = (agg?.perConstraint ?? []).map(pc => {
+      const matchingConstraint = hardEvidenceConstraints.find(c => String(c.value).trim() === pc.constraintValue);
+      return {
+        constraint_type: matchingConstraint?.type ?? 'unknown',
+        constraint_value: pc.constraintValue,
+        tower_status: pc.towerStatus as EvidenceVerificationStatus | null,
+        tower_confidence: pc.towerConfidence,
+        tower_reasoning: pc.towerReasoning,
+        source_url: lead.source_url || lead.website || null,
+        quote: lead.evidence || null,
+      };
+    });
+
     return {
-      ...l,
+      name: lead.name,
+      address: lead.location || '',
+      phone: null,
+      website: lead.source_url || null,
+      placeId: leadPlaceId,
       source: 'gpt4o_web_search',
-      ...(() => {
-        const placeIdForRollup = l.placeId;
-        const agg = perLeadAgg.get(placeIdForRollup);
-        const towerRollup: 'verified' | 'weak_match' | 'no_evidence' =
-          !agg || agg.perConstraint.length === 0
-            ? (gLead?.confidence === 'high' ? 'verified'
-              : gLead?.confidence === 'medium' ? 'weak_match'
-              : 'no_evidence')
-            : agg.anyNoEvidence
-              ? 'no_evidence'
-              : agg.anyVerified && !agg.anyWeak
-                ? 'verified'
-                : 'weak_match';
-        return {
-          verified: towerRollup === 'verified' || towerRollup === 'weak_match',
-          verification_status: towerRollup,
-          constraint_verdicts: (agg?.perConstraint ?? []).map(pc => ({
-            constraint: pc.constraintValue,
-            verdict: pc.towerStatus === 'verified' ? 'verified' as const
-              : pc.towerStatus === 'weak_match' ? 'weak_match' as const
-              : 'unverified' as const,
-          })),
-        };
-      })(),
-      evidence: gLead ? [{ source_url: gLead.source_url, text: gLead.evidence, snippet: gLead.evidence, quote: gLead.evidence, confidence: gLead.confidence }] : [],
-      match_valid: true,
-      match_summary: gLead
-        ? `Found via GPT-4o web search: ${gLead.evidence.substring(0, 150)}`
-        : 'Found via GPT-4o web search',
-      match_basis: [] as Record<string, unknown>[],
-      supporting_evidence: gLead ? [{ url: gLead.source_url, snippet: gLead.evidence }] : [] as Record<string, unknown>[],
-      match_evidence: [] as Record<string, unknown>[],
+      executor_confidence: lead.confidence,
+      verifications,
     };
   });
+
+  // THE GATEWAY: single source of truth for verified delivery
+  const finalized = finalizeDelivery({
+    leads: rawLeadInputs,
+    structuredConstraints,
+    requestedCount,
+  });
+
+  console.log(`[GPT4O_SEARCH] Gateway result: ${finalized.count} verified leads, ${finalized.dropped.length} dropped`);
+
+  if (finalized.dropped.length > 0) {
+    await createArtefact({
+      runId,
+      type: 'leads_dropped_at_gateway',
+      title: `Gateway dropped ${finalized.dropped.length} unverified leads`,
+      summary: finalized.dropped.map(d => `${d.name} (${d.rollup_status})`).join('; '),
+      payload: {
+        execution_source: 'gpt4o_primary',
+        dropped: finalized.dropped,
+        total_candidates: finalized.totalCandidates,
+        verified_count: finalized.count,
+      },
+      userId,
+      conversationId,
+    }).catch(() => {});
+  }
+
+  // The final_delivery artefact uses the same canonical FinalizedLeads
+  const deliveredLeadsWithEvidence = finalized.verifiedLeads.map(fl => ({
+    name: fl.name,
+    address: fl.address,
+    phone: fl.phone,
+    website: fl.website,
+    placeId: fl.placeId,
+    source: fl.source,
+    verified: true,
+    verification_status: 'verified' as const,
+    constraint_verdicts: fl.match_evidence.map(me => ({
+      constraint: me.constraint_value,
+      verdict: 'verified' as const,
+    })),
+    evidence: fl.match_evidence.map(me => ({
+      source_url: me.source_url,
+      text: me.quote,
+      snippet: me.quote,
+      quote: me.quote,
+      confidence: me.confidence > 0.75 ? 'high' : me.confidence > 0.5 ? 'medium' : 'low',
+    })),
+    match_valid: true,
+    match_summary: fl.match_summary,
+    match_basis: [] as Record<string, unknown>[],
+    supporting_evidence: fl.supporting_evidence,
+    match_evidence: fl.match_evidence,
+  }));
 
   const gpt4oEvidenceResults: EvidenceResult[] = [];
   for (let li = 0; li < cappedLeads.length; li++) {
@@ -891,24 +942,18 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
   const dsPlanVersions: PlanVersionEntry[] = [{ version: 1, changes_made: ['GPT-4o web search'] }];
   const dsSoftRelaxations: SoftRelaxation[] = [];
 
-  const dsLeads = cappedLeads.map((l, i) => {
-    const gLead = cappedGpt4oLeads[i];
-    return {
-      entity_id: l.placeId,
-      name: l.name,
-      address: l.address,
-      found_in_plan_version: 1 as const,
-      match_valid: true,
-      match_summary: gLead
-        ? `Found via GPT-4o web search: ${gLead.evidence.substring(0, 150)}`
-        : 'Found via GPT-4o web search',
-      match_basis: [] as Record<string, unknown>[],
-      supporting_evidence: gLead
-        ? [{ url: gLead.source_url, snippet: gLead.evidence }]
-        : [] as Record<string, unknown>[],
-      match_evidence: [] as Record<string, unknown>[],
-    };
-  });
+  // Build the delivery summary input from FinalizedLeads ONLY
+  const dsLeads: DeliverySummaryLeadInput[] = finalized.verifiedLeads.map(fl => ({
+    entity_id: fl.entity_id,
+    name: fl.name,
+    address: fl.address,
+    found_in_plan_version: 1,
+    match_valid: fl.match_valid,
+    match_summary: fl.match_summary,
+    match_basis: [],
+    supporting_evidence: fl.supporting_evidence as any,
+    match_evidence: fl.match_evidence as any,
+  }));
 
   const dsInput: DeliverySummaryInput = {
     runId,
