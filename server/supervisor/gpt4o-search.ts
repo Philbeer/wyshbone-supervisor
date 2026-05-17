@@ -662,8 +662,6 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
   console.log(`[GPT4O_SEARCH] Per-constraint Tower semantic verification complete for ${allLeads.length} leads × ${hardEvidenceConstraints.length} hard evidence constraints`);
 
   const deliveryLeads = allLeads.map((lead, i) => toDeliveryLead(lead, i));
-  const cappedLeads = requestedCount !== null ? deliveryLeads.slice(0, requestedCount) : deliveryLeads;
-  const cappedGpt4oLeads = requestedCount !== null ? allLeads.slice(0, requestedCount) : allLeads;
 
   // Build raw lead inputs for the gateway (from ALL leads, not capped — gateway applies the cap)
   const rawLeadInputs: RawLeadInput[] = allLeads.map((lead, li) => {
@@ -703,6 +701,19 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
   });
 
   console.log(`[GPT4O_SEARCH] Gateway result: ${finalized.count} verified leads, ${finalized.dropped.length} dropped`);
+
+  // Re-derive cappedLeads from gateway output so all downstream artefacts
+  // and Tower judgements see the same set the user sees.
+  const cappedLeads = finalized.verifiedLeads.map(fl => ({
+    name: fl.name,
+    address: fl.address,
+    phone: fl.phone,
+    website: fl.website,
+    placeId: fl.placeId,
+  }));
+  const cappedGpt4oLeads = allLeads.filter(l =>
+    finalized.verifiedLeads.some(fl => fl.name === l.name),
+  );
 
   if (finalized.dropped.length > 0) {
     await createArtefact({
