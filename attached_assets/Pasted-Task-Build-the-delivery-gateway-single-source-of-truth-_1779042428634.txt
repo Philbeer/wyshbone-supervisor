@@ -1,0 +1,596 @@
+Task: Build the delivery gateway — single source of truth for verified lead delivery
+Repo: wyshbone-supervisor-Post-CC
+Branch: feat-delivery-gateway (just created)
+Goal: Every lead delivered by Wyshbone must pass through ONE function that decides whether it's verified, builds a canonical lead shape, and drops anything unverified. The count, the list, the response message, the UI cards, the behaviour judge, and the AFR all read from this single function's output. No other path can deliver leads.
+This replaces the current situation where gpt4o-search.ts, mission-executor.ts, and loop-skeleton.ts each construct their own delivery payload with inconsistent rules, and isLeadVerified uses a deny-list rule that lets unverified leads through.
+
+File 1 (NEW) — server/supervisor/finalize-delivery.ts
+Create this file. It exports the gateway function and types. ~120 lines.
+ts/**
+ * SINGLE SOURCE OF TRUTH for verified lead delivery.
+ *
+ * Every executor that produces leads MUST call finalizeDelivery() to produce
+ * the canonical delivered set. The returned FinalizedDelivery object is the
+ * ONLY thing downstream consumers (delivery-summary, response-builder, UI,
+ * behaviour judge, AFR) should read from for count, list, and verification.
+ *
+ * Rule: a lead appears in finalizedDelivery.verifiedLeads if and only if its
+ * per-constraint Tower verification rollup is exactly 'verified'. Anything
+ * else (weak_match, no_evidence, insufficient_evidence) is dropped.
+ *
+ * For queries with no Tower-judged constraints (pure location/category), the
+ * executor has already filtered upstream — the lead defaults to verified.
+ */
+
+import type { StructuredConstraintPayload } from './mission-executor';
+
+export type RollupStatus = 'verified' | 'weak_match' | 'no_evidence';
+
+export type EvidenceVerificationStatus =
+  | 'verified'
+  | 'weak_match'
+  | 'no_evidence'
+  | 'insufficient_evidence'
+  | 'proxy';
+
+// Constraint types that Tower judges per-lead. Other types (text_compare,
+// numeric_range, location_constraint, ranking) are handled structurally
+// upstream and do not contribute to the rollup.
+export const TOWER_JUDGED_CONSTRAINT_TYPES = new Set([
+  'attribute_check',
+  'website_evidence',
+  'relationship_check',
+  'time_constraint',
+  'time_predicate',
+  'status_check',
+]);
+
+export interface PerConstraintVerification {
+  constraint_type: string;
+  constraint_value: string;
+  tower_status: EvidenceVerificationStatus | null;
+  tower_confidence: number | null;
+  tower_reasoning: string | null;
+  source_url: string | null;
+  quote: string | null;
+}
+
+export interface RawLeadInput {
+  name: string;
+  address: string;
+  phone?: string | null;
+  website?: string | null;
+  placeId: string;
+  source: string; // 'gp_cascade' | 'gpt4o_web_search' | etc
+  // Optional confidence from the executor itself (used as fallback for no-constraint queries)
+  executor_confidence?: 'high' | 'medium' | 'low' | null;
+  // Per-constraint verification results from Tower
+  verifications: PerConstraintVerification[];
+}
+
+export interface FinalizedLead {
+  entity_id: string;
+  name: string;
+  address: string;
+  phone: string | null;
+  website: string | null;
+  placeId: string;
+  source: string;
+  // By definition: only verified leads are in the final list
+  status: 'verified';
+  // Per-constraint evidence (filtered to passing only — failures dropped at gateway)
+  match_evidence: Array<{
+    constraint_type: string;
+    constraint_value: string;
+    source_url: string | null;
+    quote: string | null;
+    matched_phrase: string | null;
+    context_snippet: string | null;
+    confidence: number;
+    verification_status: 'verified' | 'weak_match' | 'proxy';
+  }>;
+  supporting_evidence: Array<{
+    entity_name: string;
+    constraint_type: string;
+    constraint_value: string;
+    source_url: string | null;
+    source_type: string | null;
+    quote: string | null;
+    matched_phrase: string | null;
+    context_snippet: string | null;
+    verification_status: 'verified' | 'weak_match' | 'proxy' | 'no_relevant_evidence';
+    confidence: number;
+  }>;
+  match_summary: string;
+  match_valid: true; // always true by construction (unverified are dropped)
+}
+
+export interface DroppedLead {
+  name: string;
+  placeId: string;
+  rollup_status: 'weak_match' | 'no_evidence';
+  failed_constraints: string[];
+  reasoning: string;
+}
+
+export interface FinalizedDelivery {
+  // The ONLY list of leads that should be surfaced to users.
+  verifiedLeads: FinalizedLead[];
+  // Telemetry for AFR and debugging — never shown to users
+  dropped: DroppedLead[];
+  // Counts (derived from arrays — guaranteed consistent)
+  count: number;
+  totalCandidates: number;
+  // Pass-through context for downstream consumers
+  requestedCount: number | null;
+  hasTowerJudgedConstraints: boolean;
+}
+
+export interface FinalizeDeliveryInput {
+  leads: RawLeadInput[];
+  structuredConstraints: StructuredConstraintPayload[];
+  requestedCount: number | null;
+}
+
+/**
+ * Compute the rollup status for a single lead based on its per-constraint
+ * Tower verifications.
+ *
+ * Rules:
+ *  - If lead has zero tower-judged constraints AND no verifications:
+ *    fall back to executor_confidence (high=verified, medium=weak_match, low=no_evidence)
+ *  - If any constraint returned 'no_evidence' or 'insufficient_evidence': no_evidence
+ *  - If ALL applicable constraints returned 'verified': verified
+ *  - Otherwise (mix of verified + weak_match, or any weak_match): weak_match
+ */
+export function computeRollup(
+  lead: RawLeadInput,
+  towerJudgedConstraintCount: number,
+): RollupStatus {
+  const towerJudgedVerifications = lead.verifications.filter(v =>
+    TOWER_JUDGED_CONSTRAINT_TYPES.has(v.constraint_type)
+  );
+
+  // Case 1: no tower-judged constraints exist for this query at all.
+  // Executor has filtered upstream; trust the executor.
+  if (towerJudgedConstraintCount === 0) {
+    if (!lead.executor_confidence) return 'verified';
+    if (lead.executor_confidence === 'high') return 'verified';
+    if (lead.executor_confidence === 'medium') return 'weak_match';
+    return 'no_evidence';
+  }
+
+  // Case 2: tower-judged constraints exist but this lead has no verifications
+  // for them (executor didn't run them). Treat as no_evidence — we can't claim verified.
+  if (towerJudgedVerifications.length === 0) {
+    return 'no_evidence';
+  }
+
+  // Case 3: any explicit failure → no_evidence
+  const hasFailure = towerJudgedVerifications.some(
+    v => v.tower_status === 'no_evidence' || v.tower_status === 'insufficient_evidence'
+  );
+  if (hasFailure) return 'no_evidence';
+
+  // Case 4: any constraint missing a verdict → conservative no_evidence
+  const hasUnverdicted = towerJudgedVerifications.some(v => v.tower_status === null);
+  if (hasUnverdicted) return 'no_evidence';
+
+  // Case 5: all constraints fully verified → verified
+  const allVerified = towerJudgedVerifications.every(v => v.tower_status === 'verified');
+  if (allVerified) return 'verified';
+
+  // Case 6: mix of verified and weak_match (no failures) → weak_match
+  return 'weak_match';
+}
+
+export function finalizeDelivery(input: FinalizeDeliveryInput): FinalizedDelivery {
+  const towerJudgedConstraints = input.structuredConstraints.filter(
+    c => c.hardness === 'hard' && TOWER_JUDGED_CONSTRAINT_TYPES.has(c.type)
+  );
+  const towerJudgedConstraintCount = towerJudgedConstraints.length;
+  const hasTowerJudgedConstraints = towerJudgedConstraintCount > 0;
+
+  const verifiedLeads: FinalizedLead[] = [];
+  const dropped: DroppedLead[] = [];
+
+  for (const lead of input.leads) {
+    const rollup = computeRollup(lead, towerJudgedConstraintCount);
+
+    if (rollup !== 'verified') {
+      const failedConstraints = lead.verifications
+        .filter(v =>
+          TOWER_JUDGED_CONSTRAINT_TYPES.has(v.constraint_type) &&
+          (v.tower_status === 'no_evidence' ||
+            v.tower_status === 'insufficient_evidence' ||
+            v.tower_status === 'weak_match' ||
+            v.tower_status === null)
+        )
+        .map(v => v.constraint_value);
+
+      const firstReasoning = lead.verifications.find(v => v.tower_reasoning)?.tower_reasoning;
+
+      dropped.push({
+        name: lead.name,
+        placeId: lead.placeId,
+        rollup_status: rollup,
+        failed_constraints: failedConstraints,
+        reasoning: firstReasoning || `Lead rollup was ${rollup}, not verified`,
+      });
+      continue;
+    }
+
+    // Lead is verified — build canonical FinalizedLead
+    const matchEvidence = lead.verifications
+      .filter(v =>
+        TOWER_JUDGED_CONSTRAINT_TYPES.has(v.constraint_type) &&
+        v.tower_status === 'verified'
+      )
+      .map(v => ({
+        constraint_type: v.constraint_type,
+        constraint_value: v.constraint_value,
+        source_url: v.source_url,
+        quote: v.quote,
+        matched_phrase: v.constraint_value,
+        context_snippet: v.quote,
+        confidence: v.tower_confidence ?? 0.85,
+        verification_status: 'verified' as const,
+      }));
+
+    const supportingEvidence = matchEvidence.map(me => ({
+      entity_name: lead.name,
+      constraint_type: me.constraint_type,
+      constraint_value: me.constraint_value,
+      source_url: me.source_url,
+      source_type: lead.source,
+      quote: me.quote,
+      matched_phrase: me.matched_phrase,
+      context_snippet: me.context_snippet,
+      verification_status: 'verified' as const,
+      confidence: me.confidence,
+    }));
+
+    const summary = matchEvidence.length > 0
+      ? `Verified via ${lead.source}: ${matchEvidence.length} constraint${matchEvidence.length === 1 ? '' : 's'} confirmed`
+      : `Found via ${lead.source} (no Tower-judged constraints applicable)`;
+
+    verifiedLeads.push({
+      entity_id: lead.placeId,
+      name: lead.name,
+      address: lead.address,
+      phone: lead.phone ?? null,
+      website: lead.website ?? null,
+      placeId: lead.placeId,
+      source: lead.source,
+      status: 'verified',
+      match_evidence: matchEvidence,
+      supporting_evidence: supportingEvidence,
+      match_summary: summary,
+      match_valid: true,
+    });
+  }
+
+  // Apply requestedCount cap AFTER verification filter
+  const capped = input.requestedCount !== null
+    ? verifiedLeads.slice(0, input.requestedCount)
+    : verifiedLeads;
+  const overcapDropped = verifiedLeads.length - capped.length;
+
+  if (overcapDropped > 0) {
+    console.log(`[FINALIZE_DELIVERY] Dropped ${overcapDropped} verified leads over requestedCount=${input.requestedCount}`);
+  }
+
+  console.log(
+    `[FINALIZE_DELIVERY] ${input.leads.length} candidates → ${capped.length} verified delivered, ` +
+    `${dropped.length} unverified dropped (hasTowerJudgedConstraints=${hasTowerJudgedConstraints})`
+  );
+
+  return {
+    verifiedLeads: capped,
+    dropped,
+    count: capped.length,
+    totalCandidates: input.leads.length,
+    requestedCount: input.requestedCount,
+    hasTowerJudgedConstraints,
+  };
+}
+
+File 2 — server/supervisor/gpt4o-search.ts
+Refactor the lead-finalization section to use finalizeDelivery. The change is concentrated in the area AFTER per-constraint Tower verification (the perLeadAgg map is built) and BEFORE delivery summary is emitted.
+Find the section starting at the comment // Per-(lead × hard constraint) Tower semantic verification. (~line 545). The loop that builds perLeadAgg stays. Remove the existing deliveredLeadsWithEvidence construction (~line 706) and the dsLeads construction (~line 870). Replace with:
+ts// Build raw lead inputs for the gateway
+const rawLeadInputs: RawLeadInput[] = allLeads.map((lead, li) => {
+  const leadPlaceId = `gpt4o_${li}_${lead.name.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 30)}`;
+  const agg = perLeadAgg.get(leadPlaceId);
+
+  const verifications: PerConstraintVerification[] = (agg?.perConstraint ?? []).map(pc => {
+    // Find the constraint type from structuredConstraints
+    const matchingConstraint = hardEvidenceConstraints.find(c => String(c.value).trim() === pc.constraintValue);
+    return {
+      constraint_type: matchingConstraint?.type ?? 'unknown',
+      constraint_value: pc.constraintValue,
+      tower_status: pc.towerStatus as EvidenceVerificationStatus | null,
+      tower_confidence: pc.towerConfidence,
+      tower_reasoning: pc.towerReasoning,
+      source_url: lead.source_url || lead.website || null,
+      quote: lead.evidence || null,
+    };
+  });
+
+  return {
+    name: lead.name,
+    address: lead.location || '',
+    phone: null,
+    website: lead.source_url || null,
+    placeId: leadPlaceId,
+    source: 'gpt4o_web_search',
+    executor_confidence: lead.confidence,
+    verifications,
+  };
+});
+
+// THE GATEWAY: single source of truth for verified delivery
+const finalized = finalizeDelivery({
+  leads: rawLeadInputs,
+  structuredConstraints,
+  requestedCount,
+});
+
+console.log(`[GPT4O_SEARCH] Gateway result: ${finalized.count} verified leads, ${finalized.dropped.length} dropped`);
+
+// Emit telemetry artefact for dropped leads (visible in AFR)
+if (finalized.dropped.length > 0) {
+  await createArtefact({
+    runId,
+    type: 'leads_dropped_at_gateway',
+    title: `Gateway dropped ${finalized.dropped.length} unverified leads`,
+    summary: finalized.dropped.map(d => `${d.name} (${d.rollup_status})`).join('; '),
+    payload: {
+      execution_source: 'gpt4o_primary',
+      dropped: finalized.dropped,
+      total_candidates: finalized.totalCandidates,
+      verified_count: finalized.count,
+    },
+    userId,
+    conversationId,
+  }).catch(() => {});
+}
+
+// Build the delivery summary input from FinalizedLeads ONLY
+const dsLeads = finalized.verifiedLeads.map(fl => ({
+  entity_id: fl.entity_id,
+  name: fl.name,
+  address: fl.address,
+  found_in_plan_version: 1 as const,
+  match_valid: fl.match_valid,
+  match_summary: fl.match_summary,
+  match_basis: [] as Record<string, unknown>[],
+  supporting_evidence: fl.supporting_evidence,
+  match_evidence: fl.match_evidence,
+}));
+
+// The returned leads (for combinedResult.leads) ALSO come from FinalizedLeads
+const cappedLeads = finalized.verifiedLeads.map(fl => ({
+  name: fl.name,
+  address: fl.address,
+  phone: fl.phone,
+  website: fl.website,
+  placeId: fl.placeId,
+}));
+
+// The final_delivery artefact uses the same canonical FinalizedLeads
+const deliveredLeadsWithEvidence = finalized.verifiedLeads.map(fl => ({
+  name: fl.name,
+  address: fl.address,
+  phone: fl.phone,
+  website: fl.website,
+  placeId: fl.placeId,
+  source: fl.source,
+  verified: true,
+  verification_status: 'verified' as const,
+  constraint_verdicts: fl.match_evidence.map(me => ({
+    constraint: me.constraint_value,
+    verdict: 'verified' as const,
+  })),
+  evidence: fl.match_evidence.map(me => ({
+    source_url: me.source_url,
+    text: me.quote,
+    snippet: me.quote,
+    quote: me.quote,
+    confidence: me.confidence > 0.75 ? 'high' : me.confidence > 0.5 ? 'medium' : 'low',
+  })),
+  match_valid: true,
+  match_summary: fl.match_summary,
+  match_basis: [] as Record<string, unknown>[],
+  supporting_evidence: fl.supporting_evidence,
+  match_evidence: fl.match_evidence,
+}));
+Add the import at the top of the file:
+tsimport {
+  finalizeDelivery,
+  type RawLeadInput,
+  type PerConstraintVerification,
+  type EvidenceVerificationStatus,
+} from './finalize-delivery';
+The rest of the gpt4o-search.ts function (Tower judgement, AFR logging, emitDeliverySummary call) stays the same — it now operates on the gateway's output instead of hand-rolled data.
+
+File 3 — server/supervisor/mission-executor.ts
+Apply the same pattern. Find the section that builds the delivery summary input from evidenceResults and verificationSummary (search for "buildVerificationSummary" usage and the delivery_summary input construction).
+The minimum change: gather the per-lead × per-constraint Tower results into RawLeadInput[], call finalizeDelivery, replace the hand-rolled delivered leads with finalized.verifiedLeads.
+The exact lines depend on the current structure of mission-executor — let the agent identify them, but the principle is identical:
+
+Build rawLeadInputs: RawLeadInput[] from the executor's per-lead results
+Call finalizeDelivery({ leads, structuredConstraints, requestedCount })
+Use finalized.verifiedLeads as the canonical delivery list
+Drop any existing manual filter logic that competes with the gateway
+
+Add the same import as in File 2.
+
+File 4 — server/supervisor/reloop/loop-skeleton.ts
+Remove the duplicate filtering. Find the section starting at the comment // ── Single source of truth: per-lead Tower verification status ── (~line 855). Replace the isLeadVerified filter with a passthrough — each per-loop delivery summary now already contains only verified leads (because the executor called finalizeDelivery).
+ts// Each per-loop delivery summary is ALREADY pre-filtered by the gateway.
+// The merge step is now a simple concatenation with dedup, no re-filtering.
+const verifiedMergedExact = mergedExact; // already only verified
+const unverifiedDroppedCount = 0; // dropping happens at the gateway, per-loop
+const combinedClosest = mergedClosest;
+
+console.log(`[RELOOP_SKELETON] Merge (gateway-trusted): ${mergedExact.length} verified leads accumulated across ${loopHistory.length} loop(s)`);
+The rest of loop-skeleton.ts stays — the canonical delivery_summary emission, Tower judgement, combined_delivery artefact all stay. They now operate on a pre-filtered set.
+The // Fix C: fallback block that rebuilds delivered_exact from accumulator can stay as a defensive measure but is no longer the primary path.
+
+File 5 — server/supervisor/lead-verification.ts
+Mark isLeadVerified as deprecated (still works for any legacy caller, but is no longer the canonical rule). Add a JSDoc deprecation comment at the top:
+ts/**
+ * @deprecated As of feat-delivery-gateway: the canonical verification rule
+ * is now applied inside finalize-delivery.ts at the gateway. New code should
+ * not call isLeadVerified — instead, trust that leads reaching downstream
+ * consumers have already been filtered by the gateway.
+ *
+ * This function remains exported for any legacy callers but should not be
+ * relied upon for new code. It uses a deny-list rule that lets some unverified
+ * leads through (e.g. leads with verification_status === 'unverified').
+ */
+Do not delete it — too many legacy callers. Just deprecate.
+
+File 6 — server/supervisor/response-builder.ts
+Tighten the LLM prompt for buildNaturalResponse to make Results / Verification literal. In the system prompt's RULES section, add at the TOP:
+HARD RULES (these override everything below):
+
+1. The "Results:" bullet count MUST equal the delivered_count provided in the input. Never invent a different number, never round up, never claim more than was delivered. If delivered_count is 3, say "Found 3", not "Found 5" or "Found several".
+
+2. The "Verification:" bullet describes the SAME count. Since unverified leads were dropped at the gateway upstream, EVERY delivered lead is verified. The phrasing is "All N verified with on-page evidence" — never "X of N verified" because unverified leads do not appear in the delivery.
+
+3. If delivered_count is 0, the response uses Example B (below). Do not pretend any leads were delivered.
+
+EXAMPLE A — Tower passed, leads verified (the normal case):
+Results: Found 3 beer festivals in Sussex.
+Verification: All 3 verified with on-page evidence.
+Market: Healthy supply in this area.
+Suggestion: Consider setting up monitoring for future events.
+
+EXAMPLE B — No verified leads delivered:
+Results: Could not deliver verified results.
+Verification: Tower could not confirm any matches — the available evidence was insufficient.
+Market: Genuinely scarce — there may be few or no qualifying businesses here.
+Suggestion: Try broadening your search criteria.
+Confirm that the buildNaturalResponse function receives deliveredCount from the canonical delivery summary (which now equals finalized.count). Both Results and Verification bullets read from this single number.
+
+File 7 (NEW) — server/supervisor/finalize-delivery.test.ts
+Create tests that lock down the rules. ~80 lines. Cover these scenarios:
+tsimport { describe, it, expect } from 'vitest';
+import { finalizeDelivery, computeRollup } from './finalize-delivery';
+
+describe('finalizeDelivery — single source of truth', () => {
+  it('drops leads with verification_status no_evidence', () => {
+    const result = finalizeDelivery({
+      leads: [
+        { name: 'Pass', address: 'a', placeId: 'p1', source: 's', verifications: [
+          { constraint_type: 'website_evidence', constraint_value: 'live music', tower_status: 'verified', tower_confidence: 0.9, tower_reasoning: null, source_url: null, quote: null }
+        ]},
+        { name: 'Fail', address: 'a', placeId: 'p2', source: 's', verifications: [
+          { constraint_type: 'website_evidence', constraint_value: 'live music', tower_status: 'no_evidence', tower_confidence: 0.1, tower_reasoning: 'No mention', source_url: null, quote: null }
+        ]},
+      ],
+      structuredConstraints: [{ type: 'website_evidence', field: 'evidence', operator: 'contains', value: 'live music', hardness: 'hard' }],
+      requestedCount: null,
+    });
+    expect(result.count).toBe(1);
+    expect(result.verifiedLeads[0].name).toBe('Pass');
+    expect(result.dropped).toHaveLength(1);
+    expect(result.dropped[0].name).toBe('Fail');
+  });
+
+  it('drops leads with weak_match — must be fully verified', () => {
+    const result = finalizeDelivery({
+      leads: [
+        { name: 'Weak', address: 'a', placeId: 'p1', source: 's', verifications: [
+          { constraint_type: 'website_evidence', constraint_value: 'X', tower_status: 'weak_match', tower_confidence: 0.5, tower_reasoning: null, source_url: null, quote: null }
+        ]},
+      ],
+      structuredConstraints: [{ type: 'website_evidence', field: 'evidence', operator: 'contains', value: 'X', hardness: 'hard' }],
+      requestedCount: null,
+    });
+    expect(result.count).toBe(0);
+    expect(result.dropped[0].rollup_status).toBe('weak_match');
+  });
+
+  it('passes location-only queries with no semantic constraints', () => {
+    const result = finalizeDelivery({
+      leads: [
+        { name: 'Lead', address: 'a', placeId: 'p1', source: 's', executor_confidence: 'high', verifications: [] },
+      ],
+      structuredConstraints: [{ type: 'location_constraint', field: 'location', operator: 'in', value: 'Sussex', hardness: 'hard' }],
+      requestedCount: null,
+    });
+    expect(result.count).toBe(1);
+    expect(result.hasTowerJudgedConstraints).toBe(false);
+  });
+
+  it('drops leads when tower-judged constraints exist but no verifications were run', () => {
+    const result = finalizeDelivery({
+      leads: [
+        { name: 'Unchecked', address: 'a', placeId: 'p1', source: 's', verifications: [] },
+      ],
+      structuredConstraints: [{ type: 'website_evidence', field: 'evidence', operator: 'contains', value: 'X', hardness: 'hard' }],
+      requestedCount: null,
+    });
+    expect(result.count).toBe(0);
+  });
+
+  it('count equals verifiedLeads.length always', () => {
+    const result = finalizeDelivery({
+      leads: Array.from({ length: 10 }, (_, i) => ({
+        name: `L${i}`, address: 'a', placeId: `p${i}`, source: 's',
+        verifications: [{ constraint_type: 'website_evidence', constraint_value: 'X', tower_status: i < 6 ? 'verified' : 'no_evidence', tower_confidence: 0.9, tower_reasoning: null, source_url: null, quote: null }],
+      })),
+      structuredConstraints: [{ type: 'website_evidence', field: 'evidence', operator: 'contains', value: 'X', hardness: 'hard' }],
+      requestedCount: null,
+    });
+    expect(result.count).toBe(result.verifiedLeads.length);
+    expect(result.count).toBe(6);
+  });
+
+  it('caps to requestedCount AFTER verification filter', () => {
+    const result = finalizeDelivery({
+      leads: Array.from({ length: 10 }, (_, i) => ({
+        name: `L${i}`, address: 'a', placeId: `p${i}`, source: 's',
+        verifications: [{ constraint_type: 'website_evidence', constraint_value: 'X', tower_status: 'verified', tower_confidence: 0.9, tower_reasoning: null, source_url: null, quote: null }],
+      })),
+      structuredConstraints: [{ type: 'website_evidence', field: 'evidence', operator: 'contains', value: 'X', hardness: 'hard' }],
+      requestedCount: 3,
+    });
+    expect(result.count).toBe(3);
+  });
+});
+Run with npm test finalize-delivery or the project's existing test command.
+
+Verification steps:
+
+Run npm test finalize-delivery — all tests pass
+Run the "can you find pubs in Arundel that have live music?" query (today's failing case) — UI should show only verified leads, no "unverified" badges anywhere, count agrees across all components
+Run "find pubs in Sussex" (location-only, no semantic constraints) — should still deliver leads as before (no Tower-judged constraints means executor's verdict is trusted)
+Run "find pubs in Narnia" — should deliver 0 leads, response message uses Example B from the prompt rules
+Check AFR for the live-music run — leads_dropped_at_gateway artefact should appear listing which leads were dropped and why
+Verify the Behaviour Judge box agrees with the response message count (both come from the same gateway output now)
+
+What stays the same:
+
+Tower's verdict logic (pass/fail/stop unchanged)
+AFR event logging structure
+All UI components (they just see consistent data now)
+The reloop chain itself
+Plan/executor selection
+
+What changes:
+
+Every lead delivered passes through finalizeDelivery
+The rule "verified or dropped, nothing in between" is enforced at one point in the code
+Adding a new executor in future requires it to call finalizeDelivery — there is no other path
+
+Risks and mitigations:
+
+Risk: previously-delivering leads suddenly drop because they had weak_match status that used to pass. Mitigation: the leads_dropped_at_gateway artefact shows which leads were dropped, so we can tune the rule if it's too strict.
+Risk: location-only queries break if hasTowerJudgedConstraints is false but leads have no executor_confidence. Mitigation: gateway falls through to verified in that case (Case 1 of computeRollup).
+Risk: mission-executor refactor in File 3 introduces breakage in gp_cascade path. Mitigation: ship gpt4o-search.ts change first, verify, then do mission-executor.ts as a follow-up commit on the same branch.
+
+Do not touch anywhere else in the codebase. The gateway is a single point of canonical truth; future work goes around it, not through it.
