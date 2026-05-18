@@ -142,16 +142,37 @@ export async function handleResultDiscussion(
     .join('\n');
 
   // 5. Build user prompt
-  let userPrompt = `LEADS (${ctx.leads.length} total):\n${leadSummary}\n\n`;
+  let userPrompt = `LATEST DELIVERY — LEADS (${ctx.leads.length} total):\n${leadSummary}\n\n`;
+
+  // Past deliveries in this conversation, most recent first
+  // Index 0 = the latest (same as LEADS above). Index 1 = the one before, etc.
+  if (ctx.pastDeliveries.length > 1) {
+    const olderDeliveries = ctx.pastDeliveries.slice(1, 5); // up to 4 older runs
+    const olderSummary = olderDeliveries
+      .map((pd, i) => {
+        const label = i === 0 ? 'PREVIOUS RUN (the one before the latest)' : `RUN ${i + 1} BEFORE LATEST`;
+        const ageMins = Math.round((Date.now() - pd.timestamp) / 60000);
+        const desc = [
+          `${pd.entityCategory || 'unknown entity'} in ${pd.location || 'unknown location'}`,
+          `${pd.leadCount} results delivered ${ageMins} minutes ago`,
+        ].join(' — ');
+        const names = pd.topLeadNames.length > 0
+          ? `Top results: ${pd.topLeadNames.map((n, j) => `${j + 1}. ${n}`).join(', ')}`
+          : 'No result names available';
+        return `${label}:\n  ${desc}\n  ${names}`;
+      })
+      .join('\n\n');
+    userPrompt += `EARLIER DELIVERIES IN THIS CONVERSATION:\n${olderSummary}\n\n`;
+  }
 
   if (resolvedLead) {
-    userPrompt += `REFERENCED LEAD:\n${resolvedLead.index}. ${resolvedLead.name} — ${resolvedLead.address}`;
+    userPrompt += `REFERENCED LEAD (from latest delivery):\n${resolvedLead.index}. ${resolvedLead.name} — ${resolvedLead.address}`;
     if (resolvedLead.website) userPrompt += ` | Website: ${resolvedLead.website}`;
     if (resolvedLead.phone) userPrompt += ` | Phone: ${resolvedLead.phone}`;
     userPrompt += '\n\n';
   }
 
-  userPrompt += `USER MESSAGE: ${rawMessage}`;
+  userPrompt += `USER MESSAGE: ${rawMessage}\n\nIf the user references "the previous search", "the one before", "the earlier run", or similar, use the EARLIER DELIVERIES section to answer. Only the top 3 result names are stored for older runs — if the user asks for deeper detail on an older run, say you can only see the top results and offer to re-run that search.`;
 
   // 6. Call LLM (with circuit breaker)
   let response: string;
