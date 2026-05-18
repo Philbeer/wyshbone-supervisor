@@ -26,6 +26,7 @@ import type { VerificationPolicy } from './verification-policy';
 import type { StructuredConstraintPayload, EvidenceResult, ConstraintResult, VerificationSummary } from './mission-executor';
 import { buildVerificationSummary } from './mission-executor';
 import { requestSemanticVerification, type TowerSemanticStatus } from './tower-semantic-verify';
+import { renderConstraintAsClaim } from './constraint-to-claim';
 import {
   finalizeDelivery,
   type RawLeadInput,
@@ -656,7 +657,7 @@ export async function executeGpt4oPrimaryPath(ctx: Gpt4oSearchContext): Promise<
             original_user_goal: rawUserInput,
             lead_name: lead.name,
             lead_place_id: leadPlaceId,
-            constraint_to_check: constraintValue,
+            constraint_to_check: renderConstraintAsClaim(constraint, new Date()),
             source_url: lead.source_url || lead.website || 'gpt4o_web_search',
             evidence_text: (lead.evidence || lead.description || '').substring(0, 5000),
             extracted_quotes: lead.evidence ? [lead.evidence] : [],
