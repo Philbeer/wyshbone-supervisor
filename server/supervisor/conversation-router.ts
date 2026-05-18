@@ -373,8 +373,14 @@ export async function routeConversation(input: RouterInput): Promise<RouterDecis
   }
 
   // Safety: if route is SEARCH but the original message has no location-like content,
-  // and the entity/location came from search history not the message, override to CHAT or CLARIFY
-  if (decision.route === 'SEARCH') {
+  // and the entity/location came from search history not the message, override to CHAT or CLARIFY.
+  // SKIP this override when the turn classifier says the user is providing clarification or
+  // answering a question — in those cases entity/location LEGITIMATELY come from previous turns
+  // (rule 12 / Mode B clarify acceptance), and the override would wrongly drop the user's intent.
+  const turnRelation = input.turnAnalysis?.user_message_relation;
+  const userIsAccepting = turnRelation === 'PROVIDING_CLARIFICATION' || turnRelation === 'ANSWERING_QUESTION';
+
+  if (decision.route === 'SEARCH' && !userIsAccepting) {
     const msgLower = input.currentMessage.toLowerCase().trim();
 
     const hasLocationWords = decision.location && msgLower.includes(decision.location.toLowerCase().substring(0, 4));
