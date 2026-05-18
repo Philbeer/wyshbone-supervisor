@@ -1,0 +1,88 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat/conversation-search-memory (continue on existing branch)
+FILE: server/supervisor/result-discussion.ts
+═══════════════════════════════════════════════════════════════════
+CHANGE 1 — remove regex pre-resolution
+═══════════════════════════════════════════════════════════════════
+Find:
+tsimport { getConversationContext, resolveLeadReference } from './conversation-context';
+Replace with:
+tsimport { getConversationContext } from './conversation-context';
+Find:
+ts  // 2. Try to resolve a specific lead reference
+  const resolvedLead = resolveLeadReference(ctx, rawMessage);
+Delete that block entirely (the comment line and the const line).
+═══════════════════════════════════════════════════════════════════
+CHANGE 2 — drop REFERENCED LEAD injection
+═══════════════════════════════════════════════════════════════════
+Find this block in step 5:
+ts  if (resolvedLead) {
+    userPrompt += `REFERENCED LEAD (from latest delivery):\n${resolvedLead.index}. ${resolvedLead.name} — ${resolvedLead.address}`;
+    if (resolvedLead.website) userPrompt += ` | Website: ${resolvedLead.website}`;
+    if (resolvedLead.phone) userPrompt += ` | Phone: ${resolvedLead.phone}`;
+    userPrompt += '\n\n';
+  }
+Delete it entirely.
+═══════════════════════════════════════════════════════════════════
+CHANGE 3 — clearer prompt instructions for delivery references
+═══════════════════════════════════════════════════════════════════
+Find:
+ts  userPrompt += `USER MESSAGE: ${rawMessage}\n\nIf the user references "the previous search", "the one before", "the earlier run", or similar, use the EARLIER DELIVERIES section to answer. Only the top 3 result names are stored for older runs — if the user asks for deeper detail on an older run, say you can only see the top results and offer to re-run that search.`;
+Replace with:
+ts  userPrompt += `USER MESSAGE: ${rawMessage}
+
+HOW TO RESOLVE WHAT THE USER IS REFERRING TO:
+- "lead #3" / "the third one" / "tell me about #2" → a specific lead in the LATEST DELIVERY (numbered above)
+- "the first/second/third result" → the Nth lead in the LATEST DELIVERY
+- "those results" / "they" / "them" → the LATEST DELIVERY as a whole
+- "the previous search" / "the one before" / "the earlier run" → the PREVIOUS RUN entry in EARLIER DELIVERIES (the one before the latest)
+- "the first search" / "the earliest run" / "the original search" → the OLDEST entry in EARLIER DELIVERIES (the highest-numbered "RUN N BEFORE LATEST" label, since they're listed most-recent-first)
+- "the [entity] one" (e.g. "the accountants one") → fuzzy match on entity type across EARLIER DELIVERIES
+- "the [location] one" (e.g. "the Kent one") → fuzzy match on location across EARLIER DELIVERIES
+- A specific lead name (e.g. "tell me about Sussex Barn") → match by name in LATEST DELIVERY or topLeadNames of EARLIER DELIVERIES
+
+If the user wants details about a lead in an earlier run beyond its name, only the top 3 names are stored — say you can only see the top results and offer to re-run that search.`;
+═══════════════════════════════════════════════════════════════════
+CHANGE 4 — drop referencedLeadForMeta (no longer computed)
+═══════════════════════════════════════════════════════════════════
+Find:
+ts  // 7. Save message to DB
+  const referencedLeadForMeta = resolvedLead
+    ? { name: resolvedLead.name, index: resolvedLead.index }
+    : null;
+
+  const messageId = await saveAssistantMessage(conversationId, response, referencedLeadForMeta);
+
+  // 8. Log
+  if (resolvedLead) {
+    console.log(
+      `[RESULT_DISCUSSION] Responded about lead #${resolvedLead.index} "${resolvedLead.name}" — ${response.length} chars`,
+    );
+  } else {
+    console.log(`[RESULT_DISCUSSION] Responded to general query — ${response.length} chars`);
+  }
+
+  return { response, referencedLead: referencedLeadForMeta, messageId };
+Replace with:
+ts  // 7. Save message to DB
+  const messageId = await saveAssistantMessage(conversationId, response, null);
+
+  // 8. Log
+  console.log(`[RESULT_DISCUSSION] Responded to query — ${response.length} chars`);
+
+  return { response, referencedLead: null, messageId };
+Also find the buildFallbackResponse call near step 6 where resolvedLead was passed:
+ts    response = buildFallbackResponse(resolvedLead, ctx.leads.length);
+Replace with:
+ts    response = buildFallbackResponse(null, ctx.leads.length);
+(both occurrences — circuit-breaker branch and catch branch).
+═══════════════════════════════════════════════════════════════════
+AFTER ALL CHANGES
+═══════════════════════════════════════════════════════════════════
+
+Run npx tsc --noEmit — confirm no new errors.
+Commit:
+
+   fix(memory): drop regex pre-resolution in DISCUSS — let LLM resolve from data
+
+Report commit hash.
