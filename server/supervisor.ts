@@ -2427,7 +2427,8 @@ class SupervisorService {
                     retryAttempted &&
                     !retrySucceeded &&
                     watchdogAttempt2 &&
-                    watchdogAttempt2.dropped_concepts.length > 0
+                    watchdogAttempt2.dropped_concepts.length > 0 &&
+                    !_routerHandledSearch
                   ) {
                     const watchdogClarifyMsg = buildWatchdogClarifyMessage(watchdogAttempt2.dropped_concepts);
 
