@@ -1,0 +1,54 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: main (single-file hot patch — or create feat-negation-claim-fix if you want a branch)
+
+GOAL: Fix the constraint-to-claim helper so negation operators render as POSITIVE claims for Tower verification. Currently they render as negative ("does NOT mention X") which Tower can't verify (you can't prove an absence). Result: Tower returns no_evidence for every lead, gateway's STRICT flip lets all leads through regardless of whether they actually violate the negation.
+
+Architectural intent: Tower verifies POSITIVE claims. Gateway flips the verdict for negated constraints (existing STRICT flip in finalize-delivery.ts). The claim helper needs to render positive, not negative.
+
+═══════════════════════════════════════════════
+STEP 1 — server/supervisor/constraint-to-claim.ts: render not_* operators as positive
+═══════════════════════════════════════════════
+
+In renderConstraintAsClaim, change the negation-operator branches to render the SAME claim as the positive form of that operator. Specifically:
+
+text_compare:
+- not_contains → "the {field} contains '{value}'" (same as contains)
+
+attribute_check:
+- not_has → "they have {value}" (same as has)
+
+website_evidence:
+- not_contains / not_mentions → "their website mentions or evidences {value}" (same as contains/mentions)
+
+relationship_check:
+- not_has → "they have a relationship with {value}"
+- not_serves → "they serve {value}"
+- not_owned_by → "they are owned by {value}"
+- not_managed_by → "they are managed by {value}"
+- not_partners_with → "they partner with {value}"
+
+status_check:
+- not_equals → "they are currently {value}" (same as equals/has)
+
+Simplest implementation: at the top of the function, detect negation by checking if operator starts with "not_". If yes, strip the "not_" prefix and dispatch to the positive-operator rendering branch (so you don't duplicate logic). The string "not_" itself never reaches the rendered output.
+
+═══════════════════════════════════════════════
+DO NOT TOUCH
+═══════════════════════════════════════════════
+
+- finalize-delivery.ts STRICT flip — that's correct as-is. The flip is what produces the right inclusion/exclusion behaviour when Tower verifies the positive form.
+- Tower / control-tower repo
+- chat.tsx or any UI file
+- mission-schema.ts — schema is correct
+
+═══════════════════════════════════════════════
+VERIFY
+═══════════════════════════════════════════════
+
+- TypeScript compiles cleanly.
+- Show me the diff for constraint-to-claim.ts.
+- Manual trace:
+  - { type: "website_evidence", operator: "not_mentions", value: "AI" } → should render "their website mentions or evidences AI" (no "NOT" in the output). Confirm.
+  - { type: "attribute_check", operator: "not_has", value: "beer garden" } → should render "they have beer garden". Confirm.
+
+Report when the diff is ready.
