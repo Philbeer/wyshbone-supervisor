@@ -165,11 +165,27 @@ function formatConstraintForSearch(c: StructuredConstraintPayload): string {
     }
 
     case 'time_constraint':
-    case 'time_predicate':
+    case 'time_predicate': {
+      if (c.operator === 'between_dates') {
+        let dateRange: { start: string; end: string } | null = null;
+        if (c.value && typeof c.value === 'object' && 'start' in (c.value as object)) {
+          dateRange = c.value as { start: string; end: string };
+        } else if (typeof c.value === 'string') {
+          try { dateRange = JSON.parse(c.value); } catch {}
+        }
+        if (dateRange) {
+          return `They must have ${c.field} between ${dateRange.start} and ${dateRange.end}.`;
+        }
+        return `Their ${c.field} must satisfy: between_dates ${valueRaw}.`;
+      }
+      if (c.operator === 'within_next') {
+        return `They must have ${c.field} within the next ${valueRaw}.`;
+      }
       if (c.operator === 'within_last' || c.operator === 'since') {
         return `They must have ${c.field === 'opened' ? 'opened' : c.field} ${c.operator === 'within_last' ? 'within the last' : 'since'} ${valueRaw}.`;
       }
       return `Their ${c.field} must satisfy: ${c.operator} ${valueRaw}.`;
+    }
 
     case 'location_constraint':
       return '';
@@ -204,39 +220,103 @@ function buildSearchPrompt(ctx: Gpt4oSearchContext, angle: string): string {
     constraintText = `They must: ${ctx.hardConstraints.join(', ')}.`;
   }
 
-  const hasTemporalConstraint = ctx.hardConstraints.some(c =>
-    /\b(recent|opened|established|new|last\s+\d+\s+months?|within\s+\d+)\b/i.test(c),
-  ) || /\b(recent|opened|new|last\s+\d+)\b/i.test(ctx.rawUserInput);
+  const _tcEntry = ctx.structuredConstraints.find(c =>
+    (c.type === 'time_constraint' || c.type === 'time_predicate') &&
+    c.hardness === 'hard' &&
+    c.value !== null && c.value !== undefined,
+  );
 
-  const cutoffDate = (() => {
-    const tc = ctx.structuredConstraints.find(c =>
-      (c.type === 'time_constraint' || c.type === 'time_predicate') &&
-      c.hardness === 'hard' &&
-      c.value !== null && c.value !== undefined,
-    );
-    if (!tc) {
-      return new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const _daysPerUnit: Record<string, number> = {
+    day: 1, days: 1,
+    week: 7, weeks: 7,
+    month: 30, months: 30,
+    year: 365, years: 365,
+  };
+
+  type _TemporalParams =
+    | { direction: 'backward'; cutoffDate: string }
+    | { direction: 'forward'; forwardWindowEnd: string }
+    | { direction: 'between'; start: string; end: string }
+    | { direction: 'none' };
+
+  const _temporalParams = ((): _TemporalParams => {
+    if (!_tcEntry) return { direction: 'none' };
+    const op = _tcEntry.operator;
+
+    if (op === 'between_dates') {
+      const rawVal = _tcEntry.value;
+      let dateRange: { start: string; end: string } | null = null;
+      if (rawVal && typeof rawVal === 'object' && 'start' in (rawVal as object)) {
+        dateRange = rawVal as { start: string; end: string };
+      } else if (typeof rawVal === 'string') {
+        try { dateRange = JSON.parse(rawVal); } catch {}
+      }
+      if (dateRange) return { direction: 'between', start: dateRange.start, end: dateRange.end };
+      return { direction: 'none' };
     }
-    const value = String(tc.value).trim().toLowerCase();
+
+    if (op === 'within_next') {
+      const value = String(_tcEntry.value).trim().toLowerCase();
+      const match = value.match(/^(\d+)\s*(day|days|week|weeks|month|months|year|years)$/);
+      if (match) {
+        const days = parseInt(match[1], 10) * (_daysPerUnit[match[2]] ?? 1);
+        const forwardWindowEnd = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        console.log(`[GPT4O_SEARCH] Forward temporal window from constraint "${value}" → end=${forwardWindowEnd}`);
+        return { direction: 'forward', forwardWindowEnd };
+      }
+      return { direction: 'none' };
+    }
+
+    const value = String(_tcEntry.value).trim().toLowerCase();
     const match = value.match(/^(\d+)\s*(day|days|week|weeks|month|months|year|years)$/);
-    if (!match) {
-      console.warn(`[GPT4O_SEARCH] Could not parse time_constraint value "${value}" — falling back to 365-day cutoff`);
-      return new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    if (match) {
+      const days = parseInt(match[1], 10) * (_daysPerUnit[match[2]] ?? 1);
+      const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      console.log(`[GPT4O_SEARCH] Derived temporal cutoff from constraint "${value}" → ${days} days back`);
+      return { direction: 'backward', cutoffDate };
     }
-    const n = parseInt(match[1], 10);
-    const unit = match[2];
-    const daysPerUnit: Record<string, number> = {
-      day: 1, days: 1,
-      week: 7, weeks: 7,
-      month: 30, months: 30,
-      year: 365, years: 365,
-    };
-    const days = n * daysPerUnit[unit];
-    console.log(`[GPT4O_SEARCH] Derived temporal cutoff from constraint "${value}" → ${days} days back`);
-    return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    console.warn(`[GPT4O_SEARCH] Could not parse time_constraint value "${value}" — falling back to 365-day cutoff`);
+    return { direction: 'backward', cutoffDate: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0] };
   })();
 
-  const temporalRules = hasTemporalConstraint ? `
+  const hasTemporalConstraint = _temporalParams.direction !== 'none' ||
+    ctx.hardConstraints.some(c => /\b(recent|opened|established|new|last\s+\d+\s+months?|within\s+\d+)\b/i.test(c)) ||
+    /\b(recent|opened|new|last\s+\d+)\b/i.test(ctx.rawUserInput);
+
+  const cutoffDate = _temporalParams.direction === 'backward'
+    ? _temporalParams.cutoffDate
+    : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+  const temporalRules = hasTemporalConstraint ? (() => {
+    if (_temporalParams.direction === 'between') {
+      return `
+
+CRITICAL TEMPORAL RULES — READ CAREFULLY:
+You are looking for ${entityDesc} with events or activities scheduled between ${_temporalParams.start} and ${_temporalParams.end}.
+- Only include results where you find evidence of an event, occurrence, or activity with a specific date WITHIN this date range.
+- An explicit future date on the page (e.g. "23-25 May 2026") that falls within ${_temporalParams.start} to ${_temporalParams.end} is valid evidence.
+- "Tickets on sale" / "book now" / "register" paired with a date in this range is valid.
+- "Annual" or "yearly" alone is NOT valid — the event must show a specific date within the range.
+- A historical page about past editions with no current date in range is NOT valid.
+- Today's date appearing on the page alone is NOT evidence of a scheduled event.
+- Do NOT include results with no future date explicitly within ${_temporalParams.start} to ${_temporalParams.end}.
+`;
+    }
+    if (_temporalParams.direction === 'forward') {
+      return `
+
+CRITICAL TEMPORAL RULES — READ CAREFULLY:
+You are looking for ${entityDesc} with events or activities scheduled before or on ${_temporalParams.forwardWindowEnd}.
+- Only include results where you find evidence of something happening before ${_temporalParams.forwardWindowEnd}.
+- An explicit future date on the page that falls before ${_temporalParams.forwardWindowEnd} is valid evidence.
+- "Tickets on sale" / "book now" / "register" paired with a future date before ${_temporalParams.forwardWindowEnd} is valid.
+- "Annual" or "yearly" alone is NOT valid — the event must show a specific upcoming date.
+- A historical page about past editions with no upcoming date is NOT valid.
+- Today's date appearing on the page alone is NOT evidence of a scheduled event.
+- Do NOT include results with no evidence of an upcoming event before ${_temporalParams.forwardWindowEnd}.
+`;
+    }
+    return `
 
 CRITICAL TEMPORAL RULES — READ CAREFULLY:
 You are looking for businesses that OPENED (were first established/founded) after ${cutoffDate}.
@@ -247,7 +327,8 @@ You are looking for businesses that OPENED (were first established/founded) afte
 - Recent website updates, recent Companies House filings, or recent Google reviews do NOT prove recent opening.
 - If you cannot find a clear opening/establishment date AFTER ${cutoffDate}, do NOT include the business.
 - ONLY include businesses where you find evidence they were FIRST established after ${cutoffDate}.
-` : '';
+`;
+  })() : '';
 
   return `${getCurrentDatePreamble()}
 

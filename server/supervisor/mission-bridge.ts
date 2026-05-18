@@ -268,7 +268,21 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
     }
 
     case 'time_constraint': {
-      const val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
+      let val: string | { start: string; end: string };
+      if (
+        c.operator === 'between_dates' &&
+        typeof c.value === 'string' &&
+        c.value.trim().startsWith('{')
+      ) {
+        try {
+          val = JSON.parse(c.value) as { start: string; end: string };
+        } catch {
+          val = c.value;
+        }
+      } else {
+        val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
+      }
+      const valStr = typeof val === 'object' ? JSON.stringify(val) : val;
       return {
         id: `c_time_m${index}`,
         type: 'TIME_CONSTRAINT',
@@ -276,7 +290,7 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
         operator: c.operator,
         value: val,
         hard: c.hardness === 'hard',
-        rationale: `Time constraint: ${c.field} ${c.operator} ${val}`,
+        rationale: `Time constraint: ${c.field} ${c.operator} ${valStr}`,
         canonical,
       };
     }

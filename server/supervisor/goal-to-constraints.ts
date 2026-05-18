@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { formatTemporalAnchorsForPrompt } from './current-context';
 
 export const DEFAULT_LEADS_TARGET = 20;
 
@@ -60,9 +61,15 @@ export const StructuredConstraintSchema = z.object({
   type: z.enum(CONSTRAINT_TYPES),
   field: z.string(),
   operator: z.string(),
-  value: z.union([z.string(), z.number(), z.object({ center: z.string(), km: z.number() })]),
+  value: z.union([
+    z.string(),
+    z.number(),
+    z.object({ center: z.string(), km: z.number() }),
+    z.object({ start: z.string(), end: z.string() }),
+  ]),
   hard: z.boolean(),
   rationale: z.string(),
+  inferred_window: z.boolean().optional(),
   canonical: CanonicalSourceSchema,
 });
 
@@ -96,7 +103,12 @@ export const ParsedGoalSchema = z.object({
 
 export type ParsedGoal = z.infer<typeof ParsedGoalSchema>;
 
-const SYSTEM_PROMPT = `You are a goal parser for a B2B lead generation system. Parse user requests into structured constraints for searching businesses.
+function buildSystemPrompt(): string {
+  const temporalContext = formatTemporalAnchorsForPrompt();
+  return `You are a goal parser for a B2B lead generation system. Parse user requests into structured constraints for searching businesses.
+
+CURRENT DATE CONTEXT:
+${temporalContext}
 
 You must return a JSON object with these fields:
 - original_goal: the verbatim user input
@@ -128,6 +140,41 @@ CONSTRAINT TYPES and how to detect them:
 - NAME_STARTS_WITH: when user says "starting with X" or "beginning with X" → { id: "c_name_prefix", type: "NAME_STARTS_WITH", field: "name", operator: "starts_with", value: "X", hard: false, rationale: "..." }
 - NAME_CONTAINS: when user says "with the word X in the name" or "called X" or "named X" → { id: "c_name_contains", type: "NAME_CONTAINS", field: "name", operator: "contains_word", value: "X", hard: false, rationale: "..." }. Only for BUSINESS NAME matching, not venue attributes.
 - MUST_USE_TOOL: when user says "using google places" → { id: "c_tool", type: "MUST_USE_TOOL", field: "tool", operator: "=", value: "GOOGLE_PLACES", hard: false, rationale: "..." }
+- TIME_CONSTRAINT: emit when the user references time or recency. Choose operator and value shape based on the phrase.
+
+  CALENDAR-ANCHORED phrases (use operator="between_dates", value={start, end} with YYYY-MM-DD dates COPIED VERBATIM from the CURRENT DATE CONTEXT block above):
+  - "this weekend" → value = THIS WEEKEND range
+  - "next weekend" → value = NEXT WEEKEND range
+  - "this week" → value = { start: today_iso, end: THIS WEEK END }
+  - "next week" → value = NEXT WEEK range
+  - "this month" → value = { start: today_iso, end: THIS MONTH END }
+  - "next month" → value = NEXT MONTH range
+  - "this year" → value = { start: today_iso, end: THIS YEAR END }
+  - "next year" → value = NEXT YEAR range
+  inferred_window=false for all of these (the dates come from the context block, not a guess).
+
+  VAGUE phrases (operator="within_next" or "within_last", value="N units", inferred_window=true):
+  - "upcoming" / "soon" → within_next, "6 months"
+  - "recent" / "recently" → within_last, "6 months"
+  - "new" / "newly" → within_last, "12 months"
+
+  EXPLICIT user windows → use the exact user value, inferred_window=false:
+  - "in the last 3 weeks" → within_last, "3 weeks"
+  - "next 5 months" → within_next, "5 months"
+
+  ABSOLUTE references → since / before / after with the user's date:
+  - "opened since 2024" → since, "2024"
+  - "events before December 2026" → before, "2026-12-01"
+
+  Shape:
+  { id: "c_time", type: "TIME_CONSTRAINT", field: "<event_date | opening_date | established_date>", operator: "<between_dates | within_last | within_next | since | before | after>", value: <"N units" string | {start, end} object | date string>, hard: true, rationale: "...", inferred_window: <true|false> }
+
+  field: "opening_date" / "established_date" for business opening/establishment queries; "event_date" for scheduled events. Default to "event_date" if phrasing implies an event.
+
+  hard: true by default. hard: false only if user hedges ("preferably recent", "ideally upcoming").
+
+  If the query has NO temporal element, do NOT emit a TIME_CONSTRAINT. Only emit when the user genuinely references time.
+
 - HAS_ATTRIBUTE: when user wants venues with a specific feature/amenity → { id: "c_attr_<short_name>", type: "HAS_ATTRIBUTE", field: "attribute", operator: "has", value: "<attribute>", hard: true, rationale: "..." }. Examples: "beer garden", "outdoor seating", "live music", "parking", "wheelchair accessible". Default HARD because the user explicitly asked for this feature. Only set soft (hard: false) if user uses hedging language like "preferably", "if possible", "ideally", "optionally", "nice to have".
 
 CRITICAL RULE — Attribute vs Name distinction:
@@ -164,6 +211,7 @@ For "find 7 pubs in chichester with a beer garden", you must:
 - Do NOT set name_filter (beer garden is not a name)
 
 Return ONLY valid JSON. No markdown, no explanation.`;
+}
 
 function buildUserPrompt(goal: string): string {
   return `Parse this goal into structured constraints:\n\n"${goal}"`;
@@ -181,7 +229,7 @@ async function callAnthropicForParsing(anthropicKey: string, userPrompt: string)
       model: 'claude-3-5-haiku-20241022',
       max_tokens: 2000,
       temperature: 0,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(),
       messages: [{ role: 'user', content: userPrompt + '\n\nReturn ONLY valid JSON.' }],
     }),
   });
@@ -209,7 +257,7 @@ async function callLLMForParsing(goal: string): Promise<Record<string, unknown>>
         max_tokens: 2000,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: buildSystemPrompt() },
           { role: 'user', content: userPrompt },
         ],
       });

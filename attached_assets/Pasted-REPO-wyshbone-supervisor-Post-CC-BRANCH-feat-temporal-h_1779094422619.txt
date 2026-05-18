@@ -1,0 +1,70 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat-temporal-handling (continuing on the same branch)
+
+GOAL: Small follow-up to the temporal-handling work. Strengthen the TIME_CONSTRAINT rules in the SYSTEM_PROMPT so the listed phrases are treated as reference anchors, not a closed keyword list. Adds explicit generalisation guidance for novel temporal phrases. No schema, downstream, or helper changes — those were all done in the previous step.
+
+CONTEXT: The previous prompt landed the TIME_CONSTRAINT detection rules with hardcoded phrase tables. That risked curve-fitting — the LLM would handle listed phrases reliably but might silently drop semantically equivalent novel ones. This patch turns the table into anchors and gives the LLM explicit permission to reason about novel temporal phrases using its own judgement.
+
+═══════════════════════════════════════════════
+STEP 1 — server/supervisor/goal-to-constraints.ts: replace the TIME_CONSTRAINT bullet
+═══════════════════════════════════════════════
+
+In the SYSTEM_PROMPT body (inside whichever function now assembles it — buildSystemPrompt or similar), locate the "TIME_CONSTRAINT:" bullet inside the "CONSTRAINT TYPES and how to detect them" section. Replace that bullet ENTIRELY with the following block:
+
+- TIME_CONSTRAINT: emit when the user references time, recency, or any temporal window. The phrases listed below are REFERENCE POINTS for the most common cases — they are NOT a closed keyword list. Generalise semantically: any phrase with equivalent meaning should get equivalent treatment. "Coming up", "on the horizon", "in the near future", "soon-to-open" are all equivalent to "upcoming". "Just opened", "newly launched", "fresh" are equivalent to "new". Use intent, not surface keywords.
+
+  CALENDAR-ANCHORED phrases (use operator="between_dates", value={start, end} with YYYY-MM-DD dates COPIED VERBATIM from the CURRENT DATE CONTEXT block above), inferred_window=false:
+  - "this weekend" → THIS WEEKEND range
+  - "next weekend" → NEXT WEEKEND range
+  - "this week" → { start: today_iso, end: THIS WEEK END }
+  - "next week" → NEXT WEEK range
+  - "this month" → { start: today_iso, end: THIS MONTH END }
+  - "next month" → NEXT MONTH range
+  - "this year" → { start: today_iso, end: THIS YEAR END }
+  - "next year" → NEXT YEAR range
+  Also use between_dates for semantically equivalent phrases ("over the weekend" → this weekend; "by the end of the month" → this month range; "rest of this year" → this year range).
+
+  VAGUE phrases (operator="within_next" or "within_last", value="N units"), inferred_window=true:
+  - "upcoming" / "soon" / "coming up" / "in the near future" → within_next, "6 months"
+  - "recent" / "recently" / "lately" → within_last, "6 months"
+  - "new" / "newly" / "just opened" / "freshly opened" → within_last, "12 months"
+
+  EXPLICIT user windows (number + unit) → use the exact user value, inferred_window=false:
+  - "in the last 3 weeks" → within_last, "3 weeks"
+  - "next 5 months" → within_next, "5 months"
+
+  ABSOLUTE references → since / before / after with the user's date, inferred_window=false:
+  - "opened since 2024" → since, "2024"
+  - "events before December 2026" → before, "2026-12-01"
+
+  NOVEL temporal phrases not covered above: use your own judgement. Pick the closest operator (between_dates if calendar-anchored, within_next/within_last if duration-based, since/before/after if absolute), pick a sensible window based on the phrase's actual meaning, set inferred_window=true, and explain your reasoning in the rationale string. Examples:
+  - "in the coming weeks" → within_next, "4 weeks", inferred_window=true (rationale: "Vague phrase 'coming weeks' — chose 4 weeks as a typical interpretation")
+  - "before the end of summer" → before, <31 August of current year>, inferred_window=true
+  - "sometime later this year" → between_dates, { today_iso → THIS YEAR END }, inferred_window=true
+  - "in the next month or two" → within_next, "2 months", inferred_window=true
+
+  Shape:
+  { id: "c_time", type: "TIME_CONSTRAINT", field: "<event_date | opening_date | established_date>", operator: "<between_dates | within_last | within_next | since | before | after>", value: <"N units" string | {start, end} object | date string>, hard: true, rationale: "...", inferred_window: <true|false> }
+
+  field: "opening_date" / "established_date" for business opening queries; "event_date" for scheduled events; default to "event_date" when phrasing implies an event.
+
+  hard: true by default. hard: false only if user hedges ("preferably recent", "ideally upcoming").
+
+  If the query has NO temporal element, do NOT emit a TIME_CONSTRAINT. Read intent, not surface keywords.
+
+═══════════════════════════════════════════════
+VERIFY
+═══════════════════════════════════════════════
+
+- TypeScript still compiles cleanly.
+- Show me the diff of the TIME_CONSTRAINT bullet so I can eyeball before merge.
+
+═══════════════════════════════════════════════
+DO NOT TOUCH
+═══════════════════════════════════════════════
+
+Do NOT modify StructuredConstraintSchema, gpt4o-search.ts, mission-bridge.ts, current-context.ts, or any other file. Those were completed in the previous step. This patch is the SYSTEM_PROMPT body only.
+
+Same hands-off list as before — chat.tsx, Tower, finalize-delivery.ts, verification-stage prompts in current-context.ts.
+
+Report after the change is in.
