@@ -7,7 +7,7 @@
  * fetches artefact evidence for that lead, then calls Haiku for a concise reply.
  */
 
-import { getConversationContext, resolveLeadReference } from './conversation-context';
+import { getConversationContext } from './conversation-context';
 import { storage } from '../storage';
 import { callLLMText } from './llm-failover';
 
@@ -86,9 +86,6 @@ export async function handleResultDiscussion(
     return { response: fallbackResponse, referencedLead: null, messageId };
   }
 
-  // 2. Try to resolve a specific lead reference
-  const resolvedLead = resolveLeadReference(ctx, rawMessage);
-
   // 3. Load verification evidence for ALL leads (not just a resolved one)
   let leadEvidenceMap: Map<string, { matched_phrase?: string; quote?: string; source_url?: string; verdict?: string }> = new Map();
 
@@ -165,21 +162,26 @@ export async function handleResultDiscussion(
     userPrompt += `EARLIER DELIVERIES IN THIS CONVERSATION:\n${olderSummary}\n\n`;
   }
 
-  if (resolvedLead) {
-    userPrompt += `REFERENCED LEAD (from latest delivery):\n${resolvedLead.index}. ${resolvedLead.name} — ${resolvedLead.address}`;
-    if (resolvedLead.website) userPrompt += ` | Website: ${resolvedLead.website}`;
-    if (resolvedLead.phone) userPrompt += ` | Phone: ${resolvedLead.phone}`;
-    userPrompt += '\n\n';
-  }
+  userPrompt += `USER MESSAGE: ${rawMessage}
 
-  userPrompt += `USER MESSAGE: ${rawMessage}\n\nIf the user references "the previous search", "the one before", "the earlier run", or similar, use the EARLIER DELIVERIES section to answer. Only the top 3 result names are stored for older runs — if the user asks for deeper detail on an older run, say you can only see the top results and offer to re-run that search.`;
+HOW TO RESOLVE WHAT THE USER IS REFERRING TO:
+- "lead #3" / "the third one" / "tell me about #2" → a specific lead in the LATEST DELIVERY (numbered above)
+- "the first/second/third result" → the Nth lead in the LATEST DELIVERY
+- "those results" / "they" / "them" → the LATEST DELIVERY as a whole
+- "the previous search" / "the one before" / "the earlier run" → the PREVIOUS RUN entry in EARLIER DELIVERIES (the one before the latest)
+- "the first search" / "the earliest run" / "the original search" → the OLDEST entry in EARLIER DELIVERIES (the highest-numbered "RUN N BEFORE LATEST" label, since they're listed most-recent-first)
+- "the [entity] one" (e.g. "the accountants one") → fuzzy match on entity type across EARLIER DELIVERIES
+- "the [location] one" (e.g. "the Kent one") → fuzzy match on location across EARLIER DELIVERIES
+- A specific lead name (e.g. "tell me about Sussex Barn") → match by name in LATEST DELIVERY or topLeadNames of EARLIER DELIVERIES
+
+If the user wants details about a lead in an earlier run beyond its name, only the top 3 names are stored — say you can only see the top results and offer to re-run that search.`;
 
   // 6. Call LLM (with circuit breaker)
   let response: string;
 
   if (isCircuitBroken()) {
     console.warn(`[RESULT_DISCUSSION] Circuit breaker OPEN — using fallback response`);
-    response = buildFallbackResponse(resolvedLead, ctx.leads.length);
+    response = buildFallbackResponse(null, ctx.leads.length);
   } else {
     try {
       recordDiscussionCall();
@@ -190,27 +192,17 @@ export async function handleResultDiscussion(
       });
     } catch (err: any) {
       console.error(`[RESULT_DISCUSSION] LLM call failed: ${err.message}`);
-      response = buildFallbackResponse(resolvedLead, ctx.leads.length);
+      response = buildFallbackResponse(null, ctx.leads.length);
     }
   }
 
   // 7. Save message to DB
-  const referencedLeadForMeta = resolvedLead
-    ? { name: resolvedLead.name, index: resolvedLead.index }
-    : null;
-
-  const messageId = await saveAssistantMessage(conversationId, response, referencedLeadForMeta);
+  const messageId = await saveAssistantMessage(conversationId, response, null);
 
   // 8. Log
-  if (resolvedLead) {
-    console.log(
-      `[RESULT_DISCUSSION] Responded about lead #${resolvedLead.index} "${resolvedLead.name}" — ${response.length} chars`,
-    );
-  } else {
-    console.log(`[RESULT_DISCUSSION] Responded to general query — ${response.length} chars`);
-  }
+  console.log(`[RESULT_DISCUSSION] Responded to query — ${response.length} chars`);
 
-  return { response, referencedLead: referencedLeadForMeta, messageId };
+  return { response, referencedLead: null, messageId };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
