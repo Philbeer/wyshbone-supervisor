@@ -1,0 +1,100 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat-tower-claim-render (continuing on same branch)
+
+GOAL: Fix Pass 2 schema validation so it (a) accepts the new canonical temporal operators the extractor now emits, AND (b) is resilient to minor LLM operator variations via a normalisation layer. Today the closed-enum validation rejects anything not literally in the list — that's curve-fitting. We're keeping schema strict at validation (downstream predictability) but adding a normalisation pass before validation that maps near-misses to canonical operators.
+
+Single file change. Do each step in order. Report after each. No regex over user input.
+
+═══════════════════════════════════════════════
+STEP 1 — server/supervisor/mission-schema.ts: extend TIME_CONSTRAINT_OPERATORS
+═══════════════════════════════════════════════
+
+Find:
+  export const TIME_CONSTRAINT_OPERATORS = ['within_last', 'after', 'before'] as const;
+
+Replace with:
+  export const TIME_CONSTRAINT_OPERATORS = ['within_last', 'within_next', 'after', 'before', 'between_dates', 'since'] as const;
+
+═══════════════════════════════════════════════
+STEP 2 — Extend MissionConstraintSchema value union to accept date-range objects
+═══════════════════════════════════════════════
+
+MissionConstraintSchema.value is currently:
+  value: z.union([z.string(), z.number(), z.boolean(), z.null()]),
+
+Replace with:
+  value: z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.object({ start: z.string(), end: z.string() }),
+  ]),
+
+═══════════════════════════════════════════════
+STEP 3 — Add a normalisation pass (operator near-miss mapping)
+═══════════════════════════════════════════════
+
+Add a new exported function above validateStructuredMission:
+
+  export function normaliseConstraintOperator(c: MissionConstraint): MissionConstraint
+
+This function looks at the constraint's operator (and value shape where helpful) and maps common LLM near-misses to canonical operators. It returns either the original constraint unchanged, or a copy with the operator (and possibly value shape) normalised. It is rule-based — no LLM call, no regex over user input — just an explicit semantic mapping table.
+
+Mappings to implement (start with time_constraint; extend the same pattern for other types if you spot obvious near-misses while there):
+
+For c.type === 'time_constraint':
+- If c.operator === 'between' AND c.value is an object with start+end fields → set operator to 'between_dates'
+- If c.operator === 'within' AND c.value is an object with start+end fields → set operator to 'between_dates'
+- If c.operator === 'within' AND c.value is a string (relative duration like "6 months") → default to 'within_next' (forward is the more common new case; backward intent should be spelled 'within_last' explicitly)
+- If c.operator === 'before_date' → set operator to 'before'
+- If c.operator === 'after_date' → set operator to 'after'
+- If c.operator === 'from' → set operator to 'since'
+
+Always return a new object (don't mutate input). If no mapping applies, return the input as-is.
+
+═══════════════════════════════════════════════
+STEP 4 — Call the normaliser inside validateStructuredMission BEFORE operator validation
+═══════════════════════════════════════════════
+
+In validateStructuredMission, after the StructuredMissionSchema.safeParse succeeds (so we know the basic shape is valid), but BEFORE the per-constraint operator-validity loop, normalise each constraint:
+
+  mission.constraints = mission.constraints.map(normaliseConstraintOperator);
+
+This way:
+- The strict operator enum stays as the source of truth (downstream code is predictable)
+- LLM near-misses get mapped to canonical operators before validation runs
+- If a near-miss isn't in the mapping table, validation still fails (so we get visibility into NEW near-miss patterns rather than silently masking them)
+
+═══════════════════════════════════════════════
+STEP 5 — Add value-shape validation for between_dates
+═══════════════════════════════════════════════
+
+Inside the per-constraint validation loop in validateStructuredMission, after the operator-validity check, add:
+
+  If c.type === 'time_constraint' AND c.operator === 'between_dates':
+    - c.value must be an object with `start` (non-empty string) and `end` (non-empty string)
+    - If not, push: `constraints[${i}].value: between_dates requires { start, end } object value`
+
+  If c.type === 'time_constraint' AND c.operator !== 'between_dates':
+    - If c.value is the date-range object shape, push: `constraints[${i}].value: operator "${c.operator}" requires a string value, not a date range`
+
+Mirror the style of existing text_compare / numeric_range validations.
+
+═══════════════════════════════════════════════
+VERIFY
+═══════════════════════════════════════════════
+
+- TypeScript compiles cleanly.
+- Show me the diff for: TIME_CONSTRAINT_OPERATORS, value union, normaliseConstraintOperator function, and the call site inside validateStructuredMission.
+- Manual trace: a constraint { type: 'time_constraint', operator: 'within', value: '6 months' } should normalise to operator='within_next', then pass validation. Confirm.
+- Manual trace: a constraint { type: 'time_constraint', operator: 'between', value: { start: '2026-06-01', end: '2026-06-30' } } should normalise to operator='between_dates', then pass validation. Confirm.
+
+═══════════════════════════════════════════════
+DO NOT TOUCH
+═══════════════════════════════════════════════
+
+- Any file other than server/supervisor/mission-schema.ts.
+- The constraint-to-claim.ts work from the previous step on this branch — it stays as-is.
+
+Report after each step.

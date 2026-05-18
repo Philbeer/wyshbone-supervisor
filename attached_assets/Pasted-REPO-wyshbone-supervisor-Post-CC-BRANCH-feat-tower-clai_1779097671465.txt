@@ -1,0 +1,102 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat-tower-claim-render
+
+GOAL: Fix the constraint → Tower verification path. Currently the verifier receives just the constraint value as a bare string (e.g. "2026-05-31" for a time_constraint with operator="after"), losing the operator semantics. Tower tries to literal-match the date in evidence text and always returns no_evidence on forward-temporal queries.
+
+Fix: render the full constraint as a natural-language claim before passing to Tower. This is generally better for all constraint types — Tower's semantic-match works better on explicit claims than on bare values.
+
+Do each step in order. Report after each. No regex-based decision logic. No leftover console.log statements.
+
+═══════════════════════════════════════════════
+STEP 1 — Create server/supervisor/constraint-to-claim.ts
+═══════════════════════════════════════════════
+
+New file. Export a function:
+
+  renderConstraintAsClaim(constraint, today: Date): string
+
+Returns a natural-language claim Tower can verify. Rendering rules:
+
+text_compare:
+- contains          → "the {field} contains '{value}'"
+- starts_with       → "the {field} starts with '{value}'"
+- ends_with         → "the {field} ends with '{value}'"
+- equals            → "the {field} is exactly '{value}'"
+- not_contains      → "the {field} does NOT contain '{value}'"
+
+attribute_check:
+- has               → "they have {value}"
+- not_has           → "they do NOT have {value}"
+- equals            → "their {field} is {value}"
+
+website_evidence:
+- contains / mentions       → "their website mentions or evidences {value}"
+- not_contains / not_mentions → "their website does NOT mention or evidence {value}"
+
+relationship_check:
+- has               → "they have a relationship with {value}"
+- serves            → "they serve {value}"
+- owned_by          → "they are owned by {value}"
+- managed_by        → "they are managed by {value}"
+- partners_with     → "they partner with {value}"
+- any not_* form    → "they do NOT [serve|owned_by|...] {value}"
+
+status_check:
+- equals / has      → "they are currently {value}"
+- not_equals        → "they are NOT currently {value}"
+
+time_constraint — the key fix. The claim MUST include the resolved date in readable form so Tower can verify against actual dates in evidence text:
+- after "YYYY-MM-DD"        → "the {field} is after {readable}, e.g. '{readable}' or later"
+- before "YYYY-MM-DD"       → "the {field} is before {readable}"
+- within_last "N units"     → compute cutoff = today - N units → "the {field} is within the last {N units}, i.e. on or after {cutoff readable}"
+- within_next "N units"     → compute end = today + N units → "the {field} is within the next {N units}, i.e. on or before {end readable}"
+- between_dates {start, end} → "the {field} is between {start readable} and {end readable}"
+- since "YYYY" or date       → "the {field} is in {value} or later"
+
+Readable date format: "31 May 2026" (day month year). Include the ISO in parentheses where helpful for unambiguity: "after 31 May 2026 (2026-05-31)".
+
+Fallback for any unrecognised type/operator combination: return a generic "the {field} {operator} {value}" — never crash.
+
+Handle both string values and object values ({start, end} for between_dates) safely.
+
+═══════════════════════════════════════════════
+STEP 2 — Update server/supervisor/gpt4o-search.ts
+═══════════════════════════════════════════════
+
+In the per-(lead × constraint) Tower verification loop, replace:
+
+  constraint_to_check: constraintValue,
+
+with:
+
+  constraint_to_check: renderConstraintAsClaim(constraint, new Date()),
+
+Import renderConstraintAsClaim at the top.
+
+═══════════════════════════════════════════════
+STEP 3 — Update server/supervisor/mission-executor.ts
+═══════════════════════════════════════════════
+
+Find every call to requestSemanticVerification in this file (gp_cascade path) and apply the same replacement. Import the helper.
+
+If there are other call sites for requestSemanticVerification elsewhere in the codebase (grep for it), update them too and report what you found.
+
+═══════════════════════════════════════════════
+VERIFY
+═══════════════════════════════════════════════
+
+- TypeScript compiles cleanly.
+- Show me the diff for constraint-to-claim.ts and the call-site changes.
+- Manual trace: for constraint `{ type: "time_constraint", field: "event_date", operator: "after", value: "2026-05-31" }` with today=2026-05-18, the rendered claim should be something like: "the event_date is after 31 May 2026 (2026-05-31)". Confirm that's what your helper produces.
+- For `{ type: "time_constraint", field: "event_date", operator: "within_next", value: "6 months" }` with today=2026-05-18, the claim should resolve "within the next 6 months, i.e. on or before 18 November 2026" or similar.
+
+═══════════════════════════════════════════════
+DO NOT TOUCH
+═══════════════════════════════════════════════
+
+- Tower (control-tower repo) — its prompt already handles natural-language claims correctly after last week's paraphrase fix.
+- chat.tsx or any UI repo file.
+- mission-schema.ts — no schema change needed.
+- The just-merged temporal extractor — that's correctly emitting constraints; the fix is purely downstream of it.
+
+Report after each step.

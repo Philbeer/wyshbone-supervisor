@@ -23,6 +23,7 @@ import { executeAction, createRunToolTracker, type RunToolTracker } from './acti
 import { createArtefact } from './artefacts';
 import { judgeArtefact } from './tower-artefact-judge';
 import { requestSemanticVerification, type TowerSemanticStatus } from './tower-semantic-verify';
+import { renderConstraintAsClaim } from './constraint-to-claim';
 import {
   emitDeliverySummary,
   buildDeliverySummaryPayload,
@@ -1845,7 +1846,7 @@ Respond with JSON only: {"results": [{"index": 1, "in_location": true/false, "re
                 original_user_goal: rawUserInput,
                 lead_name: lead.name,
                 lead_place_id: lead.placeId,
-                constraint_to_check: constraintValue,
+                constraint_to_check: renderConstraintAsClaim(constraint, new Date()),
                 source_url: bestEvidenceUrl,
                 evidence_text: structuredEvidenceText.substring(0, 5000),
                 extracted_quotes: extractedQuotes,
