@@ -1,0 +1,162 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat-temporal-handling (already created)
+
+GOAL: Teach the Pass 2 mission extractor to handle temporal queries with precise calendar-anchored dates for "this weekend", "next weekend", "this/next week", "this/next month", "this/next year". Vague phrases (upcoming/soon/recent/new) and explicit windows ("next 3 weeks") keep relative-duration semantics.
+
+Do each step in order. Report after each. No regex-based decision logic. No leftover console.log statements.
+
+═══════════════════════════════════════════════
+STEP 1 — server/supervisor/current-context.ts: add temporal anchors helper
+═══════════════════════════════════════════════
+
+Add two new exported functions.
+
+(a) getTemporalAnchors(): returns an object with all dates as YYYY-MM-DD strings:
+
+{
+  today_iso, today_weekday,
+  this_weekend: { start, end },
+  next_weekend: { start, end },
+  this_week_end,
+  next_week: { start, end },
+  this_month_end,
+  next_month: { start, end },
+  this_year_end,
+  next_year: { start, end },
+}
+
+Computation rules (JS getDay(): 0=Sun, 1=Mon, ..., 6=Sat):
+
+THIS WEEKEND:
+- Friday (5): start=today, end=today+2 (Sun)
+- Saturday (6): start=today, end=today+1 (Sun)
+- Sunday (0): start=today, end=today
+- Monday–Thursday (1–4): start=upcoming Saturday, end=upcoming Sunday
+
+NEXT WEEKEND: start = this_weekend.end + 6 days (next Saturday), end = start + 1 (Sunday).
+
+THIS WEEK END:
+- Sunday (0): this_week_end = today
+- Otherwise: today + (7 - dayOfWeek) days = upcoming Sunday
+
+NEXT WEEK: start = this_week_end + 1 (Mon), end = start + 6 (Sun).
+
+THIS MONTH END: last day of current calendar month.
+NEXT MONTH: 1st through last day of next calendar month.
+THIS YEAR END: Dec 31 of current year.
+NEXT YEAR: Jan 1 through Dec 31 of next year.
+
+(b) formatTemporalAnchorsForPrompt(): returns a readable block:
+
+TODAY: <weekday>, <readable date> (<ISO>)
+THIS WEEKEND: <start> to <end>
+NEXT WEEKEND: <start> to <end>
+THIS WEEK (rest of): <today> to <this_week_end>
+NEXT WEEK: <start> to <end>
+THIS MONTH (rest of): <today> to <this_month_end>
+NEXT MONTH: <start> to <end>
+THIS YEAR (rest of): <today> to <this_year_end>
+NEXT YEAR: <start> to <end>
+
+═══════════════════════════════════════════════
+STEP 2 — server/supervisor/goal-to-constraints.ts: SYSTEM_PROMPT → builder function
+═══════════════════════════════════════════════
+
+Convert SYSTEM_PROMPT const into a function buildSystemPrompt(). It calls formatTemporalAnchorsForPrompt() and prepends the result as a "CURRENT DATE CONTEXT" header block, sitting between the opening paragraph and the "You must return a JSON object" line. Update callLLMForParsing to call buildSystemPrompt() rather than referencing the const.
+
+═══════════════════════════════════════════════
+STEP 3 — server/supervisor/goal-to-constraints.ts: add TIME_CONSTRAINT rules to prompt body
+═══════════════════════════════════════════════
+
+In the "CONSTRAINT TYPES and how to detect them" section, after MUST_USE_TOOL and before HAS_ATTRIBUTE, insert exactly:
+
+- TIME_CONSTRAINT: emit when the user references time or recency. Choose operator and value shape based on the phrase.
+
+  CALENDAR-ANCHORED phrases (use operator="between_dates", value={start, end} with YYYY-MM-DD dates COPIED VERBATIM from the CURRENT DATE CONTEXT block above):
+  - "this weekend" → value = THIS WEEKEND range
+  - "next weekend" → value = NEXT WEEKEND range
+  - "this week" → value = { start: today_iso, end: THIS WEEK END }
+  - "next week" → value = NEXT WEEK range
+  - "this month" → value = { start: today_iso, end: THIS MONTH END }
+  - "next month" → value = NEXT MONTH range
+  - "this year" → value = { start: today_iso, end: THIS YEAR END }
+  - "next year" → value = NEXT YEAR range
+  inferred_window=false for all of these (the dates come from the context block, not a guess).
+
+  VAGUE phrases (operator="within_next" or "within_last", value="N units", inferred_window=true):
+  - "upcoming" / "soon" → within_next, "6 months"
+  - "recent" / "recently" → within_last, "6 months"
+  - "new" / "newly" → within_last, "12 months"
+
+  EXPLICIT user windows → use the exact user value, inferred_window=false:
+  - "in the last 3 weeks" → within_last, "3 weeks"
+  - "next 5 months" → within_next, "5 months"
+
+  ABSOLUTE references → since / before / after with the user's date:
+  - "opened since 2024" → since, "2024"
+  - "events before December 2026" → before, "2026-12-01"
+
+  Shape:
+  { id: "c_time", type: "TIME_CONSTRAINT", field: "<event_date | opening_date | established_date>", operator: "<between_dates | within_last | within_next | since | before | after>", value: <"N units" string | {start, end} object | date string>, hard: true, rationale: "...", inferred_window: <true|false> }
+
+  field: "opening_date" / "established_date" for business opening/establishment queries; "event_date" for scheduled events. Default to "event_date" if phrasing implies an event.
+
+  hard: true by default. hard: false only if user hedges ("preferably recent", "ideally upcoming").
+
+  If the query has NO temporal element, do NOT emit a TIME_CONSTRAINT. Only emit when the user genuinely references time.
+
+═══════════════════════════════════════════════
+STEP 4 — server/supervisor/goal-to-constraints.ts: extend StructuredConstraintSchema
+═══════════════════════════════════════════════
+
+Extend the value union to accept the date-range shape, and add the inferred_window field:
+
+  value: z.union([
+    z.string(),
+    z.number(),
+    z.object({ center: z.string(), km: z.number() }),
+    z.object({ start: z.string(), end: z.string() }),
+  ]),
+  ...
+  inferred_window: z.boolean().optional(),
+
+═══════════════════════════════════════════════
+STEP 5 — server/supervisor/gpt4o-search.ts: handle between_dates + within_next
+═══════════════════════════════════════════════
+
+In buildSearchPrompt, the cutoffDate IIFE today handles only backward-looking operators. Extend it to three cases:
+
+A. within_last / since → existing logic, unchanged.
+B. within_next → compute today + N units → forwardWindowEnd. Mirror the existing backward parser.
+C. between_dates → value is {start, end} already; use directly.
+
+Extend temporalRules:
+- Backward → keep existing OPENING-DATE rules.
+- Forward (within_next OR between_dates) → inject a FORWARD-LOOKING rules block adapted from the FUTURE/UPCOMING EVENTS rules in current-context.ts. Tell the search LLM to only include results with a future date inside the window. Reject past editions, "annual" mentions without current date, or pages with no future date in range.
+
+Determine direction by inspecting the structured constraint's operator, NOT by regex over user input.
+
+In formatConstraintForSearch, add the between_dates branch:
+"They must have {field} between {value.start} and {value.end}."
+
+═══════════════════════════════════════════════
+STEP 6 — server/supervisor/mission-bridge.ts: map new operators
+═══════════════════════════════════════════════
+
+Find the time_constraint case (around line 270). Verify within_next and between_dates pass through to downstream symmetrically to within_last. Add symmetric branches if missing.
+
+═══════════════════════════════════════════════
+VERIFY
+═══════════════════════════════════════════════
+
+- TypeScript compiles cleanly.
+- Run the test suite if one exists; report failures.
+- Show me diffs for the new helper, the SYSTEM_PROMPT builder, and StructuredConstraintSchema.
+
+═══════════════════════════════════════════════
+DO NOT TOUCH
+═══════════════════════════════════════════════
+
+chat.tsx or any UI repo file; Tower / src/evaluator; finalize-delivery.ts; getTemporalVerificationRules and getCurrentContextPreamble in current-context.ts (verification-stage prompts stay as-is).
+
+Report after each numbered step. Stop and ask if any step has unexpected complexity.
