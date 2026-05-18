@@ -1,0 +1,42 @@
+REPO: wyshbone-supervisor-Post-CC
+FILE: server/supervisor/conversation-router.ts
+Find this block near the end of routeConversation():
+ts  // Safety: if route is SEARCH but the original message has no location-like content,
+  // and the entity/location came from search history not the message, override to CHAT or CLARIFY
+  if (decision.route === 'SEARCH') {
+    const msgLower = input.currentMessage.toLowerCase().trim();
+
+    const hasLocationWords = decision.location && msgLower.includes(decision.location.toLowerCase().substring(0, 4));
+    const hasEntityWords = decision.entity && msgLower.includes(decision.entity.toLowerCase().substring(0, 4));
+
+    if (!hasLocationWords && !hasEntityWords) {
+      const chatPatterns = [
+        /^(tell|teach|explain|describe|what is|what are|how does|how do|can you tell|do you know)/i,
+        /^(hi|hello|hey|thanks|cheers|ok|sure|yes)/i,
+        /\?$/,
+      ];
+      const looksLikeChat = chatPatterns.some(p => p.test(msgLower));
+Replace the start of that block (the outer if (decision.route === 'SEARCH') { and the lines down to and including const looksLikeChat = chatPatterns.some(p => p.test(msgLower));) with:
+ts  // Safety: if route is SEARCH but the original message has no location-like content,
+  // and the entity/location came from search history not the message, override to CHAT or CLARIFY.
+  // SKIP this override when the turn classifier says the user is providing clarification or
+  // answering a question — in those cases entity/location LEGITIMATELY come from previous turns
+  // (rule 12 / Mode B clarify acceptance), and the override would wrongly drop the user's intent.
+  const turnRelation = input.turnAnalysis?.user_message_relation;
+  const userIsAccepting = turnRelation === 'PROVIDING_CLARIFICATION' || turnRelation === 'ANSWERING_QUESTION';
+
+  if (decision.route === 'SEARCH' && !userIsAccepting) {
+    const msgLower = input.currentMessage.toLowerCase().trim();
+
+    const hasLocationWords = decision.location && msgLower.includes(decision.location.toLowerCase().substring(0, 4));
+    const hasEntityWords = decision.entity && msgLower.includes(decision.entity.toLowerCase().substring(0, 4));
+
+    if (!hasLocationWords && !hasEntityWords) {
+      const chatPatterns = [
+        /^(tell|teach|explain|describe|what is|what are|how does|how do|can you tell|do you know)/i,
+        /^(hi|hello|hey|thanks|cheers|ok|sure|yes)/i,
+        /\?$/,
+      ];
+      const looksLikeChat = chatPatterns.some(p => p.test(msgLower));
+Leave the rest of the block (if (looksLikeChat) { ... } and the closing braces) unchanged.
+Report after applying.
