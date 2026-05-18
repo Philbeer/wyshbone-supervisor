@@ -140,40 +140,46 @@ CONSTRAINT TYPES and how to detect them:
 - NAME_STARTS_WITH: when user says "starting with X" or "beginning with X" → { id: "c_name_prefix", type: "NAME_STARTS_WITH", field: "name", operator: "starts_with", value: "X", hard: false, rationale: "..." }
 - NAME_CONTAINS: when user says "with the word X in the name" or "called X" or "named X" → { id: "c_name_contains", type: "NAME_CONTAINS", field: "name", operator: "contains_word", value: "X", hard: false, rationale: "..." }. Only for BUSINESS NAME matching, not venue attributes.
 - MUST_USE_TOOL: when user says "using google places" → { id: "c_tool", type: "MUST_USE_TOOL", field: "tool", operator: "=", value: "GOOGLE_PLACES", hard: false, rationale: "..." }
-- TIME_CONSTRAINT: emit when the user references time or recency. Choose operator and value shape based on the phrase.
+- TIME_CONSTRAINT: emit when the user references time, recency, or any temporal window. The phrases listed below are REFERENCE POINTS for the most common cases — they are NOT a closed keyword list. Generalise semantically: any phrase with equivalent meaning should get equivalent treatment. "Coming up", "on the horizon", "in the near future", "soon-to-open" are all equivalent to "upcoming". "Just opened", "newly launched", "fresh" are equivalent to "new". Use intent, not surface keywords.
 
-  CALENDAR-ANCHORED phrases (use operator="between_dates", value={start, end} with YYYY-MM-DD dates COPIED VERBATIM from the CURRENT DATE CONTEXT block above):
-  - "this weekend" → value = THIS WEEKEND range
-  - "next weekend" → value = NEXT WEEKEND range
-  - "this week" → value = { start: today_iso, end: THIS WEEK END }
-  - "next week" → value = NEXT WEEK range
-  - "this month" → value = { start: today_iso, end: THIS MONTH END }
-  - "next month" → value = NEXT MONTH range
-  - "this year" → value = { start: today_iso, end: THIS YEAR END }
-  - "next year" → value = NEXT YEAR range
-  inferred_window=false for all of these (the dates come from the context block, not a guess).
+  CALENDAR-ANCHORED phrases (use operator="between_dates", value={start, end} with YYYY-MM-DD dates COPIED VERBATIM from the CURRENT DATE CONTEXT block above), inferred_window=false:
+  - "this weekend" → THIS WEEKEND range
+  - "next weekend" → NEXT WEEKEND range
+  - "this week" → { start: today_iso, end: THIS WEEK END }
+  - "next week" → NEXT WEEK range
+  - "this month" → { start: today_iso, end: THIS MONTH END }
+  - "next month" → NEXT MONTH range
+  - "this year" → { start: today_iso, end: THIS YEAR END }
+  - "next year" → NEXT YEAR range
+  Also use between_dates for semantically equivalent phrases ("over the weekend" → this weekend; "by the end of the month" → this month range; "rest of this year" → this year range).
 
-  VAGUE phrases (operator="within_next" or "within_last", value="N units", inferred_window=true):
-  - "upcoming" / "soon" → within_next, "6 months"
-  - "recent" / "recently" → within_last, "6 months"
-  - "new" / "newly" → within_last, "12 months"
+  VAGUE phrases (operator="within_next" or "within_last", value="N units"), inferred_window=true:
+  - "upcoming" / "soon" / "coming up" / "in the near future" → within_next, "6 months"
+  - "recent" / "recently" / "lately" → within_last, "6 months"
+  - "new" / "newly" / "just opened" / "freshly opened" → within_last, "12 months"
 
-  EXPLICIT user windows → use the exact user value, inferred_window=false:
+  EXPLICIT user windows (number + unit) → use the exact user value, inferred_window=false:
   - "in the last 3 weeks" → within_last, "3 weeks"
   - "next 5 months" → within_next, "5 months"
 
-  ABSOLUTE references → since / before / after with the user's date:
+  ABSOLUTE references → since / before / after with the user's date, inferred_window=false:
   - "opened since 2024" → since, "2024"
   - "events before December 2026" → before, "2026-12-01"
+
+  NOVEL temporal phrases not covered above: use your own judgement. Pick the closest operator (between_dates if calendar-anchored, within_next/within_last if duration-based, since/before/after if absolute), pick a sensible window based on the phrase's actual meaning, set inferred_window=true, and explain your reasoning in the rationale string. Examples:
+  - "in the coming weeks" → within_next, "4 weeks", inferred_window=true (rationale: "Vague phrase 'coming weeks' — chose 4 weeks as a typical interpretation")
+  - "before the end of summer" → before, <31 August of current year>, inferred_window=true
+  - "sometime later this year" → between_dates, { today_iso → THIS YEAR END }, inferred_window=true
+  - "in the next month or two" → within_next, "2 months", inferred_window=true
 
   Shape:
   { id: "c_time", type: "TIME_CONSTRAINT", field: "<event_date | opening_date | established_date>", operator: "<between_dates | within_last | within_next | since | before | after>", value: <"N units" string | {start, end} object | date string>, hard: true, rationale: "...", inferred_window: <true|false> }
 
-  field: "opening_date" / "established_date" for business opening/establishment queries; "event_date" for scheduled events. Default to "event_date" if phrasing implies an event.
+  field: "opening_date" / "established_date" for business opening queries; "event_date" for scheduled events; default to "event_date" when phrasing implies an event.
 
   hard: true by default. hard: false only if user hedges ("preferably recent", "ideally upcoming").
 
-  If the query has NO temporal element, do NOT emit a TIME_CONSTRAINT. Only emit when the user genuinely references time.
+  If the query has NO temporal element, do NOT emit a TIME_CONSTRAINT. Read intent, not surface keywords.
 
 - HAS_ATTRIBUTE: when user wants venues with a specific feature/amenity → { id: "c_attr_<short_name>", type: "HAS_ATTRIBUTE", field: "attribute", operator: "has", value: "<attribute>", hard: true, rationale: "..." }. Examples: "beer garden", "outdoor seating", "live music", "parking", "wheelchair accessible". Default HARD because the user explicitly asked for this feature. Only set soft (hard: false) if user uses hedging language like "preferably", "if possible", "ideally", "optionally", "nice to have".
 
