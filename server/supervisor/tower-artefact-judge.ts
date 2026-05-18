@@ -38,6 +38,30 @@ export interface ArtefactJudgementResponse {
   };
 }
 
+/**
+ * Tower's final delivery judgement can't reliably verify negation constraints —
+ * it tries to verify the absence and returns no_evidence/fail even when leads
+ * are legitimately fine. The per-(lead × constraint) Tower verification has
+ * already handled these correctly via constraint-to-claim positive rendering
+ * + gateway STRICT flip. So at the final judgement step we strip negation
+ * constraints from the payload — Tower judges positive constraints only,
+ * gateway is the source of truth for negations.
+ */
+function stripNegationConstraints(constraints: unknown): { kept: any[]; strippedCount: number } {
+  if (!Array.isArray(constraints)) return { kept: [], strippedCount: 0 };
+  const kept: any[] = [];
+  let strippedCount = 0;
+  for (const c of constraints) {
+    const op = typeof (c as any)?.operator === 'string' ? (c as any).operator : '';
+    if (op.startsWith('not_')) {
+      strippedCount++;
+    } else {
+      kept.push(c);
+    }
+  }
+  return { kept, strippedCount };
+}
+
 function getTowerBaseUrl(): string | null {
   const raw = process.env.TOWER_BASE_URL || process.env.TOWER_URL;
   if (!raw) return null;
@@ -154,11 +178,37 @@ export async function judgeArtefact(params: {
   const { artefact, runId, goal, userId, conversationId, successCriteria, stepIndex, planVersion, intent_narrative, queryId, queryShapeKey } = params;
   console.log('[QID-TRACE]', 'step5:judgeArtefact_received', queryId);
 
+  // Strip negation constraints from the Tower final-judgement payload —
+  // gateway is source of truth for these via per-(lead × constraint) verification.
+  let scForTower: Record<string, unknown> | undefined = successCriteria;
+  let payloadForTower = (typeof artefact.payloadJson === 'string' ? JSON.parse(artefact.payloadJson) : artefact.payloadJson) as Record<string, unknown>;
+  let totalStripped = 0;
+
+  if (scForTower && Array.isArray((scForTower as any).structured_constraints)) {
+    const { kept, strippedCount } = stripNegationConstraints((scForTower as any).structured_constraints);
+    if (strippedCount > 0) {
+      totalStripped += strippedCount;
+      scForTower = { ...scForTower, structured_constraints: kept };
+    }
+  }
+
+  if (payloadForTower && Array.isArray((payloadForTower as any).structured_constraints)) {
+    const { kept, strippedCount } = stripNegationConstraints((payloadForTower as any).structured_constraints);
+    if (strippedCount > 0) {
+      totalStripped += strippedCount;
+      payloadForTower = { ...payloadForTower, structured_constraints: kept };
+    }
+  }
+
+  if (totalStripped > 0) {
+    console.log(`[TOWER_JUDGE] Stripped ${totalStripped} negation constraint(s) from final-judgement payload — gateway already enforced these per-lead`);
+  }
+
   const request: ArtefactJudgementRequest = {
     runId,
     artefactId: artefact.id,
     goal,
-    successCriteria,
+    successCriteria: scForTower,
     artefactType: artefact.type,
     intent_narrative,
     query_id: queryId ?? null,
@@ -166,7 +216,7 @@ export async function judgeArtefact(params: {
     artefact_payload: {
       title: artefact.title ?? undefined,
       summary: artefact.summary ?? undefined,
-      payload_json: (typeof artefact.payloadJson === 'string' ? JSON.parse(artefact.payloadJson) : artefact.payloadJson) as Record<string, unknown>,
+      payload_json: payloadForTower,
     },
   };
   console.log('[QID-TRACE]', 'step6:ArtefactJudgementRequest_query_id', request.query_id);
