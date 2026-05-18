@@ -39,6 +39,7 @@ export interface RouterInput {
     entityType: string | null;
     location: string | null;
     lastSearchRunId: string | null;
+    pastDeliveries?: Array<{ runId: string; entityCategory: string | null; location: string | null; leadCount: number; topLeadNames: string[]; ageMinutes: number }>;
   };
   urlContent: string | null;
   userSearchHistory: Array<{ query: string; delivered: number }> | null;
@@ -78,6 +79,19 @@ The TURN ANALYSIS \`user_message_relation\` field constrains which routes are pl
 IMPORTANT: If the turn analysis says ANSWERING_QUESTION or CONTINUING_CHAT, do NOT route as SEARCH even if the user's message contains words that look like business types. The context analyser has already determined the user is in conversational mode. Trust it.
 
 The ONLY case where you may override turn analysis is if the user's current message contains an explicit search verb (find, search, show me, look for) PLUS a new entity AND location — in which case it's a clear NEW_SEARCH_REQUEST regardless of prior context.
+
+## PAST DELIVERIES IN THIS CONVERSATION
+
+If \`previousResults.pastDeliveries\` is provided, it lists prior searches the user has run in this same conversation, most recent first, each with \`{entityCategory, location, leadCount, topLeadNames, ageMinutes}\`.
+
+When the user references "the previous search", "those results", "the earlier one", "the X we did", "the [entity] one", "the [location] one", or similar:
+- Treat this as a DISCUSS or ITERATE route, not a fresh SEARCH
+- Use the matching past delivery from \`pastDeliveries\` to anchor the route
+- "the previous search" / "the last one" → the second entry in pastDeliveries (the current one is index 0)
+- "those results" / "they" / "them" → the first entry in pastDeliveries
+- "the accountants one" / "the Sussex one" → fuzzy match on entityCategory or location
+
+Also: if the user is about to start a new SEARCH and a very recent \`pastDelivery\` exists with the same entityCategory and location (ageMinutes < 60), prepend a brief note to your clarify_question or route reasoning that the search has been run before, so the downstream handler can prompt: "You ran this search X minutes ago — re-run, or want me to try a different angle?"
 
 ## THE FIVE ROUTES
 
@@ -237,6 +251,11 @@ async function buildRouterUserMessage(input: RouterInput): Promise<string> {
     parts.push(`PREVIOUS RESULTS: ${input.previousResults.count} leads delivered`);
     if (input.previousResults.entityType) {
       parts.push(`LAST SEARCH: entity="${input.previousResults.entityType}", location="${input.previousResults.location || 'unknown'}"`);
+    }
+    const pd = input.previousResults.pastDeliveries;
+    if (pd && pd.length > 0) {
+      parts.push('PAST DELIVERIES IN THIS CONVERSATION (most recent first):');
+      parts.push(JSON.stringify(pd));
     }
     parts.push('');
   } else {

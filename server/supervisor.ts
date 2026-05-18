@@ -1483,18 +1483,33 @@ class SupervisorService {
         }
 
         // Load previous results context
-        let routerPreviousResults = { exists: false, count: 0, entityType: null as string | null, location: null as string | null, lastSearchRunId: null as string | null };
+        let routerPreviousResults = {
+          exists: false, count: 0,
+          entityType: null as string | null,
+          location: null as string | null,
+          lastSearchRunId: null as string | null,
+          pastDeliveries: [] as Array<{ runId: string; entityCategory: string | null; location: string | null; leadCount: number; topLeadNames: string[]; ageMinutes: number }>,
+        };
         if (task.conversation_id) {
           try {
             const { getConversationContext } = await import('./supervisor/conversation-context');
             const ctx = await getConversationContext(task.conversation_id);
             if (ctx.leads.length > 0) {
+              const now = Date.now();
               routerPreviousResults = {
                 exists: true,
                 count: ctx.leads.length,
                 entityType: ctx.entityType || null,
                 location: ctx.location || null,
                 lastSearchRunId: ctx.lastDeliveryRunId || null,
+                pastDeliveries: ctx.pastDeliveries.map(pd => ({
+                  runId: pd.runId,
+                  entityCategory: pd.entityCategory,
+                  location: pd.location,
+                  leadCount: pd.leadCount,
+                  topLeadNames: pd.topLeadNames,
+                  ageMinutes: Math.round((now - pd.timestamp) / 60000),
+                })),
               };
             }
           } catch (ctxErr: any) {
