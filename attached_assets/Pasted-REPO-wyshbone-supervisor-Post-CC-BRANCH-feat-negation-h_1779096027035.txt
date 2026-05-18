@@ -1,0 +1,117 @@
+REPO: wyshbone-supervisor-Post-CC
+BRANCH: feat-negation-handling
+
+GOAL: Add full negation support so the system can express and act on user queries like "don't say they have AI agents", "without a beer garden", "not partnered with X". Same playbook as the temporal work — schema additions + extractor SYSTEM_PROMPT rules + downstream rendering + verification flip in the gateway.
+
+STRICT MODE: when a constraint operator is `not_*`, both Tower's `verified` AND `weak_match` verdicts mean the lead violates the negation and must be excluded. Only `no_evidence` lets the lead through.
+
+Do each step in order. Report after each. No regex-based decision logic. No leftover console.log statements.
+
+═══════════════════════════════════════════════
+STEP 1 — server/supervisor/mission-schema.ts: extend operator vocabulary
+═══════════════════════════════════════════════
+
+Add negation operators to these constraint types:
+
+  WEBSITE_EVIDENCE_OPERATORS — add 'not_contains' and 'not_mentions':
+    ['contains', 'mentions', 'not_contains', 'not_mentions']
+
+  RELATIONSHIP_CHECK_OPERATORS — add a negation operator for each existing positive:
+    ['has', 'serves', 'owned_by', 'managed_by', 'partners_with',
+     'not_has', 'not_serves', 'not_owned_by', 'not_managed_by', 'not_partners_with']
+
+  ATTRIBUTE_CHECK_OPERATORS — already has 'not_has', no change needed.
+  TEXT_COMPARE_OPERATORS — already has 'not_contains', no change needed.
+  STATUS_CHECK_OPERATORS — already has 'not_equals', no change needed.
+
+VALID_OPERATORS_BY_TYPE will pick these up automatically since it references the const arrays.
+
+═══════════════════════════════════════════════
+STEP 2 — server/supervisor/goal-to-constraints.ts: add NEGATION rules to SYSTEM_PROMPT
+═══════════════════════════════════════════════
+
+In the SYSTEM_PROMPT body (inside buildSystemPrompt or wherever the prompt is now assembled), after the TIME_CONSTRAINT bullet and before HAS_ATTRIBUTE, insert exactly:
+
+- NEGATION: emit when the user expresses an EXCLUSION or NEGATIVE constraint — something the candidate must NOT have, must NOT mention, must NOT be, etc. Negation phrases include: "without X", "no X", "don't have X", "doesn't say X", "not mentioning X", "excluding X", "but not X", "must not", "free of", "lacks", "missing", and similar. The phrases listed are REFERENCE POINTS, not a closed keyword list — generalise semantically. Use intent, not surface keywords.
+
+  EMISSION RULES — use the same CONSTRAINT TYPE you would for a positive version, but flip the operator to its negation. Examples:
+
+  - "without a beer garden" / "no beer garden" / "doesn't have a beer garden" → HAS_ATTRIBUTE with operator="not_has", value="beer garden", hard=true
+  - "don't say they have AI agents" / "doesn't mention AI agents" / "without mentioning AI on their website" → WEBSITE_EVIDENCE with operator="not_mentions", value="AI agents", hard=true
+  - "not owned by Diageo" / "doesn't partner with X" → RELATIONSHIP_CHECK with operator="not_owned_by" / "not_partners_with", value=X, hard=true
+  - "without 'Inn' in the name" / "no 'Wetherspoon' in the name" → NAME_CONTAINS-style but use TEXT_COMPARE with operator="not_contains", value="Inn", hard=true
+  - "not currently closed" / "not under administration" → STATUS_CHECK with operator="not_equals", value="closed", hard=true
+
+  hard=true by default — negations are user-stated requirements, not preferences. hard=false ONLY if the user hedges ("preferably without X", "ideally not mentioning Y").
+
+  NOVEL negation phrases not covered above: use your judgement. Pick the constraint type that matches the POSITIVE version of what's being excluded, then use the corresponding `not_*` operator. Explain the negation clearly in the rationale string so downstream filtering knows what's being excluded.
+
+  STRICT verification semantics — downstream, a negation constraint is FAILED by a lead if Tower returns either `verified` OR `weak_match`. Only `no_evidence` lets the lead pass. You don't encode this in emission — just emit the correct `not_*` operator and downstream handles the flip.
+
+  If the query has NO exclusion or negation, do NOT emit a negation constraint. "Without exception" is not a negation of an entity. Read intent.
+
+═══════════════════════════════════════════════
+STEP 3 — server/supervisor/gpt4o-search.ts: render negation operators in formatConstraintForSearch
+═══════════════════════════════════════════════
+
+The function currently handles `not_contains` for text_compare. Extend it so the new negation operators render as clear "must NOT" sentences in the search prompt:
+
+  - text_compare + not_contains → "The {field} must NOT contain {value}." (already exists)
+  - attribute_check + not_has → "They must NOT have {value}." (or invert the existing has-attribute rendering)
+  - website_evidence + not_contains / not_mentions → "Their website must NOT contain evidence of {value}." / "Their website must NOT mention {value}."
+  - relationship_check + not_has / not_serves / not_owned_by / not_managed_by / not_partners_with → "They must NOT {operator} {value}." E.g. "They must NOT serve {value}", "They must NOT be owned by {value}", "They must NOT partner with {value}".
+  - status_check + not_equals → "They must NOT currently be {value}." (already exists)
+
+Mirror the positive renderings — just inverted.
+
+═══════════════════════════════════════════════
+STEP 4 — server/supervisor/finalize-delivery.ts: add STRICT verification flip
+═══════════════════════════════════════════════
+
+The gateway currently includes a lead if its hard constraints come back `verified` (and possibly `weak_match` per existing semantics) from Tower. Extend the per-constraint aggregation to handle negation:
+
+Detect negation by checking if the constraint's operator starts with "not_" (not_has, not_contains, not_mentions, not_serves, not_equals, not_owned_by, not_managed_by, not_partners_with).
+
+  If constraint IS negated:
+    - Tower `verified`           → constraint FAILED → exclude lead
+    - Tower `weak_match`          → constraint FAILED → exclude lead (STRICT mode)
+    - Tower `no_evidence`         → constraint PASSED → lead allowed through
+    - Tower `insufficient_evidence` → treat as `no_evidence` → constraint PASSED (we can't prove the candidate has the thing they shouldn't have, so they get the benefit of the doubt)
+
+  If constraint is POSITIVE (existing logic, unchanged):
+    - Tower `verified`            → PASSED
+    - Tower `weak_match`           → PASSED (existing semantics)
+    - Tower `no_evidence`          → FAILED
+    - Tower `insufficient_evidence` → FAILED
+
+Update the `dropped` artefact's `rollup_status` reason text so dropped-by-negation leads are clearly logged ("excluded by negation constraint: {operator} {value}" or similar) for the AFR audit trail.
+
+═══════════════════════════════════════════════
+STEP 5 — server/supervisor/mission-executor.ts: spot-check negation operators
+═══════════════════════════════════════════════
+
+The file already handles `not_contains`. Check that the new operators (not_mentions, not_has on website_evidence, not_serves, etc.) flow through the constraint-result aggregation without choking. If any switch statements or operator-explicit branches exist that would silently skip the new operators, extend them symmetrically. Report what you find.
+
+═══════════════════════════════════════════════
+STEP 6 — server/supervisor/mission-bridge.ts: verify operator passthrough
+═══════════════════════════════════════════════
+
+The bridge maps Pass 1 UPPER-CASE constraint types to Pass 2 lowercase. Confirm negation operators pass through untouched — they should, since operator is a string passthrough, but verify there's no operator-specific transformation that drops `not_*` values.
+
+═══════════════════════════════════════════════
+VERIFY
+═══════════════════════════════════════════════
+
+- TypeScript compiles cleanly.
+- If a test suite exists, run it and report failures.
+- Show me diffs for mission-schema.ts operator additions, the goal-to-constraints.ts SYSTEM_PROMPT NEGATION section, and the finalize-delivery.ts flip logic.
+
+═══════════════════════════════════════════════
+DO NOT TOUCH
+═══════════════════════════════════════════════
+
+- chat.tsx or anything in the UI repo (negation tests come in a separate prompt after)
+- Tower / control-tower repo — Tower keeps verifying positive evidence; the flip happens in the gateway
+- The temporal handling code just merged — don't modify time_constraint operators (negated time constraints are a lower-priority edge case for v1+)
+
+Report after each numbered step. Stop and ask if any step has unexpected complexity, especially the Step 4 flip logic — that's the one most worth a pause if anything looks off.

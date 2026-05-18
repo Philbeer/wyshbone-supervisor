@@ -43,10 +43,10 @@ export const NUMERIC_OPERATORS = [
 ] as const;
 
 export const ATTRIBUTE_CHECK_OPERATORS = ['has', 'equals', 'not_has'] as const;
-export const RELATIONSHIP_CHECK_OPERATORS = ['has', 'serves', 'owned_by', 'managed_by', 'partners_with'] as const;
+export const RELATIONSHIP_CHECK_OPERATORS = ['has', 'serves', 'owned_by', 'managed_by', 'partners_with', 'not_has', 'not_serves', 'not_owned_by', 'not_managed_by', 'not_partners_with'] as const;
 export const TIME_CONSTRAINT_OPERATORS = ['within_last', 'within_next', 'after', 'before', 'between_dates', 'since'] as const;
 export const STATUS_CHECK_OPERATORS = ['equals', 'has', 'not_equals'] as const;
-export const WEBSITE_EVIDENCE_OPERATORS = ['contains', 'mentions'] as const;
+export const WEBSITE_EVIDENCE_OPERATORS = ['contains', 'mentions', 'not_contains', 'not_mentions'] as const;
 export const CONTACT_EXTRACTION_OPERATORS = ['extract'] as const;
 export const RANKING_OPERATORS = ['top', 'best', 'bottom'] as const;
 export const ENTITY_DISCOVERY_OPERATORS = ['equals', 'includes'] as const;
