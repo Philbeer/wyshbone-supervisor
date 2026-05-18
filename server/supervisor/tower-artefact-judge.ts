@@ -47,19 +47,46 @@ export interface ArtefactJudgementResponse {
  * constraints from the payload — Tower judges positive constraints only,
  * gateway is the source of truth for negations.
  */
-function stripNegationConstraints(constraints: unknown): { kept: any[]; strippedCount: number } {
-  if (!Array.isArray(constraints)) return { kept: [], strippedCount: 0 };
+function stripNegationConstraints(constraints: unknown): { kept: any[]; strippedCount: number; strippedValues: string[] } {
+  if (!Array.isArray(constraints)) return { kept: [], strippedCount: 0, strippedValues: [] };
   const kept: any[] = [];
+  const strippedValues: string[] = [];
   let strippedCount = 0;
   for (const c of constraints) {
     const op = typeof (c as any)?.operator === 'string' ? (c as any).operator : '';
     if (op.startsWith('not_')) {
       strippedCount++;
+      const val = (c as any)?.value;
+      if (val !== null && val !== undefined) {
+        const valStr = String(val).trim();
+        if (valStr) strippedValues.push(valStr.toLowerCase());
+      }
     } else {
       kept.push(c);
     }
   }
-  return { kept, strippedCount };
+  return { kept, strippedCount, strippedValues };
+}
+
+function filterStringConstraintsByValues(items: unknown, strippedValues: string[]): { kept: string[]; removedCount: number } {
+  if (!Array.isArray(items) || strippedValues.length === 0) {
+    return { kept: Array.isArray(items) ? items as string[] : [], removedCount: 0 };
+  }
+  const kept: string[] = [];
+  let removedCount = 0;
+  for (const item of items) {
+    if (typeof item !== 'string') {
+      kept.push(item as any);
+      continue;
+    }
+    const lower = item.toLowerCase();
+    if (strippedValues.some(v => lower.includes(v))) {
+      removedCount++;
+    } else {
+      kept.push(item);
+    }
+  }
+  return { kept, removedCount };
 }
 
 function getTowerBaseUrl(): string | null {
@@ -183,20 +210,40 @@ export async function judgeArtefact(params: {
   let scForTower: Record<string, unknown> | undefined = successCriteria;
   let payloadForTower = (typeof artefact.payloadJson === 'string' ? JSON.parse(artefact.payloadJson) : artefact.payloadJson) as Record<string, unknown>;
   let totalStripped = 0;
+  const allStrippedValues: string[] = [];
 
   if (scForTower && Array.isArray((scForTower as any).structured_constraints)) {
-    const { kept, strippedCount } = stripNegationConstraints((scForTower as any).structured_constraints);
+    const { kept, strippedCount, strippedValues } = stripNegationConstraints((scForTower as any).structured_constraints);
     if (strippedCount > 0) {
       totalStripped += strippedCount;
+      allStrippedValues.push(...strippedValues);
       scForTower = { ...scForTower, structured_constraints: kept };
     }
   }
 
   if (payloadForTower && Array.isArray((payloadForTower as any).structured_constraints)) {
-    const { kept, strippedCount } = stripNegationConstraints((payloadForTower as any).structured_constraints);
+    const { kept, strippedCount, strippedValues } = stripNegationConstraints((payloadForTower as any).structured_constraints);
     if (strippedCount > 0) {
       totalStripped += strippedCount;
+      allStrippedValues.push(...strippedValues);
       payloadForTower = { ...payloadForTower, structured_constraints: kept };
+    }
+  }
+
+  // Also filter the hard_constraints / soft_constraints STRING arrays —
+  // Tower reads them as natural-language constraint labels and counts against
+  // them ("1 of 4 hard constraints verified"). Remove any entry that mentions
+  // one of the stripped negation values (e.g. "doesn't mention AI").
+  if (allStrippedValues.length > 0 && scForTower) {
+    const hardResult = filterStringConstraintsByValues((scForTower as any).hard_constraints, allStrippedValues);
+    const softResult = filterStringConstraintsByValues((scForTower as any).soft_constraints, allStrippedValues);
+    if (hardResult.removedCount > 0 || softResult.removedCount > 0) {
+      scForTower = {
+        ...scForTower,
+        hard_constraints: hardResult.kept,
+        soft_constraints: softResult.kept,
+      };
+      console.log(`[TOWER_JUDGE] Filtered ${hardResult.removedCount} hard_constraints and ${softResult.removedCount} soft_constraints matching stripped negation values`);
     }
   }
 
