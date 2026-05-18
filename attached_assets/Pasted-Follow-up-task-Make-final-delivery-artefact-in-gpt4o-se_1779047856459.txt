@@ -1,0 +1,36 @@
+Follow-up task: Make final_delivery artefact in gpt4o-search.ts use the gateway output
+The previous gateway refactor partially landed — deliveredLeadsWithEvidence and dsLeads correctly come from finalized.verifiedLeads, but the final_delivery artefact still uses the unfiltered cappedLeads. Result: the artefact's title says "5 leads" when only 2 were verified, and the Behaviour Judge (which judges this artefact) reports on all 5 including the dropped ones.
+Today's run confirms this: AFR shows Final delivery: 5 leads (GPT-4o web search) AND Combined delivery: 2 verified leads from 1 loop AND Delivery Summary: PASS — 2 delivered — three different counts for the same run.
+The fix: in gpt4o-search.ts, after finalizeDelivery is called and finalized.verifiedLeads is available, redefine cappedLeads to come from the gateway output. Every subsequent reference (artefact title, behaviour_judge section, verification_summary, delivered_count, Tower successCriteria, AFR events, final return) must use the gateway-filtered count.
+Add immediately after the finalizeDelivery call:
+ts// Re-derive cappedLeads from gateway output so all downstream artefacts
+// and Tower judgements see the same set the user sees.
+const cappedLeads = finalized.verifiedLeads.map(fl => ({
+  name: fl.name,
+  address: fl.address,
+  phone: fl.phone,
+  website: fl.website,
+  placeId: fl.placeId,
+}));
+const cappedGpt4oLeads = allLeads.filter(l =>
+  finalized.verifiedLeads.some(fl => fl.name === l.name)
+);
+If cappedLeads is already declared earlier in the function (likely const cappedLeads = requestedCount !== null ? deliveryLeads.slice(0, requestedCount) : deliveryLeads), DELETE that earlier declaration so this gateway-derived one is the only one.
+Same for cappedGpt4oLeads — replace any earlier declaration.
+Verification:
+
+Restart supervisor
+Run "find beer festivals in sussex that are happening soon" (the query that showed the bug)
+Check the AFR — Final delivery: 2 leads (GPT-4o web search) (was 5)
+Behaviour Judge box should now show 2 leads in "EVIDENCE FOUND PER LEAD", all verified
+No "X unverified" badges anywhere in the chat
+The three artefact titles should all match: final_delivery=2, combined_delivery=2, delivery_summary=2
+
+Do not change:
+
+Any logic in finalize-delivery.ts
+loop-skeleton.ts (already correct)
+The Tower judgement call itself
+The per-constraint Tower verification loop
+
+This is a one-file edit (gpt4o-search.ts) replacing the cappedLeads/cappedGpt4oLeads declarations to come from the gateway instead of the unfiltered candidates.

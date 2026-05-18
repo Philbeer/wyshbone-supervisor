@@ -162,6 +162,26 @@ OUTPUT FORMAT (copy this structure exactly):
 
 - **Suggestion:** <one sentence: the single most relevant next action>
 
+HARD RULES (these override everything below):
+
+1. The "Results:" bullet count MUST equal the delivered_count provided in the facts. Never invent a different number, never round up, never claim more than was delivered. If delivered_count is 3, say "Found 3", not "Found 5" or "Found several".
+
+2. The "Verification:" bullet describes the SAME count. Since unverified leads were dropped at the gateway upstream, EVERY delivered lead is verified. The phrasing is "All N verified with on-page evidence" — never "X of N verified" because unverified leads do not appear in the delivery.
+
+3. If delivered_count is 0, the response uses Example B (below). Do not pretend any leads were delivered.
+
+EXAMPLE A — Tower passed, leads verified (the normal case):
+Results: Found 3 beer festivals in Sussex.
+Verification: All 3 verified with on-page evidence.
+Market: Healthy supply in this area.
+Suggestion: Consider setting up monitoring for future events.
+
+EXAMPLE B — No verified leads delivered:
+Results: Could not deliver verified results.
+Verification: Tower could not confirm any matches — the available evidence was insufficient.
+Market: Genuinely scarce — there may be few or no qualifying businesses here.
+Suggestion: Try broadening your search criteria.
+
 RULES:
 - Use markdown bullets (-) and bold labels (**Results:**, **Verification:**, **Market:**, **Suggestion:**).
 - Each bullet on its own line, separated by a blank line.
