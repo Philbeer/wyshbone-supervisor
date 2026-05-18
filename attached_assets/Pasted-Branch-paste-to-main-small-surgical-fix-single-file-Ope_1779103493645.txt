@@ -1,0 +1,76 @@
+Branch: paste to main (small surgical fix, single file)
+Open server/supervisor/tower-artefact-judge.ts.
+Step 1. Right above function getTowerBaseUrl() near the top of the file, add this helper:
+typescript/**
+ * Tower's final delivery judgement can't reliably verify negation constraints —
+ * it tries to verify the absence and returns no_evidence/fail even when leads
+ * are legitimately fine. The per-(lead × constraint) Tower verification has
+ * already handled these correctly via constraint-to-claim positive rendering
+ * + gateway STRICT flip. So at the final judgement step we strip negation
+ * constraints from the payload — Tower judges positive constraints only,
+ * gateway is the source of truth for negations.
+ */
+function stripNegationConstraints(constraints: unknown): { kept: any[]; strippedCount: number } {
+  if (!Array.isArray(constraints)) return { kept: [], strippedCount: 0 };
+  const kept: any[] = [];
+  let strippedCount = 0;
+  for (const c of constraints) {
+    const op = typeof (c as any)?.operator === 'string' ? (c as any).operator : '';
+    if (op.startsWith('not_')) {
+      strippedCount++;
+    } else {
+      kept.push(c);
+    }
+  }
+  return { kept, strippedCount };
+}
+Step 2. Inside judgeArtefact(), immediately AFTER the const { artefact, runId, goal, ... } = params; line and the [QID-TRACE] step5 log line, BEFORE the const request: ArtefactJudgementRequest = { ... } block, add:
+typescript// Strip negation constraints from the Tower final-judgement payload —
+// gateway is source of truth for these via per-(lead × constraint) verification.
+let scForTower: Record<string, unknown> | undefined = successCriteria;
+let payloadForTower = (typeof artefact.payloadJson === 'string' ? JSON.parse(artefact.payloadJson) : artefact.payloadJson) as Record<string, unknown>;
+let totalStripped = 0;
+
+if (scForTower && Array.isArray((scForTower as any).structured_constraints)) {
+  const { kept, strippedCount } = stripNegationConstraints((scForTower as any).structured_constraints);
+  if (strippedCount > 0) {
+    totalStripped += strippedCount;
+    scForTower = { ...scForTower, structured_constraints: kept };
+  }
+}
+
+if (payloadForTower && Array.isArray((payloadForTower as any).structured_constraints)) {
+  const { kept, strippedCount } = stripNegationConstraints((payloadForTower as any).structured_constraints);
+  if (strippedCount > 0) {
+    totalStripped += strippedCount;
+    payloadForTower = { ...payloadForTower, structured_constraints: kept };
+  }
+}
+
+if (totalStripped > 0) {
+  console.log(`[TOWER_JUDGE] Stripped ${totalStripped} negation constraint(s) from final-judgement payload — gateway already enforced these per-lead`);
+}
+Step 3. Replace the existing request: ArtefactJudgementRequest = { ... } block to reference scForTower and payloadForTower instead of successCriteria and the raw payload:
+typescriptconst request: ArtefactJudgementRequest = {
+  runId,
+  artefactId: artefact.id,
+  goal,
+  successCriteria: scForTower,
+  artefactType: artefact.type,
+  intent_narrative,
+  query_id: queryId ?? null,
+  query_shape_key: queryShapeKey ?? null,
+  artefact_payload: {
+    title: artefact.title ?? undefined,
+    summary: artefact.summary ?? undefined,
+    payload_json: payloadForTower,
+  },
+};
+DO NOT TOUCH anything else in the file — no changes to error handling, persistence, learning update, or AFR logging.
+After completion, report back:
+
+The new helper function location (line range)
+The stripping block location (line range, inside judgeArtefact())
+Confirmation that the request object now uses scForTower and payloadForTower
+
+I will then re-run the AI negation test query and confirm Tower's final verdict comes back as PASS.
