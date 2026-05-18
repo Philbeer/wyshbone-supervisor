@@ -122,13 +122,42 @@ function formatConstraintForSearch(c: StructuredConstraintPayload): string {
       }
     }
 
-    case 'relationship_check':
-      return `They must have evidence of ${c.operator === 'serves' ? 'working with' : c.operator} ${valueRaw}.`;
+    case 'relationship_check': {
+      switch (c.operator) {
+        case 'not_has':
+          return `They must NOT have ${valueRaw}.`;
+        case 'not_serves':
+          return `They must NOT serve ${valueRaw}.`;
+        case 'not_owned_by':
+          return `They must NOT be owned by ${valueRaw}.`;
+        case 'not_managed_by':
+          return `They must NOT be managed by ${valueRaw}.`;
+        case 'not_partners_with':
+          return `They must NOT partner with ${valueRaw}.`;
+        case 'serves':
+          return `They must have evidence of working with ${valueRaw}.`;
+        default:
+          return `They must have evidence of ${c.operator} ${valueRaw}.`;
+      }
+    }
 
-    case 'website_evidence':
-      return `Their website must contain evidence of "${valueRaw}".`;
+    case 'website_evidence': {
+      switch (c.operator) {
+        case 'not_contains':
+          return `Their website must NOT contain evidence of "${valueRaw}".`;
+        case 'not_mentions':
+          return `Their website must NOT mention "${valueRaw}".`;
+        case 'mentions':
+          return `Their website must mention "${valueRaw}".`;
+        default:
+          return `Their website must contain evidence of "${valueRaw}".`;
+      }
+    }
 
     case 'attribute_check': {
+      if (c.operator === 'not_has') {
+        return `They must NOT have ${valueRaw}.`;
+      }
       if (valueRaw === 'true' || valueRaw === 'yes') {
         return `They must be ${c.field.replace(/_/g, ' ')}.`;
       }
@@ -139,7 +168,9 @@ function formatConstraintForSearch(c: StructuredConstraintPayload): string {
     }
 
     case 'status_check':
-      return `They must currently be ${valueRaw}.`;
+      return c.operator === 'not_equals'
+        ? `They must NOT currently be ${valueRaw}.`
+        : `They must currently be ${valueRaw}.`;
 
     case 'numeric_range': {
       const fieldLabel = c.field.replace(/_/g, ' ');

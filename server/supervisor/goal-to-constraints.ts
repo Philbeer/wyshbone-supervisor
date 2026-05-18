@@ -181,6 +181,24 @@ CONSTRAINT TYPES and how to detect them:
 
   If the query has NO temporal element, do NOT emit a TIME_CONSTRAINT. Read intent, not surface keywords.
 
+- NEGATION: emit when the user expresses an EXCLUSION or NEGATIVE constraint — something the candidate must NOT have, must NOT mention, must NOT be, etc. Negation phrases include: "without X", "no X", "don't have X", "doesn't say X", "not mentioning X", "excluding X", "but not X", "must not", "free of", "lacks", "missing", and similar. The phrases listed are REFERENCE POINTS, not a closed keyword list — generalise semantically. Use intent, not surface keywords.
+
+  EMISSION RULES — use the same CONSTRAINT TYPE you would for a positive version, but flip the operator to its negation. Examples:
+
+  - "without a beer garden" / "no beer garden" / "doesn't have a beer garden" → HAS_ATTRIBUTE with operator="not_has", value="beer garden", hard=true
+  - "don't say they have AI agents" / "doesn't mention AI agents" / "without mentioning AI on their website" → WEBSITE_EVIDENCE with operator="not_mentions", value="AI agents", hard=true
+  - "not owned by Diageo" / "doesn't partner with X" → RELATIONSHIP_CHECK with operator="not_owned_by" / "not_partners_with", value=X, hard=true
+  - "without 'Inn' in the name" / "no 'Wetherspoon' in the name" → TEXT_COMPARE with operator="not_contains", value="Inn", hard=true
+  - "not currently closed" / "not under administration" → STATUS_CHECK with operator="not_equals", value="closed", hard=true
+
+  hard=true by default — negations are user-stated requirements, not preferences. hard=false ONLY if the user hedges ("preferably without X", "ideally not mentioning Y").
+
+  NOVEL negation phrases not covered above: use your judgement. Pick the constraint type that matches the POSITIVE version of what's being excluded, then use the corresponding not_* operator. Explain the negation clearly in the rationale string so downstream filtering knows what's being excluded.
+
+  STRICT verification semantics — downstream, a negation constraint is FAILED by a lead if Tower returns either verified OR weak_match. Only no_evidence lets the lead pass. You don't encode this in emission — just emit the correct not_* operator and downstream handles the flip.
+
+  If the query has NO exclusion or negation, do NOT emit a negation constraint. "Without exception" is not a negation of an entity. Read intent.
+
 - HAS_ATTRIBUTE: when user wants venues with a specific feature/amenity → { id: "c_attr_<short_name>", type: "HAS_ATTRIBUTE", field: "attribute", operator: "has", value: "<attribute>", hard: true, rationale: "..." }. Examples: "beer garden", "outdoor seating", "live music", "parking", "wheelchair accessible". Default HARD because the user explicitly asked for this feature. Only set soft (hard: false) if user uses hedging language like "preferably", "if possible", "ideally", "optionally", "nice to have".
 
 CRITICAL RULE — Attribute vs Name distinction:

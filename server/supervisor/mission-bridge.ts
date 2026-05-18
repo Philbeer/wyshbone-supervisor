@@ -223,14 +223,15 @@ function mapMissionConstraintToStructured(c: MissionConstraint, index: number): 
     case 'attribute_check': {
       const val = typeof c.value === 'string' ? c.value : String(c.value ?? '');
       const shortName = val.replace(/\s+/g, '_').toLowerCase().substring(0, 20);
+      const isNegation = c.operator === 'not_has';
       return {
         id: `c_attr_${shortName}_m${index}`,
         type: 'HAS_ATTRIBUTE',
         field: 'attribute',
-        operator: 'has',
+        operator: c.operator,
         value: val,
         hard: c.hardness === 'hard',
-        rationale: `Has attribute "${val}"`,
+        rationale: isNegation ? `Must NOT have attribute "${val}"` : `Has attribute "${val}"`,
         canonical,
       };
     }

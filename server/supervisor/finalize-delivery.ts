@@ -99,6 +99,7 @@ export interface DroppedLead {
   rollup_status: 'weak_match' | 'no_evidence';
   failed_constraints: string[];
   reasoning: string;
+  negation_exclusion?: boolean;
 }
 
 export interface FinalizedDelivery {
@@ -168,6 +169,63 @@ export function computeRollup(
   return 'weak_match';
 }
 
+/**
+ * Returns true if a constraint operator is a negation (not_*) operator.
+ * These constraints require STRICT inverse semantics: Tower `verified` or
+ * `weak_match` means the forbidden thing was found → lead is excluded.
+ * Only Tower `no_evidence` or `insufficient_evidence` lets the lead through.
+ */
+function isNegationOperator(operator: string): boolean {
+  return operator.startsWith('not_');
+}
+
+/**
+ * Build a lookup keyed by (constraint_type + ':' + constraint_value) for
+ * every hard, Tower-judged constraint so we can resolve operator during flip.
+ * When multiple constraints share the same type+value pair, the last one wins
+ * (edge case — in practice they should be unique).
+ */
+function buildNegationOperatorMap(
+  structuredConstraints: StructuredConstraintPayload[],
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const c of structuredConstraints) {
+    if (c.hardness === 'hard' && TOWER_JUDGED_CONSTRAINT_TYPES.has(c.type)) {
+      const key = `${c.type}:${String(c.value ?? '')}`;
+      map.set(key, c.operator);
+    }
+  }
+  return map;
+}
+
+/**
+ * Apply the negation flip to a single verification's tower_status.
+ *
+ * STRICT negation semantics (operator starts with "not_"):
+ *   Tower verified          → FAILED  (forbidden thing was found)
+ *   Tower weak_match        → FAILED  (strict mode — any evidence of it fails)
+ *   Tower no_evidence       → PASSED  (nothing found — lead is clean)
+ *   Tower insufficient_evidence → PASSED (benefit of the doubt)
+ *
+ * Positive semantics are unchanged (returns status as-is).
+ */
+function applyNegationFlip(
+  status: EvidenceVerificationStatus | null,
+  operator: string,
+): EvidenceVerificationStatus | null {
+  if (!isNegationOperator(operator)) return status;
+  switch (status) {
+    case 'verified':
+    case 'weak_match':
+      return 'no_evidence';
+    case 'no_evidence':
+    case 'insufficient_evidence':
+      return 'verified';
+    default:
+      return status;
+  }
+}
+
 export function finalizeDelivery(input: FinalizeDeliveryInput): FinalizedDelivery {
   const towerJudgedConstraints = input.structuredConstraints.filter(
     c => c.hardness === 'hard' && TOWER_JUDGED_CONSTRAINT_TYPES.has(c.type)
@@ -175,37 +233,78 @@ export function finalizeDelivery(input: FinalizeDeliveryInput): FinalizedDeliver
   const towerJudgedConstraintCount = towerJudgedConstraints.length;
   const hasTowerJudgedConstraints = towerJudgedConstraintCount > 0;
 
+  const negationOperatorMap = buildNegationOperatorMap(input.structuredConstraints);
+
   const verifiedLeads: FinalizedLead[] = [];
   const dropped: DroppedLead[] = [];
 
   for (const lead of input.leads) {
-    const rollup = computeRollup(lead, towerJudgedConstraintCount);
+    // Apply negation flip: rewrite tower_status for verifications whose
+    // matching constraint uses a not_* operator before computing rollup.
+    const flippedLead: RawLeadInput = {
+      ...lead,
+      verifications: lead.verifications.map(v => {
+        const key = `${v.constraint_type}:${v.constraint_value}`;
+        const operator = negationOperatorMap.get(key);
+        if (!operator || !isNegationOperator(operator)) return v;
+        const flipped = applyNegationFlip(v.tower_status, operator);
+        return flipped === v.tower_status ? v : { ...v, tower_status: flipped };
+      }),
+    };
+
+    const rollup = computeRollup(flippedLead, towerJudgedConstraintCount);
 
     if (rollup !== 'verified') {
-      const failedConstraints = lead.verifications
-        .filter(v =>
-          TOWER_JUDGED_CONSTRAINT_TYPES.has(v.constraint_type) &&
-          (v.tower_status === 'no_evidence' ||
-            v.tower_status === 'insufficient_evidence' ||
-            v.tower_status === 'weak_match' ||
-            v.tower_status === null)
-        )
-        .map(v => v.constraint_value);
+      // Identify which constraints caused the drop, noting negation exclusions.
+      const failedVerifications = flippedLead.verifications.filter(v =>
+        TOWER_JUDGED_CONSTRAINT_TYPES.has(v.constraint_type) &&
+        (v.tower_status === 'no_evidence' ||
+          v.tower_status === 'insufficient_evidence' ||
+          v.tower_status === 'weak_match' ||
+          v.tower_status === null)
+      );
 
-      const firstReasoning = lead.verifications.find(v => v.tower_reasoning)?.tower_reasoning;
+      const failedConstraints = failedVerifications.map(v => v.constraint_value);
+
+      // Check if any failing constraint was a negation (original status was
+      // verified/weak_match but got flipped to no_evidence).
+      const negationFailures = failedVerifications.filter(v => {
+        const key = `${v.constraint_type}:${v.constraint_value}`;
+        const operator = negationOperatorMap.get(key);
+        return operator && isNegationOperator(operator);
+      });
+
+      const isNegationExclusion = negationFailures.length > 0;
+
+      let reasoning: string;
+      if (isNegationExclusion) {
+        const details = negationFailures
+          .map(v => {
+            const key = `${v.constraint_type}:${v.constraint_value}`;
+            const operator = negationOperatorMap.get(key) ?? 'not_*';
+            return `excluded by negation constraint: ${operator} ${v.constraint_value}`;
+          })
+          .join('; ');
+        reasoning = details;
+      } else {
+        const firstReasoning = lead.verifications.find(v => v.tower_reasoning)?.tower_reasoning;
+        reasoning = firstReasoning || `Lead rollup was ${rollup}, not verified`;
+      }
 
       dropped.push({
         name: lead.name,
         placeId: lead.placeId,
         rollup_status: rollup,
         failed_constraints: failedConstraints,
-        reasoning: firstReasoning || `Lead rollup was ${rollup}, not verified`,
+        reasoning,
+        ...(isNegationExclusion ? { negation_exclusion: true } : {}),
       });
       continue;
     }
 
-    // Lead is verified — build canonical FinalizedLead
-    const matchEvidence = lead.verifications
+    // Lead is verified — build canonical FinalizedLead using flipped verifications
+    // so negation constraints that passed (no_evidence → verified) appear correctly.
+    const matchEvidence = flippedLead.verifications
       .filter(v =>
         TOWER_JUDGED_CONSTRAINT_TYPES.has(v.constraint_type) &&
         v.tower_status === 'verified'
