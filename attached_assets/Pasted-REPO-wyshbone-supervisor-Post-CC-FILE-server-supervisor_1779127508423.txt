@@ -1,0 +1,42 @@
+REPO: wyshbone-supervisor-Post-CC
+FILE: server/supervisor/conversation-router.ts
+Find the CLARIFY section in ROUTER_SYSTEM_PROMPT:
+### CLARIFY
+The user wants to search but hasn't provided enough info. Missing business type, location, or both.
+Set route="CLARIFY" and clarify_question=a short, friendly question asking for what's missing.
+Keep clarify_question to 1-2 sentences. Be specific.
+Examples:
+- "find companies in kent" → CLARIFY ("What type of companies? For example, accountants, builders, restaurants...")
+- "find businesses that would be good for my app" → CLARIFY ("What kind of businesses are you looking for, and where should I search?")
+- "find me leads" → CLARIFY ("What type of businesses would you like me to find, and in which area?")
+- "find things in London" → CLARIFY ("What type of businesses in London? For example, restaurants, agencies, shops...")
+Replace with:
+### CLARIFY
+The user wants to search but the search target isn't fully specified. Your job depends on how much context the user has given:
+
+**MODE A — Open clarify (no domain context):**
+User has given almost nothing useful. Ask a short open question with example categories.
+- "find companies in kent" → CLARIFY ("What type of companies? For example, accountants, builders, restaurants...")
+- "find me leads" → CLARIFY ("What type of businesses would you like me to find, and in which area?")
+- "find things in London" → CLARIFY ("What type of businesses in London? For example, restaurants, agencies, shops...")
+
+**MODE B — Proposing clarify (user has given domain context):**
+The user has given enough information that you can REASON about what they probably need, even if they haven't named the business type explicitly. In this mode you do NOT ask an open menu question. Instead you propose a concrete plan and ask them to confirm or adjust.
+
+Treat the user as someone who knows their problem but doesn't necessarily know the right search vocabulary. Read everything they've said — what they sell, what they do, what they're trying to achieve, where they are, what stage they're at — and infer the specific entity types and constraints that would actually match their goal. Then propose those.
+
+Format of the clarify_question in Mode B:
+"Based on [what they told you], I'd suggest searching for [specific entity types, 2-5 of them] in [location]. [Mention any constraints you'd add.] Sound right, or want me to adjust?"
+
+Examples:
+- User: "i need places to sell my beer from my brewery" → CLARIFY (Mode A, no location yet)
+- Then user: "places in sussex - my beer is in bottles" → CLARIFY (Mode B): "Based on bottled beer from your brewery, I'd suggest searching Sussex for: independent off-licences, bottle shops, gastropubs that stock local beer, and farm shops. Sound right, or want me to adjust the list?"
+- User: "I'm a wedding photographer looking for clients in Surrey" → CLARIFY (Mode B): "Got it — for wedding photography work in Surrey I'd search for: wedding venues, country house hotels, event planners, and wedding florists (they often refer photographers). Want me to go with that, or adjust?"
+- User: "I make organic dog treats and want to find retailers in the south west" → CLARIFY (Mode B): "For organic dog treats in the South West, I'd look for: independent pet shops, farm shops, organic food stores, and dog grooming salons. Sound good, or want to adjust the list?"
+
+When to use Mode B over Mode A: if the user has told you about THEIR business / product / role / situation, you have enough context for Mode B. Don't fall back to an open menu when you can reason about what they need.
+
+After a Mode B clarify, the user's next message will usually be a short affirmative ("yes", "go for it") or an edit ("yes but skip pubs", "add hotels"). Rule 12 + ITERATE handle these — you do NOT need a separate "accept" route.
+Then find rule 12 in CRITICAL RULES and replace it with:
+12. AFFIRMATIVE RESPONSES (overrides rule 4): If the user's message is a short affirmative (under 8 words) like "yes", "yes please", "ok", "sure", "go ahead", "do it", "yeah", "please do", "go for it", "sounds good", "perfect", or an edit-acceptance like "yes but skip X", "yeah and add Y", "yes but only Z" — this is NOT a discussion. Read the PREVIOUS ASSISTANT MESSAGE. If it proposed a plan (Mode B clarify) or offered to search/refine/expand/filter, route as SEARCH with the proposed entity types and location (apply any edits from the user). The entity field should be a comma-separated list if multiple types were proposed, e.g. entity="off-licences, bottle shops, gastropubs". Rule 12 takes priority over rule 4.
+Report after applying.
