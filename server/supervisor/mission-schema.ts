@@ -44,7 +44,7 @@ export const NUMERIC_OPERATORS = [
 
 export const ATTRIBUTE_CHECK_OPERATORS = ['has', 'equals', 'not_has'] as const;
 export const RELATIONSHIP_CHECK_OPERATORS = ['has', 'serves', 'owned_by', 'managed_by', 'partners_with'] as const;
-export const TIME_CONSTRAINT_OPERATORS = ['within_last', 'after', 'before'] as const;
+export const TIME_CONSTRAINT_OPERATORS = ['within_last', 'within_next', 'after', 'before', 'between_dates', 'since'] as const;
 export const STATUS_CHECK_OPERATORS = ['equals', 'has', 'not_equals'] as const;
 export const WEBSITE_EVIDENCE_OPERATORS = ['contains', 'mentions'] as const;
 export const CONTACT_EXTRACTION_OPERATORS = ['extract'] as const;
@@ -114,7 +114,13 @@ export const MissionConstraintSchema = z.object({
   type: z.enum(MISSION_CONSTRAINT_TYPES),
   field: z.string().min(1),
   operator: z.string().min(1),
-  value: z.union([z.string(), z.number(), z.boolean(), z.null()]),
+  value: z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.object({ start: z.string(), end: z.string() }),
+  ]),
   value_secondary: z.union([z.string(), z.number(), z.null()]).optional(),
   hardness: z.enum(HARDNESS_VALUES),
   evidence_requirement: z.enum(EVIDENCE_REQUIREMENT_VALUES).optional(), // PHASE_2
@@ -149,6 +155,41 @@ export type MissionFailureStage =
   | 'pass2_schema_validation'
   | 'extractor_exception';
 
+function isDateRangeObject(v: unknown): v is { start: string; end: string } {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    'start' in v &&
+    'end' in v &&
+    typeof (v as any).start === 'string' &&
+    typeof (v as any).end === 'string'
+  );
+}
+
+export function normaliseConstraintOperator(c: MissionConstraint): MissionConstraint {
+  if (c.type === 'time_constraint') {
+    if (c.operator === 'between' && isDateRangeObject(c.value)) {
+      return { ...c, operator: 'between_dates' };
+    }
+    if (c.operator === 'within' && isDateRangeObject(c.value)) {
+      return { ...c, operator: 'between_dates' };
+    }
+    if (c.operator === 'within' && typeof c.value === 'string') {
+      return { ...c, operator: 'within_next' };
+    }
+    if (c.operator === 'before_date') {
+      return { ...c, operator: 'before' };
+    }
+    if (c.operator === 'after_date') {
+      return { ...c, operator: 'after' };
+    }
+    if (c.operator === 'from') {
+      return { ...c, operator: 'since' };
+    }
+  }
+  return c;
+}
+
 export function validateStructuredMission(raw: unknown): MissionValidationResult {
   if (raw === null || raw === undefined) {
     return { ok: false, mission: null, errors: ['Input is null or undefined'] };
@@ -165,12 +206,24 @@ export function validateStructuredMission(raw: unknown): MissionValidationResult
   const mission = parseResult.data;
   const errors: string[] = [];
 
+  mission.constraints = mission.constraints.map(normaliseConstraintOperator);
+
   for (let i = 0; i < mission.constraints.length; i++) {
     const c = mission.constraints[i];
 
     const validOps = VALID_OPERATORS_BY_TYPE[c.type as MissionConstraintType];
     if (validOps && !validOps.includes(c.operator)) {
       errors.push(`constraints[${i}].operator: "${c.operator}" is not valid for type "${c.type}". Allowed: [${validOps.join(', ')}]`);
+    }
+
+    if (c.type === 'time_constraint' && c.operator === 'between_dates') {
+      if (!isDateRangeObject(c.value) || (c.value as any).start.trim().length === 0 || (c.value as any).end.trim().length === 0) {
+        errors.push(`constraints[${i}].value: between_dates requires { start, end } object value`);
+      }
+    }
+
+    if (c.type === 'time_constraint' && c.operator !== 'between_dates' && isDateRangeObject(c.value)) {
+      errors.push(`constraints[${i}].value: operator "${c.operator}" requires a string value, not a date range`);
     }
 
     if (c.type === 'numeric_range') {
