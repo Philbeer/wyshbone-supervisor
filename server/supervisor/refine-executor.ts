@@ -5,6 +5,7 @@ import { logAFREvent } from './afr-logger';
 import { supabase } from '../supabase';
 import { executeWebVisit } from './web-visit';
 import { extractConstraintLedEvidence, getPageHintsForConstraint, type ConstraintContext, type ConstraintLedExtractionResult } from './constraint-led-extractor';
+import { extractStructuredMission } from './mission-extractor';
 import { batchGpt4oVerification } from './mission-executor';
 
 const EVIDENCE_MODE = (process.env.EVIDENCE_MODE || 'gpt4o_primary') as 'gpt4o_primary' | 'web_crawl_first';
@@ -42,67 +43,6 @@ function extractDomain(url: string): string {
     return url.replace(/^https?:\/\//i, '').split('/')[0].toLowerCase();
   } catch {
     return '';
-  }
-}
-
-async function extractConstraintValue(userQuestion: string): Promise<{ value: string; type: string }> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    const cleaned = userQuestion
-      .replace(/^(which|what|do any|are there any|can you check|tell me|show me|find|list|any)\s+(of\s+)?(those|them|the results?|these)?\s*(that\s+|which\s+|who\s+)?(mention|have|offer|provide|include|feature|do|say|advertise|list|show)?\s*/i, '')
-      .replace(/\?+$/, '')
-      .replace(/\bon their (website|homepage|site|page)\b/gi, '')
-      .trim();
-    return { value: cleaned || userQuestion, type: 'attribute_check' };
-  }
-
-  const model = process.env.REFINE_LLM_MODEL || 'claude-3-5-haiku-20241022';
-  try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 100,
-        temperature: 0,
-        system: 'Extract the specific thing the user wants to check for on a business website. Respond with JSON only.',
-        messages: [{
-          role: 'user',
-          content: `User question: "${userQuestion}"
-
-What specific attribute, feature, or content is the user looking for? Extract just the key thing to search for on the website.
-
-JSON only: {"value": "the thing to search for", "type": "attribute_check"}
-
-Examples:
-- "which of those mention live music?" → {"value": "live music", "type": "attribute_check"}
-- "do any of them do loft conversions?" → {"value": "loft conversions", "type": "attribute_check"}
-- "which ones mention eco homes or green building" → {"value": "eco homes or green building", "type": "website_evidence"}
-- "any of them have beer gardens?" → {"value": "beer garden", "type": "attribute_check"}
-- "which seem high end or premium" → {"value": "high end or premium", "type": "attribute_check"}`,
-        }],
-      }),
-    });
-
-    if (!resp.ok) throw new Error(`API ${resp.status}`);
-    const data = await resp.json() as any;
-    const text = data.content?.[0]?.text || '';
-    const cleaned = text.replace(/```json\s*/gi, '').replace(/```\s*$/g, '').trim();
-    const parsed = JSON.parse(cleaned);
-    console.log(`[REFINE_EXTRACT] "${userQuestion}" → constraint value: "${parsed.value}" type: "${parsed.type}"`);
-    return { value: parsed.value || userQuestion, type: parsed.type || 'attribute_check' };
-  } catch (err: any) {
-    console.warn(`[REFINE_EXTRACT] LLM extraction failed: ${err.message}`);
-    const cleaned = userQuestion
-      .replace(/^(which|what|do any|are there any|can you check|tell me|show me|find|list|any)\s+(of\s+)?(those|them|the results?|these)?\s*(that\s+|which\s+|who\s+)?(mention|have|offer|provide|include|feature|do|say|advertise|list|show)?\s*/i, '')
-      .replace(/\?+$/, '')
-      .replace(/\bon their (website|homepage|site|page)\b/gi, '')
-      .trim();
-    return { value: cleaned || userQuestion, type: 'attribute_check' };
   }
 }
 
@@ -209,7 +149,8 @@ async function fetchWebVisitArtefacts(sourceRunId: string): Promise<any[]> {
 
 async function liveRefineWithFetch(
   leads: RefineLead[],
-  constraint: string,
+  constraints: ConstraintContext[],
+  entityType: string | null,
   sourceRunId: string,
   runId: string,
   userId: string,
@@ -222,38 +163,25 @@ async function liveRefineWithFetch(
   const matchingLeads: RefineMatchedLead[] = [];
   const nonMatchingLeads: RefineNonMatchedLead[] = [];
 
-  // Step 1: Extract the actual constraint value from the user's question
-  const extracted = await extractConstraintValue(constraint);
-  const constraintCtx: ConstraintContext = {
-    type: extracted.type,
-    field: 'website_content',
-    operator: 'contains',
-    value: extracted.value,
-    hardness: 'soft',
-  };
-
-  console.log(`[REFINE_LIVE] Constraint extracted: "${constraint}" → value="${extracted.value}" type="${extracted.type}"`);
-
-  // Step 2: Get page hints for this constraint (e.g., /events, /whats-on for "live music")
-  const pageHints = getPageHintsForConstraint(constraintCtx);
-  console.log(`[REFINE_LIVE] Page hints for "${extracted.value}": ${pageHints.join(', ') || 'none'}`);
+  // Collect page hints across all constraints
+  const pageHints = Array.from(new Set(constraints.flatMap(c => getPageHintsForConstraint(c))));
 
   const withWebsite = leads.filter(l => !!l.website);
   const withoutWebsite = leads.filter(l => !l.website);
-
   for (const lead of withoutWebsite) {
     nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_website' });
   }
-
   if (withWebsite.length === 0) {
     return { matchingLeads, nonMatchingLeads, fetchedCount: 0 };
   }
 
   let fetchedCount = 0;
+  const cacheWrites: Promise<any>[] = [];
+  const BATCH_SIZE = 5;
 
-  // If gpt4o_primary mode, skip website crawl and go straight to GPT-4o verification
+  // ── gpt4o_primary mode: skip crawl, use GPT-4o verification on each constraint ──
   if (EVIDENCE_MODE === 'gpt4o_primary') {
-    console.log(`[REFINE_LIVE] EVIDENCE_MODE=gpt4o_primary — using GPT-4o verification for all ${withWebsite.length} leads`);
+    console.log(`[REFINE_LIVE] EVIDENCE_MODE=gpt4o_primary — verifying ${withWebsite.length} leads against ${constraints.length} constraint(s)`);
 
     const discoveredLeads = withWebsite.map(l => ({
       name: l.name,
@@ -266,63 +194,56 @@ async function liveRefineWithFetch(
       lng: null as number | null,
     }));
 
-    const missionConstraint = {
-      type: extracted.type as any,
-      field: 'website_content',
-      operator: 'contains' as any,
-      value: extracted.value,
-      hardness: 'hard' as const,
-    };
+    const missionStyleConstraints = constraints.map(c => ({
+      type: c.type as any,
+      field: c.field,
+      operator: c.operator as any,
+      value: c.value,
+      hardness: c.hardness as any,
+      synonyms: c.synonyms,
+      reasoning_mode: c.reasoning_mode,
+    }));
 
     const location = (withWebsite[0]?.address || '').replace(/,\s*UK$/i, '').split(',').pop()?.trim() || 'UK';
+    const constraintSummary = constraints.map(c => c.value).filter(Boolean).join(' AND ');
 
     const gpt4oResults = await batchGpt4oVerification(
-      discoveredLeads,
-      [missionConstraint],
-      location,
-      constraint,
-      runId,
-      userId,
-      conversationId,
+      discoveredLeads, missionStyleConstraints, location, constraintSummary,
+      runId, userId, conversationId,
     );
 
     for (let i = 0; i < withWebsite.length; i++) {
       const lead = withWebsite[i];
       const leadResults = gpt4oResults.filter(r => r.leadIndex === i);
-      const verified = leadResults.some(r => r.evidenceFound);
-
+      // Lead must satisfy every constraint that had a verification
+      const verified = leadResults.length > 0 && leadResults.every(r => r.evidenceFound);
       if (verified) {
-        const bestResult = leadResults.find(r => r.evidenceFound)!;
-        console.log(`[REFINE_LIVE] "${lead.name}" → VERIFIED via GPT-4o`);
+        const evidenceBits = leadResults
+          .map(r => r.snippets?.[0] || r.towerReasoning || '')
+          .filter(Boolean);
         matchingLeads.push({
           ...lead,
           refine_match: true,
-          refine_evidence: bestResult.snippets[0] || bestResult.towerReasoning || 'Verified via web search',
+          refine_evidence: evidenceBits.join(' | ') || 'Verified via web search',
         });
       } else {
-        console.log(`[REFINE_LIVE] "${lead.name}" → NOT VERIFIED`);
         nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_evidence' });
       }
     }
 
     fetchedCount = withWebsite.length;
-    console.log(`[REFINE_LIVE] GPT-4o primary complete — ${matchingLeads.length}/${withWebsite.length} verified`);
     return { matchingLeads, nonMatchingLeads, fetchedCount };
   }
 
-  console.log(`[REFINE_LIVE] Crawling ${withWebsite.length} websites (up to 5 pages each) for "${extracted.value}"`);
-  const cacheWrites: Promise<any>[] = [];
-  const BATCH_SIZE = 5;
+  // ── crawl path: visit websites, run constraint-led extraction per constraint ──
+  console.log(`[REFINE_LIVE] Crawling ${withWebsite.length} websites for ${constraints.length} constraint(s)`);
 
-  // Process leads in batches of 5
   for (let batchStart = 0; batchStart < withWebsite.length; batchStart += BATCH_SIZE) {
     const batch = withWebsite.slice(batchStart, batchStart + BATCH_SIZE);
 
     const batchResults = await Promise.allSettled(
       batch.map(async (lead) => {
         const url = lead.website!;
-
-        // Crawl up to 5 pages with page hints (same as main pipeline)
         let pages: any[] = [];
         try {
           const envelope = await executeWebVisit(
@@ -335,12 +256,11 @@ async function liveRefineWithFetch(
         }
 
         if (pages.length === 0) {
-          return { lead, match: false, evidence: '', reason: 'fetch_failed', pages: [] };
+          return { lead, match: false, evidence: '', reason: 'fetch_failed' };
         }
-
         fetchedCount++;
 
-        // Cache pages under the source run for future refinements
+        // Cache pages under source run
         const cacheWrite = createArtefact({
           runId: sourceRunId,
           type: 'web_visit_pages',
@@ -354,154 +274,105 @@ async function liveRefineWithFetch(
               crawl: { attempted_pages: 5, fetched_pages: pages.length, blocked: false, retryable: false, http_failures_count: 0 },
             },
           },
-          userId,
-          conversationId,
+          userId, conversationId,
         }).catch((err: any) =>
           console.warn(`[REFINE_LIVE] Cache write failed for "${lead.name}": ${err.message}`),
         );
         cacheWrites.push(cacheWrite);
 
-        // Use the SAME evidence extraction as the main pipeline
-        const extraction = await extractConstraintLedEvidence(
-          pages,
-          constraintCtx,
-          [],
-          3,
-          lead.name,
+        // Run every constraint against the lead's pages
+        const results = await Promise.all(
+          constraints.map(c => extractConstraintLedEvidence(pages, c, [], 3, lead.name, entityType ?? undefined)),
         );
 
-        if (!extraction.no_evidence && extraction.evidence_items.length > 0) {
-          const bestEvidence = extraction.evidence_items[0];
-          return {
-            lead,
-            match: true,
-            evidence: bestEvidence.direct_quote || bestEvidence.context_snippet || '',
-            reason: '',
-            pages,
-          };
-        } else {
-          return { lead, match: false, evidence: '', reason: 'no_evidence', pages };
+        const hard = constraints.map((c, i) => ({ c, r: results[i] })).filter(x => x.c.hardness === 'hard');
+        const allHardMet = hard.length === 0 || hard.every(x => !x.r.no_evidence);
+
+        if (allHardMet) {
+          const evidenceBits = results
+            .filter(r => !r.no_evidence && r.evidence_items.length > 0)
+            .map(r => r.evidence_items[0].direct_quote || r.evidence_items[0].context_snippet || '')
+            .filter(Boolean);
+          return { lead, match: true, evidence: evidenceBits.join(' | ') || 'verified', reason: '' };
         }
+        return { lead, match: false, evidence: '', reason: 'no_evidence' };
       }),
     );
 
     for (const settled of batchResults) {
-      if (settled.status === 'rejected') {
-        console.warn(`[REFINE_LIVE] Batch item threw: ${settled.reason}`);
-        continue;
-      }
+      if (settled.status === 'rejected') continue;
       const { lead, match, evidence, reason } = settled.value;
       if (match) {
-        console.log(`[REFINE_LIVE] "${lead.name}" → MATCH for "${extracted.value}"`);
         matchingLeads.push({ ...lead, refine_match: true, refine_evidence: evidence });
       } else {
-        console.log(`[REFINE_LIVE] "${lead.name}" → NO MATCH for "${extracted.value}" (${reason})`);
         nonMatchingLeads.push({ ...lead, refine_match: false, reason });
       }
     }
   }
 
-  // ── GPT-4o web search fallback for leads with no evidence ──
+  // ── GPT-4o web search fallback for no-evidence leads (covers temporal / status / inferential cases) ──
   const noEvidenceLeads = nonMatchingLeads.filter(l => l.reason === 'no_evidence');
+  if (noEvidenceLeads.length > 0 && process.env.OPENAI_API_KEY) {
+    const constraintSummary = constraints.map(c => c.value).filter(Boolean).join(' AND ');
+    const isTemporal = constraints.some(c =>
+      c.type === 'time_constraint' || c.type === 'time_predicate' ||
+      /\b(recent|opened|established|new|last\s+\d+\s+months?)\b/i.test(c.value),
+    );
+    const fallbackModel = isTemporal
+      ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
+      : (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini');
+    const cutoffDate = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const FALLBACK_BATCH = 5;
 
-  if (noEvidenceLeads.length > 0) {
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (openaiKey) {
-      console.log(`[REFINE_FALLBACK] Running GPT-4o web search fallback for ${noEvidenceLeads.length} leads with no website evidence`);
+    console.log(`[REFINE_FALLBACK] Running GPT-4o web search fallback for ${noEvidenceLeads.length} leads against "${constraintSummary}"`);
 
-      const isRefineTemporalConstraint1 = extracted.type === 'time_constraint' ||
-        extracted.type === 'time_predicate' ||
-        /\b(recent|opened|established|new|last\s+\d+\s+months?)\b/i.test(String(extracted.value));
-      const fallbackModel = isRefineTemporalConstraint1
-        ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
-        : (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini');
-      const FALLBACK_BATCH = 5;
-      const refineCutoffDate1 = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    for (let fi = 0; fi < noEvidenceLeads.length; fi += FALLBACK_BATCH) {
+      const fbBatch = noEvidenceLeads.slice(fi, fi + FALLBACK_BATCH);
+      const fbResults = await Promise.allSettled(
+        fbBatch.map(async (lead) => {
+          const prompt = `${getCurrentDatePreamble()}\n\n${getTemporalVerificationRules(cutoffDate)}\n\nSearch for "${lead.name}". Determine whether this business genuinely matches: ${constraintSummary}.\n\nRespond with JSON only:\n{"business_found": true/false, "constraint_met": true/false, "confidence": "high"/"medium"/"low", "reasoning": "one sentence"}`;
 
-      for (let fi = 0; fi < noEvidenceLeads.length; fi += FALLBACK_BATCH) {
-        const fbBatch = noEvidenceLeads.slice(fi, fi + FALLBACK_BATCH);
-
-        const fbResults = await Promise.allSettled(
-          fbBatch.map(async (lead) => {
-            const prompt = `${getCurrentDatePreamble()}
-
-${getTemporalVerificationRules(refineCutoffDate1)}
-
-Search for "${lead.name}". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${extracted.value}" is genuinely true for this specific business.
-
-Respond with JSON only, no markdown fences:
-{"business_found": true/false, "constraint_met": true/false, "confidence": "high"/"medium"/"low", "reasoning": "one sentence", "source_url": "URL or null"}
-
-IMPORTANT:
-- constraint_met means "${extracted.value}" IS genuinely true for this business
-- Check review sites, event listings, social media — not just the business's own website
-- If the business exists but does NOT match, set business_found=true, constraint_met=false`;
-
-            const resp = await fetch('https://api.openai.com/v1/responses', {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${openaiKey}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                model: fallbackModel,
-                input: prompt,
-                tools: [{ type: 'web_search' }],
-                store: false,
-              }),
-            });
-
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-            const data = await resp.json();
-            let content = '';
-            if (Array.isArray(data.output)) {
-              for (const item of data.output) {
-                if (item.type === 'message' && Array.isArray(item.content)) {
-                  for (const block of item.content) {
-                    if (block.type === 'output_text') content += block.text;
-                  }
+          const resp = await fetch('https://api.openai.com/v1/responses', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: fallbackModel, input: prompt, tools: [{ type: 'web_search' }], store: false }),
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const data = await resp.json();
+          let content = '';
+          if (Array.isArray(data.output)) {
+            for (const item of data.output) {
+              if (item.type === 'message' && Array.isArray(item.content)) {
+                for (const block of item.content) {
+                  if (block.type === 'output_text') content += block.text;
                 }
               }
             }
-            if (!content && data.output_text) content = data.output_text;
-
-            const jsonMatch = content.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) throw new Error('No JSON');
-            const parsed = JSON.parse(jsonMatch[0]);
-            return { lead, parsed };
-          }),
-        );
-
-        for (const settled of fbResults) {
-          if (settled.status === 'rejected') continue;
-          const { lead, parsed } = settled.value;
-
-          if (parsed.business_found && parsed.constraint_met) {
-            console.log(`[REFINE_FALLBACK] "${lead.name}" → VERIFIED via web search (${parsed.confidence}): ${(parsed.reasoning || '').substring(0, 100)}`);
-            const idx = nonMatchingLeads.findIndex(l => l.name === lead.name);
-            if (idx >= 0) nonMatchingLeads.splice(idx, 1);
-            matchingLeads.push({
-              ...lead,
-              refine_match: true,
-              refine_evidence: parsed.reasoning || `Verified via web search (${parsed.confidence})`,
-            });
-          } else {
-            console.log(`[REFINE_FALLBACK] "${lead.name}" → NOT VERIFIED: ${(parsed.reasoning || '').substring(0, 100)}`);
           }
+          if (!content && data.output_text) content = data.output_text;
+          const jsonMatch = content.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) throw new Error('No JSON');
+          return { lead, parsed: JSON.parse(jsonMatch[0]) };
+        }),
+      );
+
+      for (const settled of fbResults) {
+        if (settled.status === 'rejected') continue;
+        const { lead, parsed } = settled.value;
+        if (parsed.business_found && parsed.constraint_met) {
+          const idx = nonMatchingLeads.findIndex(l => l.name === lead.name);
+          if (idx >= 0) nonMatchingLeads.splice(idx, 1);
+          matchingLeads.push({
+            ...lead,
+            refine_match: true,
+            refine_evidence: parsed.reasoning || `Verified via web search (${parsed.confidence})`,
+          });
         }
       }
-
-      console.log(`[REFINE_FALLBACK] After fallback: ${matchingLeads.length} total matches`);
-    } else {
-      console.warn(`[REFINE_FALLBACK] OPENAI_API_KEY not set — skipping web search fallback`);
     }
   }
-  // ── end GPT-4o fallback ──
 
-  // Fire cache writes without blocking
   Promise.allSettled(cacheWrites).catch(() => {});
-
   console.log(`[REFINE_LIVE] Complete — fetched=${fetchedCount} matched=${matchingLeads.length}/${leads.length}`);
   return { matchingLeads, nonMatchingLeads, fetchedCount };
 }
@@ -534,65 +405,90 @@ function artefactMatchesLead(artefact: any, lead: RefineLead): boolean {
 export async function executeRefine(
   sourceRunId: string,
   leads: RefineLead[],
-  constraint: string,
+  constraint: string,  // user's raw refine message
   runId: string,
   userId: string,
   conversationId: string | undefined,
 ): Promise<RefineResult> {
-  console.log(`[REFINE] Starting — runId=${runId} source=${sourceRunId} constraint="${constraint}" leads=${leads.length}`);
+  console.log(`[REFINE] Starting — runId=${runId} source=${sourceRunId} userMessage="${constraint}" leads=${leads.length}`);
 
+  // STEP 1: build previous-results context so mission-extractor knows what the user is refining
+  const leadSummary = leads
+    .slice(0, 10)
+    .map((l, i) => `${i + 1}. ${l.name}${l.address ? ` (${l.address.split(',')[0]})` : ''}`)
+    .join('\n');
+  const conversationContext =
+    `The user was just shown ${leads.length} business results. Top results:\n${leadSummary}` +
+    `${leads.length > 10 ? `\n... and ${leads.length - 10} more` : ''}\n\n` +
+    `The user is now asking a follow-up question to refine these results. Extract the structured constraint they want to apply to the existing list. Ignore entity_category and location_text — the entity and location are already fixed from the previous search.`;
+
+  // STEP 2: run the main pipeline's mission extractor — same one used for fresh searches
+  let missionConstraints: ConstraintContext[] = [];
+  let entityType: string | null = null;
+  let extractorOk = false;
+
+  try {
+    const missionResult = await extractStructuredMission(constraint, conversationContext, {
+      runId, userId, conversationId,
+    });
+    if (missionResult.ok && missionResult.mission) {
+      entityType = missionResult.mission.entity_category || null;
+      const APPLICABLE_TYPES = new Set([
+        'website_evidence', 'attribute_check', 'status_check',
+        'relationship_check', 'time_constraint', 'time_predicate',
+        'text_compare', 'numeric_range',
+      ]);
+      missionConstraints = missionResult.mission.constraints
+        .filter(c => APPLICABLE_TYPES.has(c.type))
+        .map(c => ({
+          type: c.type,
+          field: c.field,
+          operator: c.operator,
+          value: String(c.value ?? ''),
+          hardness: c.hardness,
+          synonyms: c.synonyms ?? null,
+          reasoning_mode: c.reasoning_mode ?? null,
+        }));
+      extractorOk = missionConstraints.length > 0;
+      console.log(`[REFINE] Mission extracted ${missionConstraints.length} constraint(s): ${missionConstraints.map(c => `${c.type}="${c.value}"(${c.hardness})`).join(', ')}`);
+    }
+  } catch (err: any) {
+    console.warn(`[REFINE] Mission extractor failed: ${err.message}`);
+  }
+
+  // STEP 3: if no usable constraint, ask the user to be more specific
+  if (!extractorOk) {
+    const message =
+      `I wasn't sure how you wanted to refine the results. Could you rephrase? ` +
+      `For example: "which were established before 2020", "which serve food", "which are still trading".`;
+    return {
+      message,
+      matchingLeads: [],
+      nonMatchingLeads: leads.map(l => ({ ...l, refine_match: false as const, reason: 'unclear_refine_intent' })),
+      totalChecked: leads.length,
+      noCachedPages: false,
+      liveFetched: false,
+    };
+  }
+
+  // STEP 4: apply structured constraints to the existing leads
   const webVisitArtefacts = await fetchWebVisitArtefacts(sourceRunId);
   const noCachedPages = webVisitArtefacts.length === 0;
 
   let matchingLeads: RefineMatchedLead[] = [];
   let nonMatchingLeads: RefineNonMatchedLead[] = [];
-  let message: string;
   let liveFetched = false;
-
-  const extracted = await extractConstraintValue(constraint);
-  const constraintValue = extracted.value;
+  let message: string;
 
   if (noCachedPages) {
-    // ── Live fetch path ──────────────────────────────────────────────────────
-    console.log(`[REFINE] No cached pages — fetching live with full evidence pipeline`);
-
     const liveResult = await liveRefineWithFetch(
-      leads, constraint, sourceRunId, runId, userId, conversationId,
+      leads, missionConstraints, entityType, sourceRunId, runId, userId, conversationId,
     );
-
     matchingLeads = liveResult.matchingLeads;
     nonMatchingLeads = liveResult.nonMatchingLeads;
     liveFetched = true;
-
-    const leadsWithWebsite = leads.filter(l => !!l.website).length;
-    const { fetchedCount } = liveResult;
-
-    if (fetchedCount === 0 && leadsWithWebsite === 0) {
-      message = `None of the ${leads.length} results have a website URL, so I couldn't check for ${constraintValue}.`;
-    } else if (fetchedCount === 0) {
-      message = `I tried to check the websites live but couldn't load any of them. Would you like me to run a fresh search specifically for ${constraintValue}?`;
-    } else if (matchingLeads.length === 0) {
-      message = `I checked ${fetchedCount} website${fetchedCount !== 1 ? 's' : ''} — none of the ${leads.length} results appear to have ${constraintValue} based on their website content.`;
-    } else {
-      const matchNames = matchingLeads.slice(0, 3).map(l => l.name).join(', ');
-      const andMore = matchingLeads.length > 3 ? ` and ${matchingLeads.length - 3} more` : '';
-      message = `Found ${matchingLeads.length} of ${leads.length} with ${constraintValue}: ${matchNames}${andMore}.`;
-    }
   } else {
-    // ── Cached artefact path ─────────────────────────────────────────────────
-    const constraintCtx: ConstraintContext = {
-      type: extracted.type,
-      field: 'website_content',
-      operator: 'contains',
-      value: constraintValue,
-      hardness: 'soft',
-    };
-
-    console.log(`[REFINE] Using cached pages — constraint: "${constraintValue}"`);
-
-    const CACHED_BATCH_SIZE = 5;
-    const cachedToCheck: { lead: RefineLead; pages: any[] }[] = [];
-
+    // cached path — apply each constraint per lead via cached pages
     for (const lead of leads) {
       const matchingArtefacts = webVisitArtefacts.filter(a => artefactMatchesLead(a, lead));
       if (matchingArtefacts.length === 0) {
@@ -600,137 +496,43 @@ export async function executeRefine(
         continue;
       }
       const pages = matchingArtefacts.flatMap(a => a.payloadJson?.outputs?.pages ?? []);
-      cachedToCheck.push({ lead, pages });
-    }
 
-    for (let i = 0; i < cachedToCheck.length; i += CACHED_BATCH_SIZE) {
-      const batch = cachedToCheck.slice(i, i + CACHED_BATCH_SIZE);
-      const batchResults = await Promise.allSettled(
-        batch.map(async ({ lead, pages }) => {
-          const extraction = await extractConstraintLedEvidence(pages, constraintCtx, [], 3, lead.name);
-          return { lead, extraction };
-        }),
+      // Lead must satisfy ALL hard constraints; soft constraints only affect evidence richness
+      const constraintResults = await Promise.all(
+        missionConstraints.map(c => extractConstraintLedEvidence(pages, c, [], 3, lead.name, entityType ?? undefined)),
       );
 
-      for (const settled of batchResults) {
-        if (settled.status === 'rejected') continue;
-        const { lead, extraction } = settled.value;
-        if (!extraction.no_evidence && extraction.evidence_items.length > 0) {
-          const bestEvidence = extraction.evidence_items[0];
-          console.log(`[REFINE] "${lead.name}" → MATCH for "${constraintValue}"`);
-          matchingLeads.push({ ...lead, refine_match: true, refine_evidence: bestEvidence.direct_quote || bestEvidence.context_snippet || '' });
-        } else {
-          console.log(`[REFINE] "${lead.name}" → NO MATCH for "${constraintValue}"`);
-          nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_evidence' });
-        }
-      }
-    }
+      const hardConstraints = missionConstraints.map((c, i) => ({ c, result: constraintResults[i] })).filter(x => x.c.hardness === 'hard');
+      const allHardMet = hardConstraints.length === 0 || hardConstraints.every(x => !x.result.no_evidence);
 
-    // ── GPT-4o web search fallback for leads with no evidence ──
-    const noEvidenceCached = nonMatchingLeads.filter(l => l.reason === 'no_evidence');
-
-    if (noEvidenceCached.length > 0) {
-      const openaiKey = process.env.OPENAI_API_KEY;
-      if (openaiKey) {
-        console.log(`[REFINE_FALLBACK] Running GPT-4o web search fallback for ${noEvidenceCached.length} leads with no cached evidence`);
-
-        const isRefineTemporalConstraint2 = extracted.type === 'time_constraint' ||
-          extracted.type === 'time_predicate' ||
-          /\b(recent|opened|established|new|last\s+\d+\s+months?)\b/i.test(String(extracted.value));
-        const fallbackModel = isRefineTemporalConstraint2
-          ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
-          : (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini');
-        const FALLBACK_BATCH = 5;
-        const refineCutoffDate2 = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
-        for (let fi = 0; fi < noEvidenceCached.length; fi += FALLBACK_BATCH) {
-          const fbBatch = noEvidenceCached.slice(fi, fi + FALLBACK_BATCH);
-
-          const fbResults = await Promise.allSettled(
-            fbBatch.map(async (lead) => {
-              const prompt = `${getCurrentDatePreamble()}
-
-${getTemporalVerificationRules(refineCutoffDate2)}
-
-Search for "${lead.name}". Find their website, TripAdvisor page, Google reviews, social media, or any other source. Determine whether "${constraintValue}" is genuinely true for this specific business.
-
-Respond with JSON only, no markdown fences:
-{"business_found": true/false, "constraint_met": true/false, "confidence": "high"/"medium"/"low", "reasoning": "one sentence", "source_url": "URL or null"}
-
-IMPORTANT:
-- constraint_met means "${constraintValue}" IS genuinely true for this business
-- Check review sites, event listings, social media — not just the business's own website
-- If the business exists but does NOT match, set business_found=true, constraint_met=false`;
-
-              const resp = await fetch('https://api.openai.com/v1/responses', {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${openaiKey}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  model: fallbackModel,
-                  input: prompt,
-                  tools: [{ type: 'web_search' }],
-                  store: false,
-                }),
-              });
-
-              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-              const data = await resp.json();
-              let content = '';
-              if (Array.isArray(data.output)) {
-                for (const item of data.output) {
-                  if (item.type === 'message' && Array.isArray(item.content)) {
-                    for (const block of item.content) {
-                      if (block.type === 'output_text') content += block.text;
-                    }
-                  }
-                }
-              }
-              if (!content && data.output_text) content = data.output_text;
-
-              const jsonMatch = content.match(/\{[\s\S]*\}/);
-              if (!jsonMatch) throw new Error('No JSON');
-              const parsed = JSON.parse(jsonMatch[0]);
-              return { lead, parsed };
-            }),
-          );
-
-          for (const settled of fbResults) {
-            if (settled.status === 'rejected') continue;
-            const { lead, parsed } = settled.value;
-
-            if (parsed.business_found && parsed.constraint_met) {
-              console.log(`[REFINE_FALLBACK] "${lead.name}" → VERIFIED via web search (${parsed.confidence}): ${(parsed.reasoning || '').substring(0, 100)}`);
-              const idx = nonMatchingLeads.findIndex(l => l.name === lead.name);
-              if (idx >= 0) nonMatchingLeads.splice(idx, 1);
-              matchingLeads.push({
-                ...lead,
-                refine_match: true,
-                refine_evidence: parsed.reasoning || `Verified via web search (${parsed.confidence})`,
-              });
-            } else {
-              console.log(`[REFINE_FALLBACK] "${lead.name}" → NOT VERIFIED: ${(parsed.reasoning || '').substring(0, 100)}`);
-            }
-          }
-        }
-
-        console.log(`[REFINE_FALLBACK] After fallback: ${matchingLeads.length} total matches`);
+      if (allHardMet) {
+        const evidenceBits = constraintResults
+          .filter(r => !r.no_evidence && r.evidence_items.length > 0)
+          .map(r => r.evidence_items[0].direct_quote || r.evidence_items[0].context_snippet || '')
+          .filter(Boolean);
+        matchingLeads.push({
+          ...lead,
+          refine_match: true,
+          refine_evidence: evidenceBits.join(' | ') || 'verified',
+        });
       } else {
-        console.warn(`[REFINE_FALLBACK] OPENAI_API_KEY not set — skipping web search fallback`);
+        nonMatchingLeads.push({ ...lead, refine_match: false, reason: 'no_evidence' });
       }
     }
-    // ── end GPT-4o fallback ──
+  }
 
-    if (matchingLeads.length === 0) {
-      message = `I checked ${leads.length} websites — none of the ${leads.length} results appear to have ${constraintValue} based on their website content.`;
-    } else {
-      const matchNames = matchingLeads.slice(0, 3).map(l => l.name).join(', ');
-      const andMore = matchingLeads.length > 3 ? ` and ${matchingLeads.length - 3} more` : '';
-      message = `Found ${matchingLeads.length} of ${leads.length} with ${constraintValue}: ${matchNames}${andMore}.`;
-    }
+  // STEP 5: humanise constraint summary for the message
+  const constraintSummary = missionConstraints
+    .map(c => c.value)
+    .filter(Boolean)
+    .join(' AND ');
+
+  if (matchingLeads.length === 0) {
+    message = `I checked ${leads.length} ${liveFetched ? 'website' + (leads.length !== 1 ? 's' : '') : 'cached results'} — none of them appear to match: ${constraintSummary}.`;
+  } else {
+    const matchNames = matchingLeads.slice(0, 3).map(l => l.name).join(', ');
+    const andMore = matchingLeads.length > 3 ? ` and ${matchingLeads.length - 3} more` : '';
+    message = `Found ${matchingLeads.length} of ${leads.length} matching ${constraintSummary}: ${matchNames}${andMore}.`;
   }
 
   console.log(`[REFINE] Complete — matched=${matchingLeads.length}/${leads.length} cached=${!noCachedPages} live=${liveFetched}`);
@@ -738,10 +540,12 @@ IMPORTANT:
   await createArtefact({
     runId,
     type: 'refine_results',
-    title: `Refinement: "${constraint}" — ${matchingLeads.length}/${leads.length} matched`,
+    title: `Refinement: "${constraintSummary}" — ${matchingLeads.length}/${leads.length} matched`,
     summary: message,
     payload: {
       constraint,
+      structured_constraints: missionConstraints,
+      entity_type: entityType,
       source_run_id: sourceRunId,
       total_checked: leads.length,
       matches: matchingLeads.length,
@@ -756,15 +560,14 @@ IMPORTANT:
   }).catch((err: any) => console.warn(`[REFINE] Failed to write refine_results artefact (non-fatal): ${err.message}`));
 
   await logAFREvent({
-    userId,
-    runId,
-    conversationId,
+    userId, runId, conversationId,
     actionTaken: 'refine_completed',
     status: 'success',
     taskGenerated: message,
     runType: 'plan',
     metadata: {
       constraint,
+      structured_constraints: missionConstraints,
       source_run_id: sourceRunId,
       total_checked: leads.length,
       matches: matchingLeads.length,
