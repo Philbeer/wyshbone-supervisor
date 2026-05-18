@@ -123,29 +123,3 @@ export function resolveLeadReference(context: ConversationContext, reference: st
   const refLower = reference.toLowerCase().trim();
   return context.leads.find(l => l.name.toLowerCase().includes(refLower)) || null;
 }
-
-/**
- * Resolve "the previous search" / "those results" / "the X one we did" to a specific past delivery.
- * Returns null if the reference is too ambiguous.
- */
-export function resolvePreviousSearchReference(
-  context: ConversationContext,
-  reference: string,
-): PastDelivery | null {
-  if (context.pastDeliveries.length === 0) return null;
-  const ref = reference.toLowerCase();
-  // "previous", "last", "earlier" → second most recent (skipping the current one)
-  if (/\b(previous|last|prior|earlier)\b/.test(ref) && context.pastDeliveries.length >= 2) {
-    return context.pastDeliveries[1];
-  }
-  // "those results", "the results", "they", "them" → most recent
-  if (/\b(those|the)\s+(results?|leads|ones?)\b|\b(they|them)\b/.test(ref)) {
-    return context.pastDeliveries[0];
-  }
-  // Fuzzy match against entity_category or location of past deliveries
-  for (const pd of context.pastDeliveries) {
-    if (pd.entityCategory && ref.includes(pd.entityCategory.toLowerCase())) return pd;
-    if (pd.location && ref.includes(pd.location.toLowerCase())) return pd;
-  }
-  return null;
-}
