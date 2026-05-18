@@ -74,29 +74,28 @@ function toIso(date: Date): string {
 }
 
 export function renderConstraintAsClaim(constraint: ConstraintLike, today: Date): string {
-  const { type, field, operator, value, value_secondary } = constraint;
+  const { type, field, value, value_secondary } = constraint;
   const strValue = value === null || value === undefined ? '' : String(value).trim();
-  const op = (operator ?? '').trim().toLowerCase();
+  const rawOp = (constraint.operator ?? '').trim().toLowerCase();
+  const op = rawOp.startsWith('not_') ? rawOp.slice(4) : rawOp;
 
   try {
     switch (type) {
       case 'text_compare': {
         switch (op) {
-          case 'contains':     return `the ${field} contains '${strValue}'`;
-          case 'starts_with':  return `the ${field} starts with '${strValue}'`;
-          case 'ends_with':    return `the ${field} ends with '${strValue}'`;
-          case 'equals':       return `the ${field} is exactly '${strValue}'`;
-          case 'not_contains': return `the ${field} does NOT contain '${strValue}'`;
-          default:             return `the ${field} ${op} '${strValue}'`;
+          case 'contains':    return `the ${field} contains '${strValue}'`;
+          case 'starts_with': return `the ${field} starts with '${strValue}'`;
+          case 'ends_with':   return `the ${field} ends with '${strValue}'`;
+          case 'equals':      return `the ${field} is exactly '${strValue}'`;
+          default:            return `the ${field} ${op} '${strValue}'`;
         }
       }
 
       case 'attribute_check': {
         switch (op) {
-          case 'has':     return `they have ${strValue}`;
-          case 'not_has': return `they do NOT have ${strValue}`;
-          case 'equals':  return `their ${field} is ${strValue}`;
-          default:        return `the ${field} ${op} ${strValue}`;
+          case 'has':    return `they have ${strValue}`;
+          case 'equals': return `their ${field} is ${strValue}`;
+          default:       return `the ${field} ${op} ${strValue}`;
         }
       }
 
@@ -105,19 +104,12 @@ export function renderConstraintAsClaim(constraint: ConstraintLike, today: Date)
           case 'contains':
           case 'mentions':
             return `their website mentions or evidences ${strValue}`;
-          case 'not_contains':
-          case 'not_mentions':
-            return `their website does NOT mention or evidence ${strValue}`;
           default:
             return `the ${field} ${op} ${strValue}`;
         }
       }
 
       case 'relationship_check': {
-        if (op.startsWith('not_')) {
-          const basePredicate = op.slice(4);
-          return `they do NOT ${basePredicate} ${strValue}`;
-        }
         switch (op) {
           case 'has':           return `they have a relationship with ${strValue}`;
           case 'serves':        return `they serve ${strValue}`;
@@ -133,8 +125,6 @@ export function renderConstraintAsClaim(constraint: ConstraintLike, today: Date)
           case 'equals':
           case 'has':
             return `they are currently ${strValue}`;
-          case 'not_equals':
-            return `they are NOT currently ${strValue}`;
           default:
             return `the ${field} ${op} ${strValue}`;
         }
