@@ -1,0 +1,152 @@
+REPO: wyshbone-supervisor-Post-CC
+FILE: server/supervisor/mission-executor.ts (ONLY this file)
+
+GOAL: Add a dev-only in-memory cache to the GPT-4o web-search verification so that
+repeated identical verification calls during testing replay from memory instead of
+re-billing OpenAI. When the cache flag is off (production), behaviour must be byte-for-byte
+identical to today. This mirrors the existing Google Places search cache in
+server/supervisor/google-places.ts — match that style and logging.
+
+═══════════════════════════════════════════════════════════════════════
+STEP 0 — CREATE A BRANCH FIRST. In the Shell, run exactly:
+
+  git checkout -b feat/verify-cache-dev
+  git status
+
+Confirm you are on branch feat/verify-cache-dev before editing anything. Do all work
+on this branch. Do NOT commit to main.
+═══════════════════════════════════════════════════════════════════════
+
+CONTEXT — the exact code you are wrapping:
+The function `batchGpt4oVerification` in server/supervisor/mission-executor.ts builds a
+list of `tasks` (one per lead × constraint) and, inside a
+`Promise.allSettled(batch.map(async (task) => { ... }))` block, makes ONE fetch to
+'https://api.openai.com/v1/responses' per task with tools:[{type:'web_search'}]. Each
+task resolves to `{ task, parsed, sourceUrl, content }`, which is then turned into an
+`EvidenceResult` object and pushed into `results`. This OpenAI call is the only thing
+being cached. Do NOT touch Google Places, Tower, planning, discovery, or the
+web_crawl_first path.
+
+STICK STRICTLY TO THESE STEPS. Do not refactor, rename, or change verification logic,
+prompts, model params, concurrency, or the EvidenceResult shape.
+
+─────────────────────────────────────────────────────────────────────
+STEP 1 — Add the flag + cache structures at module top level (near the existing
+`const EVIDENCE_MODE = ...` constant). Add exactly:
+
+  // ── Dev-only verification cache (mirrors google-places.ts search cache) ──
+  // Gated by VERIFY_CACHE_DEV. When off, completely bypassed — production behaviour
+  // is unchanged. In-memory only (cleared on reboot). Never expires while on (dev).
+  const VERIFY_CACHE_ENABLED = process.env.VERIFY_CACHE_DEV === 'true';
+  interface VerifyCacheEntry { result: EvidenceResult; createdAt: number; }
+  const verifyResultsCache = new Map<string, VerifyCacheEntry>();
+  let verifyCacheStats = { hits: 0, misses: 0 };
+
+  // Periodic stats log, matching the GP cache cadence
+  setInterval(() => {
+    if (!VERIFY_CACHE_ENABLED) return;
+    const total = verifyCacheStats.hits + verifyCacheStats.misses;
+    const rate = total > 0 ? Math.round((verifyCacheStats.hits / total) * 100) : 0;
+    console.log(`📊 [VERIFY CACHE] Hits: ${verifyCacheStats.hits} | Misses: ${verifyCacheStats.misses} | Rate: ${rate}% | Entries: ${verifyResultsCache.size}`);
+  }, 10 * 60 * 1000);
+
+  // Stable key — only fields that determine the OpenAI answer. No run_id/crid/timestamps.
+  function buildVerifyCacheKey(placeId: string | undefined, leadName: string, constraintValue: string, model: string): string {
+    const id = placeId || `name:${leadName.toLowerCase().trim()}`;
+    return `verify:${id}::${constraintValue.toLowerCase().trim()}::${model}`;
+  }
+
+─────────────────────────────────────────────────────────────────────
+STEP 2 — Inside `batchGpt4oVerification`, locate the line that resolves the model,
+which reads:
+
+  const model = process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini';
+
+IMMEDIATELY AFTER that line, add a cache-hit check that returns a cached EvidenceResult
+WITHOUT calling OpenAI. The cached object must be returned in the SAME shape the success
+path returns from the map callback — i.e. resolve to an object the post-loop code can
+consume. Since the existing map returns `{ task, parsed, sourceUrl, content }` and the
+RESULT object is built AFTER the loop, do this instead to keep it clean:
+
+  Add a short-circuit that, on cache hit, returns a sentinel carrying the finished
+  EvidenceResult:  return { task, cachedResult };   // cachedResult: EvidenceResult
+
+  const cacheKey = buildVerifyCacheKey(task.lead.placeId, task.lead.name, constraintValue, model);
+  if (VERIFY_CACHE_ENABLED) {
+    const hit = verifyResultsCache.get(cacheKey);
+    if (hit) {
+      verifyCacheStats.hits++;
+      const ageMin = Math.round((Date.now() - hit.createdAt) / 60000);
+      console.log(`⚡ [VERIFY CACHE HIT] "${task.lead.name}" + "${constraintValue}" (age: ${ageMin}m) — saved 1 OpenAI call`);
+      return { task, cachedResult: hit.result };
+    }
+    verifyCacheStats.misses++;
+  }
+
+(Note: `constraintValue` is already computed just above this line in the existing code —
+reuse it, do not recompute.)
+
+─────────────────────────────────────────────────────────────────────
+STEP 3 — In the loop that consumes `batchResults` (the `for (const settledResult of
+batchResults)` block), handle the cached sentinel FIRST, before the existing
+rejected/fulfilled handling. For a fulfilled result whose value has `cachedResult`,
+push that EvidenceResult straight into `results` and continue:
+
+  if (settledResult.status === 'fulfilled' && (settledResult.value as any).cachedResult) {
+    results.push((settledResult.value as any).cachedResult);
+    continue;
+  }
+
+Leave the existing rejected handling and the existing fulfilled handling (which reads
+`{ task, parsed, sourceUrl, content }`) exactly as they are for non-cached results.
+
+─────────────────────────────────────────────────────────────────────
+STEP 4 — STORE on cache miss. The existing fulfilled-path code builds an EvidenceResult
+and pushes it into `results` in three branches (verified / not-met / not-found). After
+EACH of those three `results.push({...})` calls, add a store of the SAME object just
+pushed. The cleanest way: capture the pushed object in a local, push it, then store it.
+For each of the three branches, change:
+
+  results.push({ ...the object... });
+  console.log(...);
+
+to:
+
+  const evResult: EvidenceResult = { ...the object... };
+  results.push(evResult);
+  if (VERIFY_CACHE_ENABLED) {
+    const storeKey = buildVerifyCacheKey(t.lead.placeId, t.lead.name, cv, (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini'));
+    verifyResultsCache.set(storeKey, { result: evResult, createdAt: Date.now() });
+  }
+  console.log(...);
+
+(`t` and `cv` are the existing variables in that block — `t` is the task, `cv` is the
+constraint value string. Use them; do not rename.)
+
+Do NOT store on the rejected (error) path — only cache successful verifications.
+
+─────────────────────────────────────────────────────────────────────
+STEP 5 — Do NOT modify any other file. Do NOT change EVIDENCE_MODE, the web_crawl_first
+branch, discovery, Tower, or artefact emission. If the refine executor
+(liveRefineWithFetch) calls `batchGpt4oVerification`, it now benefits automatically — do
+NOT duplicate the cache there. If refine has its OWN separate OpenAI verification call
+(not via batchGpt4oVerification), DO NOT touch it in this task — just report that it
+exists so we handle it separately.
+
+─────────────────────────────────────────────────────────────────────
+STEP 6 — Add VERIFY_CACHE_DEV=true to Secrets. Restart with a clean boot (Stop, wait,
+Run — confirm no EADDRINUSE).
+
+═══════════════════════════════════════════════════════════════════════
+REPORT BACK:
+1. Confirm branch = feat/verify-cache-dev (paste `git status` output)
+2. The exact line numbers you edited
+3. Whether liveRefineWithFetch calls batchGpt4oVerification (shared) or has its own
+   OpenAI call (separate — report only, don't edit)
+4. Confirm VERIFY_CACHE_DEV=true is in Secrets and boot shows no EADDRINUSE
+5. TEST: in ONE conversation, run "find pubs in Arundel that have live music" TWICE.
+   Paste the [VERIFY CACHE] log lines. Expected:
+   - Run 1: all "[VERIFY CACHE]" misses (no HIT lines), real [GPT4O_VERIFY] calls happen
+   - Run 2: all "⚡ [VERIFY CACHE HIT]" lines, ZERO new [GPT4O_VERIFY] OpenAI calls
+   If run 2 still shows misses or real OpenAI calls, STOP and report — the key is wrong.
+═══════════════════════════════════════════════════════════════════════
