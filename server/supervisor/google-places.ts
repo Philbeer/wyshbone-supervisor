@@ -43,6 +43,8 @@ export interface SearchPlacesResult {
   debug?: SearchPlacesDebug;
 }
 
+const GP_CACHE_ENABLED = process.env.GP_CACHE_DISABLE !== 'true';
+
 const GOOGLE_PLACES_V1_URL = 'https://places.googleapis.com/v1/places:searchText';
 const GOOGLE_GEOCODING_URL = 'https://maps.googleapis.com/maps/api/geocode/json';
 
@@ -173,12 +175,14 @@ export async function searchPlaces(
 ): Promise<SearchPlacesResult> {
   // ─── SEARCH CACHE CHECK ───────────────────────────────────────
   const cacheKey = `search:${query.toLowerCase().trim()}||${location.toLowerCase().trim()}||${country.toLowerCase().trim()}||${maxResults}||${mode}`;
-  const cachedSearch = searchResultsCache.get(cacheKey);
-  if (cachedSearch && Date.now() < cachedSearch.expiresAt) {
-    cacheStats.hits++;
-    const ageMin = Math.round((Date.now() - cachedSearch.createdAt) / 60000);
-    console.log(`⚡ [GP CACHE HIT] "${query}" in "${location}" (age: ${ageMin}m) — saved 1+ API call`);
-    return cachedSearch.data;
+  if (GP_CACHE_ENABLED) {
+    const cachedSearch = searchResultsCache.get(cacheKey);
+    if (cachedSearch && Date.now() < cachedSearch.expiresAt) {
+      cacheStats.hits++;
+      const ageMin = Math.round((Date.now() - cachedSearch.createdAt) / 60000);
+      console.log(`⚡ [GP CACHE HIT] "${query}" in "${location}" (age: ${ageMin}m) — saved 1+ API call`);
+      return cachedSearch.data;
+    }
   }
   cacheStats.misses++;
 
@@ -354,12 +358,14 @@ export async function searchPlaces(
       places,
       debug: buildDebug(requestedMode, usedMode, searchQuery, regionUsed, biasApplied, biasLocation, radiusUsed, pagesFetched, places.length, biasFallback),
     };
-    searchResultsCache.set(cacheKey, {
-      data: resultToCache,
-      expiresAt: Infinity, // Never expires (dev mode)
-      createdAt: Date.now(),
-    });
-    console.log(`💾 [GP CACHE] Stored: "${query}" in "${location}" (${places.length} results, cached permanently (dev mode))`);
+    if (GP_CACHE_ENABLED) {
+      searchResultsCache.set(cacheKey, {
+        data: resultToCache,
+        expiresAt: Infinity, // Never expires (dev mode)
+        createdAt: Date.now(),
+      });
+      console.log(`💾 [GP CACHE] Stored: "${query}" in "${location}" (${places.length} results, cached permanently (dev mode))`);
+    }
 
     return resultToCache;
 
