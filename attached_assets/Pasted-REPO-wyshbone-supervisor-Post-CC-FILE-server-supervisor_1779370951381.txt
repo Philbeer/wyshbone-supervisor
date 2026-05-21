@@ -1,0 +1,41 @@
+REPO: wyshbone-supervisor-Post-CC
+FILE: server/supervisor.ts
+CONTEXT: When a user answers a supervisor clarification question with a short reply
+(e.g. "yes"), the run sometimes hangs in 'executing' forever instead of either
+running the search or asking a clean follow-up. The conversation router
+(server/supervisor/conversation-router.ts) is supposed to read routerHistory and
+combine the short answer with the earlier turn. I need to confirm WHY it isn't,
+then close the silent-hang path. Do NOT add any regex/keyword logic — diagnosis +
+LLM-context only.
+
+STICK STRICTLY TO THESE STEPS. Do not refactor anything else.
+
+STEP 1 — Locate the conversation router block inside processChatTask (around line
+1466, where `const { classifyTurn } = await import(...)` and routerHistory is built
+by querying the messages table, then routeConversation/classifyTurn is called).
+
+STEP 2 — Add instrumentation immediately AFTER routerHistory is built and AFTER the
+router decision is produced. Log exactly:
+  console.log(`[CLARIFY_DIAG] routerEnabled=${process.env.CONVERSATION_ROUTER_ENABLED} conv=${task.conversation_id} historyLen=${routerHistory.length} lastTurns=${JSON.stringify(routerHistory.slice(-3).map(m => ({r:m.role, c:String(m.content).slice(0,60)})))}`);
+And after the decision:
+  console.log(`[CLARIFY_DIAG] decision route=${decision.route} entity=${decision.entity} location=${decision.location} confidence=${decision.confidence} reasoning="${decision.reasoning}"`);
+
+STEP 3 — Close the silent-hang path. Find the point where, after the router runs,
+a SEARCH/ITERATE decision rewrites rawMsg and "falls through to mission extraction".
+Add a guard: if decision.route === 'SEARCH' (or the fallback decision with
+confidence <= 0.1) but decision.entity is null OR decision.location is null, do NOT
+fall through to mission extraction. Instead route to CLARIFY: write an assistant
+message asking for the missing piece, set the agent_run status to 'clarifying' with
+metadata.verdict='router_clarify', and return — exactly like the existing CLARIFY
+branch does. A short answer with no resolvable mission must never reach mission
+extraction, because that is what hangs.
+
+STEP 4 — Do not touch conversation-router.ts, the mission extractor, or the search
+pipeline. Only edit supervisor.ts. Keep all changes inside the existing router block.
+
+REPORT BACK after applying:
+- The exact line numbers you edited
+- Whether CONVERSATION_ROUTER_ENABLED is set in this repl's Secrets (true/false/absent)
+- Paste the [CLARIFY_DIAG] log lines from one test where you: send "find beer
+  festivals in Yorkshire", let it ask a clarification, then answer "yes". I want to
+  see historyLen and the lastTurns content for that "yes" run.
