@@ -63,6 +63,28 @@ const ENRICH_CONCURRENCY = 3;
 const ENRICH_BATCH_SIZE = 25;
 const EVIDENCE_MODE = (process.env.EVIDENCE_MODE || 'gpt4o_primary') as 'gpt4o_primary' | 'web_crawl_first';
 
+// ── Dev-only verification cache (mirrors google-places.ts search cache) ──
+// Gated by VERIFY_CACHE_DEV. When off, completely bypassed — production behaviour
+// is unchanged. In-memory only (cleared on reboot). Never expires while on (dev).
+const VERIFY_CACHE_ENABLED = process.env.VERIFY_CACHE_DEV === 'true';
+interface VerifyCacheEntry { result: EvidenceResult; createdAt: number; }
+const verifyResultsCache = new Map<string, VerifyCacheEntry>();
+let verifyCacheStats = { hits: 0, misses: 0 };
+
+// Periodic stats log, matching the GP cache cadence
+setInterval(() => {
+  if (!VERIFY_CACHE_ENABLED) return;
+  const total = verifyCacheStats.hits + verifyCacheStats.misses;
+  const rate = total > 0 ? Math.round((verifyCacheStats.hits / total) * 100) : 0;
+  console.log(`📊 [VERIFY CACHE] Hits: ${verifyCacheStats.hits} | Misses: ${verifyCacheStats.misses} | Rate: ${rate}% | Entries: ${verifyResultsCache.size}`);
+}, 10 * 60 * 1000);
+
+// Stable key — only fields that determine the OpenAI answer. No run_id/crid/timestamps.
+function buildVerifyCacheKey(placeId: string | undefined, leadName: string, constraintValue: string, model: string): string {
+  const id = placeId || `name:${leadName.toLowerCase().trim()}`;
+  return `verify:${id}::${constraintValue.toLowerCase().trim()}::${model}`;
+}
+
 export interface MissionExecutionContext {
   mission: StructuredMission;
   plan: MissionPlan;
@@ -843,6 +865,19 @@ IMPORTANT:
       const model = isTemporalConstraint
         ? (process.env.TEMPORAL_OPENAI_MODEL || 'gpt-4o')
         : (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini');
+
+      const cacheKey = buildVerifyCacheKey(task.lead.placeId, task.lead.name, constraintValue, model);
+      if (VERIFY_CACHE_ENABLED) {
+        const hit = verifyResultsCache.get(cacheKey);
+        if (hit) {
+          verifyCacheStats.hits++;
+          const ageMin = Math.round((Date.now() - hit.createdAt) / 60000);
+          console.log(`⚡ [VERIFY CACHE HIT] "${task.lead.name}" + "${constraintValue}" (age: ${ageMin}m) — saved 1 OpenAI call`);
+          return { task, cachedResult: hit.result };
+        }
+        verifyCacheStats.misses++;
+      }
+
       const resp = await fetch('https://api.openai.com/v1/responses', {
         method: 'POST',
         headers: {
@@ -896,6 +931,11 @@ IMPORTANT:
     }));
 
     for (const settledResult of batchResults) {
+      if (settledResult.status === 'fulfilled' && (settledResult.value as any).cachedResult) {
+        results.push((settledResult.value as any).cachedResult);
+        continue;
+      }
+
       if (settledResult.status === 'rejected') {
         const failedIdx = batchResults.indexOf(settledResult);
         const failedTask = batch[failedIdx];
@@ -928,7 +968,7 @@ IMPORTANT:
       const cv = typeof t.constraint.value === 'string' ? t.constraint.value : String(t.constraint.value ?? '');
 
       if (parsed.business_found && parsed.constraint_met) {
-        results.push({
+        const evResult: EvidenceResult = {
           leadIndex: t.leadIndex,
           leadName: t.lead.name,
           leadPlaceId: t.lead.placeId,
@@ -945,10 +985,15 @@ IMPORTANT:
           snippets: [parsed.reasoning || content.substring(0, 300)],
           sourceTier: 'web_search_fallback',
           verdict: 'verified',
-        });
+        };
+        results.push(evResult);
+        if (VERIFY_CACHE_ENABLED) {
+          const storeKey = buildVerifyCacheKey(t.lead.placeId, t.lead.name, cv, (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini'));
+          verifyResultsCache.set(storeKey, { result: evResult, createdAt: Date.now() });
+        }
         console.log(`[GPT4O_VERIFY] "${t.lead.name}" + "${cv}": VERIFIED (${parsed.confidence})`);
       } else if (parsed.business_found && !parsed.constraint_met) {
-        results.push({
+        const evResult: EvidenceResult = {
           leadIndex: t.leadIndex,
           leadName: t.lead.name,
           leadPlaceId: t.lead.placeId,
@@ -965,10 +1010,15 @@ IMPORTANT:
           snippets: [],
           sourceTier: 'web_search_fallback',
           verdict: 'no_evidence',
-        });
+        };
+        results.push(evResult);
+        if (VERIFY_CACHE_ENABLED) {
+          const storeKey = buildVerifyCacheKey(t.lead.placeId, t.lead.name, cv, (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini'));
+          verifyResultsCache.set(storeKey, { result: evResult, createdAt: Date.now() });
+        }
         console.log(`[GPT4O_VERIFY] "${t.lead.name}" + "${cv}": NOT MET — ${(parsed.reasoning || '').substring(0, 80)}`);
       } else {
-        results.push({
+        const evResult: EvidenceResult = {
           leadIndex: t.leadIndex,
           leadName: t.lead.name,
           leadPlaceId: t.lead.placeId,
@@ -985,7 +1035,12 @@ IMPORTANT:
           snippets: [],
           sourceTier: 'web_search_fallback',
           verdict: 'no_evidence',
-        });
+        };
+        results.push(evResult);
+        if (VERIFY_CACHE_ENABLED) {
+          const storeKey = buildVerifyCacheKey(t.lead.placeId, t.lead.name, cv, (process.env.GPT4O_FALLBACK_MODEL ?? 'gpt-4o-mini'));
+          verifyResultsCache.set(storeKey, { result: evResult, createdAt: Date.now() });
+        }
         console.log(`[GPT4O_VERIFY] "${t.lead.name}" + "${cv}": NOT FOUND`);
       }
     }
