@@ -1481,6 +1481,7 @@ class SupervisorService {
             }));
           }
         }
+        console.log(`[CLARIFY_DIAG] routerEnabled=${process.env.CONVERSATION_ROUTER_ENABLED} conv=${task.conversation_id} historyLen=${routerHistory.length} lastTurns=${JSON.stringify(routerHistory.slice(-3).map(m => ({r:m.role, c:String(m.content).slice(0,60)})))}`);
 
         // Load previous results context
         let routerPreviousResults = {
@@ -1537,6 +1538,7 @@ class SupervisorService {
 
         // Stage 2: router uses turn analysis as authoritative context
         const decision = await routeConversation(routerInput);
+        console.log(`[CLARIFY_DIAG] decision route=${decision.route} entity=${decision.entity} location=${decision.location} confidence=${decision.confidence} reasoning="${decision.reasoning}"`);
 
         // Log the decision as an artefact (skipped for non-SEARCH routes when telemetry is stripped)
         if (decision.route === 'SEARCH' || !STRIP_CHAT_TELEMETRY) {
@@ -1768,6 +1770,62 @@ class SupervisorService {
           console.log(`[ROUTER] ITERATE — rewritten to: "${rawMsg}"`);
           // Fall through to mission extraction below
           _routerHandledSearch = true;
+        }
+
+        // === GUARD: SEARCH/low-confidence with missing entity or location must never fall through ===
+        if ((decision.route === 'SEARCH' || decision.confidence <= 0.1) && (!decision.entity || !decision.location)) {
+          const missing = !decision.entity ? 'what type of business or venue' : 'which location';
+          const guardQuestion = `To run a search I need a bit more detail — could you tell me ${missing} you're looking for?`;
+          const messageId = randomUUID();
+          await Promise.all([
+            supabase!.from('supervisor_tasks').update({
+              status: 'completed',
+              result: { response: guardQuestion.substring(0, 200), message_id: messageId, router: 'clarify' },
+            }).eq('id', task.id),
+            supabase!.from('messages').insert({
+              id: messageId,
+              conversation_id: task.conversation_id,
+              role: 'assistant',
+              content: guardQuestion,
+              source: 'supervisor',
+              metadata: {
+                supervisor_task_id: task.id, run_id: jobId,
+                router_decision: decision,
+                clarify_gate: 'router_incomplete_search_guard',
+                smart_clarify: true,
+                mode: 'clarify',
+              },
+              created_at: Date.now(),
+            }),
+          ]);
+          await storage.updateAgentRun(jobId, {
+            status: 'completed', terminalState: 'completed', endedAt: new Date(),
+            metadata: { verdict: 'router_clarify', router: decision, awaiting: 'user_input', original_message: rawMsg, guard: 'incomplete_search' },
+          }).catch(() => {});
+          console.log(`[ROUTER] SEARCH guard — missing ${!decision.entity ? 'entity' : 'location'}, routing to CLARIFY`);
+          const _guardUiResult = await this.postArtefactToUI({
+            runId: jobId,
+            clientRequestId,
+            type: 'diagnostic',
+            payload: {
+              status: 'CLARIFY',
+              leads: [],
+              message: guardQuestion,
+              router_verdict: 'clarify',
+              run_complete: true,
+            },
+            userId: task.user_id,
+            conversationId: task.conversation_id,
+          }).catch((err: any) => {
+            console.error(`[ROUTER] CRITICAL: Failed to signal UI that run is complete: ${err.message}`);
+            return null;
+          });
+          if (!_guardUiResult) {
+            console.error(`[ROUTER] UI may hang — run_complete signal failed for runId=${jobId}`);
+          }
+          taskExecutionStartedEmitted = true;
+          await emitTaskExecutionCompleted('router_clarify');
+          return;
         }
 
         // === HANDLE SEARCH ===
